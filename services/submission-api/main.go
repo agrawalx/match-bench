@@ -12,13 +12,28 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/iicpc/submission-api/internal/handler"
+	"github.com/iicpc/submission-api/internal/logger"
 	"github.com/iicpc/submission-api/internal/publisher"
 	"github.com/iicpc/submission-api/internal/store"
 )
 
 func main() {
-	log := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+	var lokiClient *logger.LokiClient
+	var log *slog.Logger
+
+	stdHandler := slog.NewJSONHandler(os.Stdout, nil)
+	lokiURL := os.Getenv("LOKI_URL")
+	if lokiURL != "" {
+		lokiClient = logger.NewLokiClient(lokiURL)
+		log = slog.New(logger.NewLokiHandler(lokiClient, stdHandler))
+	} else {
+		log = slog.New(stdHandler)
+	}
 	slog.SetDefault(log)
+
+	if lokiClient != nil {
+		defer lokiClient.Close()
+	}
 
 	port := envOr("PORT", "8080")
 	dbURL := mustEnv("DATABASE_URL")

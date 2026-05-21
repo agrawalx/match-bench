@@ -51,7 +51,7 @@ func NewKafkaPublisher(brokers string, log *slog.Logger) *KafkaPublisher {
 		Topic:        topicBuildRequested,
 		Balancer:     &kafka.LeastBytes{},
 		RequiredAcks: kafka.RequireOne,
-		Async:        false,
+		Async:        true,
 	}
 
 	return &KafkaPublisher{writer: w, log: log}

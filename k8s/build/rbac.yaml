@@ -1,0 +1,28 @@
+# Grants the build-spawner ServiceAccount permission to manage Jobs in the build namespace.
+# The spawner pod (running in platform namespace) uses this SA via --service-account.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: job-manager
+  namespace: build
+rules:
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["create", "get", "list", "watch", "delete"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: spawner-job-manager
+  namespace: build
+subjects:
+  - kind: ServiceAccount
+    name: build-spawner
+    namespace: build
+roleRef:
+  kind: Role
+  name: job-manager
+  apiGroup: rbac.authorization.k8s.io

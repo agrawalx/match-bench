@@ -1,0 +1,47 @@
+# benchmark namespace: bot-worker pods that send orders to contestant pods
+# and publish latency results to Kafka.
+# May initiate connections to sandbox (order submission) and data/kafka (results).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: benchmark-default
+  namespace: benchmark
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress
+
+  # Ingress from platform (to receive test-run triggers)
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              name: platform
+
+  egress:
+    # Contestant pods (order submission)
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              name: sandbox
+
+    # Kafka (publish latency results)
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              name: data
+      ports:
+        - port: 9092
+          protocol: TCP
+
+    # DNS
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP

@@ -1,0 +1,40 @@
+# sandbox namespace: contestant trading algorithm pods (gVisor runtime).
+# Only bot-workers (benchmark namespace) may send orders inbound.
+# All intra-cluster egress is blocked — contestants cannot reach postgres, kafka, minio,
+# or other contestant pods. Public internet egress is allowed.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: sandbox-isolation
+  namespace: sandbox
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress
+
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              name: benchmark
+
+  egress:
+    # Public internet only — no private/cluster CIDRs
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+    # DNS
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP

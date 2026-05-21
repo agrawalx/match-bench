@@ -1,0 +1,57 @@
+# platform namespace: user-facing services (submission-api, spawner).
+# Accepts inbound traffic from the cluster ingress controller and external clients.
+# May reach data namespace for postgres, kafka, and minio.
+# May reach Harbor (external registry) for image promotion.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: platform-default
+  namespace: platform
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress
+
+  # Ingress on port 8080 — Ingress controller or direct NodePort
+  ingress:
+    - ports:
+        - port: 8080
+          protocol: TCP
+
+  egress:
+    # Data plane: postgres, kafka, minio
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              name: data
+      ports:
+        - port: 5432   # PostgreSQL
+          protocol: TCP
+        - port: 9092   # Kafka
+          protocol: TCP
+        - port: 9000   # MinIO S3 API
+          protocol: TCP
+
+    # Harbor registry (external HTTPS)
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+      ports:
+        - port: 443
+          protocol: TCP
+
+    # DNS
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP

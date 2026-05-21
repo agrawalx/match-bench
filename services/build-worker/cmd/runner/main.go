@@ -1,36 +1,34 @@
-// runner executes the build pipeline for a single submission.
-// It runs inside the k8s Job container, gets config from env vars, and exits.
+// runner executes a single pipeline step for one submission.
+// RUNNER_MODE selects the step: build | scan | sbom.
+// It runs inside the k8s Job container, reads config from env vars, and exits.
 package main
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"os"
-	"time"
 
 	"github.com/iicpc/build-worker/internal/pipeline"
-	"github.com/iicpc/build-worker/internal/publisher"
 	"github.com/iicpc/build-worker/internal/store"
-	"github.com/iicpc/schemas/topics"
 )
 
 func main() {
 	log := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	slog.SetDefault(log)
 
+	mode := mustEnv("RUNNER_MODE")
 	submissionID := mustEnv("SUBMISSION_ID")
 	artifactPath := mustEnv("ARTIFACT_PATH")
-	dbURL := mustEnv("DATABASE_URL")
 	minioEndpoint := mustEnv("MINIO_ENDPOINT")
 	minioAccess := mustEnv("MINIO_ACCESS_KEY")
 	minioSecret := mustEnv("MINIO_SECRET_KEY")
 	minioBucket := envOr("MINIO_BUCKET", "submissions")
 	minioSSL := os.Getenv("MINIO_USE_SSL") == "true"
-	kafkaBrokers   := os.Getenv("KAFKA_BROKERS")
-	harborEndpoint := os.Getenv("HARBOR_ENDPOINT")
-	harborProject  := envOr("HARBOR_PROJECT", "iicpc")
-	harborUser     := os.Getenv("HARBOR_USER")
-	harborPassword := os.Getenv("HARBOR_PASSWORD")
+	harborStagingEndpoint := mustEnv("HARBOR_STAGING_ENDPOINT")
+	harborProject := envOr("HARBOR_PROJECT", "iicpc")
+	harborUser := mustEnv("HARBOR_USER")
+	harborPassword := mustEnv("HARBOR_PASSWORD")
 
 	ctx := context.Background()
 
@@ -40,42 +38,88 @@ func main() {
 		os.Exit(1)
 	}
 
-	pgStore, err := store.NewPostgresStore(ctx, dbURL)
-	if err != nil {
-		log.Error("postgres init failed", "error", err)
+	runner := pipeline.NewNativeRunner(log, harborStagingEndpoint, harborProject, harborUser, harborPassword)
+
+	log.Info("runner started", "mode", mode, "submission_id", submissionID)
+
+	switch mode {
+	case "build":
+		if err := runBuild(ctx, log, runner, minioStore, submissionID, artifactPath); err != nil {
+			log.Error("build step failed", "error", err)
+			os.Exit(1)
+		}
+	case "scan":
+		if err := runScan(ctx, log, runner, minioStore, submissionID, harborStagingEndpoint, harborProject); err != nil {
+			log.Error("scan step failed", "error", err)
+			os.Exit(1)
+		}
+	case "sbom":
+		if err := runSBOM(ctx, log, runner, minioStore, submissionID, harborStagingEndpoint, harborProject); err != nil {
+			log.Error("sbom step failed", "error", err)
+			os.Exit(1)
+		}
+	default:
+		log.Error("unknown RUNNER_MODE", "mode", mode)
 		os.Exit(1)
 	}
-	defer pgStore.Close()
 
-	pub := publisher.NewKafkaPublisher(kafkaBrokers, log)
-	defer pub.Close()
+	log.Info("runner finished", "mode", mode)
+}
 
-	updater := &statusUpdater{pub: pub, pg: pgStore}
-	runner := pipeline.NewNativeRunner(log, harborEndpoint, harborProject, harborUser, harborPassword)
-	pipe := pipeline.New(minioStore, updater, runner, log)
-
-	msg := topics.SubmissionBuildRequested{
-		SubmissionID: submissionID,
-		ArtifactPath: artifactPath,
-		RequestedAt:  time.Now().UTC(),
+func runBuild(ctx context.Context, log *slog.Logger, runner *pipeline.NativeRunner, minio *store.MinioStore, submissionID, artifactPath string) error {
+	log.Info("downloading artifact", "path", artifactPath)
+	zipData, err := minio.DownloadObject(ctx, artifactPath)
+	if err != nil {
+		return fmt.Errorf("download artifact: %w", err)
 	}
 
-	log.Info("runner started", "submission_id", submissionID)
-	pipe.Run(ctx, msg)
-	log.Info("runner finished")
+	_, buildLog, err := runner.Build(ctx, submissionID, zipData)
+
+	_ = minio.UploadBytes(ctx,
+		fmt.Sprintf("submissions/%s/build.log", submissionID),
+		"text/plain", buildLog,
+	)
+	if err != nil {
+		return fmt.Errorf("kaniko build: %w", err)
+	}
+	log.Info("build complete")
+	return nil
 }
 
-type statusUpdater struct {
-	pub *publisher.Publisher
-	pg  *store.PostgresStore
+func runScan(ctx context.Context, log *slog.Logger, runner *pipeline.NativeRunner, minio *store.MinioStore, submissionID, stagingEndpoint, project string) error {
+	ref := fmt.Sprintf("%s/%s/%s:latest", stagingEndpoint, project, submissionID)
+	log.Info("scanning image", "ref", ref)
+
+	report, err := runner.Scan(ctx, ref)
+	if err != nil {
+		return fmt.Errorf("trivy: %w", err)
+	}
+	if err := minio.UploadBytes(ctx,
+		fmt.Sprintf("submissions/%s/trivy-report.json", submissionID),
+		"application/json", report,
+	); err != nil {
+		return fmt.Errorf("upload trivy report: %w", err)
+	}
+	log.Info("scan complete")
+	return nil
 }
 
-func (u *statusUpdater) PublishStatus(ctx context.Context, submissionID, status, message string) error {
-	return u.pub.PublishStatus(ctx, submissionID, status, message)
-}
+func runSBOM(ctx context.Context, log *slog.Logger, runner *pipeline.NativeRunner, minio *store.MinioStore, submissionID, stagingEndpoint, project string) error {
+	ref := fmt.Sprintf("%s/%s/%s:latest", stagingEndpoint, project, submissionID)
+	log.Info("generating SBOM", "ref", ref)
 
-func (u *statusUpdater) UpdateDBStatus(ctx context.Context, submissionID, status, message string) error {
-	return u.pg.UpdateStatus(ctx, submissionID, status, message)
+	sbom, err := runner.SBOM(ctx, ref)
+	if err != nil {
+		return fmt.Errorf("syft: %w", err)
+	}
+	if err := minio.UploadBytes(ctx,
+		fmt.Sprintf("submissions/%s/sbom.json", submissionID),
+		"application/json", sbom,
+	); err != nil {
+		return fmt.Errorf("upload sbom: %w", err)
+	}
+	log.Info("SBOM complete")
+	return nil
 }
 
 func envOr(key, def string) string {

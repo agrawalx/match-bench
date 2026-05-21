@@ -1,5 +1,6 @@
 // spawner is the production entry point.
-// It consumes Kafka and creates a k8s Job per submission instead of running the pipeline locally.
+// It consumes Kafka and orchestrates 3 k8s Jobs per submission:
+// build (Kaniko → Harbor staging) → scan + sbom (parallel) → promote staging→production.
 package main
 
 import (
@@ -24,6 +25,7 @@ func main() {
 	minioAccess := mustEnv("MINIO_ACCESS_KEY")
 	minioSecret := mustEnv("MINIO_SECRET_KEY")
 	minioBucket := envOr("MINIO_BUCKET", "submissions")
+	minioSSL := os.Getenv("MINIO_USE_SSL") == "true"
 	kafkaBrokers := os.Getenv("KAFKA_BROKERS")
 	kafkaGroup := envOr("KAFKA_GROUP_ID", "build-worker-spawner")
 
@@ -36,6 +38,12 @@ func main() {
 		os.Exit(1)
 	}
 	defer pgStore.Close()
+
+	minioStore, err := store.NewMinioStore(minioEndpoint, minioAccess, minioSecret, minioBucket, minioSSL)
+	if err != nil {
+		log.Error("minio init failed", "error", err)
+		os.Exit(1)
+	}
 
 	pub := publisher.NewKafkaPublisher(kafkaBrokers, log)
 	defer pub.Close()
@@ -51,13 +59,15 @@ func main() {
 		MinioSecretKey: minioSecret,
 		MinioBucket:    minioBucket,
 		KafkaBrokers:   kafkaBrokers,
-		HarborEndpoint: os.Getenv("HARBOR_ENDPOINT"),
-		HarborProject:  envOr("HARBOR_PROJECT", "iicpc"),
-		HarborUser:     os.Getenv("HARBOR_USER"),
-		HarborPassword: os.Getenv("HARBOR_PASSWORD"),
+
+		HarborStagingEndpoint:    mustEnv("HARBOR_STAGING_ENDPOINT"),
+		HarborProductionEndpoint: os.Getenv("HARBOR_PRODUCTION_ENDPOINT"),
+		HarborProject:            envOr("HARBOR_PROJECT", "iicpc"),
+		HarborUser:               mustEnv("HARBOR_USER"),
+		HarborPassword:           mustEnv("HARBOR_PASSWORD"),
 	}
 
-	spawner, err := k8sspawner.NewSpawner(jobCfg, updater, log)
+	spawner, err := k8sspawner.NewSpawner(jobCfg, minioStore, updater, log)
 	if err != nil {
 		log.Error("k8s spawner init failed", "error", err)
 		os.Exit(1)

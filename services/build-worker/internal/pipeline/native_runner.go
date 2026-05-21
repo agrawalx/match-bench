@@ -4,64 +4,69 @@ import (
 	"archive/zip"
 	"bytes"
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
-
-	"github.com/google/go-containerregistry/pkg/authn"
-	"github.com/google/go-containerregistry/pkg/crane"
-	"github.com/google/go-containerregistry/pkg/name"
-	"github.com/google/go-containerregistry/pkg/v1/tarball"
+	"strings"
 )
 
 const kanikoExecutor = "/kaniko/executor"
 
 // NativeRunner execs kaniko, trivy, and syft binaries directly.
 // Intended to run inside the k8s Job container where these binaries are bundled.
+// Build pushes directly to Harbor staging; Scan and SBOM read from the staging registry ref.
 type NativeRunner struct {
-	log            *slog.Logger
-	harborEndpoint string // e.g. harbor.example.com
-	harborProject  string // e.g. iicpc
-	harborUser     string
-	harborPassword string
-	submissionID   string // set during Build, used during Push
+	log                   *slog.Logger
+	harborStagingEndpoint string // e.g. harbor-staging.example.com
+	harborProject         string // e.g. iicpc
+	harborUser            string
+	harborPassword        string
 }
 
-func NewNativeRunner(log *slog.Logger, harborEndpoint, harborProject, harborUser, harborPassword string) *NativeRunner {
+func NewNativeRunner(log *slog.Logger, harborStagingEndpoint, harborProject, harborUser, harborPassword string) *NativeRunner {
 	return &NativeRunner{
-		log:            log,
-		harborEndpoint: harborEndpoint,
-		harborProject:  harborProject,
-		harborUser:     harborUser,
-		harborPassword: harborPassword,
+		log:                   log,
+		harborStagingEndpoint: harborStagingEndpoint,
+		harborProject:         harborProject,
+		harborUser:            harborUser,
+		harborPassword:        harborPassword,
 	}
 }
 
-func (r *NativeRunner) Build(ctx context.Context, submissionID string, zipData []byte) (string, []byte, error) {
-	r.submissionID = submissionID
+func (r *NativeRunner) stagingRef(submissionID string) string {
+	return fmt.Sprintf("%s/%s/%s:latest", r.harborStagingEndpoint, r.harborProject, submissionID)
+}
 
+// Build extracts zipData, writes Harbor staging credentials for kaniko,
+// executes kaniko to build and push to Harbor staging, and returns the staging ref.
+func (r *NativeRunner) Build(ctx context.Context, submissionID string, zipData []byte) (string, []byte, error) {
 	workDir, err := os.MkdirTemp("", "build-"+submissionID)
 	if err != nil {
 		return "", nil, fmt.Errorf("mktemp: %w", err)
 	}
+	defer os.RemoveAll(workDir)
 
 	srcDir := filepath.Join(workDir, "src")
 	if err := extractZip(zipData, srcDir); err != nil {
-		os.RemoveAll(workDir)
 		return "", nil, fmt.Errorf("extract zip: %w", err)
 	}
 
-	tarPath := filepath.Join(workDir, "image.tar")
+	if err := r.writeKanikoDockerConfig(); err != nil {
+		return "", nil, fmt.Errorf("kaniko docker config: %w", err)
+	}
+
+	stagingRef := r.stagingRef(submissionID)
 
 	cmd := exec.CommandContext(ctx,
 		kanikoExecutor,
 		"--context=dir://"+srcDir,
 		"--dockerfile="+filepath.Join(srcDir, "Dockerfile"),
-		"--no-push",
-		"--tar-path="+tarPath,
+		"--destination="+stagingRef,
 	)
 
 	var out bytes.Buffer
@@ -72,15 +77,19 @@ func (r *NativeRunner) Build(ctx context.Context, submissionID string, zipData [
 		return "", out.Bytes(), fmt.Errorf("kaniko: %w", err)
 	}
 
-	return tarPath, out.Bytes(), nil
+	r.log.Info("image pushed to staging", "ref", stagingRef)
+	return stagingRef, out.Bytes(), nil
 }
 
+// Scan runs trivy against the Harbor staging registry image.
 func (r *NativeRunner) Scan(ctx context.Context, imageRef string) ([]byte, error) {
 	cmd := exec.CommandContext(ctx,
 		"trivy", "image",
-		"--input", imageRef,
+		"--username", r.harborUser,
+		"--password", r.harborPassword,
 		"--format", "json",
 		"--exit-code", "0",
+		imageRef,
 	)
 	out, err := cmd.Output()
 	if err != nil {
@@ -89,11 +98,20 @@ func (r *NativeRunner) Scan(ctx context.Context, imageRef string) ([]byte, error
 	return out, nil
 }
 
+// SBOM runs syft against the Harbor staging registry image using env-based auth.
 func (r *NativeRunner) SBOM(ctx context.Context, imageRef string) ([]byte, error) {
+	// Extract registry hostname for SYFT_REGISTRY_AUTH_AUTHORITY
+	authority := strings.SplitN(imageRef, "/", 2)[0]
+
 	cmd := exec.CommandContext(ctx,
 		"syft",
-		"oci-archive:"+imageRef,
+		"registry:"+imageRef,
 		"-o", "spdx-json",
+	)
+	cmd.Env = append(os.Environ(),
+		"SYFT_REGISTRY_AUTH_AUTHORITY="+authority,
+		"SYFT_REGISTRY_AUTH_USERNAME="+r.harborUser,
+		"SYFT_REGISTRY_AUTH_PASSWORD="+r.harborPassword,
 	)
 	out, err := cmd.Output()
 	if err != nil {
@@ -102,47 +120,42 @@ func (r *NativeRunner) SBOM(ctx context.Context, imageRef string) ([]byte, error
 	return out, nil
 }
 
-// Push pushes the verified image tarball to Harbor using crane.
-// If HARBOR_ENDPOINT is not configured, the push is skipped (dev/staging mode).
-func (r *NativeRunner) Push(ctx context.Context, imageRef string) error {
-	if r.harborEndpoint == "" {
-		r.log.Info("HARBOR_ENDPOINT not set — skipping push")
-		return nil
-	}
-
-	dest := fmt.Sprintf("%s/%s/%s:latest", r.harborEndpoint, r.harborProject, r.submissionID)
-
-	ref, err := name.NewTag(dest)
-	if err != nil {
-		return fmt.Errorf("harbor tag: %w", err)
-	}
-
-	img, err := tarball.ImageFromPath(imageRef, nil)
-	if err != nil {
-		return fmt.Errorf("load tarball: %w", err)
-	}
-
-	auth := authn.FromConfig(authn.AuthConfig{
-		Username: r.harborUser,
-		Password: r.harborPassword,
-	})
-
-	if err := crane.Push(img, ref.String(), crane.WithAuth(auth), crane.WithContext(ctx)); err != nil {
-		return fmt.Errorf("harbor push: %w", err)
-	}
-
-	r.log.Info("image pushed to harbor", "ref", ref.String())
+// Push is a no-op — the spawner promotes staging→production via crane.Copy.
+func (r *NativeRunner) Push(_ context.Context, _ string) error {
 	return nil
 }
 
-func (r *NativeRunner) Cleanup(_ context.Context, imageRef string) {
-	// imageRef is the tarball path; its parent is the whole work dir
-	dir := filepath.Dir(imageRef)
-	if dir != "" && dir != "." && dir != "/" {
-		os.RemoveAll(dir)
+// Cleanup is a no-op — workDir is removed inside Build().
+func (r *NativeRunner) Cleanup(_ context.Context, _ string) {}
+
+// writeKanikoDockerConfig writes Harbor staging credentials to the location
+// kaniko reads by default: /kaniko/.docker/config.json.
+func (r *NativeRunner) writeKanikoDockerConfig() error {
+	type dockerAuth struct {
+		Auth string `json:"auth"`
 	}
+	type dockerConfig struct {
+		Auths map[string]dockerAuth `json:"auths"`
+	}
+
+	auth := base64.StdEncoding.EncodeToString([]byte(r.harborUser + ":" + r.harborPassword))
+	cfg := dockerConfig{
+		Auths: map[string]dockerAuth{
+			r.harborStagingEndpoint: {Auth: auth},
+		},
+	}
+	data, err := json.Marshal(cfg)
+	if err != nil {
+		return err
+	}
+	dir := "/kaniko/.docker"
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(dir, "config.json"), data, 0600)
 }
 
+// extractZip extracts zipData into destDir, rejecting any path-traversal entries.
 func extractZip(zipData []byte, destDir string) error {
 	zr, err := zip.NewReader(bytes.NewReader(zipData), int64(len(zipData)))
 	if err != nil {
@@ -150,6 +163,10 @@ func extractZip(zipData []byte, destDir string) error {
 	}
 	for _, f := range zr.File {
 		target := filepath.Join(destDir, f.Name)
+		// Reject zip-slip: resolved path must stay inside destDir
+		if !strings.HasPrefix(target, filepath.Clean(destDir)+string(filepath.Separator)) {
+			return fmt.Errorf("zip-slip: %q escapes destination", f.Name)
+		}
 		if f.FileInfo().IsDir() {
 			os.MkdirAll(target, 0755)
 			continue

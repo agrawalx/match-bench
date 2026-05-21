@@ -1,0 +1,55 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: submission-api
+  namespace: platform
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: submission-api
+  template:
+    metadata:
+      labels:
+        app: submission-api
+    spec:
+      containers:
+        - name: submission-api
+          image: harbor.example.com/iicpc/submission-api:latest   # update to real registry
+          ports:
+            - containerPort: 8080
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: submission-api-secret
+                  key: database-url
+            - name: MINIO_ENDPOINT
+              value: minio.data.svc.cluster.local:9000
+            - name: MINIO_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: submission-api-secret
+                  key: minio-access-key
+            - name: MINIO_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: submission-api-secret
+                  key: minio-secret-key
+            - name: MINIO_BUCKET
+              value: submissions
+            - name: KAFKA_BROKERS
+              value: kafka.data.svc.cluster.local:9092
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi

@@ -4,8 +4,12 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"sync"
 	"time"
 
+	"github.com/google/go-containerregistry/pkg/authn"
+	"github.com/google/go-containerregistry/pkg/crane"
+	"github.com/iicpc/build-worker/internal/precheck"
 	"github.com/iicpc/schemas/topics"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -16,8 +20,8 @@ import (
 )
 
 const (
-	jobTTL       = int32(300)  // seconds before completed Job is auto-deleted by k8s
-	jobDeadline  = int64(1800) // 30 min hard cap per build
+	jobTTL       = int32(300)
+	jobDeadline  = int64(1800)
 	pollInterval = 5 * time.Second
 )
 
@@ -26,12 +30,14 @@ type StatusUpdater interface {
 	UpdateDBStatus(ctx context.Context, submissionID, status, message string) error
 }
 
+type MinioClient interface {
+	DownloadObject(ctx context.Context, objectPath string) ([]byte, error)
+}
+
 type JobConfig struct {
-	// k8s
 	Namespace string // "build" — Jobs run in build namespace on Build Pool
 	Image     string // all-in-one build-worker image
 
-	// credentials passed as env vars into the Job container
 	DBUrl          string
 	MinioEndpoint  string
 	MinioAccessKey string
@@ -39,21 +45,22 @@ type JobConfig struct {
 	MinioBucket    string
 	KafkaBrokers   string
 
-	// Harbor — optional; push is skipped if empty
-	HarborEndpoint string // e.g. harbor.example.com
-	HarborProject  string // e.g. iicpc
-	HarborUser     string
-	HarborPassword string
+	HarborStagingEndpoint    string // e.g. harbor-staging.example.com
+	HarborProductionEndpoint string // e.g. harbor.example.com — if empty, promote is skipped
+	HarborProject            string // e.g. iicpc
+	HarborUser               string
+	HarborPassword           string
 }
 
 type Spawner struct {
 	client  kubernetes.Interface
 	cfg     JobConfig
+	minio   MinioClient
 	updater StatusUpdater
 	log     *slog.Logger
 }
 
-func NewSpawner(cfg JobConfig, updater StatusUpdater, log *slog.Logger) (*Spawner, error) {
+func NewSpawner(cfg JobConfig, minio MinioClient, updater StatusUpdater, log *slog.Logger) (*Spawner, error) {
 	k8sCfg, err := loadK8sConfig()
 	if err != nil {
 		return nil, fmt.Errorf("k8s config: %w", err)
@@ -62,29 +69,127 @@ func NewSpawner(cfg JobConfig, updater StatusUpdater, log *slog.Logger) (*Spawne
 	if err != nil {
 		return nil, fmt.Errorf("k8s client: %w", err)
 	}
-	return &Spawner{client: client, cfg: cfg, updater: updater, log: log}, nil
+	return &Spawner{client: client, cfg: cfg, minio: minio, updater: updater, log: log}, nil
 }
 
 func (s *Spawner) Run(ctx context.Context, msg topics.SubmissionBuildRequested) {
-	jobName := "build-" + msg.SubmissionID[:8]
-	log := s.log.With("submission_id", msg.SubmissionID, "job", jobName)
+	id := msg.SubmissionID
+	log := s.log.With("submission_id", id)
 
-	s.setStatus(ctx, msg.SubmissionID, topics.StatusBuilding, "job created")
-
-	job := s.buildJobSpec(jobName, msg)
-	if _, err := s.client.BatchV1().Jobs(s.cfg.Namespace).Create(ctx, job, metav1.CreateOptions{}); err != nil {
-		log.Error("failed to create job", "error", err)
-		s.setStatus(ctx, msg.SubmissionID, topics.StatusFailed, fmt.Sprintf("job create: %v", err))
+	// Pre-check: zip-slip scan before any job creation
+	zipData, err := s.minio.DownloadObject(ctx, msg.ArtifactPath)
+	if err != nil {
+		log.Error("failed to download artifact for zip-slip check", "error", err)
+		s.setStatus(ctx, id, topics.StatusFailed, fmt.Sprintf("download artifact: %v", err))
 		return
 	}
-	log.Info("job created", "namespace", s.cfg.Namespace)
+	if err := precheck.CheckZipSlip(zipData); err != nil {
+		log.Warn("zip-slip check failed", "error", err)
+		s.setStatus(ctx, id, topics.StatusFailed, fmt.Sprintf("zip-slip: %v", err))
+		return
+	}
 
-	// Runner container publishes intermediate statuses (scanned, sbom_ready, ready).
-	// Spawner only handles failure and timeout.
-	go s.watchJob(ctx, jobName, msg.SubmissionID)
+	// Phase 1: Kaniko build → Harbor staging
+	buildJob := "build-" + id[:8]
+	if err := s.createJob(ctx, s.buildJobSpec(buildJob, msg, "build")); err != nil {
+		log.Error("failed to create build job", "error", err)
+		s.setStatus(ctx, id, topics.StatusFailed, fmt.Sprintf("create build job: %v", err))
+		return
+	}
+	log.Info("build job created", "job", buildJob)
+
+	if err := s.waitForJob(ctx, buildJob); err != nil {
+		log.Error("build job failed", "error", err)
+		s.setStatus(ctx, id, topics.StatusFailed, fmt.Sprintf("build: %v", err))
+		return
+	}
+	s.setStatus(ctx, id, topics.StatusBuilding, "image built and pushed to staging registry")
+	log.Info("phase 1 complete")
+
+	// Phase 2: Trivy scan + Syft SBOM in parallel
+	scanJob := "scan-" + id[:8]
+	sbomJob := "sbom-" + id[:8]
+
+	if err := s.createJob(ctx, s.buildJobSpec(scanJob, msg, "scan")); err != nil {
+		s.setStatus(ctx, id, topics.StatusFailed, fmt.Sprintf("create scan job: %v", err))
+		return
+	}
+	if err := s.createJob(ctx, s.buildJobSpec(sbomJob, msg, "sbom")); err != nil {
+		s.setStatus(ctx, id, topics.StatusFailed, fmt.Sprintf("create sbom job: %v", err))
+		return
+	}
+	log.Info("scan and sbom jobs created")
+
+	var wg sync.WaitGroup
+	errs := make(chan error, 2)
+	statuses := make(chan string, 2)
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		if err := s.waitForJob(ctx, scanJob); err != nil {
+			errs <- fmt.Errorf("scan: %w", err)
+			return
+		}
+		statuses <- topics.StatusScanned
+	}()
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		if err := s.waitForJob(ctx, sbomJob); err != nil {
+			errs <- fmt.Errorf("sbom: %w", err)
+			return
+		}
+		statuses <- topics.StatusSBOMReady
+	}()
+
+	go func() {
+		wg.Wait()
+		close(statuses)
+		close(errs)
+	}()
+
+	for st := range statuses {
+		s.setStatus(ctx, id, st, st+" complete")
+		log.Info("phase 2 step complete", "status", st)
+	}
+	for err := range errs {
+		if err != nil {
+			log.Error("phase 2 job failed", "error", err)
+			s.setStatus(ctx, id, topics.StatusFailed, err.Error())
+			return
+		}
+	}
+	log.Info("phase 2 complete")
+
+	// Phase 3: Promote staging → production
+	if s.cfg.HarborProductionEndpoint != "" {
+		stagingRef := fmt.Sprintf("%s/%s/%s:latest", s.cfg.HarborStagingEndpoint, s.cfg.HarborProject, id)
+		productionRef := fmt.Sprintf("%s/%s/%s:latest", s.cfg.HarborProductionEndpoint, s.cfg.HarborProject, id)
+
+		auth := crane.WithAuth(authn.FromConfig(authn.AuthConfig{
+			Username: s.cfg.HarborUser,
+			Password: s.cfg.HarborPassword,
+		}))
+		if err := crane.Copy(stagingRef, productionRef, auth, crane.WithContext(ctx)); err != nil {
+			log.Error("harbor promote failed", "error", err)
+			s.setStatus(ctx, id, topics.StatusFailed, fmt.Sprintf("promote staging→production: %v", err))
+			return
+		}
+		log.Info("image promoted to production", "ref", productionRef)
+	}
+
+	s.setStatus(ctx, id, topics.StatusReady, "image ready")
+	log.Info("pipeline complete")
 }
 
-func (s *Spawner) watchJob(ctx context.Context, jobName, submissionID string) {
+func (s *Spawner) createJob(ctx context.Context, job *batchv1.Job) error {
+	_, err := s.client.BatchV1().Jobs(s.cfg.Namespace).Create(ctx, job, metav1.CreateOptions{})
+	return err
+}
+
+func (s *Spawner) waitForJob(ctx context.Context, jobName string) error {
 	deadline := time.After(time.Duration(jobDeadline) * time.Second)
 	ticker := time.NewTicker(pollInterval)
 	defer ticker.Stop()
@@ -92,10 +197,9 @@ func (s *Spawner) watchJob(ctx context.Context, jobName, submissionID string) {
 	for {
 		select {
 		case <-ctx.Done():
-			return
+			return ctx.Err()
 		case <-deadline:
-			s.setStatus(ctx, submissionID, topics.StatusFailed, "build timed out after 30 minutes")
-			return
+			return fmt.Errorf("job %s timed out after 30m", jobName)
 		case <-ticker.C:
 			job, err := s.client.BatchV1().Jobs(s.cfg.Namespace).Get(ctx, jobName, metav1.GetOptions{})
 			if err != nil {
@@ -103,17 +207,16 @@ func (s *Spawner) watchJob(ctx context.Context, jobName, submissionID string) {
 				continue
 			}
 			if isJobFailed(job) {
-				s.setStatus(ctx, submissionID, topics.StatusFailed, jobFailureMessage(job))
-				return
+				return fmt.Errorf("job %s failed: %s", jobName, jobFailureMessage(job))
 			}
 			if isJobComplete(job) {
-				return
+				return nil
 			}
 		}
 	}
 }
 
-func (s *Spawner) buildJobSpec(jobName string, msg topics.SubmissionBuildRequested) *batchv1.Job {
+func (s *Spawner) buildJobSpec(jobName string, msg topics.SubmissionBuildRequested, mode string) *batchv1.Job {
 	ttl := jobTTL
 	deadline := jobDeadline
 	backoff := int32(0)
@@ -125,6 +228,7 @@ func (s *Spawner) buildJobSpec(jobName string, msg topics.SubmissionBuildRequest
 			Labels: map[string]string{
 				"app":           "build-worker",
 				"submission-id": msg.SubmissionID,
+				"mode":          mode,
 			},
 		},
 		Spec: batchv1.JobSpec{
@@ -136,11 +240,11 @@ func (s *Spawner) buildJobSpec(jobName string, msg topics.SubmissionBuildRequest
 					Labels: map[string]string{
 						"app":           "build-job",
 						"submission-id": msg.SubmissionID,
+						"mode":          mode,
 					},
 				},
 				Spec: corev1.PodSpec{
 					RestartPolicy: corev1.RestartPolicyNever,
-					// Schedule only on the Build Pool (taint: build=true:NoSchedule)
 					Tolerations: []corev1.Toleration{
 						{
 							Key:      "build",
@@ -157,7 +261,7 @@ func (s *Spawner) buildJobSpec(jobName string, msg topics.SubmissionBuildRequest
 							Name:    "runner",
 							Image:   s.cfg.Image,
 							Command: []string{"/usr/local/bin/runner"},
-							Env:     s.buildEnv(msg),
+							Env:     s.buildEnv(msg, mode),
 						},
 					},
 				},
@@ -166,17 +270,16 @@ func (s *Spawner) buildJobSpec(jobName string, msg topics.SubmissionBuildRequest
 	}
 }
 
-func (s *Spawner) buildEnv(msg topics.SubmissionBuildRequested) []corev1.EnvVar {
+func (s *Spawner) buildEnv(msg topics.SubmissionBuildRequested, mode string) []corev1.EnvVar {
 	return []corev1.EnvVar{
+		{Name: "RUNNER_MODE", Value: mode},
 		{Name: "SUBMISSION_ID", Value: msg.SubmissionID},
 		{Name: "ARTIFACT_PATH", Value: msg.ArtifactPath},
-		{Name: "DATABASE_URL", Value: s.cfg.DBUrl},
 		{Name: "MINIO_ENDPOINT", Value: s.cfg.MinioEndpoint},
 		{Name: "MINIO_ACCESS_KEY", Value: s.cfg.MinioAccessKey},
 		{Name: "MINIO_SECRET_KEY", Value: s.cfg.MinioSecretKey},
 		{Name: "MINIO_BUCKET", Value: s.cfg.MinioBucket},
-		{Name: "KAFKA_BROKERS", Value: s.cfg.KafkaBrokers},
-		{Name: "HARBOR_ENDPOINT", Value: s.cfg.HarborEndpoint},
+		{Name: "HARBOR_STAGING_ENDPOINT", Value: s.cfg.HarborStagingEndpoint},
 		{Name: "HARBOR_PROJECT", Value: s.cfg.HarborProject},
 		{Name: "HARBOR_USER", Value: s.cfg.HarborUser},
 		{Name: "HARBOR_PASSWORD", Value: s.cfg.HarborPassword},

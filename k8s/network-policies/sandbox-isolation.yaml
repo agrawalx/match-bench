@@ -1,0 +1,44 @@
+---
+# Isolates contestant pods in the sandbox namespace.
+# Contestant code may only receive traffic from bot-worker pods (benchmark namespace).
+# All intra-cluster egress is blocked — contestant cannot reach PostgreSQL, Redis,
+# Kafka, MinIO, or other contestant pods.
+# Public internet egress is allowed (contestants may need external dependencies).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: sandbox-isolation
+  namespace: sandbox
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress
+
+  # Only bot-workers (benchmark namespace) may send orders inbound
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              name: benchmark
+
+  egress:
+    # Block all intra-cluster traffic — no cluster CIDR reachable
+    # Allow only public internet (no namespaceSelector = external only)
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8      # cluster pod CIDR
+              - 172.16.0.0/12   # cluster service CIDR
+              - 192.168.0.0/16  # node CIDR
+    # DNS
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP

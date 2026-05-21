@@ -47,3 +47,13 @@ jobs:
 
       - name: cargo check
         run: cargo check --workspace
+      - name: go vet (build-worker)
+        working-directory: services/build-worker
+        run: go vet ./...
+
+      - name: go build (build-worker binaries)
+        working-directory: services/build-worker
+        run: |
+          go build ./cmd/worker
+          go build ./cmd/spawner
+          go build ./cmd/runner

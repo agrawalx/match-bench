@@ -3,4 +3,5 @@ go 1.25.0
 use (
 	./schemas/go
 	./services/submission-api
+	./services/build-worker
 )

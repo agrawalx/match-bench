@@ -17,11 +17,20 @@ type SubmissionBuildRequested struct {
 	RequestedAt  time.Time `json:"requested_at"`
 }
 
+const (
+	StatusUploaded  = "uploaded"
+	StatusBuilding  = "building"
+	StatusScanned   = "scanned"
+	StatusSBOMReady = "sbom_ready"
+	StatusReady     = "ready"
+	StatusFailed    = "failed"
+)
+
 // SubmissionStatusUpdated is published to "submission.status.updated"
 // by the build-worker on every state transition. Consumed by: submission-api (status queries).
 type SubmissionStatusUpdated struct {
 	SubmissionID string    `json:"submission_id"`
-	Status       string    `json:"status"` // uploaded | building | ready | failed
+	Status       string    `json:"status"` // uploaded | building | scanned | sbom_ready | ready | failed
 	Message      string    `json:"message"`
 	UpdatedAt    time.Time `json:"updated_at"`
 }

@@ -7,14 +7,17 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+var ErrDuplicateSubmission = errors.New("duplicate submission")
 
 const createTableSQL = `
 CREATE TABLE IF NOT EXISTS submissions (
 	submission_id  TEXT PRIMARY KEY,
 	contestant_id  TEXT NOT NULL DEFAULT '',
-	sha256         TEXT NOT NULL,
+	sha256         TEXT NOT NULL UNIQUE,
 	language       TEXT NOT NULL,
 	protocol       TEXT NOT NULL,
 	port           INT  NOT NULL,
@@ -112,6 +115,10 @@ func (s *PostgresStore) Insert(ctx context.Context, m SubmissionMeta) error {
 		m.Status, m.CreatedAt,
 	)
 	if err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+			return ErrDuplicateSubmission
+		}
 		return fmt.Errorf("insert submission: %w", err)
 	}
 	return nil

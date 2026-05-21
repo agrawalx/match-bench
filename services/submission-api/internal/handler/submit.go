@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -68,18 +69,6 @@ func Submit(ms *store.MinioStore, pg *store.PostgresStore, pub publisher.Publish
 			return
 		}
 
-		// SHA-256 dedup check.
-		existingID, found, err := pg.FindBySHA256(r.Context(), sha256hex)
-		if err != nil {
-			log.Error("sha256 lookup failed", "error", err)
-			writeError(w, http.StatusInternalServerError, "internal error")
-			return
-		}
-		if found {
-			writeErrorWithID(w, http.StatusConflict, "duplicate submission", existingID)
-			return
-		}
-
 		id, err := uuid.NewV7()
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "failed to generate id")
@@ -110,6 +99,18 @@ func Submit(ms *store.MinioStore, pg *store.PostgresStore, pub publisher.Publish
 			CreatedAt:    createdAt,
 		}
 		if err := pg.Insert(r.Context(), meta); err != nil {
+			if errors.Is(err, store.ErrDuplicateSubmission) {
+				existingID, found, findErr := pg.FindBySHA256(r.Context(), sha256hex)
+				if findErr != nil {
+					log.Error("sha256 lookup failed during duplicate resolution", "error", findErr)
+				}
+				if found {
+					writeErrorWithID(w, http.StatusConflict, "duplicate submission", existingID)
+					return
+				}
+				writeError(w, http.StatusConflict, "duplicate submission")
+				return
+			}
 			log.Error("postgres insert failed", "submission_id", submissionID, "error", err)
 			writeError(w, http.StatusInternalServerError, "failed to save metadata")
 			return

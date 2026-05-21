@@ -13,7 +13,6 @@ import (
 var (
 	ErrNotZip          = errors.New("file is not a valid ZIP archive")
 	ErrTooLarge        = errors.New("file exceeds 100MB limit")
-	ErrNoDockerfile    = errors.New("Dockerfile not found at zip root")
 	ErrNoBenchmarkYAML = errors.New("benchmark.yaml not found at zip root")
 )
 
@@ -64,7 +63,7 @@ func ValidateSubmissionZip(data []byte) (*BenchmarkConfig, error) {
 	}
 
 	var cfg BenchmarkConfig
-	var foundBenchmark, foundDockerfile bool
+	var foundBenchmark bool
 
 	for _, f := range zr.File {
 		// Only inspect root-level entries — skip anything with a path separator.
@@ -84,17 +83,11 @@ func ValidateSubmissionZip(data []byte) (*BenchmarkConfig, error) {
 				return nil, fmt.Errorf("invalid benchmark.yaml: %w", decodeErr)
 			}
 			foundBenchmark = true
-
-		case "Dockerfile":
-			foundDockerfile = true
 		}
 	}
 
 	if !foundBenchmark {
 		return nil, ErrNoBenchmarkYAML
-	}
-	if !foundDockerfile {
-		return nil, ErrNoDockerfile
 	}
 
 	if !validProtocols[cfg.Protocol] {

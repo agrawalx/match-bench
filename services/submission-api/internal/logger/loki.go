@@ -79,9 +79,9 @@ func (c *LokiClient) QueueLog(t time.Time, level, message string) {
 // Close gracefully stops the worker, flushing any remaining logs in the queue.
 func (c *LokiClient) Close() {
 	c.closeOnce.Do(func() {
-		c.cancel() // Cancel the context to abort in-flight retries and HTTP calls immediately
 		close(c.ch)
 		<-c.doneCh
+		c.cancel()
 	})
 }
 

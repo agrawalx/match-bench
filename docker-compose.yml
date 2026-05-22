@@ -22,6 +22,15 @@ services:
     volumes:
       - minio_data:/data
 
+  loki:
+    image: grafana/loki:3.2.1
+    command: -config.file=/etc/loki/local-config.yaml
+    ports:
+      - "3100:3100"
+    volumes:
+      - loki_data:/loki
+
 volumes:
   postgres_data:
   minio_data:
+  loki_data:

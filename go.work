@@ -1,6 +1,7 @@
 go 1.25.0
 
 use (
+	./libs/go
 	./schemas/go
 	./services/submission-api
 	./services/build-worker

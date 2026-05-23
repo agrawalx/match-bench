@@ -11,7 +11,9 @@ type SubmissionBuildRequested struct {
 	ArtifactPath string    `json:"artifact_path"` // MinIO object path: submissions/{id}/artifact.zip
 	Language     string    `json:"language"`      // cpp | rust | go
 	Protocol     string    `json:"protocol"`      // FIX | REST | WS
-	Port         int       `json:"port"`          // declared port from benchmark.yaml
+	Port         int       `json:"port"`          // port the algorithm listens on
+	BuildType    string    `json:"build_type"`    // cmake | cargo | go
+	BuildTarget  string    `json:"build_target"`  // binary name declared in benchmark.yaml
 	TeamName     string    `json:"team_name"`
 	SHA256       string    `json:"sha256"`
 	RequestedAt  time.Time `json:"requested_at"`

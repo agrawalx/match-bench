@@ -7,6 +7,7 @@ toolchain go1.23.10
 require (
 	github.com/go-chi/chi/v5 v5.1.0
 	github.com/google/uuid v1.6.0
+	github.com/iicpc/libs v0.0.0
 	github.com/iicpc/schemas v0.0.0
 	github.com/jackc/pgx/v5 v5.6.0
 	github.com/minio/minio-go/v7 v7.0.70
@@ -35,4 +36,5 @@ require (
 	gopkg.in/ini.v1 v1.67.0 // indirect
 )
 
+replace github.com/iicpc/libs => ../../libs/go
 replace github.com/iicpc/schemas => ../../schemas/go

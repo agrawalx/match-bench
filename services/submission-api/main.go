@@ -12,7 +12,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/iicpc/submission-api/internal/handler"
-	"github.com/iicpc/submission-api/internal/logger"
+	"github.com/iicpc/libs/logger"
 	"github.com/iicpc/submission-api/internal/publisher"
 	"github.com/iicpc/submission-api/internal/store"
 )

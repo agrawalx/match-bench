@@ -2,13 +2,17 @@ package k8s
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
+	"io"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/google/go-containerregistry/pkg/authn"
 	"github.com/google/go-containerregistry/pkg/crane"
+	"github.com/iicpc/build-worker/internal/dockerfile"
 	"github.com/iicpc/build-worker/internal/precheck"
 	"github.com/iicpc/schemas/topics"
 	batchv1 "k8s.io/api/batch/v1"
@@ -20,9 +24,11 @@ import (
 )
 
 const (
-	jobTTL       = int32(300)
-	jobDeadline  = int64(1800)
-	pollInterval = 5 * time.Second
+	jobTTL        = int32(300)  // 5 min — generous; logs read within seconds of completion
+	buildDeadline = int64(600)  // 10 min — Rust release builds need the headroom
+	scanDeadline  = int64(900)  // 15 min — trivy cold DB download on ephemeral pods
+	sbomDeadline  = int64(600)  // 10 min — syft is fine here
+	pollInterval  = 5 * time.Second
 )
 
 type StatusUpdater interface {
@@ -32,24 +38,33 @@ type StatusUpdater interface {
 
 type MinioClient interface {
 	DownloadObject(ctx context.Context, objectPath string) ([]byte, error)
+	UploadBytes(ctx context.Context, objectPath, contentType string, data []byte) error
 }
 
+// JobConfig holds image refs and credentials for all three Job types.
+// No runner-specific config (KAFKA_BROKERS, DATABASE_URL) — Jobs only interact
+// with MinIO and Harbor; the spawner owns all status updates.
 type JobConfig struct {
-	Namespace string // "build" — Jobs run in build namespace on Build Pool
-	Image     string // all-in-one build-worker image
+	Namespace    string
+	SpawnerImage string // harbor.example.com/iicpc/spawner:latest — used as fetcher init container
+	KanikoImage  string // gcr.io/kaniko-project/executor:v1.23
+	TrivyImage   string // aquasec/trivy:0.51
+	SyftImage    string // anchore/syft:v1.4
 
-	DBUrl          string
 	MinioEndpoint  string
 	MinioAccessKey string
 	MinioSecretKey string
 	MinioBucket    string
-	KafkaBrokers   string
 
 	HarborStagingEndpoint    string // e.g. harbor-staging.example.com
 	HarborProductionEndpoint string // e.g. harbor.example.com — if empty, promote is skipped
 	HarborProject            string // e.g. iicpc
 	HarborUser               string
 	HarborPassword           string
+
+	// BuildNodePool, when non-empty, pins Job pods to nodes with pool=<value> label
+	// and adds the build=true:NoSchedule toleration. Leave empty for single-node dev.
+	BuildNodePool string
 }
 
 type Spawner struct {
@@ -75,11 +90,12 @@ func NewSpawner(cfg JobConfig, minio MinioClient, updater StatusUpdater, log *sl
 func (s *Spawner) Run(ctx context.Context, msg topics.SubmissionBuildRequested) {
 	id := msg.SubmissionID
 	log := s.log.With("submission_id", id)
+	stagingRef := fmt.Sprintf("%s/%s/%s:latest", s.cfg.HarborStagingEndpoint, s.cfg.HarborProject, id)
 
-	// Pre-check: zip-slip scan before any job creation
+	// Pre-check: zip-slip scan before any Job is created
 	zipData, err := s.minio.DownloadObject(ctx, msg.ArtifactPath)
 	if err != nil {
-		log.Error("failed to download artifact for zip-slip check", "error", err)
+		log.Error("failed to download artifact", "error", err)
 		s.setStatus(ctx, id, topics.StatusFailed, fmt.Sprintf("download artifact: %v", err))
 		return
 	}
@@ -89,32 +105,46 @@ func (s *Spawner) Run(ctx context.Context, msg topics.SubmissionBuildRequested) 
 		return
 	}
 
-	// Phase 1: Kaniko build → Harbor staging
-	buildJob := "build-" + id[:8]
-	if err := s.createJob(ctx, s.buildJobSpec(buildJob, msg, "build")); err != nil {
+	// Generate a platform-controlled Dockerfile from the submission metadata.
+	// Contestants never supply a Dockerfile — the platform controls the build environment.
+	dockerfileContent, err := dockerfile.Generate(msg.Language, msg.BuildType, msg.BuildTarget, msg.Port)
+	if err != nil {
+		log.Error("failed to generate dockerfile", "error", err)
+		s.setStatus(ctx, id, topics.StatusFailed, fmt.Sprintf("generate dockerfile: %v", err))
+		return
+	}
+	
+	dockerfileB64 := base64.StdEncoding.EncodeToString([]byte(dockerfileContent))
+
+	// Phase 1: fetcher init container extracts ZIP → kaniko builds and pushes to Harbor staging
+	buildJobName := "build-" + id[:8]
+	if err := s.createJob(ctx, s.buildJobSpec(buildJobName, msg, stagingRef, dockerfileB64)); err != nil {
 		log.Error("failed to create build job", "error", err)
 		s.setStatus(ctx, id, topics.StatusFailed, fmt.Sprintf("create build job: %v", err))
 		return
 	}
-	log.Info("build job created", "job", buildJob)
+	log.Info("build job created", "job", buildJobName)
 
-	if err := s.waitForJob(ctx, buildJob); err != nil {
-		log.Error("build job failed", "error", err)
-		s.setStatus(ctx, id, topics.StatusFailed, fmt.Sprintf("build: %v", err))
+	buildErr := s.waitForJob(ctx, buildJobName, time.Duration(buildDeadline+60)*time.Second)
+	buildLog, _ := s.readJobLogs(ctx, buildJobName, "build")
+	_ = s.minio.UploadBytes(ctx, "submissions/"+id+"/build.log", "text/plain", buildLog)
+	if buildErr != nil {
+		log.Error("build job failed", "error", buildErr)
+		s.setStatus(ctx, id, topics.StatusFailed, fmt.Sprintf("build: %v", buildErr))
 		return
 	}
-	s.setStatus(ctx, id, topics.StatusBuilding, "image built and pushed to staging registry")
+	s.setStatus(ctx, id, topics.StatusBuilding, "image built and pushed to staging")
 	log.Info("phase 1 complete")
 
-	// Phase 2: Trivy scan + Syft SBOM in parallel
-	scanJob := "scan-" + id[:8]
-	sbomJob := "sbom-" + id[:8]
+	// Phase 2: Trivy scan + Syft SBOM run in parallel against the staging registry image
+	scanJobName := "scan-" + id[:8]
+	sbomJobName := "sbom-" + id[:8]
 
-	if err := s.createJob(ctx, s.buildJobSpec(scanJob, msg, "scan")); err != nil {
+	if err := s.createJob(ctx, s.scanJobSpec(scanJobName, id, stagingRef)); err != nil {
 		s.setStatus(ctx, id, topics.StatusFailed, fmt.Sprintf("create scan job: %v", err))
 		return
 	}
-	if err := s.createJob(ctx, s.buildJobSpec(sbomJob, msg, "sbom")); err != nil {
+	if err := s.createJob(ctx, s.sbomJobSpec(sbomJobName, id, stagingRef)); err != nil {
 		s.setStatus(ctx, id, topics.StatusFailed, fmt.Sprintf("create sbom job: %v", err))
 		return
 	}
@@ -127,20 +157,24 @@ func (s *Spawner) Run(ctx context.Context, msg topics.SubmissionBuildRequested) 
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		if err := s.waitForJob(ctx, scanJob); err != nil {
+		if err := s.waitForJob(ctx, scanJobName, time.Duration(scanDeadline+60)*time.Second); err != nil {
 			errs <- fmt.Errorf("scan: %w", err)
 			return
 		}
+		report, _ := s.readJobLogs(ctx, scanJobName, "")
+		_ = s.minio.UploadBytes(ctx, "submissions/"+id+"/trivy-report.json", "application/json", report)
 		statuses <- topics.StatusScanned
 	}()
 
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		if err := s.waitForJob(ctx, sbomJob); err != nil {
+		if err := s.waitForJob(ctx, sbomJobName, time.Duration(sbomDeadline+60)*time.Second); err != nil {
 			errs <- fmt.Errorf("sbom: %w", err)
 			return
 		}
+		sbom, _ := s.readJobLogs(ctx, sbomJobName, "")
+		_ = s.minio.UploadBytes(ctx, "submissions/"+id+"/sbom.json", "application/json", sbom)
 		statuses <- topics.StatusSBOMReady
 	}()
 
@@ -163,11 +197,9 @@ func (s *Spawner) Run(ctx context.Context, msg topics.SubmissionBuildRequested) 
 	}
 	log.Info("phase 2 complete")
 
-	// Phase 3: Promote staging → production
+	// Phase 3: promote staging → production via crane.Copy (no extra Job)
 	if s.cfg.HarborProductionEndpoint != "" {
-		stagingRef := fmt.Sprintf("%s/%s/%s:latest", s.cfg.HarborStagingEndpoint, s.cfg.HarborProject, id)
 		productionRef := fmt.Sprintf("%s/%s/%s:latest", s.cfg.HarborProductionEndpoint, s.cfg.HarborProject, id)
-
 		auth := crane.WithAuth(authn.FromConfig(authn.AuthConfig{
 			Username: s.cfg.HarborUser,
 			Password: s.cfg.HarborPassword,
@@ -189,8 +221,8 @@ func (s *Spawner) createJob(ctx context.Context, job *batchv1.Job) error {
 	return err
 }
 
-func (s *Spawner) waitForJob(ctx context.Context, jobName string) error {
-	deadline := time.After(time.Duration(jobDeadline) * time.Second)
+func (s *Spawner) waitForJob(ctx context.Context, jobName string, timeout time.Duration) error {
+	deadline := time.After(timeout)
 	ticker := time.NewTicker(pollInterval)
 	defer ticker.Stop()
 
@@ -199,7 +231,7 @@ func (s *Spawner) waitForJob(ctx context.Context, jobName string) error {
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-deadline:
-			return fmt.Errorf("job %s timed out after 30m", jobName)
+			return fmt.Errorf("job %s timed out after %s", jobName, timeout)
 		case <-ticker.C:
 			job, err := s.client.BatchV1().Jobs(s.cfg.Namespace).Get(ctx, jobName, metav1.GetOptions{})
 			if err != nil {
@@ -216,9 +248,37 @@ func (s *Spawner) waitForJob(ctx context.Context, jobName string) error {
 	}
 }
 
-func (s *Spawner) buildJobSpec(jobName string, msg topics.SubmissionBuildRequested, mode string) *batchv1.Job {
+// readJobLogs reads stdout from the pod that ran jobName.
+// container selects a specific container by name; pass "" for single-container Jobs.
+func (s *Spawner) readJobLogs(ctx context.Context, jobName, container string) ([]byte, error) {
+	pods, err := s.client.CoreV1().Pods(s.cfg.Namespace).List(ctx, metav1.ListOptions{
+		LabelSelector: "job-name=" + jobName,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("list pods for job %s: %w", jobName, err)
+	}
+	if len(pods.Items) == 0 {
+		return nil, fmt.Errorf("no pod found for job %s", jobName)
+	}
+	opts := &corev1.PodLogOptions{}
+	if container != "" {
+		opts.Container = container
+	}
+	req := s.client.CoreV1().Pods(s.cfg.Namespace).GetLogs(pods.Items[0].Name, opts)
+	rc, err := req.Stream(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("get logs for %s: %w", jobName, err)
+	}
+	defer rc.Close()
+	return io.ReadAll(rc)
+}
+
+// buildJobSpec creates the kaniko build Job.
+// Init container (fetcher): downloads ZIP from MinIO → extracts to /workspace, writes kaniko docker config.
+// Main container (kaniko): reads /workspace, pushes built image to Harbor staging.
+func (s *Spawner) buildJobSpec(jobName string, msg topics.SubmissionBuildRequested, stagingRef, dockerfileB64 string) *batchv1.Job {
 	ttl := jobTTL
-	deadline := jobDeadline
+	deadline := buildDeadline
 	backoff := int32(0)
 
 	return &batchv1.Job{
@@ -228,7 +288,7 @@ func (s *Spawner) buildJobSpec(jobName string, msg topics.SubmissionBuildRequest
 			Labels: map[string]string{
 				"app":           "build-worker",
 				"submission-id": msg.SubmissionID,
-				"mode":          mode,
+				"mode":          "build",
 			},
 		},
 		Spec: batchv1.JobSpec{
@@ -240,28 +300,49 @@ func (s *Spawner) buildJobSpec(jobName string, msg topics.SubmissionBuildRequest
 					Labels: map[string]string{
 						"app":           "build-job",
 						"submission-id": msg.SubmissionID,
-						"mode":          mode,
+						"mode":          "build",
 					},
 				},
 				Spec: corev1.PodSpec{
 					RestartPolicy: corev1.RestartPolicyNever,
-					Tolerations: []corev1.Toleration{
+					Tolerations:   s.buildTolerations(),
+					NodeSelector:  s.buildNodeSelector(),
+					Volumes: []corev1.Volume{
 						{
-							Key:      "build",
-							Operator: corev1.TolerationOpEqual,
-							Value:    "true",
-							Effect:   corev1.TaintEffectNoSchedule,
+							Name:         "workspace",
+							VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
+							// we use emptyDir as its the temporary directory and jobs are cleaned up after completion 
+						},
+						{
+							Name:         "kaniko-config",
+							VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
 						},
 					},
-					NodeSelector: map[string]string{
-						"pool": "build",
+					InitContainers: []corev1.Container{
+						{
+							Name:    "fetch",
+							Image:   s.cfg.SpawnerImage,
+							Command: []string{"/usr/local/bin/fetcher"},
+							Env:     s.fetcherEnv(msg, dockerfileB64),
+							VolumeMounts: []corev1.VolumeMount{
+								{Name: "workspace", MountPath: "/workspace"},
+								{Name: "kaniko-config", MountPath: "/kaniko/.docker"},
+							},
+						},
 					},
 					Containers: []corev1.Container{
 						{
-							Name:    "runner",
-							Image:   s.cfg.Image,
-							Command: []string{"/usr/local/bin/runner"},
-							Env:     s.buildEnv(msg, mode),
+							Name:  "build",
+							Image: s.cfg.KanikoImage,
+							Args: []string{
+								"--context=dir:///workspace",
+								"--dockerfile=/workspace/Dockerfile",
+								"--destination=" + stagingRef,
+							},
+							VolumeMounts: []corev1.VolumeMount{
+								{Name: "workspace", MountPath: "/workspace"},
+								{Name: "kaniko-config", MountPath: "/kaniko/.docker", ReadOnly: true},
+							},
 						},
 					},
 				},
@@ -270,19 +351,110 @@ func (s *Spawner) buildJobSpec(jobName string, msg topics.SubmissionBuildRequest
 	}
 }
 
-func (s *Spawner) buildEnv(msg topics.SubmissionBuildRequested, mode string) []corev1.EnvVar {
+// scanJobSpec creates a trivy vulnerability scan Job against the staging registry image.
+// JSON report is written to stdout and collected by the spawner via pod logs.
+func (s *Spawner) scanJobSpec(jobName, submissionID, stagingRef string) *batchv1.Job {
+	ttl := jobTTL
+	deadline := scanDeadline
+	backoff := int32(0)
+
+	return &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      jobName,
+			Namespace: s.cfg.Namespace,
+			Labels:    map[string]string{"app": "build-worker", "submission-id": submissionID, "mode": "scan"},
+		},
+		Spec: batchv1.JobSpec{
+			BackoffLimit:            &backoff,
+			ActiveDeadlineSeconds:   &deadline,
+			TTLSecondsAfterFinished: &ttl,
+			Template: corev1.PodTemplateSpec{
+				ObjectMeta: metav1.ObjectMeta{
+					Labels: map[string]string{"app": "build-job", "submission-id": submissionID, "mode": "scan"},
+				},
+				Spec: corev1.PodSpec{
+					RestartPolicy: corev1.RestartPolicyNever,
+					Tolerations:   s.buildTolerations(),
+					NodeSelector:  s.buildNodeSelector(),
+					Containers: []corev1.Container{
+						{
+							Name:  "scan",
+							Image: s.cfg.TrivyImage,
+							Args: []string{
+								"image",
+								"--format", "json",
+								"--quiet",
+								"--username", s.cfg.HarborUser,
+								"--password", s.cfg.HarborPassword,
+								stagingRef,
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+}
+
+// sbomJobSpec creates a syft SBOM generation Job against the staging registry image.
+// SPDX-JSON output is written to stdout and collected by the spawner via pod logs.
+func (s *Spawner) sbomJobSpec(jobName, submissionID, stagingRef string) *batchv1.Job {
+	ttl := jobTTL
+	deadline := sbomDeadline
+	backoff := int32(0)
+	authority := strings.SplitN(stagingRef, "/", 2)[0]
+
+	return &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      jobName,
+			Namespace: s.cfg.Namespace,
+			Labels:    map[string]string{"app": "build-worker", "submission-id": submissionID, "mode": "sbom"},
+		},
+		Spec: batchv1.JobSpec{
+			BackoffLimit:            &backoff,
+			ActiveDeadlineSeconds:   &deadline,
+			TTLSecondsAfterFinished: &ttl,
+			Template: corev1.PodTemplateSpec{
+				ObjectMeta: metav1.ObjectMeta{
+					Labels: map[string]string{"app": "build-job", "submission-id": submissionID, "mode": "sbom"},
+				},
+				Spec: corev1.PodSpec{
+					RestartPolicy: corev1.RestartPolicyNever,
+					Tolerations:   s.buildTolerations(),
+					NodeSelector:  s.buildNodeSelector(),
+					Containers: []corev1.Container{
+						{
+							Name:  "sbom",
+							Image: s.cfg.SyftImage,
+							Args: []string{
+								"registry:" + stagingRef,
+								"-o", "spdx-json",
+								"-q",
+							},
+							Env: []corev1.EnvVar{
+								{Name: "SYFT_REGISTRY_AUTH_AUTHORITY", Value: authority},
+								{Name: "SYFT_REGISTRY_AUTH_USERNAME", Value: s.cfg.HarborUser},
+								{Name: "SYFT_REGISTRY_AUTH_PASSWORD", Value: s.cfg.HarborPassword},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+}
+
+func (s *Spawner) fetcherEnv(msg topics.SubmissionBuildRequested, dockerfileB64 string) []corev1.EnvVar {
 	return []corev1.EnvVar{
-		{Name: "RUNNER_MODE", Value: mode},
-		{Name: "SUBMISSION_ID", Value: msg.SubmissionID},
-		{Name: "ARTIFACT_PATH", Value: msg.ArtifactPath},
 		{Name: "MINIO_ENDPOINT", Value: s.cfg.MinioEndpoint},
 		{Name: "MINIO_ACCESS_KEY", Value: s.cfg.MinioAccessKey},
 		{Name: "MINIO_SECRET_KEY", Value: s.cfg.MinioSecretKey},
 		{Name: "MINIO_BUCKET", Value: s.cfg.MinioBucket},
+		{Name: "ARTIFACT_PATH", Value: msg.ArtifactPath},
 		{Name: "HARBOR_STAGING_ENDPOINT", Value: s.cfg.HarborStagingEndpoint},
-		{Name: "HARBOR_PROJECT", Value: s.cfg.HarborProject},
 		{Name: "HARBOR_USER", Value: s.cfg.HarborUser},
 		{Name: "HARBOR_PASSWORD", Value: s.cfg.HarborPassword},
+		{Name: "DOCKERFILE_B64", Value: dockerfileB64},
 	}
 }
 
@@ -293,6 +465,25 @@ func (s *Spawner) setStatus(ctx context.Context, submissionID, status, message s
 	if err := s.updater.UpdateDBStatus(ctx, submissionID, status, message); err != nil {
 		s.log.Warn("db status update failed", "error", err)
 	}
+}
+
+func (s *Spawner) buildTolerations() []corev1.Toleration {
+	if s.cfg.BuildNodePool == "" {
+		return nil
+	}
+	return []corev1.Toleration{{
+		Key:      "build",
+		Operator: corev1.TolerationOpEqual,
+		Value:    "true",
+		Effect:   corev1.TaintEffectNoSchedule,
+	}}
+}
+
+func (s *Spawner) buildNodeSelector() map[string]string {
+	if s.cfg.BuildNodePool == "" {
+		return nil
+	}
+	return map[string]string{"pool": s.cfg.BuildNodePool}
 }
 
 func isJobComplete(job *batchv1.Job) bool {
@@ -326,6 +517,7 @@ func loadK8sConfig() (*rest.Config, error) {
 	if cfg, err := rest.InClusterConfig(); err == nil {
 		return cfg, nil
 	}
+	// the next two lines only runs on local_dev, on real clusters we always have inClusterConfig set automatically 
 	rules := clientcmd.NewDefaultClientConfigLoadingRules()
 	return clientcmd.NewNonInteractiveDeferredLoadingClientConfig(rules, nil).ClientConfig()
 }

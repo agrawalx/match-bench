@@ -2,10 +2,12 @@ module github.com/iicpc/build-worker
 
 go 1.25.0
 
+replace github.com/iicpc/libs => ../../libs/go
 replace github.com/iicpc/schemas => ../../schemas/go
 
 require (
 	github.com/google/go-containerregistry v0.21.6
+	github.com/iicpc/libs v0.0.0-00010101000000-000000000000
 	github.com/iicpc/schemas v0.0.0-00010101000000-000000000000
 	github.com/jackc/pgx/v5 v5.9.2
 	github.com/minio/minio-go/v7 v7.1.0

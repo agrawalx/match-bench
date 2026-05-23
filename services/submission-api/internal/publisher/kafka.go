@@ -27,6 +27,8 @@ type PublishMeta struct {
 	Language     string
 	Protocol     string
 	Port         int
+	BuildType    string
+	BuildTarget  string
 	TeamName     string
 	ArtifactPath string
 	RequestedAt  time.Time
@@ -81,6 +83,8 @@ func (p *KafkaPublisher) PublishBuildRequested(ctx context.Context, meta Publish
 		Language:     meta.Language,
 		Protocol:     meta.Protocol,
 		Port:         meta.Port,
+		BuildType:    meta.BuildType,
+		BuildTarget:  meta.BuildTarget,
 		TeamName:     meta.TeamName,
 		SHA256:       meta.SHA256,
 		RequestedAt:  meta.RequestedAt,

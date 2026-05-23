@@ -3,6 +3,11 @@
 *.out
 vendor/
 /roadmap
+
+# Compiled binaries at repo root
+/fetcher
+/spawner
+/worker
 # Rust
 target/
 

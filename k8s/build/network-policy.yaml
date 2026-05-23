@@ -1,13 +1,81 @@
-# build namespace: kaniko/trivy/syft Job pods.
-# No inbound traffic — Jobs only initiate outbound connections.
-# May reach data namespace (postgres, kafka, minio) and Harbor registry (external HTTPS).
+# build namespace: kaniko/trivy/syft Job pods + spawner.
+#
+# Egress is split by pod role via label selectors:
+#   app=build-job  — ephemeral Job pods (kaniko, trivy, syft)
+#   app=spawner    — long-running spawner pod
+#
+# Build Job pods (kaniko/trivy/syft):
+#   - fetcher init container needs MinIO (9000) to download the artifact ZIP
+#   - kaniko/trivy/syft need port 443 to push/pull from Harbor registry
+#   - port 443 also permits outbound HTTPS from contestant RUN commands —
+#     acceptable for the build phase; runtime isolation is enforced in sandbox namespace
+#   - NO access to postgres or kafka (spawner owns all status updates)
+#
+# Spawner pod:
+#   - needs MinIO (artifact download for zip-slip check, log uploads)
+#   - needs postgres (status writes)
+#   - needs kafka (consume build.requested, publish status.updated)
+#   - needs port 443 for crane.Copy staging→production
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
   name: build-jobs-isolation
   namespace: build
 spec:
-  podSelector: {}
+  podSelector:
+    matchLabels:
+      app: build-job
+  policyTypes:
+    - Ingress
+    - Egress
+
+  ingress: []
+
+  egress:
+    # MinIO only — fetcher init container downloads the artifact ZIP
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              name: data
+      ports:
+        - port: 9000
+          protocol: TCP
+
+    # Harbor staging + production registry (push/pull)
+    # Note: also permits contestant RUN commands to reach external HTTPS —
+    # network isolation for running algorithms is enforced in sandbox namespace.
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+      ports:
+        - port: 443
+          protocol: TCP
+
+    # DNS
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: spawner-isolation
+  namespace: build
+spec:
+  podSelector:
+    matchLabels:
+      app: spawner
   policyTypes:
     - Ingress
     - Egress
@@ -21,14 +89,14 @@ spec:
             matchLabels:
               name: data
       ports:
-        - port: 5432   # PostgreSQL
+        - port: 5432
           protocol: TCP
-        - port: 9092   # Kafka
+        - port: 9092
           protocol: TCP
-        - port: 9000   # MinIO S3 API
+        - port: 9000
           protocol: TCP
 
-    # Harbor staging + production registry (external HTTPS)
+    # Harbor staging + production (crane.Copy promotion)
     - to:
         - ipBlock:
             cidr: 0.0.0.0/0

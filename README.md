@@ -11,9 +11,12 @@ sends synthetic orders to test latency and correctness, and scores the result.
 ```
 iicpc/
 │
-├── schemas/                        # Shared types across all services
+├── schemas/                        # Shared data contracts across all services
 │   ├── go/                         # Go — Kafka message types, status constants
 │   └── rust/                       # Rust — (add when first Rust service needs shared types)
+│
+├── libs/                           # Shared infrastructure libraries (no business logic)
+│   └── go/                         # Go — logging, health checks, common middleware
 │
 ├── services/                       # One folder per microservice
 │   ├── submission-api/             # Go — receives ZIP uploads, kicks off build pipeline
@@ -30,7 +33,7 @@ iicpc/
 │   └── benchmark/                  # Bot-worker pods: send orders, measure latency
 │
 ├── docker-compose.yml              # Local dev only — spins up data services
-├── go.work                         # Ties all Go modules together
+├── go.work                         # Ties all Go modules together (schemas, libs, services)
 └── .env.example                    # Source of truth for all environment variables
 ```
 
@@ -54,13 +57,22 @@ services/<name>/
     └── <domain>/                   # service-specific logic
 ```
 
-If a service has multiple binaries (e.g. build-worker has spawner + runner + worker):
+If a service has multiple binaries (e.g. build-worker has spawner + fetcher + worker):
 ```
 services/<name>/
 └── cmd/
     ├── <binary-1>/main.go
     └── <binary-2>/main.go
 ```
+
+**Shared Go library (`libs/go`):**
+```
+libs/go/
+├── go.mod                          # module github.com/iicpc/libs
+└── <package>/                      # logger/, health/, etc.
+    └── *.go
+```
+Add to a service: `require github.com/iicpc/libs v0.0.0` + `replace github.com/iicpc/libs => ../../libs/go` in its `go.mod`.
 
 **Rust service:**
 ```
@@ -100,7 +112,8 @@ k8s/<namespace>/
 | Thing | Convention | Example |
 |---|---|---|
 | Services | kebab-case | `bot-fleet`, `validation-engine` |
-| Go modules | `github.com/iicpc/<name>` | `github.com/iicpc/build-worker` |
+| Go service modules | `github.com/iicpc/<name>` | `github.com/iicpc/build-worker` |
+| Go shared modules | `github.com/iicpc/schemas`, `github.com/iicpc/libs` | fixed names, not per-service |
 | Rust crates | `iicpc-<name>` | `iicpc-bot-fleet` |
 | Go packages | single word, no underscores | `handler`, `consumer`, `store` |
 | Rust modules | snake_case | `order_handler`, `latency_store` |
@@ -117,11 +130,16 @@ k8s/<namespace>/
 Services never import each other directly.
 
 **`internal/` for everything (Go) / private modules (Rust).** Nothing inside a service
-is importable by another service. If something needs to be shared, it goes in `schemas/`.
+is importable by another service. Code shared across services goes in `schemas/` or `libs/`.
 
-**`schemas/` is the only cross-service contract.** Kafka message types and shared constants
-live here. Go services import `schemas/go`; Rust services import `schemas/rust`.
-Each language subdirectory is its own module.
+**`schemas/` is for data contracts only.** Kafka message types and shared constants live
+here. Go services import `github.com/iicpc/schemas`; Rust services import `schemas/rust`.
+No infrastructure code (loggers, clients, middleware) belongs in `schemas/`.
+
+**`libs/` is for shared infrastructure.** Reusable code with no business logic — logging,
+health checks, common middleware — lives here. If you find yourself copying a file between
+two services, it belongs in `libs/go` (or `libs/rust` when needed). Each language
+subdirectory is its own module: `github.com/iicpc/libs`.
 
 **Dockerfiles build from repo root.** The Go workspace and Rust workspace both need the
 full repo context. All `docker build` commands run from `/` of the repo:

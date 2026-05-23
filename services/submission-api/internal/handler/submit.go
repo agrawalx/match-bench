@@ -124,6 +124,8 @@ func Submit(ms *store.MinioStore, pg *store.PostgresStore, pub publisher.Publish
 			Language:     cfg.Language,
 			Protocol:     cfg.Protocol,
 			Port:         cfg.DeclaredPort(),
+			BuildType:    cfg.Build.Type,
+			BuildTarget:  cfg.Build.Target,
 			TeamName:     cfg.TeamName,
 			ArtifactPath: artifactPath,
 			RequestedAt:  createdAt,

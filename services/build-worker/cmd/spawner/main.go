@@ -12,13 +12,27 @@ import (
 
 	"github.com/iicpc/build-worker/internal/consumer"
 	k8sspawner "github.com/iicpc/build-worker/internal/k8s"
+	"github.com/iicpc/libs/logger"
 	"github.com/iicpc/build-worker/internal/publisher"
 	"github.com/iicpc/build-worker/internal/store"
 )
 
 func main() {
-	log := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+	var lokiClient *logger.LokiClient
+	var log *slog.Logger
+
+	stdHandler := slog.NewJSONHandler(os.Stdout, nil)
+	if lokiURL := os.Getenv("LOKI_URL"); lokiURL != "" {
+		lokiClient = logger.NewLokiClient(lokiURL)
+		log = slog.New(logger.NewLokiHandler(lokiClient, stdHandler))
+	} else {
+		log = slog.New(stdHandler)
+	}
 	slog.SetDefault(log)
+
+	if lokiClient != nil {
+		defer lokiClient.Close()
+	}
 
 	dbURL := mustEnv("DATABASE_URL")
 	minioEndpoint := mustEnv("MINIO_ENDPOINT")
@@ -51,14 +65,17 @@ func main() {
 	updater := &statusUpdater{pub: pub, pg: pgStore}
 
 	jobCfg := k8sspawner.JobConfig{
-		Namespace:      envOr("K8S_NAMESPACE", "build"),
-		Image:          mustEnv("BUILD_WORKER_IMAGE"),
-		DBUrl:          dbURL,
+		Namespace:     envOr("K8S_NAMESPACE", "build"),
+		BuildNodePool: os.Getenv("BUILD_NODE_POOL"), // empty = no nodeSelector/toleration (dev)
+		SpawnerImage:  mustEnv("SPAWNER_IMAGE"),
+		KanikoImage:  envOr("KANIKO_IMAGE", "gcr.io/kaniko-project/executor:v1.23.2"),
+		TrivyImage:   envOr("TRIVY_IMAGE", "aquasec/trivy:0.51.4"),
+		SyftImage:    envOr("SYFT_IMAGE", "anchore/syft:v1.4.1"),
+
 		MinioEndpoint:  minioEndpoint,
 		MinioAccessKey: minioAccess,
 		MinioSecretKey: minioSecret,
 		MinioBucket:    minioBucket,
-		KafkaBrokers:   kafkaBrokers,
 
 		HarborStagingEndpoint:    mustEnv("HARBOR_STAGING_ENDPOINT"),
 		HarborProductionEndpoint: os.Getenv("HARBOR_PRODUCTION_ENDPOINT"),
@@ -72,11 +89,11 @@ func main() {
 		log.Error("k8s spawner init failed", "error", err)
 		os.Exit(1)
 	}
-
 	cons := consumer.NewKafkaConsumer(kafkaBrokers, kafkaGroup, spawner, log)
 	defer cons.Close()
 
 	log.Info("build-worker (spawner) started")
+	// start kafka 
 	cons.Start(ctx)
 	log.Info("spawner stopped")
 }

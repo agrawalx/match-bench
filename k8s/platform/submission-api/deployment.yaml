@@ -42,7 +42,7 @@ spec:
               value: kafka.data.svc.cluster.local:9092
           readinessProbe:
             httpGet:
-              path: /healthz
+              path: /health
               port: 8080
             initialDelaySeconds: 5
             periodSeconds: 10

@@ -34,6 +34,7 @@ func NewKafkaConsumer(brokers, groupID string, handler Handler, log *slog.Logger
 func (c *Consumer) Start(ctx context.Context) {
 	c.log.Info("consumer started", "topic", topicBuildRequested)
 	for {
+		// blocks till consumer-api sends buildtopic 
 		m, err := c.reader.FetchMessage(ctx)
 		if err != nil {
 			if ctx.Err() != nil {
@@ -44,6 +45,7 @@ func (c *Consumer) Start(ctx context.Context) {
 		}
 
 		var msg topics.SubmissionBuildRequested
+		// unmarshal function is basically equivalent of deserialize func of serde crate in rust
 		if err := json.Unmarshal(m.Value, &msg); err != nil {
 			c.log.Error("unmarshal failed", "error", err)
 			_ = c.reader.CommitMessages(ctx, m)
@@ -51,6 +53,8 @@ func (c *Consumer) Start(ctx context.Context) {
 		}
 
 		c.log.Info("received build request", "submission_id", msg.SubmissionID)
+		// calls run() function written in spawner.go 
+		// this is where the build job starts 
 		c.handler.Run(ctx, msg)
 
 		if err := c.reader.CommitMessages(ctx, m); err != nil {

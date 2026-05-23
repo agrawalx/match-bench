@@ -1,0 +1,80 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: spawner
+  namespace: build
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: spawner
+  template:
+    metadata:
+      labels:
+        app: spawner
+    spec:
+      serviceAccountName: build-spawner
+      containers:
+        - name: spawner
+          image: ghcr.io/agrawalx/spawner:dev
+          env:
+            - name: SPAWNER_IMAGE
+              value: ghcr.io/agrawalx/spawner:dev
+            - name: K8S_NAMESPACE
+              value: build
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: spawner-secret
+                  key: database-url
+            - name: MINIO_ENDPOINT
+              value: minio.data.svc.cluster.local:9000
+            - name: MINIO_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: spawner-secret
+                  key: minio-access-key
+            - name: MINIO_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: spawner-secret
+                  key: minio-secret-key
+            - name: MINIO_BUCKET
+              value: submissions
+            - name: KAFKA_BROKERS
+              value: kafka.data.svc.cluster.local:9092
+            - name: KAFKA_GROUP_ID
+              value: build-worker-spawner
+            - name: HARBOR_STAGING_ENDPOINT
+              valueFrom:
+                secretKeyRef:
+                  name: spawner-secret
+                  key: harbor-staging-endpoint
+            - name: HARBOR_PRODUCTION_ENDPOINT
+              valueFrom:
+                secretKeyRef:
+                  name: spawner-secret
+                  key: harbor-production-endpoint
+            - name: HARBOR_PROJECT
+              value: agrawalx
+            - name: HARBOR_USER
+              valueFrom:
+                secretKeyRef:
+                  name: spawner-secret
+                  key: harbor-user
+            - name: HARBOR_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: spawner-secret
+                  key: harbor-password
+            - name: LOKI_URL
+              value: http://loki.monitoring.svc.cluster.local:3100
+            - name: LOKI_APP_NAME
+              value: spawner
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi

@@ -15,7 +15,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: "1.22"
+          go-version: "1.23.10"
           cache: true
 
       - name: go vet (schemas)
@@ -29,3 +29,21 @@ jobs:
       - name: go test (submission-api)
         working-directory: services/submission-api
         run: go test -race -count=1 ./...
+
+  rust-check:
+    name: Rust fmt & check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: cargo fmt
+        run: cargo fmt --all -- --check
+
+      - name: cargo check
+        run: cargo check --workspace

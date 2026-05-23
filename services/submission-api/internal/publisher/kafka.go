@@ -5,9 +5,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/iicpc/schemas/topics"
+	cerrs "github.com/iicpc/submission-api/internal/errors"
 	kafka "github.com/segmentio/kafka-go"
 )
 
@@ -38,13 +40,14 @@ type KafkaPublisher struct {
 
 // NewKafkaPublisher returns a no-op publisher when brokers is empty.
 func NewKafkaPublisher(brokers string, log *slog.Logger) *KafkaPublisher {
-	if brokers == "" {
+	brokerList := parseBrokers(brokers)
+	if len(brokerList) == 0 {
 		log.Warn("KAFKA_BROKERS not set — Kafka publishing disabled")
 		return &KafkaPublisher{noop: true, log: log}
 	}
 
 	w := &kafka.Writer{
-		Addr:         kafka.TCP(brokers),
+		Addr:         kafka.TCP(brokerList...),
 		Topic:        topicBuildRequested,
 		Balancer:     &kafka.LeastBytes{},
 		RequiredAcks: kafka.RequireOne,
@@ -52,6 +55,18 @@ func NewKafkaPublisher(brokers string, log *slog.Logger) *KafkaPublisher {
 	}
 
 	return &KafkaPublisher{writer: w, log: log}
+}
+
+func parseBrokers(brokers string) []string {
+	parts := strings.Split(brokers, ",")
+	out := make([]string, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part != "" {
+			out = append(out, part)
+		}
+	}
+	return out
 }
 
 func (p *KafkaPublisher) PublishBuildRequested(ctx context.Context, meta PublishMeta) error {
@@ -73,7 +88,7 @@ func (p *KafkaPublisher) PublishBuildRequested(ctx context.Context, meta Publish
 
 	payload, err := json.Marshal(msg)
 	if err != nil {
-		return fmt.Errorf("marshal kafka message: %w", err)
+		return fmt.Errorf("%w: marshal kafka message: %v", cerrs.ErrInternal, err)
 	}
 
 	return p.writer.WriteMessages(ctx, kafka.Message{

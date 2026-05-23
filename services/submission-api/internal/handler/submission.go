@@ -31,7 +31,7 @@ func GetSubmission(pg *store.PostgresStore, log *slog.Logger) http.HandlerFunc {
 
 		meta, err := pg.GetByID(r.Context(), submissionID)
 		if err != nil {
-			log.Error("get submission failed", "submission_id", submissionID, "error", err)
+			log.ErrorContext(r.Context(), "get submission failed", "submission_id", submissionID, "error", err)
 			writeError(w, http.StatusInternalServerError, "internal error")
 			return
 		}

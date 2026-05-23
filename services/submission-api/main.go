@@ -18,17 +18,7 @@ import (
 )
 
 func main() {
-	var lokiClient *logger.LokiClient
-	var log *slog.Logger
-
-	stdHandler := slog.NewJSONHandler(os.Stdout, nil)
-	lokiURL := os.Getenv("LOKI_URL")
-	if lokiURL != "" {
-		lokiClient = logger.NewLokiClient(lokiURL)
-		log = slog.New(logger.NewLokiHandler(lokiClient, stdHandler))
-	} else {
-		log = slog.New(stdHandler)
-	}
+	log, lokiClient := logger.NewProductionLogger(logger.DefaultConfig())
 	slog.SetDefault(log)
 
 	if lokiClient != nil {
@@ -69,7 +59,7 @@ func main() {
 	r.Use(requestLogger(log))
 	r.Use(middleware.Recoverer)
 
-	r.Get("/health", handler.Health())
+	r.Get("/health", handler.Health(log))
 	r.Post("/submit", handler.Submit(minioStore, pgStore, kafkaPub, log))
 	r.Get("/submissions/{id}", handler.GetSubmission(pgStore, log))
 
@@ -105,8 +95,17 @@ func requestLogger(log *slog.Logger) func(http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			start := time.Now()
 			ww := middleware.NewWrapResponseWriter(w, r.ProtoMajor)
-			next.ServeHTTP(ww, r)
-			log.Info("request",
+
+			ctx := logger.WithAttrs(r.Context(),
+				slog.String("request_id", middleware.GetReqID(r.Context())),
+				slog.String("http_method", r.Method),
+				slog.String("http_path", r.URL.Path),
+				slog.String("remote_addr", r.RemoteAddr),
+				slog.String("user_agent", r.UserAgent()),
+			)
+			next.ServeHTTP(ww, r.WithContext(ctx))
+
+			log.InfoContext(ctx, "http request completed",
 				"method", r.Method,
 				"path", r.URL.Path,
 				"status", ww.Status(),

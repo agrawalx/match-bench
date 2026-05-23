@@ -27,18 +27,18 @@ type SubmissionStatusUpdated struct {
 }
 
 // WorkloadSpec is published to "workload.assignments" by the test controller.
-// Each message is keyed by session_id:worker_index and consumed by one bot-worker pod.
+// Each message is keyed by session_id:worker_index and consumed by one bot-fleet worker.
 type WorkloadSpec struct {
 	SessionID        string             `json:"session_id"`
 	SubmissionID     string             `json:"submission_id"`
 	ContestantID     string             `json:"contestant_id"`
 	TargetHost       string             `json:"target_host"` // IP of contestant pod
-	TargetPort       uint16             `json:"target_port"` 
+	TargetPort       uint16             `json:"target_port"`
 	Protocol         string             `json:"protocol"` // FIX | REST | WS
 	WorkerIndex      uint32             `json:"worker_index"`
 	WorkerCount      uint32             `json:"worker_count"` // Total worker pods
 	BotCount         uint32             `json:"bot_count"`
-	OrdersPerBot     uint32             `json:"orders_per_bot"`
+	OrdersPerBot     uint32             `json:"orders_per_bot"` // Currently, every bot will run for 60s
 	GlobalSeed       uint64             `json:"global_seed"`
 	FIXVersion       string             `json:"fix_version"`
 	ProfileMix       []BotProfileWeight `json:"profile_mix"`
@@ -57,7 +57,7 @@ type BarrierEvent struct {
 	TargetEpochUnixNanos uint64 `json:"target_epoch_unix_nanos"`
 }
 
-// ReadySignal is published by each bot-worker to "bot.ready".
+// ReadySignal is published by each bot-fleet worker to "bot.ready".
 type ReadySignal struct {
 	SessionID        string `json:"session_id"`
 	SubmissionID     string `json:"submission_id"`

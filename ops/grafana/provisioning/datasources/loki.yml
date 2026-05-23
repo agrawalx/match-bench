@@ -1,0 +1,11 @@
+apiVersion: 1
+
+datasources:
+  - name: IICPC Loki
+    type: loki
+    access: proxy
+    url: http://loki:3100
+    uid: iicpc-loki
+    isDefault: true
+    jsonData:
+      maxLines: 1000

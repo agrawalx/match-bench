@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	cerrs "github.com/iicpc/submission-api/internal/errors"
 	"github.com/iicpc/submission-api/internal/publisher"
 	"github.com/iicpc/submission-api/internal/store"
 	"github.com/iicpc/submission-api/internal/validator"
@@ -80,7 +81,7 @@ func Submit(ms *store.MinioStore, pg *store.PostgresStore, pub publisher.Publish
 		// Upload artifact to MinIO.
 		artifactPath, err := ms.Upload(r.Context(), submissionID, bytes.NewReader(data), int64(len(data)))
 		if err != nil {
-			log.Error("minio upload failed", "submission_id", submissionID, "error", err)
+			log.ErrorContext(r.Context(), "minio upload failed", "submission_id", submissionID, "error", err)
 			writeError(w, http.StatusInternalServerError, "failed to store artifact")
 			return
 		}
@@ -99,10 +100,10 @@ func Submit(ms *store.MinioStore, pg *store.PostgresStore, pub publisher.Publish
 			CreatedAt:    createdAt,
 		}
 		if err := pg.Insert(r.Context(), meta); err != nil {
-			if errors.Is(err, store.ErrDuplicateSubmission) {
+			if errors.Is(err, cerrs.ErrDuplicateSubmission) {
 				existingID, found, findErr := pg.FindBySHA256(r.Context(), sha256hex)
 				if findErr != nil {
-					log.Error("sha256 lookup failed during duplicate resolution", "error", findErr)
+					log.ErrorContext(r.Context(), "sha256 lookup failed during duplicate resolution", "error", findErr)
 				}
 				if found {
 					writeErrorWithID(w, http.StatusConflict, "duplicate submission", existingID)
@@ -111,7 +112,7 @@ func Submit(ms *store.MinioStore, pg *store.PostgresStore, pub publisher.Publish
 				writeError(w, http.StatusConflict, "duplicate submission")
 				return
 			}
-			log.Error("postgres insert failed", "submission_id", submissionID, "error", err)
+			log.ErrorContext(r.Context(), "postgres insert failed", "submission_id", submissionID, "error", err)
 			writeError(w, http.StatusInternalServerError, "failed to save metadata")
 			return
 		}
@@ -127,8 +128,16 @@ func Submit(ms *store.MinioStore, pg *store.PostgresStore, pub publisher.Publish
 			ArtifactPath: artifactPath,
 			RequestedAt:  createdAt,
 		}); err != nil {
-			log.Warn("kafka publish failed", "submission_id", submissionID, "error", err)
+			log.WarnContext(r.Context(), "kafka publish failed", "submission_id", submissionID, "error", err)
 		}
+
+		log.InfoContext(r.Context(), "submission accepted",
+			"submission_id", submissionID,
+			"language", cfg.Language,
+			"protocol", cfg.Protocol,
+			"port", cfg.DeclaredPort(),
+			"team_name", cfg.TeamName,
+		)
 
 		writeJSON(w, http.StatusCreated, submitResponse{
 			SubmissionID: submissionID,

@@ -3,18 +3,14 @@ package validator
 import (
 	"archive/zip"
 	"bytes"
-	"errors"
 	"fmt"
 	"strings"
 
+	cerrs "github.com/iicpc/submission-api/internal/errors"
 	"gopkg.in/yaml.v3"
 )
 
-var (
-	ErrNotZip          = errors.New("file is not a valid ZIP archive")
-	ErrTooLarge        = errors.New("file exceeds 100MB limit")
-	ErrNoBenchmarkYAML = errors.New("benchmark.yaml not found at zip root")
-)
+
 
 const MaxZipBytes = 100 << 20 // 100 MB
 
@@ -49,12 +45,12 @@ func (c *BenchmarkConfig) DeclaredPort() int {
 // Returns a parsed BenchmarkConfig on success, or a descriptive error.
 func ValidateSubmissionZip(data []byte) (*BenchmarkConfig, error) {
 	if len(data) > MaxZipBytes {
-		return nil, ErrTooLarge
+		return nil, fmt.Errorf("%w: exceeds 100MB", cerrs.ErrValidation)
 	}
 
 	// ZIP magic bytes: PK\x03\x04
 	if len(data) < 4 || data[0] != 0x50 || data[1] != 0x4B || data[2] != 0x03 || data[3] != 0x04 {
-		return nil, ErrNotZip
+		return nil, cerrs.ErrCorruptArchive
 	}
 
 	zr, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
@@ -87,19 +83,19 @@ func ValidateSubmissionZip(data []byte) (*BenchmarkConfig, error) {
 	}
 
 	if !foundBenchmark {
-		return nil, ErrNoBenchmarkYAML
+		return nil, cerrs.ErrConfigMissing
 	}
 
 	if !validProtocols[cfg.Protocol] {
-		return nil, fmt.Errorf("invalid protocol %q: must be FIX, REST, or WS", cfg.Protocol)
+		return nil, fmt.Errorf("%w: invalid protocol %q: must be FIX, REST, or WS", cerrs.ErrValidation, cfg.Protocol)
 	}
 	if !validLanguages[cfg.Language] {
-		return nil, fmt.Errorf("invalid language %q: must be cpp, rust, or go", cfg.Language)
+		return nil, fmt.Errorf("%w: invalid language %q: must be cpp, rust, or go", cerrs.ErrValidation, cfg.Language)
 	}
 
 	port := cfg.DeclaredPort()
 	if port < 1024 || port > 65535 {
-		return nil, fmt.Errorf("declared port %d out of allowed range (1024–65535)", port)
+		return nil, fmt.Errorf("%w: declared port %d out of allowed range (1024–65535)", cerrs.ErrValidation, port)
 	}
 
 	return &cfg, nil

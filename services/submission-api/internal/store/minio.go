@@ -5,11 +5,12 @@ import (
 	"fmt"
 	"io"
 
+	cerrs "github.com/iicpc/submission-api/internal/errors"
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
 )
 
-const minioObjectPrefix = "submissions"
+const minioObjectPrefix = "iicpc-submissions"
 
 type MinioStore struct {
 	client *minio.Client
@@ -48,7 +49,7 @@ func (s *MinioStore) Upload(ctx context.Context, submissionID string, r io.Reade
 		ContentType: "application/zip",
 	})
 	if err != nil {
-		return "", fmt.Errorf("minio put object: %w", err)
+		return "", fmt.Errorf("%w: minio put object: %v", cerrs.ErrStoreUploadFailed, err)
 	}
 
 	return objectPath, nil

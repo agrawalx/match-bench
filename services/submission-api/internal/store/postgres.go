@@ -6,12 +6,11 @@ import (
 	"fmt"
 	"time"
 
+	cerrs "github.com/iicpc/submission-api/internal/errors"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
-
-var ErrDuplicateSubmission = errors.New("duplicate submission")
 
 const createTableSQL = `
 CREATE TABLE IF NOT EXISTS submissions (
@@ -26,7 +25,6 @@ CREATE TABLE IF NOT EXISTS submissions (
 	status         TEXT NOT NULL DEFAULT 'uploaded',
 	created_at     TIMESTAMPTZ NOT NULL DEFAULT now()
 );
-CREATE UNIQUE INDEX IF NOT EXISTS submissions_sha256_idx ON submissions(sha256);
 `
 
 type SubmissionMeta struct {
@@ -98,7 +96,7 @@ func (s *PostgresStore) GetByID(ctx context.Context, submissionID string) (*Subm
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, nil
 		}
-		return nil, fmt.Errorf("get submission: %w", err)
+		return nil, fmt.Errorf("%w: get submission: %v", cerrs.ErrStoreDatabaseFailed, err)
 	}
 	return &m, nil
 }
@@ -117,9 +115,9 @@ func (s *PostgresStore) Insert(ctx context.Context, m SubmissionMeta) error {
 	if err != nil {
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
-			return ErrDuplicateSubmission
+			return cerrs.ErrDuplicateSubmission
 		}
-		return fmt.Errorf("insert submission: %w", err)
+		return fmt.Errorf("%w: insert submission: %v", cerrs.ErrStoreDatabaseFailed, err)
 	}
 	return nil
 }

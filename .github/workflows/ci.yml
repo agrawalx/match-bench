@@ -30,23 +30,6 @@ jobs:
         working-directory: services/submission-api
         run: go test -race -count=1 ./...
 
-  rust-check:
-    name: Rust fmt & check
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Set up Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
-
-      - name: cargo fmt
-        run: cargo fmt --all -- --check
-
-      - name: cargo check
-        run: cargo check --workspace
       - name: go vet (build-worker)
         working-directory: services/build-worker
         run: go vet ./...
@@ -56,4 +39,36 @@ jobs:
         run: |
           go build ./cmd/worker
           go build ./cmd/spawner
-          go build ./cmd/runner
+          go build ./cmd/fetcher
+
+  rust-check:
+    name: Rust fmt & check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check for Rust source files
+        id: rust
+        run: |
+          if find . -name "*.rs" -not -path "*/target/*" | grep -q .; then
+            echo "found=true" >> $GITHUB_OUTPUT
+          else
+            echo "found=false" >> $GITHUB_OUTPUT
+            echo "No Rust source files found — skipping Rust checks"
+          fi
+
+      - name: Set up Rust
+        if: steps.rust.outputs.found == 'true'
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        if: steps.rust.outputs.found == 'true'
+        uses: Swatinem/rust-cache@v2
+
+      - name: cargo fmt
+        if: steps.rust.outputs.found == 'true'
+        run: cargo fmt --all -- --check
+
+      - name: cargo check
+        if: steps.rust.outputs.found == 'true'
+        run: cargo check --workspace

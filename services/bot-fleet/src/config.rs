@@ -44,5 +44,3 @@ fn env_or(key: &str, default: String) -> String {
         .filter(|v| !v.is_empty())
         .unwrap_or(default)
 }
-
-

@@ -28,6 +28,16 @@ const MAX_ORDERS_PER_BOT: u32 = 100_000;
 /// run starts the bot-fleet worker loop.
 /// It consumes workload assignments, executes each one, and exits on Ctrl-C.
 pub async fn run(config: Config) -> Result<()> {
+    kafka::ensure_topics(
+        &config.kafka_brokers,
+        &[
+            &config.workload_topic,
+            &config.barrier_topic,
+            &config.ready_topic,
+            &config.orders_sent_topic,
+        ],
+    )?;
+
     let producer = kafka::producer(&config.kafka_brokers)?;
     let workload_consumer = kafka::consumer(
         &config.kafka_brokers,

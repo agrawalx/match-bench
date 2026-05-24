@@ -5,6 +5,7 @@ use std::{
 
 use anyhow::{Context, Result};
 use kafka::{
+    client::KafkaClient,
     consumer::{Consumer, FetchOffset, GroupOffsetStorage},
     producer::{Producer, Record, RequiredAcks},
 };
@@ -25,6 +26,16 @@ pub struct KafkaConsumer {
     inner: Arc<Mutex<Consumer>>,
 }
 
+/// ensure_topics asks Kafka for metadata for each configured topic. With broker
+/// auto-creation enabled, this creates missing topics before consumers attach.
+pub fn ensure_topics(brokers: &str, topics: &[&str]) -> Result<()> {
+    let mut client = KafkaClient::new(parse_brokers(brokers));
+    client
+        .load_metadata(topics)
+        .context("ensure kafka topics")?;
+    Ok(())
+}
+
 /// producer creates a Kafka producer for the configured broker list.
 /// Messages require one broker ack and use a bounded ack timeout.
 pub fn producer(brokers: &str) -> Result<KafkaProducer> {
@@ -41,7 +52,12 @@ pub fn producer(brokers: &str) -> Result<KafkaProducer> {
 /// consumer creates a Kafka consumer group subscription for the requested topics.
 /// Offsets are stored in Kafka and new groups start at the latest offset.
 pub fn consumer(brokers: &str, group: &str, topics: &[&str]) -> Result<KafkaConsumer> {
-    let mut builder = Consumer::from_hosts(parse_brokers(brokers))
+    let mut client = KafkaClient::new(parse_brokers(brokers));
+    client
+        .load_metadata(topics)
+        .context("load kafka consumer topic metadata")?;
+
+    let mut builder = Consumer::from_client(client)
         .with_group(group.to_string())
         .with_fallback_offset(FetchOffset::Latest)
         .with_offset_storage(Some(GroupOffsetStorage::Kafka));
@@ -82,9 +98,11 @@ pub async fn publish_bytes(
     let payload = payload.to_vec();
 
     tokio::task::spawn_blocking(move || {
-        let mut producer = producer
-            .lock()
-            .map_err(|err| crate::errors::BotFleetError::KafkaError(format!("kafka producer mutex poisoned: {err}")))?;
+        let mut producer = producer.lock().map_err(|err| {
+            crate::errors::BotFleetError::KafkaError(format!(
+                "kafka producer mutex poisoned: {err}"
+            ))
+        })?;
         producer
             .send(&Record::from_key_value(&topic, key, payload))
             .context("publish kafka message")
@@ -135,9 +153,11 @@ pub fn ready_key(signal: &ReadySignal) -> String {
 pub async fn recv_payload(consumer: &KafkaConsumer) -> Result<Option<Vec<u8>>> {
     let consumer = consumer.inner.clone();
     let result = tokio::task::spawn_blocking(move || {
-        let mut consumer = consumer
-            .lock()
-            .map_err(|err| crate::errors::BotFleetError::KafkaError(format!("kafka consumer mutex poisoned: {err}")))?;
+        let mut consumer = consumer.lock().map_err(|err| {
+            crate::errors::BotFleetError::KafkaError(format!(
+                "kafka consumer mutex poisoned: {err}"
+            ))
+        })?;
         let sets = consumer.poll().context("poll kafka consumer")?;
 
         for set in sets.iter() {

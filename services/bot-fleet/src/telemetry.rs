@@ -64,7 +64,11 @@ impl TelemetrySink {
         let handle = self
             .handle
             .lock()
-            .map_err(|err| crate::errors::BotFleetError::TelemetryError(format!("telemetry join handle mutex poisoned: {err}")))?
+            .map_err(|err| {
+                crate::errors::BotFleetError::TelemetryError(format!(
+                    "telemetry join handle mutex poisoned: {err}"
+                ))
+            })?
             .take();
 
         if let Some(handle) = handle {

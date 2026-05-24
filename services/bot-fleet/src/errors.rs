@@ -9,4 +9,3 @@ pub enum BotFleetError {
     #[error("Validation error: {0}")]
     ValidationError(String),
 }
-

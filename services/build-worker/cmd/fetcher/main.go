@@ -118,7 +118,9 @@ func extractZip(zipData []byte, destDir string) error {
 	for _, f := range zr.File {
 		target := filepath.Join(destDir, f.Name)
 		if f.FileInfo().IsDir() {
-			os.MkdirAll(target, 0755)
+			if err := os.MkdirAll(target, 0755); err != nil {
+				return err
+			}
 			continue
 		}
 		if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {

@@ -375,6 +375,11 @@ impl ConnectedBot {
         write_timeout: Duration,
         telemetry: TelemetrySink,
     ) -> Result<u64> {
+        // pre-allocate shared strings once instead
+        let session_id = session_id.to_string();
+        let submission_id = submission_id.to_string();
+        let worker_id = worker_id.to_string();
+
         let mut sent = 0;
         for frame in self.frames {
             time::timeout(write_timeout, self.client.write(&frame))
@@ -383,9 +388,9 @@ impl ConnectedBot {
             let send_ts_ns = unix_nanos();
             telemetry
                 .record(OrderSentEvent {
-                    session_id: session_id.to_string(),
-                    submission_id: submission_id.to_string(),
-                    worker_id: worker_id.to_string(),
+                    session_id: session_id.clone(),
+                    submission_id: submission_id.clone(),
+                    worker_id: worker_id.clone(),
                     bot_id: self.bot_id,
                     order_id: frame.order_id,
                     send_ts_ns,
@@ -439,6 +444,11 @@ impl TargetClient {
                     .await
                     .context("timed out connecting WS bot")?
                     .context("connect WS bot")?;
+                // WebSocket path lacked nodelay
+                // that FIX/REST have, causing up to 40ms Nagle coalescing delay
+                if let tokio_tungstenite::MaybeTlsStream::Plain(ref tcp) = ws.get_ref() {
+                    let _ = tcp.set_nodelay(true);
+                }
                 Ok(Self::Ws(ws))
             }
         }

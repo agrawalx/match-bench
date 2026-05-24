@@ -90,7 +90,10 @@ async fn run_aggregator(
     let mut events = Vec::with_capacity(batch_size);
 
     loop {
+        // biased select ensures recv is drained before
+        // timer flushes, preventing stale partial batches under high throughput
         tokio::select! {
+            biased;
             maybe_event = rx.recv() => {
                 match maybe_event {
                     Some(event) => {

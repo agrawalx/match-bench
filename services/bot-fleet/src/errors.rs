@@ -1,20 +1,12 @@
-use std::fmt::Display;
-
 use thiserror::Error;
 
 #[derive(Error, Debug)]
 pub enum BotFleetError {
-    ConfigError(String),
+    #[error("Kafka error: {0}")]
     KafkaError(String),
-    SerializationError(String),
-    ConnectionError(String),
+    #[error("Telemetry error: {0}")]
     TelemetryError(String),
-    WorkerError(String),
+    #[error("Validation error: {0}")]
     ValidationError(String),
 }
 
-impl Display for BotFleetError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{self:?}")
-    }
-}

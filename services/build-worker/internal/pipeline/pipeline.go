@@ -50,7 +50,6 @@ func (p *Pipeline) run(ctx context.Context, msg topics.SubmissionBuildRequested,
 	log.Info("building image")
 
 	imageRef, buildLog, err := p.runner.Build(ctx, msg.SubmissionID, zipData)
-	defer p.runner.Cleanup(ctx, imageRef)
 
 	_ = p.minio.UploadBytes(ctx,
 		fmt.Sprintf("submissions/%s/build.log", msg.SubmissionID),
@@ -59,6 +58,9 @@ func (p *Pipeline) run(ctx context.Context, msg topics.SubmissionBuildRequested,
 	if err != nil {
 		return fmt.Errorf("build: %w", err)
 	}
+	// defer Cleanup only after Build succeeds;
+	// empty imageRef on failure could crash future Cleanup implementations
+	defer p.runner.Cleanup(ctx, imageRef)
 	log.Info("image built", "ref", imageRef)
 
 	log.Info("scanning with trivy")

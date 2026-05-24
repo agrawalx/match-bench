@@ -129,7 +129,10 @@ func zipToTar(zipData []byte) (io.Reader, error) {
 			return nil, err
 		}
 	}
-	return &buf, tw.Close()
+	if err := tw.Close(); err != nil {
+		return nil, err
+	}
+	return &buf, nil
 }
 
 // streamBuildOutput reads Docker's JSON build stream and returns the combined log.

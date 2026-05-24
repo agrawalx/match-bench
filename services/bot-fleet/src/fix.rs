@@ -77,7 +77,9 @@ pub fn order_frame(
 /// the standard modulo-256 checksum trailer.
 fn finalize_fix(fix_version: &str, body: &str) -> Vec<u8> {
     let mut frame = format!("8={fix_version}\x019={}\x01{body}", body.len()).into_bytes();
-    let checksum = frame.iter().fold(0u32, |sum, b| sum + u32::from(*b)) % 256;
+    // use wrapping_add to make u32 overflow defined;
+    // messages are small so overflow is unlikely, but correctness matters
+    let checksum = frame.iter().fold(0u32, |sum, b| sum.wrapping_add(u32::from(*b))) % 256;
     frame.extend_from_slice(format!("10={checksum:03}\x01").as_bytes());
     frame
 }

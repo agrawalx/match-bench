@@ -1,7 +1,6 @@
 package handler
 
 import (
-	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -45,6 +44,9 @@ func Submit(ms *store.MinioStore, pg *store.PostgresStore, pub publisher.Publish
 			writeError(w, http.StatusBadRequest, "failed to parse form: "+err.Error())
 			return
 		}
+		// multipart temp files are not cleaned up without
+		// explicit RemoveAll; relying on GC finalization leaks disk space under load
+		defer r.MultipartForm.RemoveAll()
 
 		file, _, err := r.FormFile("file")
 		if err != nil {
@@ -53,18 +55,21 @@ func Submit(ms *store.MinioStore, pg *store.PostgresStore, pub publisher.Publish
 		}
 		defer file.Close()
 
-		// Buffer the upload and compute SHA-256 in a single pass.
-		hasher := sha256.New()
-		var buf bytes.Buffer
-		if _, err := io.Copy(io.MultiWriter(&buf, hasher), file); err != nil {
+		// Find file size using Seek.
+		size, err := file.Seek(0, io.SeekEnd)
+		if err != nil {
+			log.ErrorContext(r.Context(), "failed to seek end of upload file", "error", err)
 			writeError(w, http.StatusInternalServerError, "failed to read file")
 			return
 		}
-		data := buf.Bytes()
-		sha256hex := hex.EncodeToString(hasher.Sum(nil))
+		if _, err := file.Seek(0, io.SeekStart); err != nil {
+			log.ErrorContext(r.Context(), "failed to seek start of upload file", "error", err)
+			writeError(w, http.StatusInternalServerError, "failed to read file")
+			return
+		}
 
 		// Validate zip structure and parse benchmark.yaml.
-		cfg, err := validator.ValidateSubmissionZip(data)
+		cfg, err := validator.ValidateSubmissionZip(file, size)
 		if err != nil {
 			writeError(w, http.StatusBadRequest, err.Error())
 			return
@@ -78,13 +83,24 @@ func Submit(ms *store.MinioStore, pg *store.PostgresStore, pub publisher.Publish
 		submissionID := id.String()
 		createdAt := time.Now().UTC()
 
+		// Stream the upload and compute SHA-256 in a single pass.
+		if _, err := file.Seek(0, io.SeekStart); err != nil {
+			log.ErrorContext(r.Context(), "failed to reset upload file pointer", "error", err)
+			writeError(w, http.StatusInternalServerError, "failed to read file")
+			return
+		}
+		hasher := sha256.New()
+		teeReader := io.TeeReader(file, hasher)
+
 		// Upload artifact to MinIO.
-		artifactPath, err := ms.Upload(r.Context(), submissionID, bytes.NewReader(data), int64(len(data)))
+		artifactPath, err := ms.Upload(r.Context(), submissionID, teeReader, size)
 		if err != nil {
 			log.ErrorContext(r.Context(), "minio upload failed", "submission_id", submissionID, "error", err)
 			writeError(w, http.StatusInternalServerError, "failed to store artifact")
 			return
 		}
+
+		sha256hex := hex.EncodeToString(hasher.Sum(nil))
 
 		// Persist metadata to PostgreSQL.
 		meta := store.SubmissionMeta{

@@ -1,6 +1,5 @@
 use std::{
     sync::{Arc, Mutex},
-    thread,
     time::Duration,
 };
 
@@ -135,7 +134,7 @@ pub fn ready_key(signal: &ReadySignal) -> String {
 /// Returns None when no message is currently available.
 pub async fn recv_payload(consumer: &KafkaConsumer) -> Result<Option<Vec<u8>>> {
     let consumer = consumer.inner.clone();
-    tokio::task::spawn_blocking(move || {
+    let result = tokio::task::spawn_blocking(move || {
         let mut consumer = consumer
             .lock()
             .map_err(|err| crate::errors::BotFleetError::KafkaError(format!("kafka consumer mutex poisoned: {err}")))?;
@@ -152,11 +151,19 @@ pub async fn recv_payload(consumer: &KafkaConsumer) -> Result<Option<Vec<u8>>> {
             }
         }
 
-        thread::sleep(Duration::from_millis(50));
+        // thread::sleep blocked the Tokio blocking thread
+        // pool; yield back immediately and let the async caller sleep instead
         Ok(None)
     })
     .await
-    .context("join kafka consumer task")?
+    .context("join kafka consumer task")?;
+
+    // sleep in async context instead of blocking a
+    // thread pool thread, preventing pool starvation under concurrent polls
+    if matches!(&result, Ok(None)) {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    result
 }
 
 /// parse_brokers normalizes a comma-separated broker list into kafka crate hosts.

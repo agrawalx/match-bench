@@ -2,7 +2,6 @@ package validator
 
 import (
 	"archive/zip"
-	"bytes"
 	"errors"
 	"fmt"
 	"io"
@@ -47,17 +46,21 @@ func (c *BenchmarkConfig) DeclaredPort() int {
 // ValidateSubmissionZip checks magic bytes, size, zip structure, benchmark.yaml,
 // src/ presence, build file existence, and target name consistency.
 // Returns a parsed BenchmarkConfig on success, or a descriptive error.
-func ValidateSubmissionZip(data []byte) (*BenchmarkConfig, error) {
-	if len(data) > MaxZipBytes {
+func ValidateSubmissionZip(r io.ReaderAt, size int64) (*BenchmarkConfig, error) {
+	if size > MaxZipBytes {
 		return nil, ErrTooLarge
 	}
 
 	// ZIP magic bytes: PK\x03\x04
-	if len(data) < 4 || data[0] != 0x50 || data[1] != 0x4B || data[2] != 0x03 || data[3] != 0x04 {
+	var header [4]byte
+	if _, err := r.ReadAt(header[:], 0); err != nil {
+		return nil, ErrNotZip
+	}
+	if header[0] != 0x50 || header[1] != 0x4B || header[2] != 0x03 || header[3] != 0x04 {
 		return nil, ErrNotZip
 	}
 
-	zr, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
+	zr, err := zip.NewReader(r, size)
 	if err != nil {
 		return nil, fmt.Errorf("corrupt zip: %w", err)
 	}
@@ -172,9 +175,14 @@ func validateBuildTarget(cfg *BenchmarkConfig, buildFileName string, buildFileCo
 }
 
 // cmakeHasTarget checks that CMakeLists.txt contains add_executable(target ...).
+// regex is compiled per call because target varies;
+// acceptable since this runs once per submission, not on the hot path.
 func cmakeHasTarget(data []byte, target string) bool {
 	pattern := `(?im)^\s*add_executable\s*\(\s*` + regexp.QuoteMeta(target) + `[\s),]`
-	re := regexp.MustCompile(pattern)
+	re, err := regexp.Compile(pattern)
+	if err != nil {
+		return false
+	}
 	return re.Match(data)
 }
 

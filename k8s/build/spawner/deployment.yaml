@@ -67,10 +67,12 @@ spec:
                 secretKeyRef:
                   name: spawner-secret
                   key: harbor-password
-            - name: LOKI_URL
-              value: http://loki.monitoring.svc.cluster.local:3100
-            - name: LOKI_APP_NAME
-              value: spawner
+            # Uncomment only after deploying Grafana Loki — setting LOKI_URL when Loki
+            # is not deployed causes the Kafka consumer to hang (goroutine starvation).
+            # - name: LOKI_URL
+            #   value: http://loki.monitoring.svc.cluster.local:3100
+            # - name: LOKI_APP_NAME
+            #   value: spawner
           resources:
             requests:
               cpu: 100m

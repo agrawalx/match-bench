@@ -15,7 +15,7 @@ spec:
     spec:
       containers:
         - name: submission-api
-          image: harbor.example.com/iicpc/submission-api:latest   # update to real registry
+          image: ghcr.io/agrawalx/submission-api:dev
           ports:
             - containerPort: 8080
           env:

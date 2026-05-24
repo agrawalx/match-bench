@@ -11,14 +11,16 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
-	"github.com/iicpc/submission-api/internal/handler"
 	"github.com/iicpc/libs/logger"
+	"github.com/iicpc/submission-api/internal/handler"
 	"github.com/iicpc/submission-api/internal/publisher"
 	"github.com/iicpc/submission-api/internal/store"
 )
 
 func main() {
-	log, lokiClient := logger.NewProductionLogger(logger.DefaultConfig())
+	logCfg := logger.DefaultConfig()
+	logCfg.ServiceName = "submission-api"
+	log, lokiClient := logger.NewProductionLogger(logCfg)
 	slog.SetDefault(log)
 
 	if lokiClient != nil {

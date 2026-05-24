@@ -49,11 +49,12 @@ func NewKafkaPublisher(brokers string, log *slog.Logger) *KafkaPublisher {
 	}
 
 	w := &kafka.Writer{
-		Addr:         kafka.TCP(brokerList...),
-		Topic:        topicBuildRequested,
-		Balancer:     &kafka.LeastBytes{},
-		RequiredAcks: kafka.RequireOne,
-		Async:        true,
+		Addr:                   kafka.TCP(brokerList...),
+		Topic:                  topicBuildRequested,
+		Balancer:               &kafka.LeastBytes{},
+		RequiredAcks:           kafka.RequireOne,
+		Async:                  false,
+		AllowAutoTopicCreation: true,
 	}
 
 	return &KafkaPublisher{writer: w, log: log}

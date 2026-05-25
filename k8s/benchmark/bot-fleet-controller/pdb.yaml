@@ -1,0 +1,14 @@
+# PodDisruptionBudget required by CONVENTIONS.md §9.
+# Without this, a routine node drain (e.g. cluster upgrade) evicts the
+# controller mid-run and every in-flight session ends up failed by the
+# next startup's recovery path.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: bot-fleet-controller
+  namespace: benchmark
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: bot-fleet-controller

@@ -25,6 +25,26 @@ CREATE TABLE IF NOT EXISTS submissions (
 	status         TEXT NOT NULL DEFAULT 'uploaded',
 	created_at     TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+CREATE TABLE IF NOT EXISTS runs (
+	session_id     TEXT PRIMARY KEY,
+	submission_id  TEXT NOT NULL,
+	contestant_id  TEXT NOT NULL DEFAULT '',
+	status         TEXT NOT NULL DEFAULT 'requested',
+	message        TEXT NOT NULL DEFAULT '',
+	created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+	updated_at     TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- Partial unique index enforces "at most one active run per submission" at the
+-- database level. Idempotency on POST /benchmarks/{submission_id} relies on
+-- this — see CONVENTIONS.md §6.1. Terminal states (completed, failed) must
+-- only be written by bot-fleet-controller via benchmark.status.updated.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_runs_one_active_per_submission
+	ON runs (submission_id)
+	WHERE status NOT IN ('completed', 'failed');
+
+CREATE INDEX IF NOT EXISTS idx_runs_submission_id ON runs (submission_id);
 `
 
 type SubmissionMeta struct {
@@ -51,10 +71,106 @@ func NewPostgresStore(ctx context.Context, dsn string) (*PostgresStore, error) {
 	}
 
 	if _, err := pool.Exec(ctx, createTableSQL); err != nil {
-		return nil, fmt.Errorf("create submissions table: %w", err)
+		return nil, fmt.Errorf("create tables: %w", err)
 	}
 
 	return &PostgresStore{pool: pool}, nil
+}
+
+// RunMeta is the in-memory shape of one row of the runs table.
+type RunMeta struct {
+	SessionID    string
+	SubmissionID string
+	ContestantID string
+	Status       string
+	Message      string
+	CreatedAt    time.Time
+	UpdatedAt    time.Time
+}
+
+// FindActiveRun returns the active (non-terminal) run for a submission, or
+// (nil, nil) when there is none. Used by the benchmark endpoint to decide
+// whether to mint a new session_id or return the existing one.
+func (s *PostgresStore) FindActiveRun(ctx context.Context, submissionID string) (*RunMeta, error) {
+	row := s.pool.QueryRow(ctx,
+		`SELECT session_id, submission_id, contestant_id, status, message, created_at, updated_at
+		   FROM runs
+		  WHERE submission_id = $1
+		    AND status NOT IN ('completed', 'failed')
+		  LIMIT 1`,
+		submissionID,
+	)
+	var r RunMeta
+	err := row.Scan(&r.SessionID, &r.SubmissionID, &r.ContestantID, &r.Status, &r.Message, &r.CreatedAt, &r.UpdatedAt)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("%w: find active run: %v", cerrs.ErrStoreDatabaseFailed, err)
+	}
+	return &r, nil
+}
+
+// GetRun fetches one run by session_id. Returns (nil, nil) when not found.
+func (s *PostgresStore) GetRun(ctx context.Context, sessionID string) (*RunMeta, error) {
+	row := s.pool.QueryRow(ctx,
+		`SELECT session_id, submission_id, contestant_id, status, message, created_at, updated_at
+		   FROM runs WHERE session_id = $1`,
+		sessionID,
+	)
+	var r RunMeta
+	err := row.Scan(&r.SessionID, &r.SubmissionID, &r.ContestantID, &r.Status, &r.Message, &r.CreatedAt, &r.UpdatedAt)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("%w: get run: %v", cerrs.ErrStoreDatabaseFailed, err)
+	}
+	return &r, nil
+}
+
+// InsertRun creates a new run row. Returns ErrActiveRunExists when the
+// partial unique index rejects the insert because another active run is
+// already in flight for this submission.
+func (s *PostgresStore) InsertRun(ctx context.Context, r RunMeta) error {
+	_, err := s.pool.Exec(ctx,
+		`INSERT INTO runs
+			(session_id, submission_id, contestant_id, status, message, created_at, updated_at)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+		r.SessionID, r.SubmissionID, r.ContestantID, r.Status, r.Message, r.CreatedAt, r.UpdatedAt,
+	)
+	if err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+			// 23505 is the unique violation code. With our schema this can
+			// fire from the primary key collision (session_id) — unreachable
+			// in practice because session_id is UUID v7 — or from the partial
+			// unique index. Either way, the caller falls back to returning
+			// the existing run_id.
+			return cerrs.ErrActiveRunExists
+		}
+		return fmt.Errorf("%w: insert run: %v", cerrs.ErrStoreDatabaseFailed, err)
+	}
+	return nil
+}
+
+// UpdateRunStatus applies a benchmark.status.updated event to the runs row.
+// Only the bot-fleet-controller emits these events; no other writer touches
+// this column (CONVENTIONS.md §6.1).
+func (s *PostgresStore) UpdateRunStatus(ctx context.Context, sessionID, status, message string) error {
+	tag, err := s.pool.Exec(ctx,
+		`UPDATE runs
+		    SET status = $2, message = $3, updated_at = now()
+		  WHERE session_id = $1`,
+		sessionID, status, message,
+	)
+	if err != nil {
+		return fmt.Errorf("%w: update run status: %v", cerrs.ErrStoreDatabaseFailed, err)
+	}
+	if tag.RowsAffected() == 0 {
+		return cerrs.ErrRunNotFound
+	}
+	return nil
 }
 
 func (s *PostgresStore) Close() {

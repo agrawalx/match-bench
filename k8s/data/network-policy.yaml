@@ -1,5 +1,6 @@
 # data namespace: stateful services (postgres, kafka, minio).
-# Only platform and build namespaces may reach data services.
+# Only platform, build, and benchmark namespaces may reach data services.
+# (benchmark added for bot-fleet-controller: Kafka publish/consume + runs-table reads.)
 # Data pods never initiate outbound connections.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
@@ -20,6 +21,9 @@ spec:
         - namespaceSelector:
             matchLabels:
               name: build
+        - namespaceSelector:
+            matchLabels:
+              name: benchmark
 
   egress:
     - to:

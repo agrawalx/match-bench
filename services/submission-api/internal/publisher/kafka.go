@@ -13,14 +13,18 @@ import (
 	kafka "github.com/segmentio/kafka-go"
 )
 
-const topicBuildRequested = "submission.build.requested"
+const (
+	topicBuildRequested     = "submission.build.requested"
+	topicBenchmarkRequested = "benchmark.requested"
+)
 
 type Publisher interface {
 	PublishBuildRequested(ctx context.Context, meta PublishMeta) error
+	PublishBenchmarkRequested(ctx context.Context, meta BenchmarkMeta) error
 	Close() error
 }
 
-// PublishMeta carries all fields needed for the Kafka message.
+// PublishMeta carries all fields needed for the build.requested Kafka message.
 type PublishMeta struct {
 	SubmissionID string
 	SHA256       string
@@ -34,10 +38,21 @@ type PublishMeta struct {
 	RequestedAt  time.Time
 }
 
+// BenchmarkMeta carries the fields needed for benchmark.requested.
+// session_id is minted by the submission-api handler (UUID v7) so the response
+// can return run_id synchronously — see CONVENTIONS.md §11.
+type BenchmarkMeta struct {
+	SessionID    string
+	SubmissionID string
+	ContestantID string
+	RequestedAt  time.Time
+}
+
 type KafkaPublisher struct {
-	writer *kafka.Writer
-	log    *slog.Logger
-	noop   bool
+	buildWriter     *kafka.Writer
+	benchmarkWriter *kafka.Writer
+	log             *slog.Logger
+	noop            bool
 }
 
 // NewKafkaPublisher returns a no-op publisher when brokers is empty.
@@ -48,8 +63,10 @@ func NewKafkaPublisher(brokers string, log *slog.Logger) *KafkaPublisher {
 		return &KafkaPublisher{noop: true, log: log}
 	}
 
-	w := &kafka.Writer{
-		Addr:                   kafka.TCP(brokerList...),
+	addr := kafka.TCP(brokerList...)
+
+	build := &kafka.Writer{
+		Addr:                   addr,
 		Topic:                  topicBuildRequested,
 		Balancer:               &kafka.LeastBytes{},
 		RequiredAcks:           kafka.RequireOne,
@@ -57,7 +74,19 @@ func NewKafkaPublisher(brokers string, log *slog.Logger) *KafkaPublisher {
 		AllowAutoTopicCreation: true,
 	}
 
-	return &KafkaPublisher{writer: w, log: log}
+	// Synchronous publish for benchmark.requested: the user got a run_id back
+	// in the HTTP response, and if the message is dropped the controller will
+	// never see it. Losing this silently strands the run in 'requested'.
+	bench := &kafka.Writer{
+		Addr:                   addr,
+		Topic:                  topicBenchmarkRequested,
+		Balancer:               &kafka.LeastBytes{},
+		RequiredAcks:           kafka.RequireAll,
+		Async:                  false,
+		AllowAutoTopicCreation: true,
+	}
+
+	return &KafkaPublisher{buildWriter: build, benchmarkWriter: bench, log: log}
 }
 
 func parseBrokers(brokers string) []string {
@@ -96,15 +125,49 @@ func (p *KafkaPublisher) PublishBuildRequested(ctx context.Context, meta Publish
 		return fmt.Errorf("%w: marshal kafka message: %v", cerrs.ErrInternal, err)
 	}
 
-	return p.writer.WriteMessages(ctx, kafka.Message{
+	return p.buildWriter.WriteMessages(ctx, kafka.Message{
 		Key:   []byte(meta.SubmissionID),
 		Value: payload,
 	})
 }
 
-func (p *KafkaPublisher) Close() error {
-	if p.noop || p.writer == nil {
+func (p *KafkaPublisher) PublishBenchmarkRequested(ctx context.Context, meta BenchmarkMeta) error {
+	if p.noop {
 		return nil
 	}
-	return p.writer.Close()
+
+	msg := topics.BenchmarkRequested{
+		SessionID:    meta.SessionID,
+		SubmissionID: meta.SubmissionID,
+		ContestantID: meta.ContestantID,
+		RequestedAt:  meta.RequestedAt,
+	}
+
+	payload, err := json.Marshal(msg)
+	if err != nil {
+		return fmt.Errorf("%w: marshal benchmark request: %v", cerrs.ErrInternal, err)
+	}
+
+	return p.benchmarkWriter.WriteMessages(ctx, kafka.Message{
+		Key:   []byte(meta.SessionID),
+		Value: payload,
+	})
+}
+
+func (p *KafkaPublisher) Close() error {
+	if p.noop {
+		return nil
+	}
+	var firstErr error
+	if p.buildWriter != nil {
+		if err := p.buildWriter.Close(); err != nil {
+			firstErr = err
+		}
+	}
+	if p.benchmarkWriter != nil {
+		if err := p.benchmarkWriter.Close(); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
 }

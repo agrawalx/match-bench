@@ -1,0 +1,54 @@
+# Additive netpol: the base sandbox-isolation policy denies all sandbox
+# egress except DNS + public internet (so contestant algo pods cannot reach
+# cluster services). The orchestrator pod needs to reach the k8s API server
+# to manage Pod + Service resources — this policy adds that permission, but
+# only for pods labelled app=sandbox-orchestrator.
+#
+# Per the NetworkPolicy spec, when multiple policies select the same pod,
+# the union of their rules applies. Algo pods are NOT selected here and
+# remain locked down by sandbox-isolation.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: sandbox-orchestrator-egress
+  namespace: sandbox
+spec:
+  podSelector:
+    matchLabels:
+      app: sandbox-orchestrator
+  policyTypes:
+    - Ingress
+    - Egress
+
+  # Ingress: only the bot-fleet-controller in the benchmark namespace calls
+  # the orchestrator's HTTP API.
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              name: benchmark
+      ports:
+        - port: 8080
+          protocol: TCP
+
+  egress:
+    # k8s API server. Resolves to a ClusterIP in the default namespace
+    # (kubernetes.default.svc), backed by endpoints in kube-system on the
+    # control plane. Allow all cluster IPs on 443; tightening this further
+    # requires hardcoding the api-server endpoint, which differs across clusters.
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+      ports:
+        - port: 443
+          protocol: TCP
+    # DNS (kube-system :53). Required to resolve kubernetes.default.svc.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP

@@ -28,6 +28,42 @@ const (
 	StatusFailed    = "failed"
 )
 
+// Run status values for the runs table. Terminal values (completed, failed)
+// may only be written by the bot-fleet-controller — see CONVENTIONS.md §6.1.
+const (
+	RunStatusRequested    = "requested"     // submission-api accepted the click
+	RunStatusDeploying    = "deploying"     // controller is allocating a sandbox slot
+	RunStatusWaitingReady = "waiting_ready" // workload published, fanning in bot.ready
+	RunStatusBarrierFired = "barrier_fired" // barrier event published
+	RunStatusRunning      = "running"       // bots actively firing
+	RunStatusCompleted    = "completed"     // controller: terminal success
+	RunStatusFailed       = "failed"        // controller: terminal failure
+)
+
+// BenchmarkRequested is published to "benchmark.requested" by submission-api when
+// the user clicks "start benchmark" on a submission. Consumed by: bot-fleet-controller.
+// Key: session_id (so a future multi-replica controller could shard by session).
+type BenchmarkRequested struct {
+	SessionID    string    `json:"session_id"`    // UUID v7, minted by submission-api
+	SubmissionID string    `json:"submission_id"` // referenced submission (must be 'ready')
+	ContestantID string    `json:"contestant_id"` // reserved; empty until OAuth
+	RequestedAt  time.Time `json:"requested_at"`
+}
+
+// BenchmarkStatusUpdated is published to "benchmark.status.updated" by
+// bot-fleet-controller on every state transition. Consumed by:
+//   - submission-api (refreshes the runs row in PostgreSQL — the only writer of
+//     terminal status; see CONVENTIONS.md §6.1)
+//   - sse-gateway (fan-out to frontend SSE clients) — future
+// Key: session_id.
+type BenchmarkStatusUpdated struct {
+	SessionID    string    `json:"session_id"`
+	SubmissionID string    `json:"submission_id"` // included for consumers that index by submission
+	Status       string    `json:"status"`        // one of RunStatus* constants above
+	Message      string    `json:"message"`
+	UpdatedAt    time.Time `json:"updated_at"`
+}
+
 // SubmissionStatusUpdated is published to "submission.status.updated"
 // by the build-worker on every state transition. Consumed by: submission-api (status queries).
 type SubmissionStatusUpdated struct {

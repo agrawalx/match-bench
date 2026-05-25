@@ -1,0 +1,75 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sandbox-orchestrator
+  namespace: sandbox
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: sandbox-orchestrator
+  template:
+    metadata:
+      labels:
+        app: sandbox-orchestrator
+    spec:
+      serviceAccountName: sandbox-orchestrator
+      containers:
+        - name: sandbox-orchestrator
+          image: ghcr.io/agrawalx/sandbox-orchestrator:dev
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          env:
+            - name: PORT
+              value: "8080"
+            - name: K8S_NAMESPACE
+              value: sandbox
+            # RUNTIME_CLASS is empty for dev k3s — algo pods get the default runtime.
+            # In prod, set this to "gvisor" (after installing the runsc RuntimeClass).
+            # Pattern mirrors BUILD_NODE_POOL per CONVENTIONS.md §3.
+            - name: RUNTIME_CLASS
+              value: ""
+            # Equal request/limit → Guaranteed QoS. Integer CPU enables cpuset
+            # pinning when the kubelet runs with cpuManagerPolicy=static (Tier 2).
+            # See SANDBOX_FAIRNESS.md for the full chain of dependencies.
+            - name: ALGO_CPU
+              value: "2"
+            - name: ALGO_MEMORY
+              value: "1Gi"
+            # Dedicated sandbox node pool. Empty in dev k3s (no taint exists).
+            # Prod: set to "sandbox" with matching taint sandbox=true:NoSchedule
+            # on the dedicated node pool. Mirrors BUILD_NODE_POOL.
+            - name: SANDBOX_NODE_POOL
+              value: ""
+            # Per-pod NIC bandwidth caps. Read by the CNI bandwidth plugin
+            # (and Cilium) from kubernetes.io/{egress,ingress}-bandwidth
+            # annotations. Set to empty to disable.
+            - name: ALGO_EGRESS_BANDWIDTH
+              value: "100M"
+            - name: ALGO_INGRESS_BANDWIDTH
+              value: "100M"
+            # Uncomment after deploying Loki — leaving this set when Loki is
+            # unreachable starves the slog handler (same caveat as the spawner).
+            # - name: LOKI_URL
+            #   value: http://loki.monitoring.svc.cluster.local:3100
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi

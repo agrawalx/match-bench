@@ -12,6 +12,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/iicpc/libs/logger"
+	"github.com/iicpc/submission-api/internal/consumer"
 	"github.com/iicpc/submission-api/internal/handler"
 	"github.com/iicpc/submission-api/internal/publisher"
 	"github.com/iicpc/submission-api/internal/store"
@@ -55,6 +56,18 @@ func main() {
 	kafkaPub := publisher.NewKafkaPublisher(kafkaBrokers, log)
 	defer kafkaPub.Close()
 
+	// Consumer for benchmark.status.updated. This is the only writer of
+	// terminal run status in submission-api per CONVENTIONS.md §6.1.
+	var benchStatusConsumer *consumer.BenchmarkStatusConsumer
+	if kafkaBrokers != "" {
+		group := envOr("KAFKA_BENCHMARK_STATUS_GROUP", "submission-api-benchmark-status")
+		benchStatusConsumer = consumer.NewBenchmarkStatusConsumer(kafkaBrokers, group, pgStore, log)
+		defer benchStatusConsumer.Close()
+		go benchStatusConsumer.Start(ctx)
+	} else {
+		log.Warn("KAFKA_BROKERS not set — benchmark status consumer disabled; runs table will not reflect controller updates")
+	}
+
 	r := chi.NewRouter()
 	r.Use(middleware.RequestID)
 	r.Use(middleware.RealIP)
@@ -64,6 +77,8 @@ func main() {
 	r.Get("/health", handler.Health(log))
 	r.Post("/submit", handler.Submit(minioStore, pgStore, kafkaPub, log))
 	r.Get("/submissions/{id}", handler.GetSubmission(pgStore, log))
+	r.Post("/benchmarks/{submission_id}", handler.StartBenchmark(pgStore, kafkaPub, log))
+	r.Get("/runs/{session_id}", handler.GetRun(pgStore, log))
 
 	srv := &http.Server{
 		Addr:         ":" + port,

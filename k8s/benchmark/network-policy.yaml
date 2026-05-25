@@ -1,6 +1,9 @@
-# benchmark namespace: bot-worker pods that send orders to contestant pods
-# and publish latency results to Kafka.
-# May initiate connections to sandbox (order submission) and data/kafka (results).
+# benchmark namespace: bot-worker pods AND the bot-fleet-controller.
+# Egress permits:
+#   - sandbox (algo TCP order traffic + orchestrator HTTP at :8080)
+#   - data:9092 (Kafka, all benchmark-namespace services)
+#   - data:5432 (PostgreSQL, controller's runs-table reads + recovery writes)
+#   - DNS
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -12,7 +15,7 @@ spec:
     - Ingress
     - Egress
 
-  # Ingress from platform (to receive test-run triggers)
+  # Ingress from platform (controller probes / future direct calls).
   ingress:
     - from:
         - namespaceSelector:
@@ -20,19 +23,22 @@ spec:
               name: platform
 
   egress:
-    # Contestant pods (order submission)
+    # Sandbox: contestant pods on the contestant's port (bot orders) and the
+    # sandbox-orchestrator HTTP API on :8080 (controller).
     - to:
         - namespaceSelector:
             matchLabels:
               name: sandbox
 
-    # Kafka (publish latency results)
+    # Data plane: Kafka and PostgreSQL.
     - to:
         - namespaceSelector:
             matchLabels:
               name: data
       ports:
         - port: 9092
+          protocol: TCP
+        - port: 5432
           protocol: TCP
 
     # DNS

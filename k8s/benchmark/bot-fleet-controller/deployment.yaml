@@ -1,0 +1,80 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: bot-fleet-controller
+  namespace: benchmark
+spec:
+  # Single replica, locked in per CONVENTIONS.md §9. Do not scale.
+  # The session map is in-memory; multiple replicas would shard the bot.ready
+  # consumer group and break per-session fan-in.
+  replicas: 1
+  strategy:
+    # Prevent two replicas from briefly coexisting during rolling updates —
+    # the second pod would consume bot.ready for an in-flight session it
+    # doesn't know about and the first pod would never get the barrier fired.
+    type: Recreate
+  selector:
+    matchLabels:
+      app: bot-fleet-controller
+  template:
+    metadata:
+      labels:
+        app: bot-fleet-controller
+    spec:
+      containers:
+        - name: bot-fleet-controller
+          image: ghcr.io/agrawalx/bot-fleet-controller:dev
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          env:
+            - name: PORT
+              value: "8080"
+            - name: KAFKA_BROKERS
+              value: kafka.data.svc.cluster.local:9092
+            - name: SANDBOX_ORCHESTRATOR_URL
+              value: http://sandbox-orchestrator.sandbox.svc.cluster.local:8080
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: bot-fleet-controller-secret
+                  key: database-url
+            - name: HARBOR_PRODUCTION_ENDPOINT
+              valueFrom:
+                secretKeyRef:
+                  name: bot-fleet-controller-secret
+                  key: harbor-production-endpoint
+            - name: HARBOR_PROJECT
+              value: agrawalx
+            # v1 hardcoded scenario knobs (replace when scenarios table lands).
+            - name: SCENARIO_WORKER_COUNT
+              value: "1"
+            - name: SCENARIO_BOT_COUNT
+              value: "10"
+            - name: SCENARIO_ORDERS_PER_BOT
+              value: "100"
+            - name: RUN_DURATION
+              value: "90s"
+            # Uncomment when Loki is deployed.
+            # - name: LOKI_URL
+            #   value: http://loki.monitoring.svc.cluster.local:3100
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi

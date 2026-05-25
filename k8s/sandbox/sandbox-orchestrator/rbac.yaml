@@ -1,0 +1,35 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: sandbox-orchestrator
+  namespace: sandbox
+---
+# The orchestrator owns Pod + Service lifecycle for one slot per benchmark
+# run. Scoped to the sandbox namespace per CONVENTIONS.md §7 + DECISIONS.md §11
+# (no ClusterRoles in v1).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: slot-manager
+  namespace: sandbox
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["create", "get", "list", "watch", "delete"]
+  - apiGroups: [""]
+    resources: ["services"]
+    verbs: ["create", "get", "list", "watch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: sandbox-orchestrator-slot-manager
+  namespace: sandbox
+subjects:
+  - kind: ServiceAccount
+    name: sandbox-orchestrator
+    namespace: sandbox
+roleRef:
+  kind: Role
+  name: slot-manager
+  apiGroup: rbac.authorization.k8s.io

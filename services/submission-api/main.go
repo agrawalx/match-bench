@@ -56,8 +56,15 @@ func main() {
 	kafkaPub := publisher.NewKafkaPublisher(kafkaBrokers, log)
 	defer kafkaPub.Close()
 
-	// Consumer for benchmark.status.updated. This is the only writer of
-	// terminal run status in submission-api per CONVENTIONS.md §6.1.
+	// Consumer for benchmark.status.updated. This goroutine is the ONLY path
+	// by which terminal runs.status values ('completed', 'failed') reach
+	// PostgreSQL during normal operation. The only exception platform-wide
+	// is the bot-fleet-controller's startup recovery sweep, which writes
+	// 'failed' directly to release the partial unique index before its
+	// consumers start. Do not add other terminal-status writers — every
+	// such addition risks freeing the unique index while resources for the
+	// run are still live, defeating the one-active-run-per-submission
+	// guarantee that the endpoint's idempotency relies on.
 	var benchStatusConsumer *consumer.BenchmarkStatusConsumer
 	if kafkaBrokers != "" {
 		group := envOr("KAFKA_BENCHMARK_STATUS_GROUP", "submission-api-benchmark-status")

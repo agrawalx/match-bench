@@ -1,7 +1,12 @@
-# PodDisruptionBudget required by CONVENTIONS.md §9.
-# Without this, a routine node drain (e.g. cluster upgrade) evicts the
-# controller mid-run and every in-flight session ends up failed by the
-# next startup's recovery path.
+# PodDisruptionBudget — required because bot-fleet-controller runs at exactly
+# one replica (architecturally locked; no horizontal scale-out).
+#
+# minAvailable=1 means cluster operations that drain nodes (e.g. a rolling
+# kubelet upgrade) must wait for a replacement pod to come up on another
+# node before the current pod can be evicted. Without this, a drain
+# evicts the controller mid-run and every in-flight session ends up
+# marked failed by the next startup's recovery sweep — the user has to
+# re-trigger every benchmark that was in flight.
 apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:

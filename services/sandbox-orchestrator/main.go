@@ -1,7 +1,21 @@
 // sandbox-orchestrator manages the lifecycle of contestant algorithm pods
 // in the sandbox namespace. The bot-fleet-controller calls this service via
 // HTTP to allocate, observe, and release one Pod + Service per benchmark run.
-// See CONVENTIONS.md §10 for the invariants this service enforces.
+//
+// Core invariants this service enforces:
+//   - slot_id is always the controller's session_id; orchestrator never mints IDs.
+//   - One Pod and one Service per slot (both named algo-{slot_id}), created
+//     together on POST /slots, deleted together on DELETE /slots/{id}.
+//   - Image ref is supplied by the caller (controller composes Harbor refs).
+//   - Lazy lifecycle in v1 — no warm pool, no caching. Allocation costs
+//     ~3-10 s per run. Warm pool is a v2 optimization.
+//   - In-memory slot map; k8s itself is the durable source of truth.
+//     On startup we rebuild the map from a Pod list (label app=algo) in
+//     the sandbox namespace.
+//   - Pod spec is FAIRNESS-driven: Guaranteed QoS, readOnlyRootFilesystem +
+//     tmpfs mounts, CNI bandwidth caps, optional gVisor runtime class,
+//     optional dedicated node pool. See internal/k8s/slot.go for the
+//     full set and the rationale behind each.
 package main
 
 import (
@@ -33,9 +47,12 @@ func main() {
 	port := envOr("PORT", "8080")
 	namespace := envOr("K8S_NAMESPACE", "sandbox")
 	runtimeClass := os.Getenv("RUNTIME_CLASS") // empty in dev k3s; "gvisor" in prod
-	// CPU/memory: same value used for request AND limit (Guaranteed QoS).
-	// CPU must be an integer string for cpuset pinning to engage on a
-	// kubelet running with cpuManagerPolicy=static. See SANDBOX_FAIRNESS.md.
+	// CPU/memory: same value used for both request AND limit (which is what
+	// makes the pod Guaranteed QoS, the precondition for both stable memory
+	// accounting and kubelet CPU manager cpuset pinning). CPU MUST be an
+	// integer string ("2", not "2000m") for the static-policy CPU manager
+	// to allocate a dedicated cpuset; millicore values fall back to shared
+	// CFS bandwidth and lose pinning.
 	algoCPU := envOr("ALGO_CPU", "2")
 	algoMemory := envOr("ALGO_MEMORY", "1Gi")
 	// Optional dedicated node pool — mirrors BUILD_NODE_POOL pattern.
@@ -67,9 +84,17 @@ func main() {
 
 	slots := store.NewSlotStore()
 
-	// Rebuild the in-memory map from k8s. k8s is the durable source of truth
-	// (CONVENTIONS.md §10) — anything missing here is a leaked Pod we cannot
-	// account for.
+	// Rebuild the in-memory slot map from k8s on every startup.
+	//
+	// The map is a cache; k8s itself is the durable source of truth. After
+	// a crash or rolling restart, the previous in-memory state is gone but
+	// any Pod the orchestrator created is still alive in the cluster (or
+	// has been cleaned up by its own RestartPolicy=Never failure mode).
+	// Listing here lets the new process resume answering GET /slots/{id}
+	// for runs that started under the previous process. Any Pod we
+	// don't recognise (label app=algo + managed-by=sandbox-orchestrator,
+	// but slot label missing) is treated as leaked and ignored — it'll
+	// surface as a NotFound on the controller's eventual DELETE.
 	existing, err := mgr.ListExisting(ctx)
 	if err != nil {
 		log.Error("list existing slots", "error", err)

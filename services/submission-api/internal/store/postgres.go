@@ -38,8 +38,15 @@ CREATE TABLE IF NOT EXISTS runs (
 
 -- Partial unique index enforces "at most one active run per submission" at the
 -- database level. Idempotency on POST /benchmarks/{submission_id} relies on
--- this — see CONVENTIONS.md §6.1. Terminal states (completed, failed) must
--- only be written by bot-fleet-controller via benchmark.status.updated.
+-- this: the INSERT path either succeeds (no active row existed) or fails with
+-- 23505 unique_violation, at which point the handler re-queries and returns
+-- the existing run_id with HTTP 200.
+--
+-- HARD INVARIANT: the terminal states 'completed' and 'failed' must only be
+-- written by bot-fleet-controller, via benchmark.status.updated messages
+-- consumed by submission-api. The one exception is the controller's startup
+-- recovery sweep, which writes 'failed' directly to release this index
+-- before its consumers start.
 CREATE UNIQUE INDEX IF NOT EXISTS idx_runs_one_active_per_submission
 	ON runs (submission_id)
 	WHERE status NOT IN ('completed', 'failed');
@@ -155,8 +162,13 @@ func (s *PostgresStore) InsertRun(ctx context.Context, r RunMeta) error {
 }
 
 // UpdateRunStatus applies a benchmark.status.updated event to the runs row.
-// Only the bot-fleet-controller emits these events; no other writer touches
-// this column (CONVENTIONS.md §6.1).
+//
+// This is the ONLY path that writes terminal values ('completed' or 'failed')
+// into runs.status from outside the bot-fleet-controller's own startup
+// recovery. Only the bot-fleet-controller emits benchmark.status.updated
+// events. Do not add other callers — every other status writer in this
+// repo violates the one-writer invariant that protects the partial unique
+// index from being freed by an unauthorized actor.
 func (s *PostgresStore) UpdateRunStatus(ctx context.Context, sessionID, status, message string) error {
 	tag, err := s.pool.Exec(ctx,
 		`UPDATE runs

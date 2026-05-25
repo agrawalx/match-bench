@@ -39,8 +39,12 @@ type PublishMeta struct {
 }
 
 // BenchmarkMeta carries the fields needed for benchmark.requested.
-// session_id is minted by the submission-api handler (UUID v7) so the response
-// can return run_id synchronously — see CONVENTIONS.md §11.
+//
+// session_id is minted by the submission-api handler as a UUID v7 (so it is
+// both globally unique and time-ordered, which is useful for log scans).
+// The handler must return run_id synchronously in the HTTP response so the
+// frontend can start polling — that's why minting happens in the API
+// instead of being delegated to the controller.
 type BenchmarkMeta struct {
 	SessionID    string
 	SubmissionID string

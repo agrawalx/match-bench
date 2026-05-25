@@ -8,8 +8,15 @@ import (
 	"github.com/iicpc/bot-fleet-controller/internal/controller"
 )
 
-// ReadyState is flipped after startup recovery completes and the consumers
-// have started. /readyz returns 200 only after this — see CONVENTIONS.md §9.
+// ReadyState is flipped after startup recovery completes AND the consumers
+// have started. /readyz returns 200 only after both happen.
+//
+// Why both: on a controller restart, runs.status rows are marked failed by
+// the recovery sweep BEFORE the benchmark.requested consumer starts (so a
+// retriggered run can pass the partial unique index on submission_id).
+// If /readyz returned 200 before recovery finished, the Service would
+// route new benchmark.requested messages to a controller mid-cleanup and
+// they would be processed against a stale session map.
 type ReadyState struct {
 	ready atomic.Bool
 }

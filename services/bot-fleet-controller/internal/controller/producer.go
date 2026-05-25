@@ -114,8 +114,14 @@ func (p *Producer) PublishBarrier(ctx context.Context, sessionID string, targetE
 }
 
 // PublishStatus publishes one benchmark.status.updated event. submission-api
-// consumes this and updates the runs row. This is the path through which
-// terminal status reaches PostgreSQL — see CONVENTIONS.md §6.1.
+// consumes this and updates the runs row.
+//
+// This is the ONLY path through which terminal status ('completed', 'failed')
+// reaches PostgreSQL during normal operation. The hard rule is that the
+// controller is the sole producer of these events, and submission-api's
+// consumer is the sole writer of the terminal column value. The single
+// documented exception is the controller's startup recovery, which writes
+// 'failed' to runs directly (synchronously) before any consumer is alive.
 func (p *Producer) PublishStatus(ctx context.Context, evt topics.BenchmarkStatusUpdated) error {
 	if p.noop {
 		return nil

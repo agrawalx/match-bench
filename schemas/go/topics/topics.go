@@ -28,8 +28,18 @@ const (
 	StatusFailed    = "failed"
 )
 
-// Run status values for the runs table. Terminal values (completed, failed)
-// may only be written by the bot-fleet-controller — see CONVENTIONS.md §6.1.
+// Run status values for the runs table.
+//
+// HARD INVARIANT: terminal values (completed, failed) may only be written by
+// the bot-fleet-controller — via a BenchmarkStatusUpdated message published
+// to "benchmark.status.updated" and consumed by submission-api. The only
+// exception is the controller's startup recovery sweep, which writes
+// 'failed' directly to release the partial unique index on
+// runs(submission_id) WHERE status NOT IN ('completed','failed').
+//
+// Non-terminal states are owned by the controller's per-session goroutine
+// driving the run lifecycle: deploying → waiting_ready → barrier_fired →
+// running, then a terminal value.
 const (
 	RunStatusRequested    = "requested"     // submission-api accepted the click
 	RunStatusDeploying    = "deploying"     // controller is allocating a sandbox slot
@@ -52,9 +62,12 @@ type BenchmarkRequested struct {
 
 // BenchmarkStatusUpdated is published to "benchmark.status.updated" by
 // bot-fleet-controller on every state transition. Consumed by:
-//   - submission-api (refreshes the runs row in PostgreSQL — the only writer of
-//     terminal status; see CONVENTIONS.md §6.1)
-//   - sse-gateway (fan-out to frontend SSE clients) — future
+//   - submission-api: refreshes the runs row in PostgreSQL. This consumer
+//     is the only writer of the terminal 'completed' and 'failed' values
+//     into runs.status (see the hard invariant on RunStatus* constants
+//     above). All non-terminal transitions are written by the controller's
+//     per-session goroutine.
+//   - sse-gateway (fan-out to frontend SSE clients) — future, not built yet.
 // Key: session_id.
 type BenchmarkStatusUpdated struct {
 	SessionID    string    `json:"session_id"`

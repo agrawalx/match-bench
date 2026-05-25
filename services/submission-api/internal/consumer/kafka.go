@@ -17,8 +17,18 @@ const TopicBenchmarkStatusUpdated = "benchmark.status.updated"
 // BenchmarkStatusConsumer keeps the runs table in PostgreSQL in sync with
 // state transitions published by the bot-fleet-controller.
 //
-// This is the ONLY writer of terminal run status (completed / failed) in
-// the submission-api process. See CONVENTIONS.md §6.1.
+// HARD INVARIANT: this consumer is the ONLY writer of the terminal run
+// statuses 'completed' and 'failed' anywhere in the platform during normal
+// operation. The single documented exception platform-wide is the
+// bot-fleet-controller's startup recovery, which writes 'failed' directly
+// to release the partial unique index on runs(submission_id) before its
+// consumers start.
+//
+// The one-writer rule exists because flipping status to a terminal value
+// frees the partial unique index, which lets the user re-trigger the
+// benchmark. If anyone other than the controller flips it (e.g. a stuck-
+// run cleanup job, an operator "force fail" endpoint), the user's retry
+// can race a still-live algo pod / bot workload / orchestrator slot.
 type BenchmarkStatusConsumer struct {
 	reader *kafka.Reader
 	pg     *store.PostgresStore

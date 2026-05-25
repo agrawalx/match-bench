@@ -10,9 +10,18 @@ import (
 )
 
 // Session holds per-run state for one benchmark in flight.
-// Lives in memory only — single-replica controller per CONVENTIONS.md §9.
-// On controller crash these entries are lost; the recovery path marks all
-// in-flight runs failed at next startup.
+//
+// Lives in memory only — no PostgreSQL backing for session state. This is
+// safe because the controller is architecturally locked at a single
+// replica: if the process dies, every session in this map dies with it
+// and there is no other replica that needs to learn about them. The
+// startup recovery sweep on the next process re-reads the runs table,
+// finds any rows still in non-terminal status, and marks them failed.
+// User re-triggers via the frontend.
+//
+// Concurrent access is protected by sync.RWMutex on the SessionManager
+// (not here on Session itself — once a Session is constructed and inserted
+// into the map, its fields are only mutated by its own runner goroutine).
 type Session struct {
 	SessionID    string
 	SubmissionID string

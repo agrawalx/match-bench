@@ -4,9 +4,13 @@ metadata:
   name: bot-fleet-controller
   namespace: benchmark
 spec:
-  # Single replica, locked in per CONVENTIONS.md §9. Do not scale.
-  # The session map is in-memory; multiple replicas would shard the bot.ready
-  # consumer group and break per-session fan-in.
+  # Single replica — architecturally locked at 1. DO NOT SCALE.
+  # The session map lives in memory only; if two replicas existed, the
+  # bot.ready consumer group would shard messages across them and a
+  # ReadySignal for session S could land on a replica that does not know
+  # about S — fan-in for that session would never complete. Crash
+  # recovery (mark-failed-on-restart) is the deliberate trade-off that
+  # lets us keep the controller stateless across pods.
   replicas: 1
   strategy:
     # Prevent two replicas from briefly coexisting during rolling updates —

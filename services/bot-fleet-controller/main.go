@@ -3,7 +3,12 @@
 // publishes WorkloadSpec to bot-fleet workers, fans in bot.ready signals,
 // publishes the barrier, and reports back via benchmark.status.updated.
 //
-// Single replica, locked in — see CONVENTIONS.md §9.
+// HARD INVARIANT: this service runs at exactly 1 replica, architecturally locked.
+// No sharding, no horizontal scale-out. submission-api is the stateless service
+// that scales; the controller stays at 1. Session state lives in-memory behind
+// a sync.RWMutex; on crash, in-flight runs are marked failed by the recovery
+// sweep on the next startup and the user re-triggers. A PodDisruptionBudget
+// with minAvailable=1 protects against routine node drains.
 package main
 
 import (
@@ -59,8 +64,18 @@ func main() {
 	producer := controller.NewProducer(kafkaBrokers, log)
 	defer producer.Close()
 
-	// Synchronous crash recovery: every in-flight run becomes failed
-	// before the consumers start. CONVENTIONS.md §9.
+	// Synchronous crash recovery — MUST run before consumers start.
+	//
+	// v1 recovery strategy is "mark-failed-on-restart": every runs row in a
+	// non-terminal state (requested|deploying|waiting_ready|barrier_fired|
+	// running) is updated to failed with message='controller restart'.
+	// User re-triggers via the frontend. No attempt to resume in-flight
+	// sessions — their goroutines died with the previous process, the
+	// algo pod was likely torn down, and the bot workers have moved on.
+	//
+	// This must complete BEFORE consumers start because the partial unique
+	// index on runs(submission_id) WHERE status NOT IN ('completed','failed')
+	// otherwise blocks any retriggered benchmark for an in-flight submission.
 	if err := controller.RecoverInFlightRuns(ctx, st, producer, log); err != nil {
 		log.Error("startup recovery failed", "error", err)
 		os.Exit(1)
@@ -122,8 +137,13 @@ func main() {
 }
 
 // scenarioFromEnv loads the hardcoded v1 scenario, allowing env overrides.
-// Replace with a scenarios table lookup when open question #1 in
-// BOT_FLEET_PIPELINE.md §9 is resolved.
+//
+// v1 ships a single scenario per controller deployment, knobs set via env
+// at deploy time. v2 will introduce a scenarios table in PostgreSQL and a
+// scenario_id in the benchmark.requested message so each run can pick a
+// shape (constant load / ramp / spike). For now every run uses the same
+// shape and the only knobs are the worker count, bot count, orders/bot,
+// deadlines, and run duration below.
 func scenarioFromEnv() controller.Scenario {
 	return controller.Scenario{
 		WorkerCount:      uint32(envOrInt("SCENARIO_WORKER_COUNT", 1)),

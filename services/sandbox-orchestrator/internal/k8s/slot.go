@@ -27,12 +27,24 @@ const (
 )
 
 // Manager wraps k8s client operations for sandbox slot lifecycle.
-// Pod + Service are always created and deleted as a pair — one slot
-// is conceptually both resources (see CONVENTIONS.md §10).
 //
-// All pod-spec fields here are designed to make the benchmark FAIR across
-// contestants. See SANDBOX_FAIRNESS.md for the full rationale and the
-// kubelet-level / OS-level pieces that this pod spec depends on.
+// One slot is conceptually two resources: a Pod and a Service, both
+// named algo-{slot_id}. They are created together on POST /slots and
+// deleted together on DELETE /slots/{id}. Never delete one without the
+// other — the Pod without the Service becomes unreachable from the bots;
+// the Service without the Pod becomes a dangling endpoint that fails
+// requests. slot_id is always the controller's session_id verbatim.
+//
+// All pod-spec fields the methods below set are FAIRNESS-driven: equal
+// CPU/memory request and limit (Guaranteed QoS), readOnlyRootFilesystem +
+// tmpfs mounts (no disk I/O), CNI bandwidth annotations (per-pod NIC cap),
+// nodeSelector + toleration (dedicated sandbox node pool), optional
+// runtimeClassName=gvisor. The pod spec is necessary but not sufficient:
+// it depends on the kubelet being configured with cpuManagerPolicy=static
+// + full-pcpus-only=true + topologyManagerPolicy=single-numa-node, plus
+// OS-level tuning (CPU governor, C-states, IRQ pinning) on the sandbox
+// node pool. Without those, the pod spec still applies but contestants
+// can see ~ms-scale jitter from sources outside the pod's control.
 type Manager struct {
 	client       kubernetes.Interface
 	namespace    string
@@ -48,9 +60,14 @@ type Config struct {
 	Namespace    string
 	RuntimeClass string // e.g. "gvisor" in prod; empty in dev k3s
 	// CPU is the integer CPU count (string) for both request and limit.
-	// Must be an integer string ("1", "2", "4") for cpuset pinning to work —
-	// the kubelet's CPU manager (static policy) only pins integer-CPU
-	// Guaranteed-QoS pods. See SANDBOX_FAIRNESS.md Tier 1+2.
+	// Must be an integer string ("1", "2", "4") — NOT millicores like
+	// "2000m" — for cpuset pinning to engage. The kubelet's CPU manager
+	// (when configured with cpuManagerPolicy=static) only allocates a
+	// dedicated cpuset to Guaranteed-QoS pods with integer CPU; anything
+	// else gets shared CFS bandwidth, which has documented throttling-
+	// cliff tail-latency pathologies under HFT-style load. Equal request
+	// AND limit is what makes the pod Guaranteed QoS; integer count is
+	// what makes it eligible for cpuset pinning. Both required.
 	CPU string
 	// Memory is the size string (e.g. "1Gi") for both request and limit.
 	// Equal request/limit makes the pod Guaranteed QoS — required for
@@ -152,8 +169,17 @@ func (m *Manager) Refresh(ctx context.Context, slotID string) (store.SlotState, 
 }
 
 // ListExisting enumerates slots already in the cluster on startup so the
-// in-memory map can be rebuilt from k8s. k8s is the durable source of truth
-// (CONVENTIONS.md §10) — anything we miss here is leaked or orphaned.
+// in-memory slot map can be rebuilt from k8s.
+//
+// The orchestrator is intentionally stateless across restarts: the
+// in-memory map is a cache, k8s itself is the durable source of truth.
+// On startup we list Pods labelled app=algo + managed-by=sandbox-orchestrator
+// and reconstruct each Slot record from the live Pod state. Anything we
+// fail to match here is either a leaked Pod (orchestrator was killed
+// after CreatePod but before recording the slot) or an orphan (Service
+// without its Pod) — both surface in subsequent DELETE calls failing
+// with NotFound, which is acceptable because there's nothing live to
+// clean up anyway.
 func (m *Manager) ListExisting(ctx context.Context) ([]store.Slot, error) {
 	selector := fmt.Sprintf("%s=%s,%s=%s", LabelApp, AppValue, LabelManagedBy, ManagedByValue)
 	pods, err := m.client.CoreV1().Pods(m.namespace).List(ctx, metav1.ListOptions{LabelSelector: selector})
@@ -208,9 +234,12 @@ func (m *Manager) podSpec(slotID, image string, port int) *corev1.Pod {
 		LabelManagedBy: ManagedByValue,
 	}
 
-	// Bandwidth annotations: CNI bandwidth plugin / Cilium reads these and
-	// applies tc qdisc throttling so one chatty contestant cannot saturate
-	// the node NIC at the expense of neighbours. See SANDBOX_FAIRNESS.md Tier 1.
+	// Bandwidth annotations are read by the CNI bandwidth plugin (and Cilium
+	// natively) which applies tc qdisc throttling so one chatty contestant
+	// cannot saturate the node NIC and starve neighbour pods. Caps bytes/sec,
+	// NOT packets/sec — a contestant doing high-pps low-bps traffic can
+	// still pressure IRQ handling; that's solved at the node level via NIC
+	// IRQ pinning to reserved system cores (not in this code).
 	annotations := map[string]string{}
 	if m.egressBwBps != "" {
 		annotations["kubernetes.io/egress-bandwidth"] = m.egressBwBps
@@ -220,9 +249,14 @@ func (m *Manager) podSpec(slotID, image string, port int) *corev1.Pod {
 	}
 
 	autoMount := false
-	// readOnlyRoot prevents writes to the container's overlayfs layer; combined
-	// with tmpfs emptyDir mounts below, this eliminates ALL disk I/O from the
-	// algo pod. See SANDBOX_FAIRNESS.md Tier 1 (disk I/O fairness).
+	// readOnlyRoot + tmpfs emptyDirs together eliminate ALL disk I/O from
+	// the algo pod. readOnlyRoot alone leaves the contestant with no
+	// writable paths (their process crashes on first write); tmpfs alone
+	// leaves the container's overlayfs writable to disk. BOTH are
+	// required. tmpfs (RAM-backed) usage counts against the pod's
+	// memory.max cgroup, so a contestant who writes 256 MiB of logs eats
+	// into their own memory allocation instead of contending with
+	// neighbours for node disk bandwidth.
 	readOnlyRoot := true
 
 	pod := &corev1.Pod{
@@ -266,9 +300,12 @@ func (m *Manager) podSpec(slotID, image string, port int) *corev1.Pod {
 		pod.Spec.RuntimeClassName = &rc
 	}
 
-	// Node-pool pinning: dedicated sandbox node pool prevents platform
-	// workloads from sharing CPU/memory with contestant pods. Mirrors the
-	// BUILD_NODE_POOL pattern. See SANDBOX_FAIRNESS.md Tier 1.
+	// Node-pool pinning: a dedicated sandbox node pool prevents platform
+	// workloads (submission-api, controller, Kafka, etc.) from sharing
+	// CPU/memory/NIC with contestant pods. Requires the ops side to
+	// label the pool nodes pool=<value> and taint them
+	// sandbox=true:NoSchedule. Mirrors the BUILD_NODE_POOL toggle: empty
+	// SANDBOX_NODE_POOL env disables (dev k3s); non-empty enables.
 	if m.nodePool != "" {
 		pod.Spec.Tolerations = []corev1.Toleration{{
 			Key:      "sandbox",
@@ -284,7 +321,9 @@ func (m *Manager) podSpec(slotID, image string, port int) *corev1.Pod {
 
 // writableVolumes returns the four tmpfs emptyDirs every algo pod mounts.
 // Memory-backed → no disk I/O → counts against the pod's memory.max cgroup.
-// SANDBOX_FAIRNESS.md Tier 1.
+// Paired with readOnlyRootFilesystem=true on the container, this gives a
+// contestant exactly four writable locations (/tmp, /var/tmp, /var/log,
+// /var/run) and nowhere else, all RAM-backed.
 func writableVolumes() []corev1.Volume {
 	tmpfs := func(name string) corev1.Volume {
 		return corev1.Volume{
@@ -341,10 +380,13 @@ func (m *Manager) serviceSpec(slotID string, port int) *corev1.Service {
 
 // containerResources builds a Guaranteed-QoS resource block: request == limit
 // for both CPU and memory. This is the gate that unlocks:
-//   - cgroup v2 memory.max == memory.high (no kernel reclamation under load)
-//   - kubelet CPU manager (static policy) cpuset pinning, when the node is
-//     configured for it
-// See SANDBOX_FAIRNESS.md Tier 1+2.
+//   - cgroup v2 memory.max == memory.high (no kernel reclamation under load,
+//     so a contestant's working set isn't evicted while their algorithm runs)
+//   - kubelet CPU manager (static policy) cpuset pinning to a dedicated set
+//     of cores — when the node is configured with cpuManagerPolicy=static.
+//     Without that kubelet setting the resource block still applies but the
+//     contestant shares cores via CFS bandwidth rather than getting an
+//     exclusive cpuset.
 //
 // Both values must be parseable by resource.MustParse. For CPU pinning,
 // the value must also be an integer ("1", "2", "4") — millicpu strings
@@ -364,8 +406,21 @@ func (m *Manager) containerResources() corev1.ResourceRequirements {
 }
 
 // deriveState turns a live Pod into the orchestrator's SlotState + message.
-// Terminal pull/config errors land in failed; transient creating phases stay
-// in creating. See CONVENTIONS.md §10 for the lifecycle contract.
+//
+// Slot lifecycle the controller depends on (returned as `state` in the JSON):
+//   creating  → Pod object exists but is not yet schedulable/ready
+//   ready     → Pod has the PodReady=True condition (algo is accepting TCP)
+//   failed    → Pod hit a terminal phase (PodFailed/PodSucceeded with
+//               restartPolicy=Never) OR a terminal waiting reason
+//               (ImagePullBackOff, ErrImagePull, CrashLoopBackOff,
+//               CreateContainerConfigError)
+//   terminating → Pod is being deleted (DeletionTimestamp set)
+//
+// Returning failed promptly for terminal waiting reasons matters: the
+// controller's GET /slots/{id} poll loop would otherwise wait the full
+// DEPLOY_DEADLINE (60s) on what is clearly a permanent failure (e.g.
+// the contestant image doesn't exist in Harbor). Fail fast → user
+// re-triggers sooner.
 func deriveState(pod *corev1.Pod) (store.SlotState, string) {
 	// Terminal phases first.
 	switch pod.Status.Phase {

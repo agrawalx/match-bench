@@ -32,9 +32,28 @@ type runResponse struct {
 }
 
 // StartBenchmark handles POST /benchmarks/{submission_id}.
-// Idempotent: returns 200 with the existing run_id when an active run is
-// already in flight for this submission, otherwise 202 with a freshly minted
-// session_id. See CONVENTIONS.md §11.
+//
+// Idempotency contract:
+//   - HTTP 200 + existing run_id  → an active run is already in flight for
+//     this submission; caller joined it.
+//   - HTTP 202 + new run_id       → a fresh run was started.
+//
+// Body shape is identical in both cases; the status code distinguishes
+// "joined" from "started".
+//
+// Idempotency is enforced at the database level by a partial unique index
+// on runs(submission_id) WHERE status NOT IN ('completed','failed'). The
+// flow below is:
+//   1. Query runs for an active row for this submission.
+//   2. If found → return 200 with existing run_id.
+//   3. Else INSERT runs row with status='requested'.
+//   4. On unique_violation (a concurrent click landed first) → re-query
+//      and return whichever row won, with 200.
+//   5. Else publish benchmark.requested and return 202.
+//
+// session_id is minted here as UUID v7 so it is both globally unique and
+// time-ordered (v7 timestamps embed in the high bits). The API must
+// return it synchronously so the frontend can start tracking immediately.
 func StartBenchmark(pg *store.PostgresStore, pub publisher.Publisher, log *slog.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		submissionID := chi.URLParam(r, "submission_id")
@@ -60,7 +79,9 @@ func StartBenchmark(pg *store.PostgresStore, pub publisher.Publisher, log *slog.
 			return
 		}
 
-		// Idempotency check (Layer 1, see CONVENTIONS.md §11).
+		// Idempotency check — step 1 of the flow documented above. If an
+		// active run exists, return its run_id with HTTP 200 instead of
+		// minting a new one.
 		if existing, err := pg.FindActiveRun(ctx, submissionID); err != nil {
 			log.ErrorContext(ctx, "find active run", "submission_id", submissionID, "error", err)
 			writeError(w, http.StatusInternalServerError, "lookup failed")
@@ -96,8 +117,13 @@ func StartBenchmark(pg *store.PostgresStore, pub publisher.Publisher, log *slog.
 		}
 		if err := pg.InsertRun(ctx, run); err != nil {
 			if errors.Is(err, cerrs.ErrActiveRunExists) {
-				// Lost a race with a concurrent click. Fall back to returning
-				// whichever run won (Layer 1, step 4 in CONVENTIONS.md §11).
+				// Lost a race with a concurrent click — another request
+				// inserted an active runs row for this submission between
+				// our FindActiveRun check above and our INSERT here. The
+				// partial unique index rejected ours with unique_violation
+				// (PostgreSQL error code 23505), which the store layer
+				// translated to ErrActiveRunExists. Re-query and return
+				// whichever run won, with HTTP 200.
 				existing, ferr := pg.FindActiveRun(ctx, submissionID)
 				if ferr != nil || existing == nil {
 					log.ErrorContext(ctx, "active run conflict but no row found", "submission_id", submissionID, "error", ferr)
@@ -124,10 +150,15 @@ func StartBenchmark(pg *store.PostgresStore, pub publisher.Publisher, log *slog.
 			ContestantID: sub.ContestantID,
 			RequestedAt:  now,
 		}); err != nil {
-			// The runs row is already inserted. The controller's startup
-			// recovery (CONVENTIONS.md §9) will mark this run failed if the
-			// controller never sees it. Surface the publish failure to the
-			// user so they know to retry.
+			// The runs row is already inserted but Kafka publish failed.
+			// We can't roll back the INSERT (another request could already
+			// be reading it). The controller is single-replica and runs a
+			// crash-recovery sweep on startup that marks every in-flight
+			// run failed — so this orphaned 'requested' row will be
+			// cleaned up the next time the controller restarts, or it
+			// will stall here until the controller (or its consumer)
+			// eventually receives the message via a different mechanism.
+			// Surface the publish failure to the user so they retry.
 			log.ErrorContext(ctx, "publish benchmark.requested", "session_id", sessionID, "error", err)
 			writeError(w, http.StatusInternalServerError, "failed to publish benchmark request")
 			return

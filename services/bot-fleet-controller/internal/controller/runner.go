@@ -13,9 +13,12 @@ import (
 )
 
 // Scenario is the workload shape the controller publishes for each session.
-// v1 is hardcoded — there is no scenarios table yet (open question #1 in
-// BOT_FLEET_PIPELINE.md §9). When that lands, replace the hardcoded value
-// in main.go with a per-submission lookup.
+//
+// v1 ships a single scenario per controller deployment, loaded from env in
+// main.go. There is no scenarios table in PostgreSQL yet. v2 will introduce
+// per-submission (or per-tournament) scenarios — at that point, replace the
+// hardcoded load in main.go with a lookup keyed by submission_id or by a
+// scenario_id carried in BenchmarkRequested.
 type Scenario struct {
 	WorkerCount      uint32
 	BotCount         uint32
@@ -45,8 +48,25 @@ func (h HarborConfig) ImageRef(submissionID string) string {
 	return fmt.Sprintf("%s/%s/%s:latest", h.Endpoint, h.Project, submissionID)
 }
 
-// Runner drives one session through the lifecycle described in
-// BOT_FLEET_PIPELINE.md §3.
+// Runner drives one session through the benchmark lifecycle:
+//
+//   1. Look up the submission row (need protocol + port).
+//   2. Allocate a sandbox slot via the orchestrator (HTTP POST /slots),
+//      then poll GET /slots/{id} until state=ready or DEPLOY_DEADLINE.
+//   3. Publish N WorkloadSpecs on workload.assignments (one per worker).
+//   4. Fan in bot.ready from each worker, up to READY_DEADLINE. Partial
+//      fan-in is acceptable — the run proceeds degraded with whatever
+//      ready_received we have.
+//   5. Publish the barrier (target_epoch = now + BARRIER_SAFETY_GAP) so
+//      every worker fires at the same wall-clock instant.
+//   6. Sleep RUN_DURATION (no workload.completed signal exists today —
+//      workers self-terminate after orders_per_bot).
+//   7. DELETE the slot and publish status=completed.
+//
+// On any error in 1–5, fail the run via the same status pipeline and
+// release the slot if it was allocated. The per-session goroutine owns
+// cleanup; if it dies before step 7, the next controller startup's
+// recovery sweep marks the run failed.
 type Runner struct {
 	sessions *SessionManager
 	store    *store.Store
@@ -96,9 +116,9 @@ func (r *Runner) Start(parent context.Context, req topics.BenchmarkRequested) {
 	go r.run(ctx, sess)
 }
 
-// run is the per-session goroutine. Walks through the lifecycle defined in
-// CONVENTIONS.md §9 and BOT_FLEET_PIPELINE.md §3, publishing
-// benchmark.status.updated at every transition.
+// run is the per-session goroutine. Walks through the lifecycle outlined on
+// the Runner type above (steps 1-7), publishing benchmark.status.updated on
+// every transition so submission-api's consumer can keep the runs row fresh.
 func (r *Runner) run(ctx context.Context, sess *Session) {
 	log := r.log.With("session_id", sess.SessionID, "submission_id", sess.SubmissionID)
 
@@ -170,9 +190,11 @@ func (r *Runner) run(ctx context.Context, sess *Session) {
 	r.transition(ctx, sess, topics.RunStatusRunning, "bots firing", log)
 
 	// 6. Bound the run. Workers self-terminate after sending orders_per_bot;
-	// this is the upper bound on how long we wait before cleanup. No
-	// workload-completed signal exists yet (open question #2 in
-	// BOT_FLEET_PIPELINE.md §9).
+	// RUN_DURATION is the upper bound on how long we wait before forcing
+	// cleanup. There is no workload.completed signal back from the workers
+	// today — adding one is a future schema item but not blocking, because
+	// the orders_per_bot × N math gives the controller a reasonable upper
+	// bound for any given scenario, and RUN_DURATION just has to exceed that.
 	select {
 	case <-time.After(r.scenario.RunDuration):
 	case <-ctx.Done():

@@ -18,8 +18,12 @@ const (
 // benchmark.requested → spawn a new session runner.
 // bot.ready           → demultiplex by session_id into the matching runner.
 //
-// Both consumers are single-replica (CONVENTIONS.md §9). One process means
-// one consumer per topic; partitions on each topic balance to this one pod.
+// Both readers are scoped to this single-replica controller (the service is
+// architecturally locked at 1 pod, no sharding). One process means one
+// consumer per topic; whatever partitions each topic has all balance to
+// this pod. When/if the controller is ever multi-shard, bot.ready's
+// session-keyed partitioning lets a future shard fan in only the sessions
+// it owns — but that's a v2 problem; v1 is single-replica.
 type Consumer struct {
 	benchmarkReader *kafka.Reader
 	botReadyReader  *kafka.Reader

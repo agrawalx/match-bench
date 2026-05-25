@@ -63,7 +63,12 @@ type InFlightRun struct {
 }
 
 // ListInFlightRuns returns every runs row in a non-terminal state.
-// The controller marks each of them failed on startup per CONVENTIONS.md §9.
+//
+// The controller is single-replica and architecturally locked at 1; on a
+// restart there can be runs frozen mid-flight (the per-session goroutine
+// died with the process). v1 crash recovery is "mark-failed-on-restart":
+// every row returned by this query gets MarkRunFailed'd before consumers
+// start. No resume logic. The user re-triggers via the frontend.
 func (s *Store) ListInFlightRuns(ctx context.Context) ([]InFlightRun, error) {
 	rows, err := s.pool.Query(ctx,
 		`SELECT session_id, submission_id, status
@@ -88,14 +93,22 @@ func (s *Store) ListInFlightRuns(ctx context.Context) ([]InFlightRun, error) {
 }
 
 // MarkRunFailed is the controller's only direct write to the runs table.
-// Used exclusively by the startup recovery path (CONVENTIONS.md §9 + §6.1):
-// every other status change flows through benchmark.status.updated Kafka
-// messages consumed by submission-api.
 //
-// The synchronous DB write here is intentional: recovery must complete
-// before the controller starts consuming benchmark.requested, otherwise a
-// new click for a submission whose previous run is still in-flight will
-// see "active run exists" and be returned the dead session_id.
+// HARD INVARIANT for the rest of the platform: only the bot-fleet-controller
+// may write the terminal statuses 'completed' or 'failed' to runs.status.
+// Every other status change flows through a benchmark.status.updated Kafka
+// message produced by this service and consumed by submission-api.
+//
+// This function is the single, explicit exception — used only by the
+// startup recovery path. The exception exists because recovery must
+// complete BEFORE the controller starts consuming benchmark.requested:
+// otherwise a new click for a submission whose previous run is still
+// in-flight will see "active run exists" (partial unique index on
+// runs.submission_id WHERE status NOT IN ('completed','failed')) and be
+// returned the dead session_id of the abandoned run.
+//
+// Do not add other callers. If you think you need one, the answer is
+// almost always "produce a benchmark.status.updated message" instead.
 func (s *Store) MarkRunFailed(ctx context.Context, sessionID, message string) error {
 	tag, err := s.pool.Exec(ctx,
 		`UPDATE runs

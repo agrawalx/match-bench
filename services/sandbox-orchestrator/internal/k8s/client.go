@@ -8,8 +8,12 @@ import (
 
 // NewClient builds a kubernetes.Interface using in-cluster config when running
 // inside a pod, falling back to kubeconfig for local dev.
-// Mirrors services/build-worker/internal/k8s/spawner.go:loadK8sConfig per
-// CONVENTIONS.md §7 ("copy verbatim, do not invent variations").
+//
+// This is the standard k8s config loader for every service in this repo.
+// Copy it verbatim into any new service that needs the API — do not invent
+// variations. Order matters: rest.InClusterConfig() succeeds only when the
+// process is running inside a pod with a mounted ServiceAccount token, so
+// the kubeconfig fallback only fires for local dev.
 func NewClient() (kubernetes.Interface, error) {
 	cfg, err := loadConfig()
 	if err != nil {

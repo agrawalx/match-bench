@@ -14,8 +14,12 @@ import (
 )
 
 // createSlotRequest is the controller → orchestrator contract for POST /slots.
-// slot_id is the controller's session_id (see CONVENTIONS.md §10: orchestrator
-// does not mint its own IDs).
+//
+// slot_id MUST be the controller's session_id verbatim. The orchestrator
+// never mints its own IDs — having a single ID for the run means the
+// algo Pod, Service, and any log/metric record can be cross-referenced
+// without translation. The image ref is also supplied by the caller;
+// the orchestrator does not assemble Harbor refs itself.
 type createSlotRequest struct {
 	SlotID string `json:"slot_id"`
 	Image  string `json:"image"`

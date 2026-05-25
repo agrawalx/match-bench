@@ -9,8 +9,12 @@ import (
 )
 
 // deriveState is the only piece of subtle logic in the orchestrator;
-// these tests cover the failure-vs-creating transitions that the
-// CONVENTIONS.md §10 lifecycle contract depends on.
+// these tests cover the failure-vs-creating transitions that the slot
+// lifecycle depends on. The controller polls GET /slots/{id} and treats
+// state=ready as the signal to publish workload.assignments; if
+// deriveState returned "creating" for a pod that was actually stuck
+// (e.g. ImagePullBackOff), the controller would wait the full
+// DEPLOY_DEADLINE before failing the run rather than failing fast.
 func TestDeriveState(t *testing.T) {
 	cases := []struct {
 		name      string
@@ -143,9 +147,16 @@ func TestPodSpecLabels(t *testing.T) {
 	}
 }
 
-// TestGuaranteedQoSShape locks the resource shape that fairness depends on:
-// request == limit for both CPU and memory. Without this the pod is Burstable
-// and the kubelet's CPU manager will not pin cpuset. See SANDBOX_FAIRNESS.md.
+// TestGuaranteedQoSShape locks the resource shape that fairness depends on.
+//
+// Kubernetes assigns Guaranteed QoS only when, for every container, every
+// resource has request == limit AND CPU is specified as an integer count
+// (not millicores). Burstable or BestEffort QoS makes algo pods eligible
+// for kubelet CPU throttling under contention — fatal for HFT-style p99
+// claims. Guaranteed QoS is also the precondition for the kubelet CPU
+// manager (when configured with cpuManagerPolicy=static) to give the pod
+// exclusive cpuset pinning; without that, two pods can share the same
+// physical cores even though they each "own" 2 CPUs.
 func TestGuaranteedQoSShape(t *testing.T) {
 	mgr := &Manager{namespace: "sandbox", cpu: "2", memory: "1Gi"}
 	pod := mgr.podSpec("s1", "img:tag", 8080)

@@ -10,19 +10,28 @@ import (
 	"github.com/iicpc/schemas/topics"
 )
 
-// RecoverInFlightRuns marks every in-flight run as failed on controller
-// startup. See CONVENTIONS.md §9 — this is the v1 recovery strategy:
-// no resume logic, the user re-triggers.
+// RecoverInFlightRuns marks every in-flight run as failed on controller startup.
 //
-// We write directly to PostgreSQL here (the one documented exception to
-// "submission-api is the writer" in CONVENTIONS.md §6.1) because the recovery
-// MUST complete synchronously before consuming benchmark.requested: a stale
-// non-terminal run blocks the partial unique index and would cause a new
-// click to receive the dead session_id.
+// v1 crash recovery strategy: no resume logic. Every run row in a non-terminal
+// state (requested|deploying|waiting_ready|barrier_fired|running) is updated
+// to 'failed' with message="controller restart — re-trigger benchmark". The
+// user re-triggers via the frontend. Resume would require reconstructing the
+// per-session goroutine state (slot endpoint, ready-set, barrier epoch, etc.)
+// from external sources that don't have it — not worth building until v2.
 //
-// We also publish benchmark.status.updated so any downstream consumers
-// (future sse-gateway) observe the failure — best-effort, but the
-// authoritative state is already in the runs table.
+// HARD INVARIANT under normal operation: only submission-api writes terminal
+// runs.status values, via its consumer of benchmark.status.updated produced
+// by this controller. This recovery path is the SINGLE EXPLICIT EXCEPTION:
+// we write 'failed' directly to PostgreSQL because recovery MUST complete
+// synchronously BEFORE the benchmark.requested consumer starts. Otherwise a
+// stale non-terminal row blocks the partial unique index on submission_id,
+// and a new click for that submission gets back the dead session_id instead
+// of starting a fresh run.
+//
+// We also publish benchmark.status.updated as a courtesy so any downstream
+// consumers (e.g. a future sse-gateway pushing live status to the frontend)
+// observe the failure — best-effort, the authoritative state is already in
+// PostgreSQL by the time we publish.
 func RecoverInFlightRuns(ctx context.Context, st *store.Store, producer *Producer, log *slog.Logger) error {
 	runs, err := st.ListInFlightRuns(ctx)
 	if err != nil {

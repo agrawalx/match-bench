@@ -1,7 +1,16 @@
 // Package orchestrator is the HTTP client for sandbox-orchestrator.
-// Mirrors the JSON contract documented in services/sandbox-orchestrator.
-// The controller treats the orchestrator as a black box managing one Pod +
-// Service per slot — see CONVENTIONS.md §10.
+//
+// Wire contract (defined in services/sandbox-orchestrator):
+//   POST   /slots             create a slot for {slot_id, image, port}
+//   GET    /slots/{slot_id}   poll current state
+//   DELETE /slots/{slot_id}   release Pod + Service
+//
+// The controller treats the orchestrator as a black box: each slot is one
+// Pod and one Service (both named algo-{slot_id}), created together on
+// POST and released together on DELETE. slot_id is always the controller's
+// session_id verbatim — the orchestrator does not mint its own IDs. Image
+// ref is supplied by the caller (controller composes the Harbor reference
+// from HARBOR_PRODUCTION_ENDPOINT and HARBOR_PROJECT env).
 package orchestrator
 
 import (

@@ -81,6 +81,19 @@ func (c *BenchmarkStatusConsumer) Start(ctx context.Context) {
 			continue
 		}
 
+		// Roll the child's new status up into the parent run-group's denormalized
+		// status field. A failed rollup is logged but not fatal — the children
+		// are the source of truth, so a stale group row is a UX/leaderboard
+		// issue, not a correctness issue. We commit the Kafka offset regardless.
+		if msg.RunGroupID != "" {
+			if err := c.pg.RecomputeRunGroupStatus(ctx, msg.RunGroupID); err != nil {
+				c.log.Warn("recompute run-group status failed",
+					"run_group_id", msg.RunGroupID,
+					"session_id", msg.SessionID,
+					"error", err)
+			}
+		}
+
 		if err := c.reader.CommitMessages(ctx, m); err != nil {
 			c.log.Warn("commit failed", "session_id", msg.SessionID, "error", err)
 		}

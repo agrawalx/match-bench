@@ -51,15 +51,22 @@ spec:
                   key: harbor-production-endpoint
             - name: HARBOR_PROJECT
               value: agrawalx
-            # v1 hardcoded scenario knobs (replace when scenarios table lands).
-            - name: SCENARIO_WORKER_COUNT
-              value: "1"
-            - name: SCENARIO_BOT_COUNT
-              value: "10"
-            - name: SCENARIO_ORDERS_PER_BOT
-              value: "100"
-            - name: RUN_DURATION
-              value: "90s"
+            # Scenarios now live in the PostgreSQL `scenarios` table, seeded
+            # by submission-api on startup (constant / spike / ramp). The
+            # controller loads the scenario for each benchmark.requested by
+            # scenario_id; there are no scenario knobs in this deployment
+            # any longer. To retune a scenario, edit the JSON in the
+            # scenarios row directly.
+            #
+            # The few deploy-wide knobs that ARE per-deployment (deadlines,
+            # FIX protocol version) fall back to sensible defaults in
+            # main.go; override only if needed.
+            # - name: DEPLOY_DEADLINE
+            #   value: "60s"
+            # - name: READY_DEADLINE
+            #   value: "30s"
+            # - name: BARRIER_SAFETY_GAP
+            #   value: "500ms"
             # Uncomment when Loki is deployed.
             # - name: LOKI_URL
             #   value: http://loki.monitoring.svc.cluster.local:3100

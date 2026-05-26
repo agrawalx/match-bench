@@ -53,10 +53,17 @@ const (
 // BenchmarkRequested is published to "benchmark.requested" by submission-api when
 // the user clicks "start benchmark" on a submission. Consumed by: bot-fleet-controller.
 // Key: session_id (so a future multi-replica controller could shard by session).
+//
+// One "start benchmark" click expands into a run-group with multiple child sessions
+// (one per scenario in the scenarios table — constant, spike, ramp in v1). The
+// submission-api publishes one BenchmarkRequested per session, all sharing the same
+// RunGroupID. Each message carries the ScenarioID the controller should load.
 type BenchmarkRequested struct {
 	SessionID    string    `json:"session_id"`    // UUID v7, minted by submission-api
 	SubmissionID string    `json:"submission_id"` // referenced submission (must be 'ready')
 	ContestantID string    `json:"contestant_id"` // reserved; empty until OAuth
+	RunGroupID   string    `json:"run_group_id"`  // parent group; shared across the run-group's sessions
+	ScenarioID   string    `json:"scenario_id"`   // which row in scenarios table this session runs
 	RequestedAt  time.Time `json:"requested_at"`
 }
 
@@ -72,6 +79,7 @@ type BenchmarkRequested struct {
 type BenchmarkStatusUpdated struct {
 	SessionID    string    `json:"session_id"`
 	SubmissionID string    `json:"submission_id"` // included for consumers that index by submission
+	RunGroupID   string    `json:"run_group_id"`  // parent group; allows the frontend / SSE to correlate sibling sessions
 	Status       string    `json:"status"`        // one of RunStatus* constants above
 	Message      string    `json:"message"`
 	UpdatedAt    time.Time `json:"updated_at"`
@@ -88,27 +96,58 @@ type SubmissionStatusUpdated struct {
 
 // WorkloadSpec is published to "workload.assignments" by the test controller.
 // Each message is keyed by session_id:worker_index and consumed by one bot-fleet worker.
+//
+// The flat (BotCount, OrdersPerBot, ProfileMix) shape is replaced by a list of
+// TaskSpec values. Every TaskSpec is one tokio task in the worker = one TCP
+// connection = one constant-rate sender. Load-pattern variation (spike, ramp)
+// emerges from the schedule of TaskSpecs: tasks start at their StartOffsetNs
+// and stop after DurationNs. Bots never change behavior mid-flight.
 type WorkloadSpec struct {
-	SessionID        string             `json:"session_id"`
-	SubmissionID     string             `json:"submission_id"`
-	ContestantID     string             `json:"contestant_id"`
-	TargetHost       string             `json:"target_host"` // IP of contestant pod
-	TargetPort       uint16             `json:"target_port"`
-	Protocol         string             `json:"protocol"` // FIX | REST | WS
-	WorkerIndex      uint32             `json:"worker_index"`
-	WorkerCount      uint32             `json:"worker_count"` // Total worker pods
-	BotCount         uint32             `json:"bot_count"`
-	OrdersPerBot     uint32             `json:"orders_per_bot"` // Currently, every bot will run for 60s
-	GlobalSeed       uint64             `json:"global_seed"`
-	FIXVersion       string             `json:"fix_version"`
-	ProfileMix       []BotProfileWeight `json:"profile_mix"`
-	ConnectTimeoutMS uint64             `json:"connect_timeout_ms"`
-	WriteTimeoutMS   uint64             `json:"write_timeout_ms"`
+	SessionID        string     `json:"session_id"`
+	SubmissionID     string     `json:"submission_id"`
+	ContestantID     string     `json:"contestant_id"`
+	TargetHost       string     `json:"target_host"` // IP of contestant pod
+	TargetPort       uint16     `json:"target_port"`
+	Protocol         string     `json:"protocol"` // FIX | REST | WS
+	WorkerIndex      uint32     `json:"worker_index"`
+	WorkerCount      uint32     `json:"worker_count"` // Total worker pods
+	GlobalSeed       uint64     `json:"global_seed"`
+	FIXVersion       string     `json:"fix_version"`
+	ConnectTimeoutMS uint64     `json:"connect_timeout_ms"`
+	WriteTimeoutMS   uint64     `json:"write_timeout_ms"`
+	// barrier_epoch_ns was historically carried here as a "fallback" if the
+	// BarrierEvent was lost, but workers never read this field — they wait
+	// for BarrierEvent (kafka::wait_for_barrier) and use its target_epoch_unix_nanos.
+	// Removed because computing the epoch before fan-in meant it was stale
+	// (up to ReadyDeadline seconds in the past) by the time workers received
+	// the BarrierEvent. The controller now computes the epoch AFTER fan-in
+	// using the same BarrierSafetyGap, so the BarrierEvent value is fresh.
+	Tasks []TaskSpec `json:"tasks"` // this worker's slice of the scenario's task list
 }
 
-type BotProfileWeight struct {
-	Profile string `json:"profile"` // market_maker | aggressive_taker | canceller
-	Weight  uint32 `json:"weight"`
+// TaskSpec is one sender: one tokio task, one TCP connection, one constant rate.
+//
+// All tasks pre-open their TCP connection at barrier time (avoids cold-start jitter
+// contaminating spike measurements). Each task sleeps until BarrierEpochNs +
+// StartOffsetNs, then sends at TargetRPS via fixed-interval pacing until
+// BarrierEpochNs + StartOffsetNs + DurationNs.
+type TaskSpec struct {
+	TaskID        uint32 `json:"task_id"`
+	Profile       string `json:"profile"`         // hft | retail | institutional
+	TargetRPS     uint32 `json:"target_rps"`      // orders per second, constant for this task's lifetime
+	StartOffsetNs uint64 `json:"start_offset_ns"` // relative to barrier epoch
+	DurationNs    uint64 `json:"duration_ns"`     // how long this task fires
+}
+
+// Scenario is the controller-side representation of a row in the scenarios table.
+// Not a Kafka message — included here because the bot-fleet-controller and
+// submission-api both read/write the same shape, and JSONB column storage uses
+// the same field names.
+type Scenario struct {
+	ScenarioID string     `json:"scenario_id"`
+	Name       string     `json:"name"`        // constant | spike | ramp
+	DurationNs uint64     `json:"duration_ns"` // wall-time of the session
+	TaskSpecs  []TaskSpec `json:"task_specs"`  // full task list — sharded across worker pods by the controller
 }
 
 // BarrierEvent is published to "barrier" once all workers have reported ready.
@@ -118,13 +157,17 @@ type BarrierEvent struct {
 }
 
 // ReadySignal is published by each bot-fleet worker to "bot.ready".
+//
+// TaskCount is the number of TaskSpec entries assigned to this worker. The
+// old name BotCount referred to the pre-scenario bot_count knob and is gone;
+// the JSON key is now "task_count" to match what the Rust producer emits.
 type ReadySignal struct {
 	SessionID        string `json:"session_id"`
 	SubmissionID     string `json:"submission_id"`
 	WorkerID         string `json:"worker_id"`
 	WorkerIndex      uint32 `json:"worker_index"`
 	WorkerCount      uint32 `json:"worker_count"`
-	BotCount         uint32 `json:"bot_count"`
+	TaskCount        uint32 `json:"task_count"`
 	ConnectedCount   uint32 `json:"connected_count"`
 	ReadyAtUnixNanos uint64 `json:"ready_at_unix_nanos"`
 }
@@ -136,14 +179,39 @@ type OrderSentBatch struct {
 	Events    []OrderSentEvent `json:"events" msgpack:"events"`
 }
 
+// OrderSentEvent records one outbound order with the three bot-side
+// timestamps the telemetry-ingester needs to detect coordinated omission.
+//
+// Timestamp definitions (all CLOCK_REALTIME nanoseconds, bot-side):
+//   - TargetSendTSNS (t0): the schedule's intended fire time. Deterministic
+//     from barrier_epoch + task.start_offset + seq*(1e9/target_rps).
+//     Captured BEFORE sleep_until — never a clock read. The gap
+//     SendTSNS - TargetSendTSNS IS coordinated omission, by definition.
+//   - SendTSNS (t1): wall-clock immediately after the TCP write returned.
+//   - RecvDoneTSNS (r9): wall-clock immediately after the FIRST response for
+//     this order was read off the socket. Subsequent ExecutionReports for
+//     the same ClOrdID (partial fills, final fills) are ignored.
+//
+// TimedOut=true with RecvDoneTSNS=0 means the watchdog evicted the order at
+// the 5s deadline because no response ever arrived. Distinguishes "lost
+// response" from "response at exactly t=0", which would otherwise be
+// ambiguous.
+//
+// REST/WS caveat: response capture is FIX-only in v1. For REST and WS the
+// bot emits with RecvDoneTSNS=0 and TimedOut=false (legacy behaviour).
+//
+// task_id replaces the old bot_id field (per-task loop, not per-bot loop).
 type OrderSentEvent struct {
-	SessionID    string `json:"session_id" msgpack:"session_id"`
-	SubmissionID string `json:"submission_id" msgpack:"submission_id"`
-	WorkerID     string `json:"worker_id" msgpack:"worker_id"`
-	BotID        uint64 `json:"bot_id" msgpack:"bot_id"`
-	OrderID      string `json:"order_id" msgpack:"order_id"`
-	SendTSNS     uint64 `json:"send_ts_ns" msgpack:"send_ts_ns"`
-	Price        uint64 `json:"price" msgpack:"price"`
-	Qty          uint64 `json:"qty" msgpack:"qty"`
-	Side         string `json:"side" msgpack:"side"` // BUY | SELL
+	SessionID        string `json:"session_id" msgpack:"session_id"`
+	SubmissionID     string `json:"submission_id" msgpack:"submission_id"`
+	WorkerID         string `json:"worker_id" msgpack:"worker_id"`
+	TaskID           uint32 `json:"task_id" msgpack:"task_id"`
+	OrderID          string `json:"order_id" msgpack:"order_id"`
+	TargetSendTSNS   uint64 `json:"target_send_ts_ns" msgpack:"target_send_ts_ns"`
+	SendTSNS         uint64 `json:"send_ts_ns" msgpack:"send_ts_ns"`
+	RecvDoneTSNS     uint64 `json:"recv_done_ts_ns" msgpack:"recv_done_ts_ns"`
+	TimedOut         bool   `json:"timed_out" msgpack:"timed_out"`
+	Price            uint64 `json:"price" msgpack:"price"`
+	Qty              uint64 `json:"qty" msgpack:"qty"`
+	Side             string `json:"side" msgpack:"side"` // BUY | SELL
 }

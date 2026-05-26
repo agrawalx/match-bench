@@ -15,6 +15,7 @@ import (
 	"github.com/iicpc/submission-api/internal/consumer"
 	"github.com/iicpc/submission-api/internal/handler"
 	"github.com/iicpc/submission-api/internal/publisher"
+	"github.com/iicpc/submission-api/internal/scenarios"
 	"github.com/iicpc/submission-api/internal/store"
 )
 
@@ -53,6 +54,32 @@ func main() {
 	}
 	defer pgStore.Close()
 
+	// Seed the canonical load-test scenarios (constant, spike, ramp) into the
+	// scenarios table. The seeder uses INSERT ... ON CONFLICT (name) DO NOTHING,
+	// so a judge who tweaked a row by hand will not have their changes
+	// overwritten on the next service restart. First boot of a fresh database
+	// populates all three; subsequent boots are a no-op.
+	scenarioRows, err := scenarios.BuildAll()
+	if err != nil {
+		log.Error("build scenarios failed", "error", err)
+		os.Exit(1)
+	}
+	storeRows := make([]store.ScenarioRow, len(scenarioRows))
+	for i, sr := range scenarioRows {
+		storeRows[i] = store.ScenarioRow{
+			ScenarioID: sr.ScenarioID,
+			Name:       sr.Name,
+			SortOrder:  sr.SortOrder,
+			DurationNs: sr.DurationNs,
+			TaskSpecs:  sr.TaskSpecs,
+		}
+	}
+	if err := pgStore.SeedScenarios(ctx, storeRows); err != nil {
+		log.Error("seed scenarios failed", "error", err)
+		os.Exit(1)
+	}
+	log.Info("scenarios seeded", "count", len(storeRows))
+
 	kafkaPub := publisher.NewKafkaPublisher(kafkaBrokers, log)
 	defer kafkaPub.Close()
 
@@ -84,7 +111,12 @@ func main() {
 	r.Get("/health", handler.Health(log))
 	r.Post("/submit", handler.Submit(minioStore, pgStore, kafkaPub, log))
 	r.Get("/submissions/{id}", handler.GetSubmission(pgStore, log))
+	// POST /submissions/{id}/benchmark mints one run-group and N child runs
+	// (one per row in the scenarios table). The legacy POST /benchmarks/{id}
+	// path is kept as an alias so older frontends do not break.
+	r.Post("/submissions/{submission_id}/benchmark", handler.StartBenchmark(pgStore, kafkaPub, log))
 	r.Post("/benchmarks/{submission_id}", handler.StartBenchmark(pgStore, kafkaPub, log))
+	r.Get("/run-groups/{run_group_id}", handler.GetRunGroup(pgStore, log))
 	r.Get("/runs/{session_id}", handler.GetRun(pgStore, log))
 
 	srv := &http.Server{

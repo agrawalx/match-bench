@@ -1,12 +1,5 @@
-mod config;
-mod errors;
-mod fix;
-mod kafka;
-mod telemetry;
-mod time;
-mod worker;
-
 use anyhow::Result;
+use iicpc_bot_fleet::{config, worker};
 use tracing_subscriber::EnvFilter;
 
 #[tokio::main(flavor = "multi_thread")]

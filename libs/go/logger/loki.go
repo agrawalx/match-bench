@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math/rand/v2"
 	"net/http"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -18,6 +20,23 @@ import (
 
 const defaultServiceName = "iicpc"
 
+// cachedHostname avoids repeated os.Hostname() syscalls when DefaultConfig
+// or normalizeConfig are called multiple times during setup.
+var cachedHostname = func() string {
+	h, _ := os.Hostname()
+	return h
+}()
+
+var slicePool = sync.Pool{
+	New: func() any {
+		s := make([][]string, 0, 256)
+		return &s
+	},
+}
+
+var warnBatchSizeOnce sync.Once
+
+// we use empty structs to prevent collisions in context field names
 type contextAttrsKey struct{}
 
 // Config controls application logging and optional Loki shipping.
@@ -39,20 +58,107 @@ type Config struct {
 // DefaultConfig returns production-shaped defaults with Loki disabled unless
 // LOKI_URL is provided through the environment.
 func DefaultConfig() Config {
-	host, _ := os.Hostname()
 	return Config{
 		ServiceName: defaultServiceName,
 		Environment: envOr("ENVIRONMENT", envOr("APP_ENV", "local")),
-		InstanceID:  host,
+		InstanceID:  cachedHostname,
 		Version:     envOr("SERVICE_VERSION", "dev"),
 		LokiURL:     os.Getenv("LOKI_URL"),
 		Level:       parseLevel(envOr("LOG_LEVEL", "info")),
 		QueueSize:   10000,
 		BatchSize:   256,
-		BatchWait:   500*time.Millisecond,
-		HTTPTimeout: 5*time.Second,
+		BatchWait:   500 * time.Millisecond,
+		HTTPTimeout: 5 * time.Second,
 		MaxRetries:  3,
 	}
+}
+
+func normalizeConfig(cfg Config) Config {
+	defaults := DefaultConfig()
+	if cfg.ServiceName == "" {
+		cfg.ServiceName = defaults.ServiceName
+	}
+	if cfg.Environment == "" {
+		cfg.Environment = defaults.Environment
+	}
+	if cfg.InstanceID == "" {
+		cfg.InstanceID = defaults.InstanceID
+	}
+	if cfg.Version == "" {
+		cfg.Version = defaults.Version
+	}
+	if cfg.QueueSize <= 0 {
+		cfg.QueueSize = defaults.QueueSize
+	}
+	if cfg.BatchSize <= 0 {
+		cfg.BatchSize = defaults.BatchSize
+	}
+	if cfg.BatchSize > cfg.QueueSize {
+		warnBatchSizeOnce.Do(func() {
+			fmt.Fprintf(os.Stderr, "loki client warning: BatchSize (%d) is larger than QueueSize (%d). Capping BatchSize to QueueSize (%d) to ensure flushing by count works.\n", cfg.BatchSize, cfg.QueueSize, cfg.QueueSize)
+		})
+		cfg.BatchSize = cfg.QueueSize
+	}
+	if cfg.BatchWait <= 0 {
+		cfg.BatchWait = defaults.BatchWait
+	}
+	if cfg.HTTPTimeout <= 0 {
+		cfg.HTTPTimeout = defaults.HTTPTimeout
+	}
+	if cfg.MaxRetries <= 0 {
+		cfg.MaxRetries = defaults.MaxRetries
+	}
+	return cfg
+}
+
+func lokiPushURL(baseURL string) string {
+	if strings.HasSuffix(baseURL, "/loki/api/v1/push") {
+		return baseURL
+	}
+	return strings.TrimSuffix(baseURL, "/") + "/loki/api/v1/push"
+}
+
+func lokiLabels(cfg Config) map[string]string {
+	labels := map[string]string{
+		"service_name": cfg.ServiceName,
+		"environment":  cfg.Environment,
+	}
+	if cfg.Version != "" {
+		labels["version"] = cfg.Version
+	}
+	return labels
+}
+
+func serviceAttrs(cfg Config) []slog.Attr {
+	attrs := []slog.Attr{
+		slog.String("service_name", cfg.ServiceName),
+		slog.String("environment", cfg.Environment),
+		slog.String("instance", cfg.InstanceID),
+	}
+	if cfg.Version != "" {
+		attrs = append(attrs, slog.String("version", cfg.Version))
+	}
+	return attrs
+}
+
+func parseLevel(value string) slog.Level {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "debug":
+		return slog.LevelDebug
+	case "warn", "warning":
+		return slog.LevelWarn
+	case "error":
+		return slog.LevelError
+	default:
+		return slog.LevelInfo
+	}
+}
+
+func envOr(key, fallback string) string {
+	if value := os.Getenv(key); value != "" {
+		return value
+	}
+	return fallback
 }
 
 // NewProductionLogger builds the process logger used by services.
@@ -79,6 +185,48 @@ func NewProductionLogger(cfg Config) (*slog.Logger, *LokiClient) {
 	handler = &ContextHandler{next: handler}
 
 	return slog.New(handler), client
+}
+
+// NewLokiClient keeps the old constructor while using production defaults.
+func NewLokiClient(baseURL string) *LokiClient {
+	cfg := DefaultConfig()
+	cfg.LokiURL = baseURL
+	return NewLokiClientWithConfig(cfg)
+}
+
+// NewLokiClientWithConfig creates and starts a Loki client.
+// Panics if cfg.LokiURL is not empty and is invalid (missing scheme or host).
+func NewLokiClientWithConfig(cfg Config) *LokiClient {
+	cfg = normalizeConfig(cfg)
+
+	if cfg.LokiURL != "" {
+		parsed, err := url.Parse(cfg.LokiURL)
+		if err != nil {
+			panic(fmt.Sprintf("invalid Loki URL %q: %v", cfg.LokiURL, err))
+		}
+		if parsed.Scheme == "" || parsed.Host == "" {
+			panic(fmt.Sprintf("invalid Loki URL %q: scheme and host are required", cfg.LokiURL))
+		}
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	c := &LokiClient{
+		url:        lokiPushURL(cfg.LokiURL),
+		labels:     lokiLabels(cfg),
+		attrs:      serviceAttrs(cfg),
+		httpClient: &http.Client{Timeout: cfg.HTTPTimeout},
+		ch:         make(chan LokiEntry, cfg.QueueSize),
+		doneCh:     make(chan struct{}),
+		ctx:        ctx,
+		cancel:     cancel,
+		batchSize:  cfg.BatchSize,
+		batchWait:  cfg.BatchWait,
+		maxRetries: cfg.MaxRetries,
+	}
+
+	go c.start()
+	return c
 }
 
 // WithAttrs returns a child context whose attributes are appended to every
@@ -130,68 +278,67 @@ type LokiEntry struct {
 	Line      string
 }
 
+type lokiPushRequest struct {
+	Streams []lokiStream `json:"streams"`
+}
+
+type lokiStream struct {
+	Stream map[string]string `json:"stream"`
+	Values [][]string        `json:"values"`
+}
+
 // LokiClient handles bounded queueing, batching, retrying, and sending logs to
 // Grafana Loki's push API.
 type LokiClient struct {
 	url        string
-	labels     map[string]string
-	attrs      []slog.Attr
+	labels     map[string]string // only Loki-specific
+	attrs      []slog.Attr       // useful to both Loki and slog
 	httpClient *http.Client
 	ch         chan LokiEntry
 	doneCh     chan struct{}
 	closeOnce  sync.Once
+	closed     atomic.Bool
 	ctx        context.Context
 	cancel     context.CancelFunc
-	queueDrops atomic.Uint64
-	sendDrops  atomic.Uint64
+	queueDrops atomic.Uint64 // logs dropped due to full queue
+	sendDrops  atomic.Uint64 // logs dropped due to HTTP errors
 	batchSize  int
 	batchWait  time.Duration
 	maxRetries int
 }
 
-// NewLokiClient keeps the old constructor while using production defaults.
-func NewLokiClient(baseURL string) *LokiClient {
-	cfg := DefaultConfig()
-	cfg.LokiURL = baseURL
-	return NewLokiClientWithConfig(cfg)
-}
-
-// NewLokiClientWithConfig creates and starts a Loki client.
-func NewLokiClientWithConfig(cfg Config) *LokiClient {
-	cfg = normalizeConfig(cfg)
-	ctx, cancel := context.WithCancel(context.Background())
-
-	c := &LokiClient{
-		url:        lokiPushURL(cfg.LokiURL),
-		labels:     lokiLabels(cfg),
-		attrs:      serviceAttrs(cfg),
-		httpClient: &http.Client{Timeout: cfg.HTTPTimeout},
-		ch:         make(chan LokiEntry, cfg.QueueSize),
-		doneCh:     make(chan struct{}),
-		ctx:        ctx,
-		cancel:     cancel,
-		batchSize:  cfg.BatchSize,
-		batchWait:  cfg.BatchWait,
-		maxRetries: cfg.MaxRetries,
+// QueueLog pushes a serialized log entry to the bounded Loki queue.
+// Safe to call concurrently with Close — silently drops after shutdown.
+// Uses an atomic check as a fast-path gate and a deferred recover to absorb
+// the rare TOCTOU panic if Close fires between the flag check and the send.
+func (c *LokiClient) QueueLog(t time.Time, line string) {
+	if c.closed.Load() {
+		return
 	}
 
-	go c.start()
-	return c
-}
+	defer func() {
+		if r := recover(); r != nil {
+			// Channel closed between the atomic check and the send.
+			// Silently drop — this is a shutdown race, not backpressure.
+		}
+	}()
 
-// QueueLog pushes a serialized log entry to the bounded Loki queue.
-func (c *LokiClient) QueueLog(t time.Time, line string) {
 	select {
 	case c.ch <- LokiEntry{Timestamp: t, Line: line}:
 	default:
-		c.queueDrops.Add(1)
-		fmt.Fprintf(os.Stderr, "loki queue full, dropping log line\n")
+		drops := c.queueDrops.Add(1)
+		if drops == 1 || drops%1000 == 0 {
+			fmt.Fprintf(os.Stderr, "loki queue full, dropping log line (dropped %d so far)\n", drops)
+		}
 	}
 }
 
 // Close gracefully stops the worker and flushes any remaining queued logs.
+// Note: Close blocks until all queued logs are flushed. If a Loki push retry is in progress,
+// it can block Close for up to HTTPTimeout per attempt before completing.
 func (c *LokiClient) Close() {
 	c.closeOnce.Do(func() {
+		c.closed.Store(true)
 		close(c.ch)
 		<-c.doneCh
 		c.cancel()
@@ -204,13 +351,14 @@ func (c *LokiClient) Close() {
 	})
 }
 
-type lokiPushRequest struct {
-	Streams []lokiStream `json:"streams"`
+// QueueDrops returns the number of logs dropped because the queue was full.
+func (c *LokiClient) QueueDrops() uint64 {
+	return c.queueDrops.Load()
 }
 
-type lokiStream struct {
-	Stream map[string]string `json:"stream"`
-	Values [][]string        `json:"values"`
+// SendDrops returns the number of logs dropped because Loki push failed.
+func (c *LokiClient) SendDrops() uint64 {
+	return c.sendDrops.Load()
 }
 
 func (c *LokiClient) start() {
@@ -229,12 +377,12 @@ func (c *LokiClient) start() {
 			batch = append(batch, entry)
 			if len(batch) >= c.batchSize {
 				c.flush(batch)
-				batch = make([]LokiEntry, 0, c.batchSize)
+				batch = batch[:0]
 			}
 		case <-ticker.C:
 			if len(batch) > 0 {
 				c.flush(batch)
-				batch = make([]LokiEntry, 0, c.batchSize)
+				batch = batch[:0]
 			}
 		}
 	}
@@ -245,7 +393,8 @@ func (c *LokiClient) flush(batch []LokiEntry) {
 		return
 	}
 
-	values := make([][]string, 0, len(batch))
+	pValues := slicePool.Get().(*[][]string)
+	values := (*pValues)[:0]
 	for _, entry := range batch {
 		values = append(values, []string{
 			strconv.FormatInt(entry.Timestamp.UnixNano(), 10),
@@ -261,15 +410,31 @@ func (c *LokiClient) flush(batch []LokiEntry) {
 	}
 	data, err := json.Marshal(payload)
 	if err != nil {
+		for i := range values {
+			values[i] = nil
+		}
+		*pValues = values
+		slicePool.Put(pValues)
+
 		c.sendDrops.Add(uint64(len(batch)))
 		fmt.Fprintf(os.Stderr, "loki marshal failed: %v\n", err)
 		return
 	}
 
+	// Put the values slice back to pool after marshalling is done
+	// values was copied/serialized by json.Marshal, so we can recycle now
+	for i := range values {
+		values[i] = nil
+	}
+	*pValues = values
+	slicePool.Put(pValues)
+
 	delay := 100 * time.Millisecond
 	for attempt := 1; attempt <= c.maxRetries; attempt++ {
 		if attempt > 1 {
-			timer := time.NewTimer(delay)
+			// Add random jitter up to delay/2 to avoid thundering herd retry storms
+			jitter := time.Duration(rand.Int64N(int64(delay / 2)))
+			timer := time.NewTimer(delay + jitter)
 			select {
 			case <-c.ctx.Done():
 				timer.Stop()
@@ -314,13 +479,9 @@ func (c *LokiClient) flush(batch []LokiEntry) {
 	fmt.Fprintf(os.Stderr, "loki permanently dropped batch of %d log lines\n", len(batch))
 }
 
-type lokiWriter struct {
-	mu  sync.Mutex
-	buf bytes.Buffer
-}
-
-func (w *lokiWriter) Write(p []byte) (int, error) {
-	return w.buf.Write(p)
+type renderState struct {
+	buf     *bytes.Buffer
+	handler slog.Handler
 }
 
 type slogStep struct {
@@ -334,28 +495,49 @@ type LokiHandler struct {
 	client *LokiClient
 	next   slog.Handler
 	steps  []slogStep
-	writer *lokiWriter
-	render slog.Handler
+	pool   *sync.Pool
 }
 
 // NewLokiHandler wraps a LokiClient and fallback handler.
 func NewLokiHandler(client *LokiClient, fallback slog.Handler) *LokiHandler {
-	writer := &lokiWriter{}
-	render := slog.NewJSONHandler(writer, &slog.HandlerOptions{
-		Level: slog.LevelDebug,
-		ReplaceAttr: func(groups []string, attr slog.Attr) slog.Attr {
-			if attr.Key == slog.TimeKey {
-				attr.Value = slog.StringValue(attr.Value.Time().UTC().Format(time.RFC3339Nano))
+	return buildLokiHandler(client, fallback, nil)
+}
+
+func buildLokiHandler(client *LokiClient, next slog.Handler, steps []slogStep) *LokiHandler {
+	pool := &sync.Pool{
+		New: func() any {
+			buf := new(bytes.Buffer)
+			render := slog.NewJSONHandler(buf, &slog.HandlerOptions{
+				Level: slog.LevelDebug,
+				ReplaceAttr: func(groups []string, attr slog.Attr) slog.Attr {
+					if attr.Key == slog.TimeKey {
+						attr.Value = slog.StringValue(attr.Value.Time().UTC().Format(time.RFC3339Nano))
+					}
+					return attr
+				},
+			}).WithAttrs(client.attrs)
+
+			var handler slog.Handler = render
+			for _, step := range steps {
+				if step.isGroup {
+					handler = handler.WithGroup(step.group)
+				} else {
+					handler = handler.WithAttrs(step.attrs)
+				}
 			}
-			return attr
+
+			return &renderState{
+				buf:     buf,
+				handler: handler,
+			}
 		},
-	}).WithAttrs(client.attrs)
+	}
 
 	return &LokiHandler{
 		client: client,
-		next:   fallback,
-		writer: writer,
-		render: render,
+		next:   next,
+		steps:  steps,
+		pool:   pool,
 	}
 }
 
@@ -371,11 +553,15 @@ func (h *LokiHandler) Handle(ctx context.Context, record slog.Record) error {
 		return err
 	}
 
-	h.writer.mu.Lock()
-	h.writer.buf.Reset()
-	jsonErr := h.render.Handle(ctx, record)
-	line := strings.TrimSuffix(h.writer.buf.String(), "\n")
-	h.writer.mu.Unlock()
+	state := h.pool.Get().(*renderState)
+	state.buf.Reset()
+
+	jsonErr := state.handler.Handle(ctx, record)
+	line := strings.TrimSuffix(state.buf.String(), "\n")
+
+	if state.buf.Cap() <= 65536 {
+		h.pool.Put(state)
+	}
 
 	if jsonErr == nil && line != "" {
 		h.client.QueueLog(record.Time, line)
@@ -389,7 +575,7 @@ func (h *LokiHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
 	steps := append(append([]slogStep(nil), h.steps...), slogStep{
 		attrs: attrs,
 	})
-	return h.with(h.next.WithAttrs(attrs), steps)
+	return buildLokiHandler(h.client, h.next.WithAttrs(attrs), steps)
 }
 
 // WithGroup returns a handler with a named attribute group attached.
@@ -398,119 +584,5 @@ func (h *LokiHandler) WithGroup(name string) slog.Handler {
 		isGroup: true,
 		group:   name,
 	})
-	return h.with(h.next.WithGroup(name), steps)
-}
-
-func (h *LokiHandler) with(next slog.Handler, steps []slogStep) slog.Handler {
-	writer := &lokiWriter{}
-	render := slog.NewJSONHandler(writer, &slog.HandlerOptions{
-		Level: slog.LevelDebug,
-		ReplaceAttr: func(groups []string, attr slog.Attr) slog.Attr {
-			if attr.Key == slog.TimeKey {
-				attr.Value = slog.StringValue(attr.Value.Time().UTC().Format(time.RFC3339Nano))
-			}
-			return attr
-		},
-	}).WithAttrs(h.client.attrs)
-
-	var handler slog.Handler = render
-	for _, step := range steps {
-		if step.isGroup {
-			handler = handler.WithGroup(step.group)
-		} else {
-			handler = handler.WithAttrs(step.attrs)
-		}
-	}
-
-	return &LokiHandler{
-		client: h.client,
-		next:   next,
-		steps:  steps,
-		writer: writer,
-		render: handler,
-	}
-}
-
-func normalizeConfig(cfg Config) Config {
-	defaults := DefaultConfig()
-	if cfg.ServiceName == "" {
-		cfg.ServiceName = defaults.ServiceName
-	}
-	if cfg.Environment == "" {
-		cfg.Environment = defaults.Environment
-	}
-	if cfg.InstanceID == "" {
-		cfg.InstanceID = defaults.InstanceID
-	}
-	if cfg.Version == "" {
-		cfg.Version = defaults.Version
-	}
-	if cfg.QueueSize <= 0 {
-		cfg.QueueSize = defaults.QueueSize
-	}
-	if cfg.BatchSize <= 0 {
-		cfg.BatchSize = defaults.BatchSize
-	}
-	if cfg.BatchWait <= 0 {
-		cfg.BatchWait = defaults.BatchWait
-	}
-	if cfg.HTTPTimeout <= 0 {
-		cfg.HTTPTimeout = defaults.HTTPTimeout
-	}
-	if cfg.MaxRetries <= 0 {
-		cfg.MaxRetries = defaults.MaxRetries
-	}
-	return cfg
-}
-
-func lokiPushURL(baseURL string) string {
-	if strings.HasSuffix(baseURL, "/loki/api/v1/push") {
-		return baseURL
-	}
-	return strings.TrimSuffix(baseURL, "/") + "/loki/api/v1/push"
-}
-
-func lokiLabels(cfg Config) map[string]string {
-	labels := map[string]string{
-		"service_name": cfg.ServiceName,
-		"service":      cfg.ServiceName,
-		"environment":  cfg.Environment,
-	}
-	if cfg.Version != "" {
-		labels["version"] = cfg.Version
-	}
-	return labels
-}
-
-func serviceAttrs(cfg Config) []slog.Attr {
-	attrs := []slog.Attr{
-		slog.String("service_name", cfg.ServiceName),
-		slog.String("service", cfg.ServiceName),
-		slog.String("environment", cfg.Environment),
-		slog.String("instance", cfg.InstanceID),
-	}
-	if cfg.Version != "" {
-		attrs = append(attrs, slog.String("version", cfg.Version))
-	}
-	return attrs
-}
-
-func parseLevel(value string) slog.Level {
-	switch strings.ToLower(strings.TrimSpace(value)) {
-	case "debug":
-		return slog.LevelDebug
-	case "warn", "warning":
-		return slog.LevelWarn
-	case "error":
-		return slog.LevelError
-	default:
-		return slog.LevelInfo
-	}
-}
-
-func envOr(key, fallback string) string {
-	if value := os.Getenv(key); value != "" {
-		return value
-	}
-	return fallback
+	return buildLokiHandler(h.client, h.next.WithGroup(name), steps)
 }

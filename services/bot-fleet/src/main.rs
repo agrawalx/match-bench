@@ -6,7 +6,8 @@ mod telemetry;
 mod time;
 mod worker;
 
-use anyhow::Result;
+use anyhow::{Context, Error, Result};
+use config::Config;
 use tracing_subscriber::EnvFilter;
 
 #[tokio::main(flavor = "multi_thread")]
@@ -16,5 +17,11 @@ async fn main() -> Result<()> {
         .with_env_filter(EnvFilter::from_default_env())
         .init();
 
-    worker::run(config::Config::from_env()).await
+    let config = Config::from_env();
+    config
+        .validate()
+        .map_err(Error::msg)
+        .context("invalid bot-fleet configuration")?;
+
+    worker::run(config).await
 }

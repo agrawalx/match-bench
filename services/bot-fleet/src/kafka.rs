@@ -1,74 +1,107 @@
-use std::{
-    sync::{Arc, Mutex},
-    time::Duration,
-};
+use std::{sync::Arc, time::Duration};
 
 use anyhow::{Context, Result};
-use kafka::{
-    client::KafkaClient,
-    consumer::{Consumer, FetchOffset, GroupOffsetStorage},
-    producer::{Producer, Record, RequiredAcks},
+use rdkafka::{
+    config::ClientConfig,
+    consumer::{BaseConsumer, CommitMode, Consumer, StreamConsumer},
+    message::Message,
+    producer::{FutureProducer, FutureRecord, Producer},
+    Offset, TopicPartitionList,
 };
+use tracing::{debug, warn};
 
 use iicpc_schemas_rust::{BarrierEvent, ReadySignal};
 
-/// KafkaProducer wraps the blocking kafka crate producer behind a mutex so
-/// async tasks can publish through spawn_blocking without sharing it unsafely.
+/// KafkaProducer wraps rdkafka's async FutureProducer.
 #[derive(Clone)]
 pub struct KafkaProducer {
-    inner: Arc<Mutex<Producer>>,
+    inner: FutureProducer,
 }
 
-/// KafkaConsumer wraps the blocking kafka crate consumer behind a mutex so one
-/// async poll path owns offset advancement for a subscribed topic set.
+/// KafkaConsumer wraps rdkafka's async StreamConsumer inside an Arc.
 #[derive(Clone)]
 pub struct KafkaConsumer {
-    inner: Arc<Mutex<Consumer>>,
+    inner: Arc<StreamConsumer>,
 }
 
-/// ensure_topics asks Kafka for metadata for each configured topic. With broker
-/// auto-creation enabled, this creates missing topics before consumers attach.
+/// KafkaMessage is the payload plus enough offset metadata to commit it only
+/// after the caller has decided how the message was handled.
+pub struct KafkaMessage {
+    pub payload: Option<Vec<u8>>,
+    topic: String,
+    partition: i32,
+    offset: i64,
+}
+
+/// ensure_topics asks Kafka for metadata for each configured topic so startup
+/// fails fast when explicit topic initialization has not run.
 pub fn ensure_topics(brokers: &str, topics: &[&str]) -> Result<()> {
-    let mut client = KafkaClient::new(parse_brokers(brokers));
-    client
-        .load_metadata(topics)
-        .context("ensure kafka topics")?;
+    let client: BaseConsumer = ClientConfig::new()
+        .set("bootstrap.servers", brokers)
+        .create()
+        .context("create temp metadata consumer")?;
+
+    for topic in topics {
+        let metadata = client
+            .fetch_metadata(Some(topic), Duration::from_secs(5))
+            .with_context(|| format!("fetch kafka metadata for topic '{topic}'"))?;
+        let exists = metadata.topics().iter().any(|t| t.name() == *topic);
+        if !exists {
+            anyhow::bail!("kafka topic '{topic}' does not exist");
+        }
+    }
     Ok(())
 }
 
 /// producer creates a Kafka producer for the configured broker list.
-/// Messages require one broker ack and use a bounded ack timeout.
+/// Messages require all in-sync replicas to ack and use a bounded ack timeout.
 pub fn producer(brokers: &str) -> Result<KafkaProducer> {
-    let producer = Producer::from_hosts(parse_brokers(brokers))
-        .with_required_acks(RequiredAcks::One)
-        .with_ack_timeout(Duration::from_secs(5))
+    let producer: FutureProducer = ClientConfig::new()
+        .set("bootstrap.servers", brokers)
+        .set("acks", "all")
+        .set("queue.buffering.max.ms", "5")
+        .set("batch.size", "65536") // 64KB
+        .set("compression.type", "lz4")
+        .set("request.timeout.ms", "5000")
         .create()
         .context("create kafka producer")?;
-    Ok(KafkaProducer {
-        inner: Arc::new(Mutex::new(producer)),
-    })
+
+    Ok(KafkaProducer { inner: producer })
 }
 
-/// consumer creates a Kafka consumer group subscription for the requested topics.
-/// Offsets are stored in Kafka and new groups start at the latest offset.
 pub fn consumer(brokers: &str, group: &str, topics: &[&str]) -> Result<KafkaConsumer> {
-    let mut client = KafkaClient::new(parse_brokers(brokers));
-    client
-        .load_metadata(topics)
-        .context("load kafka consumer topic metadata")?;
+    consumer_with_fallback(brokers, group, topics, "latest")
+}
 
-    let mut builder = Consumer::from_client(client)
-        .with_group(group.to_string())
-        .with_fallback_offset(FetchOffset::Latest)
-        .with_offset_storage(Some(GroupOffsetStorage::Kafka));
+/// workload_consumer creates the assignment consumer. New groups replay retained
+/// assignments so scale-up races do not drop single-shot controller messages.
+pub fn workload_consumer(brokers: &str, group: &str, topics: &[&str]) -> Result<KafkaConsumer> {
+    consumer_with_fallback(brokers, group, topics, "earliest")
+}
 
-    for topic in topics {
-        builder = builder.with_topic((*topic).to_string());
-    }
+/// consumer_with_fallback creates a Kafka consumer group subscription for the
+/// requested topics. Offsets are stored in Kafka only when explicitly committed
+/// by the caller after it has handled the message.
+fn consumer_with_fallback(
+    brokers: &str,
+    group: &str,
+    topics: &[&str],
+    fallback_offset: &str,
+) -> Result<KafkaConsumer> {
+    let consumer: StreamConsumer = ClientConfig::new()
+        .set("bootstrap.servers", brokers)
+        .set("group.id", group)
+        .set("enable.auto.commit", "false")
+        .set("auto.offset_reset", fallback_offset)
+        .create()
+        .context("create kafka consumer")?;
 
-    let consumer = builder.create().context("create kafka consumer")?;
+    consumer
+        .subscribe(topics)
+        .context("subscribe to kafka topics")?;
+
     Ok(KafkaConsumer {
-        inner: Arc::new(Mutex::new(consumer)),
+        inner: Arc::new(consumer),
     })
 }
 
@@ -85,30 +118,27 @@ pub async fn publish_json<T: serde::Serialize>(
 }
 
 /// publish_bytes sends a pre-encoded Kafka payload from an async context.
-/// The blocking producer call is isolated on Tokio's blocking thread pool.
+///
+/// The timeout bounds how long rdkafka may wait to enqueue into its internal
+/// producer queue. It is not an end-to-end broker delivery timeout, so callers
+/// on hot paths should treat a slow/full producer queue as backpressure.
 pub async fn publish_bytes(
     producer: &KafkaProducer,
     topic: &str,
     key: &str,
     payload: &[u8],
 ) -> Result<()> {
-    let producer = producer.inner.clone();
-    let topic = topic.to_string();
-    let key = key.as_bytes().to_vec();
-    let payload = payload.to_vec();
+    let record = FutureRecord::to(topic).key(key).payload(payload);
 
-    tokio::task::spawn_blocking(move || {
-        let mut producer = producer.lock().map_err(|err| {
-            crate::errors::BotFleetError::KafkaError(format!(
-                "kafka producer mutex poisoned: {err}"
-            ))
+    producer
+        .inner
+        .send(record, Duration::from_secs(5))
+        .await
+        .map_err(|(err, _)| {
+            crate::errors::BotFleetError::KafkaError(format!("publish error: {err}"))
         })?;
-        producer
-            .send(&Record::from_key_value(&topic, key, payload))
-            .context("publish kafka message")
-    })
-    .await
-    .context("join kafka producer task")?
+
+    Ok(())
 }
 
 /// wait_for_barrier polls the barrier topic until the matching session event arrives.
@@ -118,23 +148,46 @@ pub async fn wait_for_barrier(
     session_id: &str,
     wait_timeout: Duration,
 ) -> Result<BarrierEvent> {
-    let deadline = std::time::Instant::now() + wait_timeout;
+    let deadline = tokio::time::Instant::now() + wait_timeout;
 
     loop {
-        if std::time::Instant::now() >= deadline {
+        let now = tokio::time::Instant::now();
+        if now >= deadline {
             anyhow::bail!("timed out waiting for barrier");
         }
+        let time_remaining = deadline - now;
 
-        let Some(payload) = recv_payload(consumer).await? else {
+        let message_res = tokio::time::timeout(time_remaining, recv_message(consumer)).await;
+        let message = match message_res {
+            Ok(Ok(message)) => message,
+            Ok(Err(err)) => return Err(err),
+            Err(_) => anyhow::bail!("timed out waiting for barrier"),
+        };
+        let Some(payload) = message.payload.as_deref() else {
+            warn!("skipping null barrier message");
+            commit_message(consumer, &message).context("commit null barrier message")?;
             continue;
         };
-        let event: BarrierEvent = match serde_json::from_slice(&payload) {
+
+        let event: BarrierEvent = match serde_json::from_slice(payload) {
             Ok(event) => event,
-            Err(_) => continue,
+            Err(err) => {
+                let prefix = String::from_utf8_lossy(&payload[..payload.len().min(256)]);
+                warn!(error = %err, payload_prefix = %prefix, "skipping malformed barrier message");
+                commit_message(consumer, &message).context("commit malformed barrier message")?;
+                continue;
+            }
         };
         if event.session_id == session_id {
+            commit_message(consumer, &message).context("commit matching barrier message")?;
             return Ok(event);
         }
+        debug!(
+            expected_session_id = session_id,
+            actual_session_id = %event.session_id,
+            "skipping unrelated barrier message"
+        );
+        commit_message(consumer, &message).context("commit unrelated barrier message")?;
     }
 }
 
@@ -148,50 +201,44 @@ pub fn ready_key(signal: &ReadySignal) -> String {
     format!("{}:{}", signal.session_id, signal.worker_id)
 }
 
-/// recv_payload polls one Kafka message and commits only that message's offset.
-/// Returns None when no message is currently available.
-pub async fn recv_payload(consumer: &KafkaConsumer) -> Result<Option<Vec<u8>>> {
-    let consumer = consumer.inner.clone();
-    let result = tokio::task::spawn_blocking(move || {
-        let mut consumer = consumer.lock().map_err(|err| {
-            crate::errors::BotFleetError::KafkaError(format!(
-                "kafka consumer mutex poisoned: {err}"
-            ))
-        })?;
-        let sets = consumer.poll().context("poll kafka consumer")?;
-
-        for set in sets.iter() {
-            if let Some(message) = set.messages().first() {
-                let payload = message.value.to_vec();
-                consumer
-                    .consume_message(set.topic(), set.partition(), message.offset)
-                    .context("consume kafka message")?;
-                consumer.commit_consumed().context("commit kafka offset")?;
-                return Ok(Some(payload));
-            }
+/// recv_message polls one Kafka message without committing its offset.
+pub async fn recv_message(consumer: &KafkaConsumer) -> Result<KafkaMessage> {
+    match consumer.inner.recv().await {
+        Ok(msg) => Ok(KafkaMessage {
+            payload: msg.payload().map(|p| p.to_vec()),
+            topic: msg.topic().to_string(),
+            partition: msg.partition(),
+            offset: msg.offset(),
+        }),
+        Err(err) => {
+            anyhow::bail!("failed to receive message from kafka: {err}");
         }
-
-        // thread::sleep blocked the Tokio blocking thread
-        // pool; yield back immediately and let the async caller sleep instead
-        Ok(None)
-    })
-    .await
-    .context("join kafka consumer task")?;
-
-    // sleep in async context instead of blocking a
-    // thread pool thread, preventing pool starvation under concurrent polls
-    if matches!(&result, Ok(None)) {
-        tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    result
 }
 
-/// parse_brokers normalizes a comma-separated broker list into kafka crate hosts.
-fn parse_brokers(brokers: &str) -> Vec<String> {
-    brokers
-        .split(',')
-        .map(str::trim)
-        .filter(|broker| !broker.is_empty())
-        .map(ToOwned::to_owned)
-        .collect()
+/// commit_message records that the consumed Kafka message has been fully
+/// handled. Kafka commits the next offset, not the current message offset.
+pub fn commit_message(consumer: &KafkaConsumer, message: &KafkaMessage) -> Result<()> {
+    let mut offsets = TopicPartitionList::new();
+    offsets
+        .add_partition_offset(
+            &message.topic,
+            message.partition,
+            Offset::Offset(message.offset + 1),
+        )
+        .context("build kafka commit offset")?;
+    consumer
+        .inner
+        .commit(&offsets, CommitMode::Async)
+        .context("commit kafka message offset")
+}
+
+/// flush_producer waits for rdkafka's internal queue to deliver enqueued
+/// messages. Use this before treating final telemetry/control-plane publishes
+/// as durable.
+pub fn flush_producer(producer: &KafkaProducer, timeout: Duration) -> Result<()> {
+    producer
+        .inner
+        .flush(timeout)
+        .context("flush kafka producer")
 }

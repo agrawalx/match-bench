@@ -5,7 +5,11 @@ use std::{
 
 use anyhow::{Context, Result};
 use serde::Serialize;
-use tokio::{sync::mpsc, time};
+use tokio::{
+    sync::mpsc::{self, error::TrySendError, Sender},
+    time,
+    task::JoinHandle,
+};
 use tracing::{error, warn};
 
 use iicpc_schemas_rust::OrderSentEvent;
@@ -16,8 +20,8 @@ use crate::kafka::{self, KafkaProducer};
 /// one background aggregator for batched Kafka publishing.
 #[derive(Clone)]
 pub struct TelemetrySink {
-    tx: mpsc::Sender<OrderSentEvent>,
-    handle: Arc<Mutex<Option<tokio::task::JoinHandle<Result<()>>>>>,
+    tx: Sender<OrderSentEvent>,
+    handle: Arc<Mutex<Option<JoinHandle<Result<()>>>>>,
 }
 
 impl TelemetrySink {
@@ -51,8 +55,14 @@ impl TelemetrySink {
     /// record queues one outbound order timestamp without blocking bot writes.
     /// Events are dropped only when the bounded channel is full.
     pub async fn record(&self, event: OrderSentEvent) {
-        if let Err(err) = self.tx.try_send(event) {
-            warn!(error = %err, "dropping telemetry event because channel is full");
+        match self.tx.try_send(event) {
+            Ok(()) => {}
+            Err(TrySendError::Full(_)) => {
+                warn!("dropping telemetry event because channel is full");
+            }
+            Err(TrySendError::Closed(_)) => {
+                error!("dropping telemetry event because aggregator channel is closed");
+            }
         }
     }
 

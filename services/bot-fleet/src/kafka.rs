@@ -9,6 +9,7 @@ use rdkafka::{
     consumer::{CommitMode, Consumer, StreamConsumer},
     message::Message,
     producer::{FutureProducer, FutureRecord},
+    Offset, TopicPartitionList,
 };
 
 use iicpc_schemas_rust::{BarrierEvent, ReadySignal};
@@ -29,6 +30,15 @@ pub struct KafkaProducer {
 /// after the caller has finished processing the message.
 pub struct KafkaConsumer {
     inner: StreamConsumer,
+}
+
+/// KafkaMessage carries a consumed payload plus offset metadata. Callers must
+/// commit it only after the message has been fully handled.
+pub struct KafkaMessage {
+    pub payload: Option<Vec<u8>>,
+    topic: String,
+    partition: i32,
+    offset: i64,
 }
 
 /// ensure_topics creates each topic if it doesn't already exist. Idempotent
@@ -195,19 +205,27 @@ pub async fn wait_for_barrier(
             anyhow::bail!("timed out waiting for barrier");
         }
 
-        let payload = match tokio::time::timeout(remaining, recv_payload(consumer)).await {
+        let message = match tokio::time::timeout(remaining, recv_message(consumer)).await {
             Ok(result) => result?,
             Err(_) => anyhow::bail!("timed out waiting for barrier"),
         };
-        let Some(payload) = payload else { continue };
+        let Some(payload) = message.payload.as_deref() else {
+            commit_message(consumer, &message).context("commit null barrier message")?;
+            continue;
+        };
 
-        let event: BarrierEvent = match serde_json::from_slice(&payload) {
+        let event: BarrierEvent = match serde_json::from_slice(payload) {
             Ok(event) => event,
-            Err(_) => continue,
+            Err(_) => {
+                commit_message(consumer, &message).context("commit malformed barrier message")?;
+                continue;
+            }
         };
         if event.session_id == session_id {
+            commit_message(consumer, &message).context("commit matching barrier message")?;
             return Ok(event);
         }
+        commit_message(consumer, &message).context("commit unrelated barrier message")?;
     }
 }
 
@@ -221,14 +239,13 @@ pub fn ready_key(signal: &ReadySignal) -> String {
     format!("{}:{}", signal.session_id, signal.worker_id)
 }
 
-/// recv_payload awaits the next message on the consumer's subscribed topics,
-/// commits its offset synchronously, and returns the payload bytes. Returns
-/// `Ok(None)` when the message arrived with no payload (rdkafka surfaces
-/// these as deletions/tombstones; we skip them).
+/// recv_message awaits the next message on the consumer's subscribed topics
+/// without committing its offset. Call commit_message after the payload is
+/// handled or intentionally discarded.
 ///
 /// Cancellation is the caller's responsibility — wrap this call in a
 /// `tokio::select!` or `tokio::time::timeout` to bound the wait.
-pub async fn recv_payload(consumer: &KafkaConsumer) -> Result<Option<Vec<u8>>> {
+pub async fn recv_message(consumer: &KafkaConsumer) -> Result<KafkaMessage> {
     let mut stream = consumer.inner.stream();
     let msg = stream
         .next()
@@ -236,17 +253,36 @@ pub async fn recv_payload(consumer: &KafkaConsumer) -> Result<Option<Vec<u8>>> {
         .ok_or_else(|| anyhow!("consumer stream ended unexpectedly"))?
         .context("read message")?;
 
-    let payload = msg.payload().map(|b| b.to_vec());
+    Ok(KafkaMessage {
+        payload: msg.payload().map(|b| b.to_vec()),
+        topic: msg.topic().to_string(),
+        partition: msg.partition(),
+        offset: msg.offset(),
+    })
+}
 
-    // Commit synchronously so that on a worker crash we have at-least-once
-    // delivery and not at-most-once. CommitMode::Sync blocks on the broker
-    // round-trip; for the bot-fleet's low message rate on barrier and
-    // workload.assignments topics, the cost is dwarfed by the time the
-    // worker spends processing each message anyway.
+/// commit_message records that the consumed Kafka message has been fully
+/// handled. Kafka commits the next offset, not the current message offset.
+pub fn commit_message(consumer: &KafkaConsumer, message: &KafkaMessage) -> Result<()> {
+    let mut offsets = TopicPartitionList::new();
+    offsets
+        .add_partition_offset(
+            &message.topic,
+            message.partition,
+            Offset::Offset(message.offset + 1),
+        )
+        .context("build kafka commit offset")?;
     consumer
         .inner
-        .commit_message(&msg, CommitMode::Sync)
+        .commit(&offsets, CommitMode::Sync)
         .context("commit kafka offset")?;
+    Ok(())
+}
 
+/// recv_payload is kept for examples that do not need manual commit control.
+pub async fn recv_payload(consumer: &KafkaConsumer) -> Result<Option<Vec<u8>>> {
+    let message = recv_message(consumer).await?;
+    let payload = message.payload.clone();
+    commit_message(consumer, &message)?;
     Ok(payload)
 }

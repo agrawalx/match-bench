@@ -90,7 +90,9 @@ async fn handle_connection(
             if drop_every > 0 && order_count.is_multiple_of(drop_every) {
                 continue; // intentional drop for watchdog tests
             }
-            let Some(clord_id_bytes) = msg.clord_id else { continue };
+            let Some(clord_id_bytes) = msg.clord_id else {
+                continue;
+            };
             let clord_id = std::str::from_utf8(clord_id_bytes).unwrap_or("UNKNOWN");
 
             if !latency.is_zero() {

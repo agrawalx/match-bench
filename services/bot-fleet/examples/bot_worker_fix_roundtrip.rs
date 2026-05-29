@@ -25,12 +25,7 @@
 use std::{collections::HashSet, env, time::Duration};
 
 use anyhow::{anyhow, Context, Result};
-use iicpc_bot_fleet::{
-    config::Config,
-    fix,
-    kafka as kafka_helper,
-    worker,
-};
+use iicpc_bot_fleet::{config::Config, fix, kafka as kafka_helper, worker};
 use iicpc_schemas_rust::{
     BarrierEvent, BotProfile, OrderSentBatch, Protocol, TaskSpec, WorkloadSpec,
 };
@@ -116,6 +111,7 @@ async fn main() -> Result<()> {
     let workload_topic = format!("test.workload.{suffix}");
     let barrier_topic = format!("test.barrier.{suffix}");
     let ready_topic = format!("test.ready.{suffix}");
+    let workload_failed_topic = format!("test.workload.failed.{suffix}");
     let orders_sent_topic = format!("test.orders.sent.{suffix}");
 
     eprintln!("== bot_worker_fix_roundtrip ==");
@@ -128,7 +124,13 @@ async fn main() -> Result<()> {
     // auto-creation (a known issue we already handled in testing/02).
     create_topics(
         &brokers,
-        &[&workload_topic, &barrier_topic, &ready_topic, &orders_sent_topic],
+        &[
+            &workload_topic,
+            &barrier_topic,
+            &ready_topic,
+            &workload_failed_topic,
+            &orders_sent_topic,
+        ],
     )
     .await?;
 
@@ -144,6 +146,7 @@ async fn main() -> Result<()> {
         workload_topic: workload_topic.clone(),
         barrier_topic: barrier_topic.clone(),
         ready_topic: ready_topic.clone(),
+        workload_failed_topic: workload_failed_topic.clone(),
         orders_sent_topic: orders_sent_topic.clone(),
         telemetry_flush_interval: Duration::from_millis(5),
         telemetry_batch_size: 64,
@@ -229,9 +232,13 @@ async fn main() -> Result<()> {
 
     // Collect orders.sent. Worker finishes at task_end + RESPONSE_TIMEOUT (5s),
     // so we wait task_end + 7s before declaring done.
-    let collect_deadline =
-        Duration::from_secs(2 /*barrier delay*/ + DURATION_SECS + 7 /*watchdog drain*/);
-    eprintln!("collecting orders.sent for {}s ...", collect_deadline.as_secs());
+    let collect_deadline = Duration::from_secs(
+        2 /*barrier delay*/ + DURATION_SECS + 7, /*watchdog drain*/
+    );
+    eprintln!(
+        "collecting orders.sent for {}s ...",
+        collect_deadline.as_secs()
+    );
     let events = collect_events(&brokers, &orders_sent_topic, collect_deadline).await?;
 
     eprintln!("collected {} OrderSentEvent records", events.len());
@@ -404,8 +411,8 @@ async fn collect_events(
         match recv {
             Ok(Ok(msg)) => {
                 if let Some(payload) = msg.payload() {
-                    let batch: OrderSentBatchOwned = rmp_serde::from_slice(payload)
-                        .with_context(|| "decode OrderSentBatch")?;
+                    let batch: OrderSentBatchOwned =
+                        rmp_serde::from_slice(payload).with_context(|| "decode OrderSentBatch")?;
                     events.extend(batch.events);
                 }
             }
@@ -468,7 +475,9 @@ async fn serve_one_fix_connection(
             if drop_every > 0 && order_count.is_multiple_of(drop_every) {
                 continue;
             }
-            let Some(clord_id_bytes) = msg.clord_id else { continue };
+            let Some(clord_id_bytes) = msg.clord_id else {
+                continue;
+            };
             let clord_id = std::str::from_utf8(clord_id_bytes).unwrap_or("UNKNOWN");
             if !latency.is_zero() {
                 sleep(latency).await;

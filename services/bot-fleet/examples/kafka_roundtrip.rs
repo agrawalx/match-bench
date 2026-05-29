@@ -23,8 +23,7 @@ async fn main() -> Result<()> {
     // Without this, "auto.offset.reset=earliest" still works because the
     // commit_message path advances offsets, but ordering this way matches
     // how production callers (worker.rs) do it.
-    let consumer = kafka::consumer(&brokers, GROUP, &[TOPIC])
-        .context("create consumer")?;
+    let consumer = kafka::consumer(&brokers, GROUP, &[TOPIC]).context("create consumer")?;
     let producer = kafka::producer(&brokers).context("create producer")?;
 
     println!("Publishing {COUNT} messages to {TOPIC}");
@@ -44,13 +43,10 @@ async fn main() -> Result<()> {
     while got.len() < COUNT {
         // 10s timeout per message is generous; first read includes consumer
         // group join + offset reset, which can take a second or two.
-        let payload = tokio::time::timeout(
-            Duration::from_secs(10),
-            kafka::recv_payload(&consumer),
-        )
-        .await
-        .context("consume timeout")??
-        .context("consumed a tombstone/empty message")?;
+        let payload = tokio::time::timeout(Duration::from_secs(10), kafka::recv_payload(&consumer))
+            .await
+            .context("consume timeout")??
+            .context("consumed a tombstone/empty message")?;
 
         let s = String::from_utf8(payload).context("payload was not utf8")?;
         println!("  <- {s}");

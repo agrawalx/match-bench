@@ -522,7 +522,11 @@ mod tests {
         let (msgs, consumed) = parse_messages(&buf);
         assert_eq!(msgs.len(), 1, "only the complete first message is parsed");
         assert_eq!(msgs[0].clord_id, Some(b"FIRST".as_ref()));
-        assert_eq!(consumed, m1.len(), "consumed = end of first message; rest is carry-over");
+        assert_eq!(
+            consumed,
+            m1.len(),
+            "consumed = end of first message; rest is carry-over"
+        );
     }
 
     #[test]

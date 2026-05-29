@@ -7,7 +7,9 @@ use std::{
 
 use anyhow::{Context, Result};
 use futures::SinkExt;
-use iicpc_schemas_rust::{BotProfile, OrderSentEvent, Protocol, ReadySignal, Side, TaskSpec, WorkloadSpec};
+use iicpc_schemas_rust::{
+    BotProfile, OrderSentEvent, Protocol, ReadySignal, Side, TaskSpec, WorkloadSpec,
+};
 use rand::{rngs::SmallRng, Rng, SeedableRng};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt, ReadHalf, WriteHalf},
@@ -81,14 +83,19 @@ pub async fn run(config: Config) -> Result<()> {
                 info!("shutdown requested");
                 return Ok(());
             }
-            payload = kafka::recv_payload(&workload_consumer) => {
-                let Some(payload) = payload.context("read workload assignment")? else {
+            message = kafka::recv_message(&workload_consumer) => {
+                let message = message.context("read workload assignment")?;
+                let Some(payload) = message.payload.as_deref() else {
+                    kafka::commit_message(&workload_consumer, &message)
+                        .context("commit null workload assignment")?;
                     continue;
                 };
-                let spec = match kafka::decode_workload(&payload) {
+                let spec = match kafka::decode_workload(payload) {
                     Ok(spec) => spec,
                     Err(err) => {
                         warn!(error = %err, "skipping invalid workload assignment");
+                        kafka::commit_message(&workload_consumer, &message)
+                            .context("commit invalid workload assignment")?;
                         continue;
                     }
                 };
@@ -106,6 +113,8 @@ pub async fn run(config: Config) -> Result<()> {
                     // workload is harmless at the fleet level.
                     error!(error = %err, "workload failed; dropping and continuing");
                 }
+                kafka::commit_message(&workload_consumer, &message)
+                    .context("commit handled workload assignment")?;
             }
         }
     }
@@ -197,7 +206,14 @@ async fn run_workload(
         config.telemetry_batch_size,
     );
 
-    let result = fire_workload(config, &spec, connected, barrier_epoch_ns, telemetry.clone()).await;
+    let result = fire_workload(
+        config,
+        &spec,
+        connected,
+        barrier_epoch_ns,
+        telemetry.clone(),
+    )
+    .await;
     telemetry.close().await?;
     result
 }
@@ -206,10 +222,9 @@ async fn run_workload(
 /// would corrupt generated FIX or JSON payloads.
 fn validate_spec(config: &Config, spec: &WorkloadSpec) -> Result<()> {
     if spec.tasks.is_empty() {
-        return Err(crate::errors::BotFleetError::ValidationError(
-            "tasks list is empty".into(),
-        )
-        .into());
+        return Err(
+            crate::errors::BotFleetError::ValidationError("tasks list is empty".into()).into(),
+        );
     }
     if spec.tasks.len() > MAX_TASKS_PER_WORKER {
         return Err(crate::errors::BotFleetError::ValidationError(format!(
@@ -292,7 +307,11 @@ async fn connect_tasks(spec: &WorkloadSpec) -> Result<Vec<ConnectedTask>> {
         let task = task.clone();
         set.spawn(async move {
             let client = TargetClient::connect(&spec, addr).await?;
-            Ok::<_, anyhow::Error>(ConnectedTask { task, client })
+            Ok::<_, anyhow::Error>(ConnectedTask {
+                task,
+                target_host: spec.target_host.clone(),
+                client,
+            })
         });
     }
 
@@ -386,6 +405,7 @@ async fn fire_workload(
 /// fixed-interval pacer.
 struct ConnectedTask {
     task: TaskSpec,
+    target_host: String,
     client: TargetClient,
 }
 
@@ -431,6 +451,7 @@ impl ConnectedTask {
             session_id: session_id.to_string(),
             submission_id: submission_id.to_string(),
             worker_id: worker_id.to_string(),
+            target_host: self.target_host,
             fix_version: fix_version.to_string(),
             global_seed,
             barrier_epoch_ns,
@@ -443,9 +464,7 @@ impl ConnectedTask {
             TargetClient::Rest(stream) => {
                 run_writeonly_task(self.task, WriteOnly::Rest(stream), ctx).await
             }
-            TargetClient::Ws(ws) => {
-                run_writeonly_task(self.task, WriteOnly::Ws(ws), ctx).await
-            }
+            TargetClient::Ws(ws) => run_writeonly_task(self.task, WriteOnly::Ws(ws), ctx).await,
         }
     }
 }
@@ -456,6 +475,7 @@ struct TaskContext {
     session_id: String,
     submission_id: String,
     worker_id: String,
+    target_host: String,
     fix_version: String,
     global_seed: u64,
     barrier_epoch_ns: u64,
@@ -475,9 +495,7 @@ struct FixConnection {
 /// watchdog continue for RESPONSE_TIMEOUT past the task deadline so stragglers
 /// either get matched or get evicted with timed_out=true.
 async fn run_fix_task(task: TaskSpec, fix: FixConnection, ctx: TaskContext) -> Result<u64> {
-    let task_start_ns = ctx
-        .barrier_epoch_ns
-        .saturating_add(task.start_offset_ns);
+    let task_start_ns = ctx.barrier_epoch_ns.saturating_add(task.start_offset_ns);
     let task_end_ns = task_start_ns.saturating_add(task.duration_ns);
     let drain_end_ns = task_end_ns.saturating_add(RESPONSE_TIMEOUT_NS);
 
@@ -490,6 +508,7 @@ async fn run_fix_task(task: TaskSpec, fix: FixConnection, ctx: TaskContext) -> R
         task.clone(),
         pending.clone(),
         ctx.session_id.clone(),
+        ctx.target_host.clone(),
         ctx.fix_version.clone(),
         ctx.global_seed,
         task_start_ns,
@@ -542,6 +561,7 @@ async fn fix_write_loop(
     task: TaskSpec,
     pending: PendingMap,
     session_id: String,
+    target_host: String,
     fix_version: String,
     global_seed: u64,
     task_start_ns: u64,
@@ -574,6 +594,7 @@ async fn fix_write_loop(
         let frame = fix::order_frame(
             &fix_version,
             &session_id,
+            &target_host,
             u64::from(task.task_id),
             u64::from(seq),
             price,
@@ -633,7 +654,10 @@ async fn fix_write_loop(
                     .lock()
                     .expect("pending map poisoned")
                     .remove(&frame.order_id);
-                warn!(task_id = task.task_id, seq, "FIX write timeout; task writer exiting");
+                warn!(
+                    task_id = task.task_id,
+                    seq, "FIX write timeout; task writer exiting"
+                );
                 return Ok(sent);
             }
         }
@@ -696,8 +720,12 @@ async fn fix_read_loop(
             if msg.msg_type != b"8" {
                 continue;
             }
-            let Some(clord_id_bytes) = msg.clord_id else { continue };
-            let Ok(clord_id) = std::str::from_utf8(clord_id_bytes) else { continue };
+            let Some(clord_id_bytes) = msg.clord_id else {
+                continue;
+            };
+            let Ok(clord_id) = std::str::from_utf8(clord_id_bytes) else {
+                continue;
+            };
 
             // Lock scope: remove the entry, then drop the guard BEFORE the
             // telemetry.record().await call. Holding a std Mutex across an
@@ -838,7 +866,7 @@ impl WriteOnly {
                 .await
                 .context("write REST order"),
             Self::Ws(ws) => ws
-                .send(WsMessage::Text(frame.ws.clone()))
+                .send(WsMessage::Binary(frame.ws_bytes.clone()))
                 .await
                 .context("write WS order"),
         }
@@ -849,7 +877,11 @@ impl WriteOnly {
 /// emitted OrderSentEvent has recv_done_ts_ns=0 and timed_out=false; the
 /// ingester is expected to treat that pair as "r9 not captured for this
 /// protocol" rather than "lost response."
-async fn run_writeonly_task(task: TaskSpec, mut client: WriteOnly, ctx: TaskContext) -> Result<u64> {
+async fn run_writeonly_task(
+    task: TaskSpec,
+    mut client: WriteOnly,
+    ctx: TaskContext,
+) -> Result<u64> {
     let task_start_ns = ctx.barrier_epoch_ns.saturating_add(task.start_offset_ns);
     let task_end_ns = task_start_ns.saturating_add(task.duration_ns);
     time::sleep_until(instant_from_unix_nanos(task_start_ns)).await;
@@ -873,6 +905,7 @@ async fn run_writeonly_task(task: TaskSpec, mut client: WriteOnly, ctx: TaskCont
         let frame = fix::order_frame(
             &ctx.fix_version,
             &ctx.session_id,
+            &ctx.target_host,
             u64::from(task.task_id),
             u64::from(seq),
             price,
@@ -906,7 +939,10 @@ async fn run_writeonly_task(task: TaskSpec, mut client: WriteOnly, ctx: TaskCont
                 return Ok(sent);
             }
             Err(_) => {
-                warn!(task_id = task.task_id, seq, "task write timeout; task exiting");
+                warn!(
+                    task_id = task.task_id,
+                    seq, "task write timeout; task exiting"
+                );
                 return Ok(sent);
             }
         }
@@ -936,7 +972,11 @@ fn order_shape(profile: BotProfile, seq: u32, rng: &mut SmallRng) -> (u64, u64, 
         }
         BotProfile::Retail => {
             // Retail: small, random side, modest sizes, close to mid.
-            let side = if rng.gen_bool(0.5) { Side::Buy } else { Side::Sell };
+            let side = if rng.gen_bool(0.5) {
+                Side::Buy
+            } else {
+                Side::Sell
+            };
             let drift = rng.gen_range(0..50);
             let price = match side {
                 Side::Buy => 10_000 - drift,
@@ -947,7 +987,11 @@ fn order_shape(profile: BotProfile, seq: u32, rng: &mut SmallRng) -> (u64, u64, 
         BotProfile::Institutional => {
             // Institutional: large block sizes, conservative pricing further
             // from mid to exercise the depth of the book.
-            let side = if rng.gen_bool(0.5) { Side::Buy } else { Side::Sell };
+            let side = if rng.gen_bool(0.5) {
+                Side::Buy
+            } else {
+                Side::Sell
+            };
             let drift = rng.gen_range(20..100);
             let price = match side {
                 Side::Buy => 10_000 - drift,
@@ -1035,7 +1079,7 @@ impl TargetClient {
 
 #[cfg(test)]
 mod tests {
-    use super::resolve_target;
+    use super::*;
     use std::net::SocketAddr;
 
     // Regression: the controller passes target_host as a DNS name
@@ -1075,11 +1119,6 @@ mod tests {
             "expected a resolver error, got: {err}"
         );
     }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
 
     fn valid_spec() -> WorkloadSpec {
         WorkloadSpec {
@@ -1091,14 +1130,18 @@ mod tests {
             protocol: Protocol::Fix,
             worker_index: 0,
             worker_count: 1,
-            bot_count: 1,
-            orders_per_bot: 1,
-            target_rate_per_bot: None,
             global_seed: 42,
             fix_version: "FIX.4.2".into(),
-            profile_mix: vec![],
             connect_timeout_ms: 1500,
             write_timeout_ms: 250,
+            barrier_epoch_ns: 0,
+            tasks: vec![TaskSpec {
+                task_id: 1,
+                profile: BotProfile::Hft,
+                target_rps: 10,
+                start_offset_ns: 0,
+                duration_ns: 1_000_000_000,
+            }],
         }
     }
 
@@ -1119,7 +1162,7 @@ mod tests {
             worker_id: "worker-1".into(),
             worker_index: 0,
             worker_count: 1,
-            bot_count: 1,
+            task_count: 1,
             connected_count: 1,
             ready_at_unix_nanos: 123,
         };

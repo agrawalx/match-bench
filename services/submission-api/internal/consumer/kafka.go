@@ -12,8 +12,6 @@ import (
 	kafka "github.com/segmentio/kafka-go"
 )
 
-const TopicBenchmarkStatusUpdated = "benchmark.status.updated"
-
 // BenchmarkStatusConsumer keeps the runs table in PostgreSQL in sync with
 // state transitions published by the bot-fleet-controller.
 //
@@ -39,7 +37,7 @@ func NewBenchmarkStatusConsumer(brokers, groupID string, pg *store.PostgresStore
 	r := kafka.NewReader(kafka.ReaderConfig{
 		Brokers: []string{brokers},
 		GroupID: groupID,
-		Topic:   TopicBenchmarkStatusUpdated,
+		Topic:   topics.TopicBenchmarkStatusUpdated,
 	})
 	return &BenchmarkStatusConsumer{reader: r, pg: pg, log: log}
 }
@@ -49,7 +47,7 @@ func NewBenchmarkStatusConsumer(brokers, groupID string, pg *store.PostgresStore
 // the consumer). On store failures, the message is NOT committed so the next
 // poll will retry.
 func (c *BenchmarkStatusConsumer) Start(ctx context.Context) {
-	c.log.Info("benchmark status consumer started", "topic", TopicBenchmarkStatusUpdated)
+	c.log.Info("benchmark status consumer started", "topic", topics.TopicBenchmarkStatusUpdated)
 	for {
 		m, err := c.reader.FetchMessage(ctx)
 		if err != nil {
@@ -63,6 +61,11 @@ func (c *BenchmarkStatusConsumer) Start(ctx context.Context) {
 		var msg topics.BenchmarkStatusUpdated
 		if err := json.Unmarshal(m.Value, &msg); err != nil {
 			c.log.Error("unmarshal benchmark status update", "error", err, "key", string(m.Key))
+			_ = c.reader.CommitMessages(ctx, m)
+			continue
+		}
+		if !validRunStatus(msg.Status) {
+			c.log.Error("invalid benchmark run status", "session_id", msg.SessionID, "status", msg.Status)
 			_ = c.reader.CommitMessages(ctx, m)
 			continue
 		}
@@ -102,4 +105,19 @@ func (c *BenchmarkStatusConsumer) Start(ctx context.Context) {
 
 func (c *BenchmarkStatusConsumer) Close() error {
 	return c.reader.Close()
+}
+
+func validRunStatus(status string) bool {
+	switch status {
+	case topics.RunStatusRequested,
+		topics.RunStatusDeploying,
+		topics.RunStatusWaitingReady,
+		topics.RunStatusBarrierFired,
+		topics.RunStatusRunning,
+		topics.RunStatusCompleted,
+		topics.RunStatusFailed:
+		return true
+	default:
+		return false
+	}
 }

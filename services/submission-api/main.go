@@ -36,12 +36,23 @@ func main() {
 	minioSecret := mustEnv("MINIO_SECRET_KEY")
 	minioBucket := envOr("MINIO_BUCKET", "submissions")
 	minioSSL := os.Getenv("MINIO_USE_SSL") == "true"
-	kafkaBrokers := os.Getenv("KAFKA_BROKERS")
+	minioCreateBucket := os.Getenv("MINIO_CREATE_BUCKET_IF_MISSING") == "true"
+	kafkaBrokers := mustEnv("KAFKA_BROKERS")
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
 
-	minioStore, err := store.NewMinioStore(minioEndpoint, minioAccess, minioSecret, minioBucket, minioSSL)
+	minioInitCtx, minioCancel := context.WithTimeout(ctx, 5*time.Second)
+	minioStore, err := store.NewMinioStoreWithOptions(
+		minioInitCtx,
+		minioEndpoint,
+		minioAccess,
+		minioSecret,
+		minioBucket,
+		minioSSL,
+		store.MinioStoreOptions{CreateBucketIfMissing: minioCreateBucket},
+	)
+	minioCancel()
 	if err != nil {
 		log.Error("minio init failed", "error", err)
 		os.Exit(1)
@@ -92,15 +103,10 @@ func main() {
 	// such addition risks freeing the unique index while resources for the
 	// run are still live, defeating the one-active-run-per-submission
 	// guarantee that the endpoint's idempotency relies on.
-	var benchStatusConsumer *consumer.BenchmarkStatusConsumer
-	if kafkaBrokers != "" {
-		group := envOr("KAFKA_BENCHMARK_STATUS_GROUP", "submission-api-benchmark-status")
-		benchStatusConsumer = consumer.NewBenchmarkStatusConsumer(kafkaBrokers, group, pgStore, log)
-		defer benchStatusConsumer.Close()
-		go benchStatusConsumer.Start(ctx)
-	} else {
-		log.Warn("KAFKA_BROKERS not set — benchmark status consumer disabled; runs table will not reflect controller updates")
-	}
+	group := envOr("KAFKA_BENCHMARK_STATUS_GROUP", "submission-api-benchmark-status")
+	benchStatusConsumer := consumer.NewBenchmarkStatusConsumer(kafkaBrokers, group, pgStore, log)
+	defer benchStatusConsumer.Close()
+	go benchStatusConsumer.Start(ctx)
 
 	r := chi.NewRouter()
 	r.Use(middleware.RequestID)
@@ -108,7 +114,13 @@ func main() {
 	r.Use(requestLogger(log))
 	r.Use(middleware.Recoverer)
 
-	r.Get("/health", handler.Health(log))
+	healthHandler, err := handler.Health(log)
+	if err != nil {
+		log.Error("health handler init failed", "error", err)
+		os.Exit(1)
+	}
+
+	r.Get("/health", healthHandler)
 	r.Post("/submit", handler.Submit(minioStore, pgStore, kafkaPub, log))
 	r.Get("/submissions/{id}", handler.GetSubmission(pgStore, log))
 	// POST /submissions/{id}/benchmark mints one run-group and N child runs

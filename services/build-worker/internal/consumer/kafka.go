@@ -9,8 +9,8 @@ import (
 	kafka "github.com/segmentio/kafka-go"
 )
 
-const topicBuildRequested = "submission.build.requested"
-
+// Handler processes one decoded build request. Implementations must treat
+// SubmissionID as the idempotency key because Kafka can redeliver messages.
 type Handler interface {
 	Run(ctx context.Context, msg topics.SubmissionBuildRequested)
 }
@@ -25,16 +25,15 @@ func NewKafkaConsumer(brokers, groupID string, handler Handler, log *slog.Logger
 	r := kafka.NewReader(kafka.ReaderConfig{
 		Brokers: []string{brokers},
 		GroupID: groupID,
-		Topic:   topicBuildRequested,
+		Topic:   topics.TopicSubmissionBuildRequested,
 	})
 	return &Consumer{reader: r, handler: handler, log: log}
 }
 
 // Start blocks and processes messages until ctx is cancelled.
 func (c *Consumer) Start(ctx context.Context) {
-	c.log.Info("consumer started", "topic", topicBuildRequested)
+	c.log.Info("consumer started", "topic", topics.TopicSubmissionBuildRequested)
 	for {
-		// blocks till consumer-api sends buildtopic 
 		m, err := c.reader.FetchMessage(ctx)
 		if err != nil {
 			if ctx.Err() != nil {
@@ -45,7 +44,6 @@ func (c *Consumer) Start(ctx context.Context) {
 		}
 
 		var msg topics.SubmissionBuildRequested
-		// unmarshal function is basically equivalent of deserialize func of serde crate in rust
 		if err := json.Unmarshal(m.Value, &msg); err != nil {
 			c.log.Error("unmarshal failed", "error", err)
 			_ = c.reader.CommitMessages(ctx, m)
@@ -53,8 +51,6 @@ func (c *Consumer) Start(ctx context.Context) {
 		}
 
 		c.log.Info("received build request", "submission_id", msg.SubmissionID)
-		// calls run() function written in spawner.go 
-		// this is where the build job starts 
 		c.handler.Run(ctx, msg)
 
 		if err := c.reader.CommitMessages(ctx, m); err != nil {

@@ -41,6 +41,8 @@ spec:
                   key: minio-secret-key
             - name: MINIO_BUCKET
               value: submissions
+            - name: JOB_SECRET_NAME
+              value: spawner-secret
             - name: KAFKA_BROKERS
               value: kafka.data.svc.cluster.local:9092
             - name: KAFKA_GROUP_ID
@@ -67,12 +69,13 @@ spec:
                 secretKeyRef:
                   name: spawner-secret
                   key: harbor-password
-            # Uncomment only after deploying Grafana Loki — setting LOKI_URL when Loki
-            # is not deployed causes the Kafka consumer to hang (goroutine starvation).
-            # - name: LOKI_URL
-            #   value: http://loki.monitoring.svc.cluster.local:3100
-            # - name: LOKI_APP_NAME
-            #   value: spawner
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            capabilities:
+              drop:
+                - ALL
           resources:
             requests:
               cpu: 100m
@@ -80,3 +83,5 @@ spec:
             limits:
               cpu: 500m
               memory: 256Mi
+      securityContext:
+        runAsNonRoot: true

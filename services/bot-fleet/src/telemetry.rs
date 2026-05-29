@@ -7,8 +7,8 @@ use anyhow::{Context, Result};
 use serde::Serialize;
 use tokio::{
     sync::mpsc::{self, error::TrySendError, Sender},
-    time,
     task::JoinHandle,
+    time,
 };
 use tracing::{error, warn};
 

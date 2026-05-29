@@ -33,7 +33,7 @@ func main() {
 	minioSecret := mustEnv("MINIO_SECRET_KEY")
 	minioBucket := envOr("MINIO_BUCKET", "submissions")
 	minioSSL := os.Getenv("MINIO_USE_SSL") == "true"
-	kafkaBrokers := os.Getenv("KAFKA_BROKERS")
+	kafkaBrokers := mustEnv("KAFKA_BROKERS")
 	kafkaGroup := envOr("KAFKA_GROUP_ID", "build-worker-spawner")
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
@@ -69,9 +69,10 @@ func main() {
 		MinioAccessKey: minioAccess,
 		MinioSecretKey: minioSecret,
 		MinioBucket:    minioBucket,
+		JobSecretName:  envOr("JOB_SECRET_NAME", "spawner-secret"),
 
 		HarborStagingEndpoint:    mustEnv("HARBOR_STAGING_ENDPOINT"),
-		HarborProductionEndpoint: os.Getenv("HARBOR_PRODUCTION_ENDPOINT"),
+		HarborProductionEndpoint: mustEnv("HARBOR_PRODUCTION_ENDPOINT"),
 		HarborProject:            envOr("HARBOR_PROJECT", "iicpc"),
 		HarborUser:               mustEnv("HARBOR_USER"),
 		HarborPassword:           mustEnv("HARBOR_PASSWORD"),

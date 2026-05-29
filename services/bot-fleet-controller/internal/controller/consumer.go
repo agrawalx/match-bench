@@ -9,11 +9,6 @@ import (
 	kafka "github.com/segmentio/kafka-go"
 )
 
-const (
-	TopicBenchmarkRequested = "benchmark.requested"
-	TopicBotReady           = "bot.ready"
-)
-
 // Consumer owns the two inbound topics the controller cares about.
 // benchmark.requested → spawn a new session runner.
 // bot.ready           → demultiplex by session_id into the matching runner.
@@ -37,12 +32,12 @@ func NewConsumer(brokers, benchmarkGroup, botReadyGroup string, runner *Runner, 
 		benchmarkReader: kafka.NewReader(kafka.ReaderConfig{
 			Brokers: []string{brokers},
 			GroupID: benchmarkGroup,
-			Topic:   TopicBenchmarkRequested,
+			Topic:   topics.TopicBenchmarkRequested,
 		}),
 		botReadyReader: kafka.NewReader(kafka.ReaderConfig{
 			Brokers: []string{brokers},
 			GroupID: botReadyGroup,
-			Topic:   TopicBotReady,
+			Topic:   topics.TopicBotReady,
 		}),
 		runner:   runner,
 		sessions: sessions,

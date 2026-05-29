@@ -250,6 +250,7 @@ fn validate_spec(config: &Config, spec: &WorkloadSpec) -> Result<()> {
         .into());
     }
     validate_identifier("session_id", &spec.session_id)?;
+    validate_identifier("submission_id", &spec.submission_id)?;
     validate_identifier("fix_version", &spec.fix_version)?;
     Ok(())
 }
@@ -1073,5 +1074,56 @@ mod tests {
             err.to_string().contains("resolve target host"),
             "expected a resolver error, got: {err}"
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn valid_spec() -> WorkloadSpec {
+        WorkloadSpec {
+            session_id: "sess-1".into(),
+            submission_id: "sub-1".into(),
+            contestant_id: "team-1".into(),
+            target_host: "127.0.0.1".into(),
+            target_port: 8080,
+            protocol: Protocol::Fix,
+            worker_index: 0,
+            worker_count: 1,
+            bot_count: 1,
+            orders_per_bot: 1,
+            target_rate_per_bot: None,
+            global_seed: 42,
+            fix_version: "FIX.4.2".into(),
+            profile_mix: vec![],
+            connect_timeout_ms: 1500,
+            write_timeout_ms: 250,
+        }
+    }
+
+    #[test]
+    fn validate_spec_rejects_submission_id_with_wire_unsafe_chars() {
+        let mut spec = valid_spec();
+        spec.submission_id = "sub/1".into();
+
+        let err = validate_spec(&Config::default(), &spec).expect_err("spec should be rejected");
+        assert!(err.to_string().contains("submission_id"));
+    }
+
+    #[test]
+    fn ready_key_groups_by_session_and_worker() {
+        let signal = ReadySignal {
+            session_id: "sess-1".into(),
+            submission_id: "sub-1".into(),
+            worker_id: "worker-1".into(),
+            worker_index: 0,
+            worker_count: 1,
+            bot_count: 1,
+            connected_count: 1,
+            ready_at_unix_nanos: 123,
+        };
+
+        assert_eq!(kafka::ready_key(&signal), "sess-1:worker-1");
     }
 }

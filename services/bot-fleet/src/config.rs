@@ -1,5 +1,10 @@
 use std::{env, process, time::Duration};
 
+use iicpc_schemas_rust::{
+    TOPIC_BARRIER, TOPIC_BOT_READY, TOPIC_ORDERS_SENT, TOPIC_WORKLOAD_ASSIGNMENTS,
+    TOPIC_WORKLOAD_FAILED,
+};
+
 /// Config contains the bot-fleet runtime knobs loaded from environment.
 /// Defaults target local development while keeping workload fan-out bounded.
 #[derive(Debug, Clone)]
@@ -24,11 +29,11 @@ impl Default for Config {
             worker_id: format!("bot-fleet-local-{}", process::id()),
             kafka_brokers: "localhost:9092".to_string(),
             consumer_group: "bot-fleet".to_string(),
-            workload_topic: "workload.assignments".to_string(),
-            barrier_topic: "barrier".to_string(),
-            ready_topic: "bot.ready".to_string(),
-            workload_failed_topic: "workload.failed".to_string(),
-            orders_sent_topic: "orders.sent".to_string(),
+            workload_topic: TOPIC_WORKLOAD_ASSIGNMENTS.to_string(),
+            barrier_topic: TOPIC_BARRIER.to_string(),
+            ready_topic: TOPIC_BOT_READY.to_string(),
+            workload_failed_topic: TOPIC_WORKLOAD_FAILED.to_string(),
+            orders_sent_topic: TOPIC_ORDERS_SENT.to_string(),
             telemetry_flush_interval: Duration::from_millis(5),
             telemetry_batch_size: 4096,
             telemetry_channel_capacity: 65536,
@@ -125,4 +130,31 @@ fn env_or(key: &str, default: String) -> String {
         .ok()
         .filter(|v| !v.is_empty())
         .unwrap_or(default)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_topics_come_from_schema_contract() {
+        let config = Config::default();
+        assert_eq!(config.workload_topic, TOPIC_WORKLOAD_ASSIGNMENTS);
+        assert_eq!(config.barrier_topic, TOPIC_BARRIER);
+        assert_eq!(config.ready_topic, TOPIC_BOT_READY);
+        assert_eq!(config.workload_failed_topic, TOPIC_WORKLOAD_FAILED);
+        assert_eq!(config.orders_sent_topic, TOPIC_ORDERS_SENT);
+    }
+
+    #[test]
+    fn validate_rejects_undersized_telemetry_channel() {
+        let config = Config {
+            telemetry_batch_size: 100,
+            telemetry_channel_capacity: 10,
+            ..Config::default()
+        };
+
+        let err = config.validate().expect_err("config should be rejected");
+        assert!(err.contains("telemetry_channel_capacity"));
+    }
 }

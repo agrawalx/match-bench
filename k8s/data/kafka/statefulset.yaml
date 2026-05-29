@@ -16,6 +16,7 @@ spec:
       labels:
         app: kafka
     spec:
+      automountServiceAccountToken: false
       containers:
         - name: kafka
           image: apache/kafka:3.7.1
@@ -40,7 +41,7 @@ spec:
             - name: KAFKA_INTER_BROKER_LISTENER_NAME
               value: "PLAINTEXT"
             - name: KAFKA_AUTO_CREATE_TOPICS_ENABLE
-              value: "true"
+              value: "false"
             - name: KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR
               value: "1"
             - name: KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR
@@ -55,11 +56,22 @@ spec:
           volumeMounts:
             - name: data
               mountPath: /opt/kafka/data
+            - name: tmp
+              mountPath: /tmp
+            - name: kafka-logs
+              mountPath: /opt/kafka/logs
           readinessProbe:
             tcpSocket:
               port: 9092
             initialDelaySeconds: 15
             periodSeconds: 10
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            capabilities:
+              drop:
+                - ALL
           resources:
             requests:
               cpu: 500m
@@ -67,6 +79,14 @@ spec:
             limits:
               cpu: "2"
               memory: 2Gi
+      securityContext:
+        runAsNonRoot: true
+        fsGroup: 1000
+      volumes:
+        - name: tmp
+          emptyDir: {}
+        - name: kafka-logs
+          emptyDir: {}
   volumeClaimTemplates:
     - metadata:
         name: data

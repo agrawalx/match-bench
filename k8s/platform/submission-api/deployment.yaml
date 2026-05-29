@@ -13,6 +13,7 @@ spec:
       labels:
         app: submission-api
     spec:
+      automountServiceAccountToken: false
       containers:
         - name: submission-api
           image: ghcr.io/agrawalx/submission-api:dev
@@ -46,6 +47,16 @@ spec:
               port: 8080
             initialDelaySeconds: 5
             periodSeconds: 10
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            capabilities:
+              drop:
+                - ALL
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
           resources:
             requests:
               cpu: 100m
@@ -53,3 +64,8 @@ spec:
             limits:
               cpu: 500m
               memory: 256Mi
+      securityContext:
+        runAsNonRoot: true
+      volumes:
+        - name: tmp
+          emptyDir: {}

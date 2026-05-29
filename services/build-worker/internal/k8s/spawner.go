@@ -2,7 +2,9 @@ package k8s
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"log/slog"
@@ -20,22 +22,24 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
-	"k8s.io/client-go/tools/clientcmd"
 )
 
 const (
-	jobTTL        = int32(300)  // 5 min — generous; logs read within seconds of completion
-	buildDeadline = int64(600)  // 10 min — Rust release builds need the headroom
-	scanDeadline  = int64(900)  // 15 min — trivy cold DB download on ephemeral pods
-	sbomDeadline  = int64(600)  // 10 min — syft is fine here
+	jobTTL        = int32(300) // 5 min — generous; logs read within seconds of completion
+	buildDeadline = int64(600) // 10 min — Rust release builds need the headroom
+	scanDeadline  = int64(900) // 15 min — trivy cold DB download on ephemeral pods
+	sbomDeadline  = int64(600) // 10 min — syft is fine here
 	pollInterval  = 5 * time.Second
+	maxK8sNameLen = 63
 )
 
+// StatusUpdater publishes and persists monotonic submission state transitions.
 type StatusUpdater interface {
 	PublishStatus(ctx context.Context, submissionID, status, message string) error
 	UpdateDBStatus(ctx context.Context, submissionID, status, message string) error
 }
 
+// MinioClient provides artifact IO for per-submission build jobs.
 type MinioClient interface {
 	DownloadObject(ctx context.Context, objectPath string) ([]byte, error)
 	UploadBytes(ctx context.Context, objectPath, contentType string, data []byte) error
@@ -55,9 +59,10 @@ type JobConfig struct {
 	MinioAccessKey string
 	MinioSecretKey string
 	MinioBucket    string
+	JobSecretName  string
 
 	HarborStagingEndpoint    string // e.g. harbor-staging.example.com
-	HarborProductionEndpoint string // e.g. harbor.example.com — if empty, promote is skipped
+	HarborProductionEndpoint string // e.g. harbor.example.com
 	HarborProject            string // e.g. iicpc
 	HarborUser               string
 	HarborPassword           string
@@ -76,6 +81,12 @@ type Spawner struct {
 }
 
 func NewSpawner(cfg JobConfig, minio MinioClient, updater StatusUpdater, log *slog.Logger) (*Spawner, error) {
+	if cfg.HarborProductionEndpoint == "" {
+		return nil, fmt.Errorf("harbor production endpoint is required")
+	}
+	if cfg.JobSecretName == "" {
+		return nil, fmt.Errorf("job secret name is required")
+	}
 	k8sCfg, err := loadK8sConfig()
 	if err != nil {
 		return nil, fmt.Errorf("k8s config: %w", err)
@@ -113,11 +124,11 @@ func (s *Spawner) Run(ctx context.Context, msg topics.SubmissionBuildRequested) 
 		s.setStatus(ctx, id, topics.StatusFailed, fmt.Sprintf("generate dockerfile: %v", err))
 		return
 	}
-	
+
 	dockerfileB64 := base64.StdEncoding.EncodeToString([]byte(dockerfileContent))
 
 	// Phase 1: fetcher init container extracts ZIP → kaniko builds and pushes to Harbor staging
-	buildJobName := "build-" + id[:8]
+	buildJobName := resourceName("build", id)
 	if err := s.createJob(ctx, s.buildJobSpec(buildJobName, msg, stagingRef, dockerfileB64)); err != nil {
 		log.Error("failed to create build job", "error", err)
 		s.setStatus(ctx, id, topics.StatusFailed, fmt.Sprintf("create build job: %v", err))
@@ -137,8 +148,8 @@ func (s *Spawner) Run(ctx context.Context, msg topics.SubmissionBuildRequested) 
 	log.Info("phase 1 complete")
 
 	// Phase 2: Trivy scan + Syft SBOM run in parallel against the staging registry image
-	scanJobName := "scan-" + id[:8]
-	sbomJobName := "sbom-" + id[:8]
+	scanJobName := resourceName("scan", id)
+	sbomJobName := resourceName("sbom", id)
 
 	if err := s.createJob(ctx, s.scanJobSpec(scanJobName, id, stagingRef)); err != nil {
 		s.setStatus(ctx, id, topics.StatusFailed, fmt.Sprintf("create scan job: %v", err))
@@ -198,19 +209,17 @@ func (s *Spawner) Run(ctx context.Context, msg topics.SubmissionBuildRequested) 
 	log.Info("phase 2 complete")
 
 	// Phase 3: promote staging → production via crane.Copy (no extra Job)
-	if s.cfg.HarborProductionEndpoint != "" {
-		productionRef := fmt.Sprintf("%s/%s/%s:latest", s.cfg.HarborProductionEndpoint, s.cfg.HarborProject, id)
-		auth := crane.WithAuth(authn.FromConfig(authn.AuthConfig{
-			Username: s.cfg.HarborUser,
-			Password: s.cfg.HarborPassword,
-		}))
-		if err := crane.Copy(stagingRef, productionRef, auth, crane.WithContext(ctx)); err != nil {
-			log.Error("harbor promote failed", "error", err)
-			s.setStatus(ctx, id, topics.StatusFailed, fmt.Sprintf("promote staging→production: %v", err))
-			return
-		}
-		log.Info("image promoted to production", "ref", productionRef)
+	productionRef := fmt.Sprintf("%s/%s/%s:latest", s.cfg.HarborProductionEndpoint, s.cfg.HarborProject, id)
+	auth := crane.WithAuth(authn.FromConfig(authn.AuthConfig{
+		Username: s.cfg.HarborUser,
+		Password: s.cfg.HarborPassword,
+	}))
+	if err := crane.Copy(stagingRef, productionRef, auth, crane.WithContext(ctx)); err != nil {
+		log.Error("harbor promote failed", "error", err)
+		s.setStatus(ctx, id, topics.StatusFailed, fmt.Sprintf("promote staging→production: %v", err))
+		return
 	}
+	log.Info("image promoted to production", "ref", productionRef)
 
 	s.setStatus(ctx, id, topics.StatusReady, "image ready")
 	log.Info("pipeline complete")
@@ -304,14 +313,14 @@ func (s *Spawner) buildJobSpec(jobName string, msg topics.SubmissionBuildRequest
 					},
 				},
 				Spec: corev1.PodSpec{
-					RestartPolicy: corev1.RestartPolicyNever,
-					Tolerations:   s.buildTolerations(),
-					NodeSelector:  s.buildNodeSelector(),
+					RestartPolicy:   corev1.RestartPolicyNever,
+					SecurityContext: podSecurityContext(),
+					Tolerations:     s.buildTolerations(),
+					NodeSelector:    s.buildNodeSelector(),
 					Volumes: []corev1.Volume{
 						{
 							Name:         "workspace",
 							VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
-							// we use emptyDir as its the temporary directory and jobs are cleaned up after completion 
 						},
 						{
 							Name:         "kaniko-config",
@@ -320,10 +329,11 @@ func (s *Spawner) buildJobSpec(jobName string, msg topics.SubmissionBuildRequest
 					},
 					InitContainers: []corev1.Container{
 						{
-							Name:    "fetch",
-							Image:   s.cfg.SpawnerImage,
-							Command: []string{"/usr/local/bin/fetcher"},
-							Env:     s.fetcherEnv(msg, dockerfileB64),
+							Name:            "fetch",
+							Image:           s.cfg.SpawnerImage,
+							Command:         []string{"/usr/local/bin/fetcher"},
+							Env:             s.fetcherEnv(msg, dockerfileB64),
+							SecurityContext: containerSecurityContext(),
 							VolumeMounts: []corev1.VolumeMount{
 								{Name: "workspace", MountPath: "/workspace"},
 								{Name: "kaniko-config", MountPath: "/kaniko/.docker"},
@@ -339,6 +349,7 @@ func (s *Spawner) buildJobSpec(jobName string, msg topics.SubmissionBuildRequest
 								"--dockerfile=/workspace/Dockerfile",
 								"--destination=" + stagingRef,
 							},
+							SecurityContext: containerSecurityContext(),
 							VolumeMounts: []corev1.VolumeMount{
 								{Name: "workspace", MountPath: "/workspace"},
 								{Name: "kaniko-config", MountPath: "/kaniko/.docker", ReadOnly: true},
@@ -373,9 +384,10 @@ func (s *Spawner) scanJobSpec(jobName, submissionID, stagingRef string) *batchv1
 					Labels: map[string]string{"app": "build-job", "submission-id": submissionID, "mode": "scan"},
 				},
 				Spec: corev1.PodSpec{
-					RestartPolicy: corev1.RestartPolicyNever,
-					Tolerations:   s.buildTolerations(),
-					NodeSelector:  s.buildNodeSelector(),
+					RestartPolicy:   corev1.RestartPolicyNever,
+					SecurityContext: podSecurityContext(),
+					Tolerations:     s.buildTolerations(),
+					NodeSelector:    s.buildNodeSelector(),
 					Containers: []corev1.Container{
 						{
 							Name:  "scan",
@@ -384,10 +396,13 @@ func (s *Spawner) scanJobSpec(jobName, submissionID, stagingRef string) *batchv1
 								"image",
 								"--format", "json",
 								"--quiet",
-								"--username", s.cfg.HarborUser,
-								"--password", s.cfg.HarborPassword,
 								stagingRef,
 							},
+							Env: []corev1.EnvVar{
+								{Name: "TRIVY_USERNAME", ValueFrom: s.secretKeyRef("harbor-user")},
+								{Name: "TRIVY_PASSWORD", ValueFrom: s.secretKeyRef("harbor-password")},
+							},
+							SecurityContext: containerSecurityContext(),
 						},
 					},
 				},
@@ -419,9 +434,10 @@ func (s *Spawner) sbomJobSpec(jobName, submissionID, stagingRef string) *batchv1
 					Labels: map[string]string{"app": "build-job", "submission-id": submissionID, "mode": "sbom"},
 				},
 				Spec: corev1.PodSpec{
-					RestartPolicy: corev1.RestartPolicyNever,
-					Tolerations:   s.buildTolerations(),
-					NodeSelector:  s.buildNodeSelector(),
+					RestartPolicy:   corev1.RestartPolicyNever,
+					SecurityContext: podSecurityContext(),
+					Tolerations:     s.buildTolerations(),
+					NodeSelector:    s.buildNodeSelector(),
 					Containers: []corev1.Container{
 						{
 							Name:  "sbom",
@@ -433,9 +449,10 @@ func (s *Spawner) sbomJobSpec(jobName, submissionID, stagingRef string) *batchv1
 							},
 							Env: []corev1.EnvVar{
 								{Name: "SYFT_REGISTRY_AUTH_AUTHORITY", Value: authority},
-								{Name: "SYFT_REGISTRY_AUTH_USERNAME", Value: s.cfg.HarborUser},
-								{Name: "SYFT_REGISTRY_AUTH_PASSWORD", Value: s.cfg.HarborPassword},
+								{Name: "SYFT_REGISTRY_AUTH_USERNAME", ValueFrom: s.secretKeyRef("harbor-user")},
+								{Name: "SYFT_REGISTRY_AUTH_PASSWORD", ValueFrom: s.secretKeyRef("harbor-password")},
 							},
+							SecurityContext: containerSecurityContext(),
 						},
 					},
 				},
@@ -447,14 +464,23 @@ func (s *Spawner) sbomJobSpec(jobName, submissionID, stagingRef string) *batchv1
 func (s *Spawner) fetcherEnv(msg topics.SubmissionBuildRequested, dockerfileB64 string) []corev1.EnvVar {
 	return []corev1.EnvVar{
 		{Name: "MINIO_ENDPOINT", Value: s.cfg.MinioEndpoint},
-		{Name: "MINIO_ACCESS_KEY", Value: s.cfg.MinioAccessKey},
-		{Name: "MINIO_SECRET_KEY", Value: s.cfg.MinioSecretKey},
+		{Name: "MINIO_ACCESS_KEY", ValueFrom: s.secretKeyRef("minio-access-key")},
+		{Name: "MINIO_SECRET_KEY", ValueFrom: s.secretKeyRef("minio-secret-key")},
 		{Name: "MINIO_BUCKET", Value: s.cfg.MinioBucket},
 		{Name: "ARTIFACT_PATH", Value: msg.ArtifactPath},
-		{Name: "HARBOR_STAGING_ENDPOINT", Value: s.cfg.HarborStagingEndpoint},
-		{Name: "HARBOR_USER", Value: s.cfg.HarborUser},
-		{Name: "HARBOR_PASSWORD", Value: s.cfg.HarborPassword},
+		{Name: "HARBOR_STAGING_ENDPOINT", ValueFrom: s.secretKeyRef("harbor-staging-endpoint")},
+		{Name: "HARBOR_USER", ValueFrom: s.secretKeyRef("harbor-user")},
+		{Name: "HARBOR_PASSWORD", ValueFrom: s.secretKeyRef("harbor-password")},
 		{Name: "DOCKERFILE_B64", Value: dockerfileB64},
+	}
+}
+
+func (s *Spawner) secretKeyRef(key string) *corev1.EnvVarSource {
+	return &corev1.EnvVarSource{
+		SecretKeyRef: &corev1.SecretKeySelector{
+			LocalObjectReference: corev1.LocalObjectReference{Name: s.cfg.JobSecretName},
+			Key:                  key,
+		},
 	}
 }
 
@@ -514,10 +540,68 @@ func jobFailureMessage(job *batchv1.Job) string {
 }
 
 func loadK8sConfig() (*rest.Config, error) {
-	if cfg, err := rest.InClusterConfig(); err == nil {
-		return cfg, nil
+	return rest.InClusterConfig()
+}
+
+func resourceName(prefix, submissionID string) string {
+	hash := sha256.Sum256([]byte(submissionID))
+	hashSuffix := hex.EncodeToString(hash[:])[:10]
+	suffixBudget := maxK8sNameLen - len(prefix) - len(hashSuffix) - 2
+	if suffixBudget < 1 {
+		suffixBudget = 1
 	}
-	// the next two lines only runs on local_dev, on real clusters we always have inClusterConfig set automatically 
-	rules := clientcmd.NewDefaultClientConfigLoadingRules()
-	return clientcmd.NewNonInteractiveDeferredLoadingClientConfig(rules, nil).ClientConfig()
+
+	safe := dnsLabelFragment(submissionID)
+	if len(safe) > suffixBudget {
+		safe = strings.Trim(safe[:suffixBudget], "-")
+	}
+	if safe == "" {
+		safe = "submission"
+	}
+	return fmt.Sprintf("%s-%s-%s", prefix, safe, hashSuffix)
+}
+
+func dnsLabelFragment(value string) string {
+	var b strings.Builder
+	lastHyphen := false
+	for i := 0; i < len(value); i++ {
+		c := value[i]
+		switch {
+		case c >= 'a' && c <= 'z':
+			b.WriteByte(c)
+			lastHyphen = false
+		case c >= '0' && c <= '9':
+			b.WriteByte(c)
+			lastHyphen = false
+		case c >= 'A' && c <= 'Z':
+			b.WriteByte(c + ('a' - 'A'))
+			lastHyphen = false
+		default:
+			if !lastHyphen {
+				b.WriteByte('-')
+				lastHyphen = true
+			}
+		}
+	}
+	return strings.Trim(b.String(), "-")
+}
+
+func podSecurityContext() *corev1.PodSecurityContext {
+	return &corev1.PodSecurityContext{
+		RunAsNonRoot: boolPtr(true),
+	}
+}
+
+func containerSecurityContext() *corev1.SecurityContext {
+	return &corev1.SecurityContext{
+		AllowPrivilegeEscalation: boolPtr(false),
+		ReadOnlyRootFilesystem:   boolPtr(true),
+		Capabilities: &corev1.Capabilities{
+			Drop: []corev1.Capability{"ALL"},
+		},
+	}
+}
+
+func boolPtr(v bool) *bool {
+	return &v
 }

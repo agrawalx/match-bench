@@ -1,5 +1,18 @@
 use serde::{Deserialize, Serialize};
 
+pub const TOPIC_SUBMISSION_BUILD_REQUESTED: &str = "submission.build.requested";
+pub const TOPIC_SUBMISSION_STATUS_UPDATED: &str = "submission.status.updated";
+pub const TOPIC_BENCHMARK_REQUESTED: &str = "benchmark.requested";
+pub const TOPIC_BENCHMARK_STATUS_UPDATED: &str = "benchmark.status.updated";
+pub const TOPIC_WORKLOAD_ASSIGNMENTS: &str = "workload.assignments";
+pub const TOPIC_BARRIER: &str = "barrier";
+pub const TOPIC_BOT_READY: &str = "bot.ready";
+pub const TOPIC_WORKLOAD_FAILED: &str = "workload.failed";
+pub const TOPIC_ORDERS_SENT: &str = "orders.sent";
+pub const TOPIC_ORDERS_ACKED: &str = "orders.acked";
+pub const TOPIC_SCORES_CORRECTNESS: &str = "scores.correctness";
+pub const TOPIC_LEADERBOARD_UPDATES: &str = "leaderboard.updates";
+
 /// Protocol identifies the transport a bot-fleet worker should use.
 /// Serialized as FIX, REST, or WS to match controller payloads.
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
@@ -174,4 +187,86 @@ fn default_connect_timeout_ms() -> u64 {
 /// default_write_timeout_ms bounds per-order socket writes.
 fn default_write_timeout_ms() -> u64 {
     250
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn topic_constants_match_platform_contract() {
+        let topics = [
+            TOPIC_SUBMISSION_BUILD_REQUESTED,
+            TOPIC_SUBMISSION_STATUS_UPDATED,
+            TOPIC_BENCHMARK_REQUESTED,
+            TOPIC_BENCHMARK_STATUS_UPDATED,
+            TOPIC_WORKLOAD_ASSIGNMENTS,
+            TOPIC_BARRIER,
+            TOPIC_BOT_READY,
+            TOPIC_WORKLOAD_FAILED,
+            TOPIC_ORDERS_SENT,
+            TOPIC_ORDERS_ACKED,
+            TOPIC_SCORES_CORRECTNESS,
+            TOPIC_LEADERBOARD_UPDATES,
+        ];
+
+        for topic in topics {
+            assert!(!topic.trim().is_empty());
+            assert!(
+                topic.bytes().all(|b| b.is_ascii_lowercase()
+                    || b.is_ascii_digit()
+                    || matches!(b, b'.' | b'-')),
+                "topic {topic} contains unsupported characters"
+            );
+        }
+    }
+
+    #[test]
+    fn workload_spec_decodes_go_controller_payload() {
+        let payload = br#"{
+            "session_id":"sess-1",
+            "submission_id":"sub-1",
+            "contestant_id":"team-1",
+            "target_host":"algo-sess-1.sandbox.svc.cluster.local",
+            "target_port":8080,
+            "protocol":"FIX",
+            "worker_index":0,
+            "worker_count":1,
+            "global_seed":42,
+            "fix_version":"FIX.4.2",
+            "connect_timeout_ms":1500,
+            "write_timeout_ms":250,
+            "tasks":[
+                {"task_id":1,"profile":"hft","target_rps":50,"start_offset_ns":0,"duration_ns":1000000000}
+            ]
+        }"#;
+
+        let spec: WorkloadSpec = serde_json::from_slice(payload).expect("decode workload spec");
+        assert_eq!(spec.session_id, "sess-1");
+        assert_eq!(spec.submission_id, "sub-1");
+        assert_eq!(spec.protocol, Protocol::Fix);
+        assert_eq!(spec.tasks.len(), 1);
+        assert_eq!(spec.tasks[0].profile, BotProfile::Hft);
+    }
+
+    #[test]
+    fn ready_signal_encodes_go_controller_fields() {
+        let signal = ReadySignal {
+            session_id: "sess-1".into(),
+            submission_id: "sub-1".into(),
+            worker_id: "worker-1".into(),
+            worker_index: 0,
+            worker_count: 1,
+            task_count: 10,
+            connected_count: 10,
+            ready_at_unix_nanos: 123,
+        };
+
+        let value = serde_json::to_value(signal).expect("encode ready signal");
+        assert_eq!(value["session_id"], "sess-1");
+        assert_eq!(value["submission_id"], "sub-1");
+        assert_eq!(value["worker_id"], "worker-1");
+        assert_eq!(value["task_count"], 10);
+        assert_eq!(value["ready_at_unix_nanos"], 123);
+    }
 }

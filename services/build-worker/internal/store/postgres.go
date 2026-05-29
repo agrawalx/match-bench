@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/iicpc/schemas/topics"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -24,12 +25,59 @@ func (s *PostgresStore) Close() {
 }
 
 func (s *PostgresStore) UpdateStatus(ctx context.Context, submissionID, status, message string) error {
+	if !validSubmissionStatus(status) {
+		return fmt.Errorf("invalid submission status: %s", status)
+	}
 	_, err := s.pool.Exec(ctx,
-		`UPDATE submissions SET status = $1 WHERE submission_id = $2`,
-		status, submissionID,
+		`WITH incoming(rank) AS (
+			SELECT CASE $2
+				WHEN 'uploaded' THEN 0
+				WHEN 'building' THEN 1
+				WHEN 'scanned' THEN 2
+				WHEN 'sbom_ready' THEN 2
+				WHEN 'ready' THEN 3
+				WHEN 'failed' THEN 4
+				ELSE -1
+			END
+		)
+		UPDATE submissions
+		   SET status = $2
+		  FROM incoming
+		 WHERE submission_id = $1
+		   AND incoming.rank >= 0
+		   AND (
+		       submissions.status = $2
+		       OR (
+		           submissions.status != 'failed'
+		           AND incoming.rank >= CASE submissions.status
+		               WHEN 'uploaded' THEN 0
+		               WHEN 'building' THEN 1
+		               WHEN 'scanned' THEN 2
+		               WHEN 'sbom_ready' THEN 2
+		               WHEN 'ready' THEN 3
+		               WHEN 'failed' THEN 4
+		               ELSE -1
+		           END
+		       )
+		   )`,
+		submissionID, status,
 	)
 	if err != nil {
 		return fmt.Errorf("update status: %w", err)
 	}
 	return nil
+}
+
+func validSubmissionStatus(status string) bool {
+	switch status {
+	case topics.StatusUploaded,
+		topics.StatusBuilding,
+		topics.StatusScanned,
+		topics.StatusSBOMReady,
+		topics.StatusReady,
+		topics.StatusFailed:
+		return true
+	default:
+		return false
+	}
 }

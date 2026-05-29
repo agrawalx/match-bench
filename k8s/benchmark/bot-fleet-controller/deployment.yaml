@@ -25,6 +25,7 @@ spec:
       labels:
         app: bot-fleet-controller
     spec:
+      automountServiceAccountToken: false
       containers:
         - name: bot-fleet-controller
           image: ghcr.io/agrawalx/bot-fleet-controller:dev
@@ -51,25 +52,6 @@ spec:
                   key: harbor-production-endpoint
             - name: HARBOR_PROJECT
               value: agrawalx
-            # Scenarios now live in the PostgreSQL `scenarios` table, seeded
-            # by submission-api on startup (constant / spike / ramp). The
-            # controller loads the scenario for each benchmark.requested by
-            # scenario_id; there are no scenario knobs in this deployment
-            # any longer. To retune a scenario, edit the JSON in the
-            # scenarios row directly.
-            #
-            # The few deploy-wide knobs that ARE per-deployment (deadlines,
-            # FIX protocol version) fall back to sensible defaults in
-            # main.go; override only if needed.
-            # - name: DEPLOY_DEADLINE
-            #   value: "60s"
-            # - name: READY_DEADLINE
-            #   value: "30s"
-            # - name: BARRIER_SAFETY_GAP
-            #   value: "500ms"
-            # Uncomment when Loki is deployed.
-            # - name: LOKI_URL
-            #   value: http://loki.monitoring.svc.cluster.local:3100
           livenessProbe:
             httpGet:
               path: /healthz
@@ -82,6 +64,13 @@ spec:
               port: http
             initialDelaySeconds: 2
             periodSeconds: 5
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            capabilities:
+              drop:
+                - ALL
           resources:
             requests:
               cpu: 100m
@@ -89,3 +78,5 @@ spec:
             limits:
               cpu: 500m
               memory: 256Mi
+      securityContext:
+        runAsNonRoot: true

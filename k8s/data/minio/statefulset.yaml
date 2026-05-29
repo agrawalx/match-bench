@@ -14,9 +14,10 @@ spec:
       labels:
         app: minio
     spec:
+      automountServiceAccountToken: false
       containers:
         - name: minio
-          image: quay.io/minio/minio:latest
+          image: quay.io/minio/minio:RELEASE.2024-07-16T23-46-41Z
           command: ["minio", "server", "/data", "--console-address", ":9001"]
           ports:
             - containerPort: 9000   # S3 API
@@ -35,12 +36,21 @@ spec:
           volumeMounts:
             - name: data
               mountPath: /data
+            - name: tmp
+              mountPath: /tmp
           readinessProbe:
             httpGet:
               path: /minio/health/ready
               port: 9000
             initialDelaySeconds: 10
             periodSeconds: 10
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            capabilities:
+              drop:
+                - ALL
           resources:
             requests:
               cpu: 250m
@@ -48,6 +58,12 @@ spec:
             limits:
               cpu: "1"
               memory: 1Gi
+      securityContext:
+        runAsNonRoot: true
+        fsGroup: 1000
+      volumes:
+        - name: tmp
+          emptyDir: {}
   volumeClaimTemplates:
     - metadata:
         name: data

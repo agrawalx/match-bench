@@ -11,8 +11,6 @@ import (
 	kafka "github.com/segmentio/kafka-go"
 )
 
-const topicStatusUpdated = "submission.status.updated"
-
 type Publisher struct {
 	writer *kafka.Writer
 	log    *slog.Logger
@@ -26,11 +24,11 @@ func NewKafkaPublisher(brokers string, log *slog.Logger) *Publisher {
 	}
 
 	w := &kafka.Writer{
-		Addr:                 kafka.TCP(brokers),
-		Topic:                topicStatusUpdated,
-		Balancer:             &kafka.LeastBytes{},
-		RequiredAcks:         kafka.RequireOne,
-		Async:                false,
+		Addr:                   kafka.TCP(brokers),
+		Topic:                  topics.TopicSubmissionStatusUpdated,
+		Balancer:               &kafka.LeastBytes{},
+		RequiredAcks:           kafka.RequireOne,
+		Async:                  false,
 		AllowAutoTopicCreation: true,
 	}
 

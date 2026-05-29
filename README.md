@@ -134,10 +134,8 @@ iicpc/
 │
 ├── schemas/                        # Shared data contracts across all services
 │   ├── go/                         # Go — Kafka message types, status constants
-│   └── rust/                       # Rust — (add when first Rust service needs shared types)
-│
-├── libs/                           # Shared infrastructure libraries (no business logic)
-│   └── go/                         # Go — logging, health checks, common middleware
+│   └── rust/                       # Rust — Kafka message types shared by Rust services
+│   └── rust/                       # Rust — Kafka message types shared by Rust services
 │
 ├── services/                       # One folder per microservice
 │   ├── submission-api/             # Go — receives ZIP uploads, kicks off build, mints session_id, triggers benchmark
@@ -389,13 +387,11 @@ go run ./services/submission-api
 # 4. Run a service (Rust)
 cargo run -p iicpc-bot-fleet
 
-# 5. Submit a test ZIP
+# 5. Submit a test ZIP containing submission.yaml or benchmark.yaml at the ZIP root
+# 5. Submit a test ZIP containing submission.yaml or benchmark.yaml at the ZIP root
 curl -X POST http://localhost:8080/submit \
-  -F "file=@test.zip" \
-  -F "language=go" \
-  -F "protocol=tcp" \
-  -F "port=8080" \
-  -F "team_name=team1"
+  -F "file=@test.zip"
+  -F "file=@test.zip"
 ```
 
 **Prerequisites:** Go 1.23+, Rust (latest stable), Docker, `kubectl`

@@ -11,12 +11,6 @@ import (
 	kafka "github.com/segmentio/kafka-go"
 )
 
-const (
-	TopicWorkloadAssignments     = "workload.assignments"
-	TopicBarrier                 = "barrier"
-	TopicBenchmarkStatusUpdated  = "benchmark.status.updated"
-)
-
 // Producer publishes the three controller-owned topics. Each topic gets its
 // own kafka.Writer because segmentio/kafka-go pins the topic on the writer.
 //
@@ -49,9 +43,9 @@ func NewProducer(brokers string, log *slog.Logger) *Producer {
 		}
 	}
 	return &Producer{
-		workloadWriter: mk(TopicWorkloadAssignments),
-		barrierWriter:  mk(TopicBarrier),
-		statusWriter:   mk(TopicBenchmarkStatusUpdated),
+		workloadWriter: mk(topics.TopicWorkloadAssignments),
+		barrierWriter:  mk(topics.TopicBarrier),
+		statusWriter:   mk(topics.TopicBenchmarkStatusUpdated),
 		log:            log,
 	}
 }

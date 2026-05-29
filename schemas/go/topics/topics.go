@@ -2,6 +2,21 @@ package topics
 
 import "time"
 
+const (
+	TopicSubmissionBuildRequested = "submission.build.requested"
+	TopicSubmissionStatusUpdated  = "submission.status.updated"
+	TopicBenchmarkRequested       = "benchmark.requested"
+	TopicBenchmarkStatusUpdated   = "benchmark.status.updated"
+	TopicWorkloadAssignments      = "workload.assignments"
+	TopicBarrier                  = "barrier"
+	TopicBotReady                 = "bot.ready"
+	TopicWorkloadFailed           = "workload.failed"
+	TopicOrdersSent               = "orders.sent"
+	TopicOrdersAcked              = "orders.acked"
+	TopicScoresCorrectness        = "scores.correctness"
+	TopicLeaderboardUpdates       = "leaderboard.updates"
+)
+
 // SubmissionBuildRequested is published to "submission.build.requested"
 // by the submission-api after the artifact is stored in MinIO and metadata
 // is written to PostgreSQL. Consumed by: build-worker.

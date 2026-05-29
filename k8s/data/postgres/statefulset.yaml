@@ -14,6 +14,7 @@ spec:
       labels:
         app: postgres
     spec:
+      automountServiceAccountToken: false
       containers:
         - name: postgres
           image: postgres:16-alpine
@@ -34,11 +35,22 @@ spec:
           volumeMounts:
             - name: data
               mountPath: /var/lib/postgresql/data
+            - name: tmp
+              mountPath: /tmp
+            - name: postgres-run
+              mountPath: /var/run/postgresql
           readinessProbe:
             exec:
               command: ["pg_isready", "-U", "iicpc"]
             initialDelaySeconds: 5
             periodSeconds: 5
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            capabilities:
+              drop:
+                - ALL
           resources:
             requests:
               cpu: 250m
@@ -46,6 +58,14 @@ spec:
             limits:
               cpu: "1"
               memory: 1Gi
+      securityContext:
+        runAsNonRoot: true
+        fsGroup: 70
+      volumes:
+        - name: tmp
+          emptyDir: {}
+        - name: postgres-run
+          emptyDir: {}
   volumeClaimTemplates:
     - metadata:
         name: data

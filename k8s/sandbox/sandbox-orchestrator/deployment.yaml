@@ -57,10 +57,6 @@ spec:
               value: "100M"
             - name: ALGO_INGRESS_BANDWIDTH
               value: "100M"
-            # Uncomment after deploying Loki — leaving this set when Loki is
-            # unreachable starves the slog handler (same caveat as the spawner).
-            # - name: LOKI_URL
-            #   value: http://loki.monitoring.svc.cluster.local:3100
           livenessProbe:
             httpGet:
               path: /healthz
@@ -73,6 +69,13 @@ spec:
               port: http
             initialDelaySeconds: 2
             periodSeconds: 5
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            capabilities:
+              drop:
+                - ALL
           resources:
             requests:
               cpu: 100m
@@ -80,3 +83,5 @@ spec:
             limits:
               cpu: 500m
               memory: 256Mi
+      securityContext:
+        runAsNonRoot: true

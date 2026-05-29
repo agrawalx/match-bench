@@ -44,10 +44,17 @@ type PublishMeta struct {
 // The handler must return run_id synchronously in the HTTP response so the
 // frontend can start polling — that's why minting happens in the API
 // instead of being delegated to the controller.
+//
+// One "click benchmark" expands into multiple BenchmarkMeta values — one per
+// scenario in the scenarios table. All share the same RunGroupID; each
+// points at a different ScenarioID. The controller looks up the scenario
+// row when the message arrives.
 type BenchmarkMeta struct {
 	SessionID    string
 	SubmissionID string
 	ContestantID string
+	RunGroupID   string
+	ScenarioID   string
 	RequestedAt  time.Time
 }
 
@@ -138,6 +145,8 @@ func (p *KafkaPublisher) PublishBenchmarkRequested(ctx context.Context, meta Ben
 		SessionID:    meta.SessionID,
 		SubmissionID: meta.SubmissionID,
 		ContestantID: meta.ContestantID,
+		RunGroupID:   meta.RunGroupID,
+		ScenarioID:   meta.ScenarioID,
 		RequestedAt:  meta.RequestedAt,
 	}
 

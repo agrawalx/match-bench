@@ -2,11 +2,13 @@ package store
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
 
 	cerrs "github.com/iicpc/submission-api/internal/errors"
+	"github.com/iicpc/schemas/topics"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -26,32 +28,95 @@ CREATE TABLE IF NOT EXISTS submissions (
 	created_at     TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+-- A "scenario" is one named load pattern (constant / spike / ramp). Its
+-- task_specs JSONB is the full task list — every TaskSpec is one tokio task
+-- in a bot-worker = one TCP connection = one constant-rate sender. The
+-- controller shards this list across worker pods at session start. Values
+-- are seeded by submission-api on startup (see SeedScenarios) and remain
+-- editable by judges via direct SQL.
+CREATE TABLE IF NOT EXISTS scenarios (
+	scenario_id    TEXT PRIMARY KEY,
+	name           TEXT NOT NULL UNIQUE,                -- constant | spike | ramp
+	duration_ns    BIGINT NOT NULL,
+	task_specs     JSONB NOT NULL,
+	-- sort_order is the position in the run-group's execution sequence.
+	-- 1=constant, 2=spike, 3=ramp by default. Used by ListRunsByGroup so the
+	-- frontend renders the three sessions in execution order rather than
+	-- alphabetical (which would put 'ramp' before 'spike').
+	sort_order     INT NOT NULL DEFAULT 0,
+	created_at     TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- Idempotent migration: add sort_order to pre-existing scenarios tables.
+ALTER TABLE scenarios ADD COLUMN IF NOT EXISTS sort_order INT NOT NULL DEFAULT 0;
+
+-- A run_group is one "click benchmark" by a contestant. It expands into N
+-- child runs rows, one per scenario in the scenarios table. The partial
+-- unique index on (submission_id) WHERE NOT terminal enforces "at most one
+-- active benchmark per submission" — the same idempotency invariant the
+-- old runs(submission_id) partial index used to enforce, now lifted to the
+-- parent because a group has multiple concurrent child runs sharing
+-- submission_id.
+CREATE TABLE IF NOT EXISTS run_groups (
+	run_group_id   TEXT PRIMARY KEY,
+	submission_id  TEXT NOT NULL,
+	contestant_id  TEXT NOT NULL DEFAULT '',
+	status         TEXT NOT NULL DEFAULT 'requested',   -- requested | running | completed | failed
+	created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+	updated_at     TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
 CREATE TABLE IF NOT EXISTS runs (
 	session_id     TEXT PRIMARY KEY,
 	submission_id  TEXT NOT NULL,
 	contestant_id  TEXT NOT NULL DEFAULT '',
+	run_group_id   TEXT,                                -- NULL only for legacy single-session runs
+	scenario_id    TEXT,                                -- which scenario this session ran
 	status         TEXT NOT NULL DEFAULT 'requested',
 	message        TEXT NOT NULL DEFAULT '',
 	created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
 	updated_at     TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
--- Partial unique index enforces "at most one active run per submission" at the
--- database level. Idempotency on POST /benchmarks/{submission_id} relies on
--- this: the INSERT path either succeeds (no active row existed) or fails with
--- 23505 unique_violation, at which point the handler re-queries and returns
--- the existing run_id with HTTP 200.
+-- Schema migration: add run_group_id / scenario_id columns to existing runs
+-- tables. ADD COLUMN IF NOT EXISTS is idempotent and safe to run on every
+-- startup. Existing rows get NULL, which is the documented "legacy" state.
+ALTER TABLE runs ADD COLUMN IF NOT EXISTS run_group_id TEXT;
+ALTER TABLE runs ADD COLUMN IF NOT EXISTS scenario_id  TEXT;
+
+-- Drop the old per-submission partial unique index on runs. Replaced by the
+-- run_groups equivalent below — a group has N concurrent child runs that
+-- legitimately share submission_id, so the constraint cannot live on runs
+-- anymore.
+DROP INDEX IF EXISTS idx_runs_one_active_per_submission;
+
+-- Partial unique index — at most one active run_group per submission.
+-- Idempotency on POST /submissions/{id}/benchmark relies on this: the INSERT
+-- path either succeeds (no active group existed) or fails with 23505
+-- unique_violation, at which point the handler re-queries and returns the
+-- existing run_group_id with HTTP 200.
 --
--- HARD INVARIANT: the terminal states 'completed' and 'failed' must only be
--- written by bot-fleet-controller, via benchmark.status.updated messages
--- consumed by submission-api. The one exception is the controller's startup
--- recovery sweep, which writes 'failed' directly to release this index
--- before its consumers start.
-CREATE UNIQUE INDEX IF NOT EXISTS idx_runs_one_active_per_submission
-	ON runs (submission_id)
+-- HARD INVARIANT: terminal run_group statuses ('completed', 'failed') are
+-- derived from the child runs' terminal statuses and written only by the
+-- bot-fleet-controller. The exception is the controller's startup recovery
+-- sweep, which writes 'failed' directly to release this index before its
+-- consumers start consuming benchmark.requested.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_run_groups_one_active_per_submission
+	ON run_groups (submission_id)
 	WHERE status NOT IN ('completed', 'failed');
 
 CREATE INDEX IF NOT EXISTS idx_runs_submission_id ON runs (submission_id);
+CREATE INDEX IF NOT EXISTS idx_runs_run_group_id ON runs (run_group_id);
+CREATE INDEX IF NOT EXISTS idx_run_groups_submission_id ON run_groups (submission_id);
+
+-- Defensive: within one run-group, there is at most one row per scenario.
+-- A re-publish of benchmark.requested for the same (group, scenario) must
+-- not produce a duplicate runs row. NULLs in run_group_id are common (legacy)
+-- so the partial WHERE clause is required for the unique constraint to be
+-- meaningful.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_runs_unique_scenario_per_group
+	ON runs (run_group_id, scenario_id)
+	WHERE run_group_id IS NOT NULL AND scenario_id IS NOT NULL;
 `
 
 type SubmissionMeta struct {
@@ -77,9 +142,6 @@ func NewPostgresStore(ctx context.Context, dsn string) (*PostgresStore, error) {
 		return nil, fmt.Errorf("pgx pool: %w", err)
 	}
 
-	// Bootstrap-only DDL for greenfield local/dev environments. Production
-	// schema changes must go through explicit migrations; IF NOT EXISTS will
-	// not evolve existing tables or indexes.
 	if _, err := pool.Exec(ctx, createTableSQL); err != nil {
 		return nil, fmt.Errorf("create tables: %w", err)
 	}
@@ -92,45 +154,89 @@ type RunMeta struct {
 	SessionID    string
 	SubmissionID string
 	ContestantID string
+	RunGroupID   string // empty for legacy single-session runs
+	ScenarioID   string // empty for legacy single-session runs
 	Status       string
 	Message      string
 	CreatedAt    time.Time
 	UpdatedAt    time.Time
 }
 
-// FindActiveRun returns the active (non-terminal) run for a submission, or
-// (nil, nil) when there is none. Used by the benchmark endpoint to decide
-// whether to mint a new session_id or return the existing one. LIMIT 1 is safe
-// because idx_runs_one_active_per_submission enforces at most one active row.
-func (s *PostgresStore) FindActiveRun(ctx context.Context, submissionID string) (*RunMeta, error) {
+// RunGroupMeta is the in-memory shape of one row of the run_groups table.
+// One row per benchmark trigger; parents N child runs rows (one per scenario).
+type RunGroupMeta struct {
+	RunGroupID   string
+	SubmissionID string
+	ContestantID string
+	Status       string
+	CreatedAt    time.Time
+	UpdatedAt    time.Time
+}
+
+// ScenarioRow is the in-memory shape of one row of the scenarios table.
+type ScenarioRow struct {
+	ScenarioID string
+	Name       string // constant | spike | ramp
+	SortOrder  int    // execution order in the run-group (1=constant, 2=spike, 3=ramp)
+	DurationNs uint64
+	TaskSpecs  []topics.TaskSpec
+	CreatedAt  time.Time
+}
+
+// FindActiveRunGroup returns the active (non-terminal) run-group for a
+// submission, or (nil, nil) when there is none. The benchmark endpoint uses
+// this for idempotency: if an active group already exists, return it with
+// HTTP 200 instead of creating a new one.
+func (s *PostgresStore) FindActiveRunGroup(ctx context.Context, submissionID string) (*RunGroupMeta, error) {
 	row := s.pool.QueryRow(ctx,
-		`SELECT session_id, submission_id, contestant_id, status, message, created_at, updated_at
-		   FROM runs
+		`SELECT run_group_id, submission_id, contestant_id, status, created_at, updated_at
+		   FROM run_groups
 		  WHERE submission_id = $1
 		    AND status NOT IN ('completed', 'failed')
 		  LIMIT 1`,
 		submissionID,
 	)
-	var r RunMeta
-	err := row.Scan(&r.SessionID, &r.SubmissionID, &r.ContestantID, &r.Status, &r.Message, &r.CreatedAt, &r.UpdatedAt)
+	var g RunGroupMeta
+	err := row.Scan(&g.RunGroupID, &g.SubmissionID, &g.ContestantID, &g.Status, &g.CreatedAt, &g.UpdatedAt)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, nil
 		}
-		return nil, fmt.Errorf("%w: find active run: %v", cerrs.ErrStoreDatabaseFailed, err)
+		return nil, fmt.Errorf("%w: find active run-group: %v", cerrs.ErrStoreDatabaseFailed, err)
 	}
-	return &r, nil
+	return &g, nil
+}
+
+// GetRunGroup fetches one run-group by id. Returns (nil, nil) when not found.
+func (s *PostgresStore) GetRunGroup(ctx context.Context, runGroupID string) (*RunGroupMeta, error) {
+	row := s.pool.QueryRow(ctx,
+		`SELECT run_group_id, submission_id, contestant_id, status, created_at, updated_at
+		   FROM run_groups WHERE run_group_id = $1`,
+		runGroupID,
+	)
+	var g RunGroupMeta
+	err := row.Scan(&g.RunGroupID, &g.SubmissionID, &g.ContestantID, &g.Status, &g.CreatedAt, &g.UpdatedAt)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("%w: get run-group: %v", cerrs.ErrStoreDatabaseFailed, err)
+	}
+	return &g, nil
 }
 
 // GetRun fetches one run by session_id. Returns (nil, nil) when not found.
 func (s *PostgresStore) GetRun(ctx context.Context, sessionID string) (*RunMeta, error) {
 	row := s.pool.QueryRow(ctx,
-		`SELECT session_id, submission_id, contestant_id, status, message, created_at, updated_at
+		`SELECT session_id, submission_id, contestant_id,
+		        COALESCE(run_group_id, ''), COALESCE(scenario_id, ''),
+		        status, message, created_at, updated_at
 		   FROM runs WHERE session_id = $1`,
 		sessionID,
 	)
 	var r RunMeta
-	err := row.Scan(&r.SessionID, &r.SubmissionID, &r.ContestantID, &r.Status, &r.Message, &r.CreatedAt, &r.UpdatedAt)
+	err := row.Scan(&r.SessionID, &r.SubmissionID, &r.ContestantID,
+		&r.RunGroupID, &r.ScenarioID, &r.Status, &r.Message, &r.CreatedAt, &r.UpdatedAt)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, nil
@@ -140,29 +246,82 @@ func (s *PostgresStore) GetRun(ctx context.Context, sessionID string) (*RunMeta,
 	return &r, nil
 }
 
-// InsertRun creates a new run row. Returns ErrActiveRunExists when the
-// partial unique index rejects the insert because another active run is
-// already in flight for this submission. Callers that want idempotent UX must
-// handle ErrActiveRunExists by re-querying FindActiveRun and returning the
-// winning row.
-func (s *PostgresStore) InsertRun(ctx context.Context, r RunMeta) error {
-	_, err := s.pool.Exec(ctx,
-		`INSERT INTO runs
-			(session_id, submission_id, contestant_id, status, message, created_at, updated_at)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-		r.SessionID, r.SubmissionID, r.ContestantID, r.Status, r.Message, r.CreatedAt, r.UpdatedAt,
+// ListRunsByGroup returns the child runs of one run-group in EXECUTION order
+// (constant → spike → ramp), not alphabetical. Sort key is scenarios.sort_order,
+// populated by SeedScenarios. Name tiebreak keeps the query deterministic if
+// two scenarios end up with the same sort_order (shouldn't happen but cheap).
+func (s *PostgresStore) ListRunsByGroup(ctx context.Context, runGroupID string) ([]RunMeta, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT r.session_id, r.submission_id, r.contestant_id,
+		        COALESCE(r.run_group_id, ''), COALESCE(r.scenario_id, ''),
+		        r.status, r.message, r.created_at, r.updated_at
+		   FROM runs r
+		   LEFT JOIN scenarios s ON s.scenario_id = r.scenario_id
+		  WHERE r.run_group_id = $1
+		  ORDER BY s.sort_order, s.name`,
+		runGroupID,
 	)
 	if err != nil {
+		return nil, fmt.Errorf("%w: list runs by group: %v", cerrs.ErrStoreDatabaseFailed, err)
+	}
+	defer rows.Close()
+
+	out := make([]RunMeta, 0, 3)
+	for rows.Next() {
+		var r RunMeta
+		if err := rows.Scan(&r.SessionID, &r.SubmissionID, &r.ContestantID,
+			&r.RunGroupID, &r.ScenarioID, &r.Status, &r.Message, &r.CreatedAt, &r.UpdatedAt); err != nil {
+			return nil, fmt.Errorf("%w: scan run: %v", cerrs.ErrStoreDatabaseFailed, err)
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+// InsertRunGroupWithChildren atomically creates a run-group and N child runs.
+//
+// Returns ErrActiveRunGroupExists when the partial unique index on
+// run_groups(submission_id) WHERE NOT terminal rejects the parent insert —
+// the caller falls back to returning the existing run_group_id with HTTP 200.
+//
+// The transaction guarantees that either all rows land or none do. A
+// half-inserted state (run-group exists but a child row failed) would leave
+// the controller confused about how many sessions to expect.
+func (s *PostgresStore) InsertRunGroupWithChildren(ctx context.Context, g RunGroupMeta, children []RunMeta) error {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("%w: begin tx: %v", cerrs.ErrStoreDatabaseFailed, err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	if _, err := tx.Exec(ctx,
+		`INSERT INTO run_groups
+			(run_group_id, submission_id, contestant_id, status, created_at, updated_at)
+		 VALUES ($1, $2, $3, $4, $5, $6)`,
+		g.RunGroupID, g.SubmissionID, g.ContestantID, g.Status, g.CreatedAt, g.UpdatedAt,
+	); err != nil {
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
-			// 23505 is the unique violation code. With our schema this can
-			// fire from the primary key collision (session_id) — unreachable
-			// in practice because session_id is UUID v7 — or from the partial
-			// unique index. Either way, the caller falls back to returning
-			// the existing run_id.
-			return cerrs.ErrActiveRunExists
+			return cerrs.ErrActiveRunGroupExists
 		}
-		return fmt.Errorf("%w: insert run: %v", cerrs.ErrStoreDatabaseFailed, err)
+		return fmt.Errorf("%w: insert run-group: %v", cerrs.ErrStoreDatabaseFailed, err)
+	}
+
+	for _, r := range children {
+		if _, err := tx.Exec(ctx,
+			`INSERT INTO runs
+				(session_id, submission_id, contestant_id, run_group_id, scenario_id,
+				 status, message, created_at, updated_at)
+			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+			r.SessionID, r.SubmissionID, r.ContestantID, r.RunGroupID, r.ScenarioID,
+			r.Status, r.Message, r.CreatedAt, r.UpdatedAt,
+		); err != nil {
+			return fmt.Errorf("%w: insert child run: %v", cerrs.ErrStoreDatabaseFailed, err)
+		}
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("%w: commit run-group tx: %v", cerrs.ErrStoreDatabaseFailed, err)
 	}
 	return nil
 }
@@ -175,75 +334,168 @@ func (s *PostgresStore) InsertRun(ctx context.Context, r RunMeta) error {
 // events. Do not add other callers — every other status writer in this
 // repo violates the one-writer invariant that protects the partial unique
 // index from being freed by an unauthorized actor.
+// RecomputeRunGroupStatus rolls up the children of a run-group into the
+// group's own status field. Called by the benchmark-status consumer after
+// every child status change so the group reflects what's actually happening
+// across its sessions.
 //
-// The update is intentionally monotonic and idempotent. Kafka can replay an
-// already-handled event if the process crashes after PostgreSQL commits but
-// before the Kafka offset commit succeeds. Replayed older states must not
-// regress a run that has already advanced or reached a terminal status.
+// Rollup rules (failure dominates):
+//   - any child in 'failed'                              → group = 'failed'
+//   - all children in 'completed'                        → group = 'completed'
+//   - any child in a non-terminal, non-'requested' state → group = 'running'
+//   - otherwise (all children 'requested')               → group = 'requested'
+//
+// The group's status is denormalized state — the children are the source of
+// truth. We keep it to make leaderboard/listing queries fast (one row scan
+// instead of an N+1 children join per group).
+//
+// A no-op when the group has zero children — defensive against a half-built
+// group state we should never observe in practice but want to handle without
+// crashing if we do.
+func (s *PostgresStore) RecomputeRunGroupStatus(ctx context.Context, runGroupID string) error {
+	row := s.pool.QueryRow(ctx, `
+		SELECT
+			SUM(CASE WHEN status = 'failed'    THEN 1 ELSE 0 END) AS failed_count,
+			SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) AS completed_count,
+			SUM(CASE WHEN status = 'requested' THEN 1 ELSE 0 END) AS requested_count,
+			COUNT(*)                                              AS total_count
+		FROM runs
+		WHERE run_group_id = $1
+	`, runGroupID)
+	var failed, completed, requested, total int
+	if err := row.Scan(&failed, &completed, &requested, &total); err != nil {
+		return fmt.Errorf("%w: recompute run-group status: %v", cerrs.ErrStoreDatabaseFailed, err)
+	}
+	if total == 0 {
+		return nil
+	}
+	var newStatus string
+	switch {
+	case failed > 0:
+		newStatus = "failed"
+	case completed == total:
+		newStatus = "completed"
+	case requested == total:
+		newStatus = "requested"
+	default:
+		newStatus = "running"
+	}
+	if _, err := s.pool.Exec(ctx,
+		`UPDATE run_groups SET status = $2, updated_at = now() WHERE run_group_id = $1`,
+		runGroupID, newStatus,
+	); err != nil {
+		return fmt.Errorf("%w: update run-group status: %v", cerrs.ErrStoreDatabaseFailed, err)
+	}
+	return nil
+}
+
 func (s *PostgresStore) UpdateRunStatus(ctx context.Context, sessionID, status, message string) error {
+	// Guard against terminal-state overwrite. Kafka delivers at-least-once,
+	// so a 'running' message can be redelivered AFTER the 'completed' message
+	// has already been committed. Without this guard, the run would be
+	// reopened — defeating the partial unique index on
+	// run_groups(submission_id) WHERE NOT terminal and letting a re-trigger
+	// see a finished session as live.
 	tag, err := s.pool.Exec(ctx,
-		`WITH incoming(rank) AS (
-			SELECT CASE $2
-				WHEN 'requested' THEN 0
-				WHEN 'deploying' THEN 1
-				WHEN 'waiting_ready' THEN 2
-				WHEN 'barrier_fired' THEN 3
-				WHEN 'running' THEN 4
-				WHEN 'completed' THEN 5
-				WHEN 'failed' THEN 5
-				ELSE -1
-			END
-		)
-		UPDATE runs
-		   SET status = $2, message = $3, updated_at = now()
-		  FROM incoming
-		 WHERE session_id = $1
-		   AND incoming.rank >= 0
-		   AND (
-		       runs.status = $2
-		       OR (
-		           runs.status NOT IN ('completed', 'failed')
-		           AND incoming.rank >= CASE runs.status
-		               WHEN 'requested' THEN 0
-		               WHEN 'deploying' THEN 1
-		               WHEN 'waiting_ready' THEN 2
-		               WHEN 'barrier_fired' THEN 3
-		               WHEN 'running' THEN 4
-		               WHEN 'completed' THEN 5
-		               WHEN 'failed' THEN 5
-		               ELSE -1
-		           END
-		       )
-		   )`,
+		`UPDATE runs
+		    SET status = $2, message = $3, updated_at = now()
+		  WHERE session_id = $1
+		    AND status NOT IN ('completed', 'failed')`,
 		sessionID, status, message,
 	)
 	if err != nil {
 		return fmt.Errorf("%w: update run status: %v", cerrs.ErrStoreDatabaseFailed, err)
 	}
 	if tag.RowsAffected() == 0 {
-		exists, err := s.runExists(ctx, sessionID)
+		// Either the row doesn't exist, or it exists in terminal state and we
+		// skipped it. Disambiguate with a follow-up query so the caller can
+		// log accurately and the Kafka offset can be committed in both cases.
+		var currentStatus string
+		err := s.pool.QueryRow(ctx,
+			`SELECT status FROM runs WHERE session_id = $1`, sessionID,
+		).Scan(&currentStatus)
 		if err != nil {
-			return err
+			if errors.Is(err, pgx.ErrNoRows) {
+				return cerrs.ErrRunNotFound
+			}
+			return fmt.Errorf("%w: check run status: %v", cerrs.ErrStoreDatabaseFailed, err)
 		}
-		if exists {
-			return nil
-		}
-		return cerrs.ErrRunNotFound
+		// Row exists in terminal state — guarded redelivery. Treat as
+		// successfully ignored so the consumer commits the Kafka offset
+		// instead of retrying forever.
+		return nil
 	}
 	return nil
 }
 
-func (s *PostgresStore) runExists(ctx context.Context, sessionID string) (bool, error) {
-	var exists bool
-	err := s.pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM runs WHERE session_id = $1)`, sessionID).Scan(&exists)
+// ListScenarios returns all scenarios in EXECUTION order (by sort_order).
+// submission-api calls this on the benchmark trigger to know how many child
+// runs to mint and which scenario_id each one points at.
+func (s *PostgresStore) ListScenarios(ctx context.Context) ([]ScenarioRow, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT scenario_id, name, sort_order, duration_ns, task_specs, created_at
+		   FROM scenarios
+		  ORDER BY sort_order, name`,
+	)
 	if err != nil {
-		return false, fmt.Errorf("%w: check run exists: %v", cerrs.ErrStoreDatabaseFailed, err)
+		return nil, fmt.Errorf("%w: list scenarios: %v", cerrs.ErrStoreDatabaseFailed, err)
 	}
-	return exists, nil
+	defer rows.Close()
+
+	out := make([]ScenarioRow, 0, 3)
+	for rows.Next() {
+		var sc ScenarioRow
+		var taskSpecsJSON []byte
+		if err := rows.Scan(&sc.ScenarioID, &sc.Name, &sc.SortOrder, &sc.DurationNs, &taskSpecsJSON, &sc.CreatedAt); err != nil {
+			return nil, fmt.Errorf("%w: scan scenario: %v", cerrs.ErrStoreDatabaseFailed, err)
+		}
+		if err := json.Unmarshal(taskSpecsJSON, &sc.TaskSpecs); err != nil {
+			return nil, fmt.Errorf("%w: unmarshal task_specs for %q: %v", cerrs.ErrStoreDatabaseFailed, sc.Name, err)
+		}
+		out = append(out, sc)
+	}
+	return out, rows.Err()
+}
+
+// SeedScenarios inserts the 3 canonical scenarios (constant, spike, ramp) if
+// they don't already exist. ON CONFLICT DO NOTHING means rerunning is a
+// no-op — judges who hand-edit a row in the scenarios table will not have
+// their changes overwritten on the next service restart.
+//
+// Re-tuning a scenario after the fact requires either editing the row
+// directly in PostgreSQL or wiping it first (DELETE FROM scenarios WHERE
+// name = 'spike'; restart service to re-seed).
+//
+// sort_order is backfilled UNCONDITIONALLY (not gated on conflict) so that
+// upgrading from an older deployment whose scenarios table didn't have the
+// column populates the field for existing rows.
+func (s *PostgresStore) SeedScenarios(ctx context.Context, scenarios []ScenarioRow) error {
+	for _, sc := range scenarios {
+		taskSpecsJSON, err := json.Marshal(sc.TaskSpecs)
+		if err != nil {
+			return fmt.Errorf("%w: marshal task_specs for %q: %v", cerrs.ErrStoreDatabaseFailed, sc.Name, err)
+		}
+		if _, err := s.pool.Exec(ctx,
+			`INSERT INTO scenarios (scenario_id, name, sort_order, duration_ns, task_specs)
+			 VALUES ($1, $2, $3, $4, $5)
+			 ON CONFLICT (name) DO NOTHING`,
+			sc.ScenarioID, sc.Name, sc.SortOrder, sc.DurationNs, taskSpecsJSON,
+		); err != nil {
+			return fmt.Errorf("%w: seed scenario %q: %v", cerrs.ErrStoreDatabaseFailed, sc.Name, err)
+		}
+		// Backfill sort_order for an existing row that pre-dates this column.
+		if _, err := s.pool.Exec(ctx,
+			`UPDATE scenarios SET sort_order = $2
+			  WHERE name = $1 AND sort_order = 0`,
+			sc.Name, sc.SortOrder,
+		); err != nil {
+			return fmt.Errorf("%w: backfill sort_order for %q: %v", cerrs.ErrStoreDatabaseFailed, sc.Name, err)
+		}
+	}
+	return nil
 }
 
 func (s *PostgresStore) Close() {
-	// pgxpool.Close has no error return; shutdown is best-effort drain/close.
 	s.pool.Close()
 }
 
@@ -258,7 +510,7 @@ func (s *PostgresStore) FindBySHA256(ctx context.Context, sha256hex string) (sub
 		if errors.Is(err, pgx.ErrNoRows) {
 			return "", false, nil
 		}
-		return "", false, fmt.Errorf("%w: sha256 lookup: %v", cerrs.ErrStoreDatabaseFailed, err)
+		return "", false, fmt.Errorf("sha256 lookup: %w", err)
 	}
 	return submissionID, true, nil
 }

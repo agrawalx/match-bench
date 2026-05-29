@@ -56,8 +56,20 @@ func (c *Consumer) Close() {
 }
 
 // StartBenchmarkRequested blocks consuming benchmark.requested.
-// Each valid message spawns a runner goroutine; the consumer returns once
-// the message is committed (the runner runs independently).
+//
+// Sessions are processed SERIALLY: this loop fetches one message, runs the
+// session to completion (Runner.Run is synchronous), commits the Kafka
+// offset, and only then pulls the next message. With a single controller
+// replica this gives every session exclusive use of the orchestrator + bot
+// fleet, which is what we want for clean metrics and predictable resource
+// usage.
+//
+// Within a run-group, submission-api publishes N benchmark.requested messages
+// up front (one per scenario). Kafka delivers them; this loop drains them in
+// publish order, producing the sequential per-group execution the load-test
+// design requires. Cross-group serialization is a fortunate side-effect:
+// only one benchmark runs anywhere in the cluster at a time. Lifting that
+// limit is a v2 concern.
 func (c *Consumer) StartBenchmarkRequested(ctx context.Context) {
 	c.log.Info("benchmark.requested consumer started")
 	for {
@@ -77,7 +89,8 @@ func (c *Consumer) StartBenchmarkRequested(ctx context.Context) {
 			continue
 		}
 
-		c.runner.Start(ctx, req)
+		// Synchronous: blocks until the session reaches a terminal state.
+		c.runner.Run(ctx, req)
 
 		if err := c.benchmarkReader.CommitMessages(ctx, m); err != nil {
 			c.log.Warn("commit benchmark.requested", "session_id", req.SessionID, "error", err)

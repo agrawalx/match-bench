@@ -29,7 +29,6 @@ import (
 	"github.com/iicpc/bot-fleet-controller/internal/orchestrator"
 	"github.com/iicpc/bot-fleet-controller/internal/store"
 	"github.com/iicpc/libs/logger"
-	"github.com/iicpc/schemas/topics"
 )
 
 func main() {
@@ -49,7 +48,7 @@ func main() {
 	orchURL := mustEnv("SANDBOX_ORCHESTRATOR_URL")
 	harborEndpoint := mustEnv("HARBOR_PRODUCTION_ENDPOINT")
 	harborProject := envOr("HARBOR_PROJECT", "iicpc")
-	scenario := scenarioFromEnv()
+	runConfig := runConfigFromEnv()
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
@@ -84,7 +83,7 @@ func main() {
 	orchClient := orchestrator.NewClient(orchURL)
 	sessions := controller.NewSessionManager()
 	harbor := controller.HarborConfig{Endpoint: harborEndpoint, Project: harborProject}
-	runner := controller.NewRunner(sessions, st, orchClient, producer, scenario, harbor, log)
+	runner := controller.NewRunner(sessions, st, orchClient, producer, runConfig, harbor, log)
 	consumer := controller.NewConsumer(kafkaBrokers, benchmarkGroup, botReadyGroup, runner, sessions, log)
 	defer consumer.Close()
 
@@ -115,10 +114,9 @@ func main() {
 			"port", port,
 			"orchestrator", orchURL,
 			"harbor", fmt.Sprintf("%s/%s", harborEndpoint, harborProject),
-			"worker_count", scenario.WorkerCount,
-			"bot_count", scenario.BotCount,
-			"orders_per_bot", scenario.OrdersPerBot,
-			"run_duration", scenario.RunDuration,
+			"deploy_deadline", runConfig.DeployDeadline,
+			"ready_deadline", runConfig.ReadyDeadline,
+			"barrier_safety_gap", runConfig.BarrierSafetyGap,
 		)
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Error("server error", "error", err)
@@ -136,32 +134,20 @@ func main() {
 	log.Info("controller stopped")
 }
 
-// scenarioFromEnv loads the hardcoded v1 scenario, allowing env overrides.
-//
-// v1 ships a single scenario per controller deployment, knobs set via env
-// at deploy time. v2 will introduce a scenarios table in PostgreSQL and a
-// scenario_id in the benchmark.requested message so each run can pick a
-// shape (constant load / ramp / spike). For now every run uses the same
-// shape and the only knobs are the worker count, bot count, orders/bot,
-// deadlines, and run duration below.
-func scenarioFromEnv() controller.Scenario {
-	return controller.Scenario{
-		WorkerCount:      uint32(envOrInt("SCENARIO_WORKER_COUNT", 1)),
-		BotCount:         uint32(envOrInt("SCENARIO_BOT_COUNT", 10)),
-		OrdersPerBot:     uint32(envOrInt("SCENARIO_ORDERS_PER_BOT", 100)),
-		GlobalSeed:       uint64(envOrInt("SCENARIO_GLOBAL_SEED", 42)),
-		FIXVersion:       envOr("SCENARIO_FIX_VERSION", "FIX.4.2"),
-		ConnectTimeoutMS: uint64(envOrInt("SCENARIO_CONNECT_TIMEOUT_MS", 1500)),
-		WriteTimeoutMS:   uint64(envOrInt("SCENARIO_WRITE_TIMEOUT_MS", 250)),
-		ProfileMix: []topics.BotProfileWeight{
-			{Profile: "market_maker", Weight: 40},
-			{Profile: "aggressive_taker", Weight: 40},
-			{Profile: "canceller", Weight: 20},
-		},
+// runConfigFromEnv loads the deployment-wide operational knobs. The
+// load-shape (worker count, task list, durations) is now per-scenario and
+// lives in the scenarios table — this function only configures the cluster-
+// wide deadlines and protocol settings that apply to every benchmark.
+func runConfigFromEnv() controller.RunConfig {
+	return controller.RunConfig{
+		GlobalSeed:       uint64(envOrInt("GLOBAL_SEED", 42)),
+		FIXVersion:       envOr("FIX_VERSION", "FIX.4.2"),
+		ConnectTimeoutMS: uint64(envOrInt("CONNECT_TIMEOUT_MS", 1500)),
+		WriteTimeoutMS:   uint64(envOrInt("WRITE_TIMEOUT_MS", 250)),
+
 		DeployDeadline:   envOrDuration("DEPLOY_DEADLINE", 60*time.Second),
 		ReadyDeadline:    envOrDuration("READY_DEADLINE", 30*time.Second),
 		BarrierSafetyGap: envOrDuration("BARRIER_SAFETY_GAP", 500*time.Millisecond),
-		RunDuration:      envOrDuration("RUN_DURATION", 90*time.Second),
 	}
 }
 

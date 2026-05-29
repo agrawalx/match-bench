@@ -15,6 +15,7 @@ import (
 	"github.com/iicpc/submission-api/internal/consumer"
 	"github.com/iicpc/submission-api/internal/handler"
 	"github.com/iicpc/submission-api/internal/publisher"
+	"github.com/iicpc/submission-api/internal/scenarios"
 	"github.com/iicpc/submission-api/internal/store"
 )
 
@@ -35,28 +36,16 @@ func main() {
 	minioSecret := mustEnv("MINIO_SECRET_KEY")
 	minioBucket := envOr("MINIO_BUCKET", "submissions")
 	minioSSL := os.Getenv("MINIO_USE_SSL") == "true"
-	minioCreateBucket := os.Getenv("MINIO_CREATE_BUCKET_IF_MISSING") == "true"
 	kafkaBrokers := os.Getenv("KAFKA_BROKERS")
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
 
-	minioInitCtx, minioCancel := context.WithTimeout(ctx, 5*time.Second)
-	minioStore, err := store.NewMinioStoreWithOptions(
-		minioInitCtx,
-		minioEndpoint,
-		minioAccess,
-		minioSecret,
-		minioBucket,
-		minioSSL,
-		store.MinioStoreOptions{CreateBucketIfMissing: minioCreateBucket},
-	)
-	minioCancel()
+	minioStore, err := store.NewMinioStore(minioEndpoint, minioAccess, minioSecret, minioBucket, minioSSL)
 	if err != nil {
 		log.Error("minio init failed", "error", err)
 		os.Exit(1)
 	}
-	defer minioStore.Close()
 
 	pgStore, err := store.NewPostgresStore(ctx, dbURL)
 	if err != nil {
@@ -64,6 +53,32 @@ func main() {
 		os.Exit(1)
 	}
 	defer pgStore.Close()
+
+	// Seed the canonical load-test scenarios (constant, spike, ramp) into the
+	// scenarios table. The seeder uses INSERT ... ON CONFLICT (name) DO NOTHING,
+	// so a judge who tweaked a row by hand will not have their changes
+	// overwritten on the next service restart. First boot of a fresh database
+	// populates all three; subsequent boots are a no-op.
+	scenarioRows, err := scenarios.BuildAll()
+	if err != nil {
+		log.Error("build scenarios failed", "error", err)
+		os.Exit(1)
+	}
+	storeRows := make([]store.ScenarioRow, len(scenarioRows))
+	for i, sr := range scenarioRows {
+		storeRows[i] = store.ScenarioRow{
+			ScenarioID: sr.ScenarioID,
+			Name:       sr.Name,
+			SortOrder:  sr.SortOrder,
+			DurationNs: sr.DurationNs,
+			TaskSpecs:  sr.TaskSpecs,
+		}
+	}
+	if err := pgStore.SeedScenarios(ctx, storeRows); err != nil {
+		log.Error("seed scenarios failed", "error", err)
+		os.Exit(1)
+	}
+	log.Info("scenarios seeded", "count", len(storeRows))
 
 	kafkaPub := publisher.NewKafkaPublisher(kafkaBrokers, log)
 	defer kafkaPub.Close()
@@ -93,16 +108,15 @@ func main() {
 	r.Use(requestLogger(log))
 	r.Use(middleware.Recoverer)
 
-	healthHandler, err := handler.Health(log)
-	if err != nil {
-		log.Error("health handler init failed", "error", err)
-		os.Exit(1)
-	}
-
-	r.Get("/health", healthHandler)
+	r.Get("/health", handler.Health(log))
 	r.Post("/submit", handler.Submit(minioStore, pgStore, kafkaPub, log))
-	r.Get("/submissions/{submission_id}", handler.GetSubmission(pgStore, log))
+	r.Get("/submissions/{id}", handler.GetSubmission(pgStore, log))
+	// POST /submissions/{id}/benchmark mints one run-group and N child runs
+	// (one per row in the scenarios table). The legacy POST /benchmarks/{id}
+	// path is kept as an alias so older frontends do not break.
+	r.Post("/submissions/{submission_id}/benchmark", handler.StartBenchmark(pgStore, kafkaPub, log))
 	r.Post("/benchmarks/{submission_id}", handler.StartBenchmark(pgStore, kafkaPub, log))
+	r.Get("/run-groups/{run_group_id}", handler.GetRunGroup(pgStore, log))
 	r.Get("/runs/{session_id}", handler.GetRun(pgStore, log))
 
 	srv := &http.Server{

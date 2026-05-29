@@ -1,13 +1,5 @@
-mod config;
-mod errors;
-mod fix;
-mod kafka;
-mod telemetry;
-mod time;
-mod worker;
-
-use anyhow::{Context, Error, Result};
-use config::Config;
+use anyhow::Result;
+use iicpc_bot_fleet::{config, worker};
 use tracing_subscriber::EnvFilter;
 
 #[tokio::main(flavor = "multi_thread")]
@@ -17,11 +9,5 @@ async fn main() -> Result<()> {
         .with_env_filter(EnvFilter::from_default_env())
         .init();
 
-    let config = Config::from_env();
-    config
-        .validate()
-        .map_err(Error::msg)
-        .context("invalid bot-fleet configuration")?;
-
-    worker::run(config).await
+    worker::run(config::Config::from_env()).await
 }

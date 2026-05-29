@@ -5,21 +5,14 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
-	"time"
 
 	"github.com/iicpc/schemas/topics"
 	cerrs "github.com/iicpc/submission-api/internal/errors"
 	"github.com/iicpc/submission-api/internal/store"
-	"github.com/iicpc/submission-api/internal/utils"
 	kafka "github.com/segmentio/kafka-go"
 )
 
-const (
-	readerMinBytes = 1
-	readerMaxBytes = 1 << 20
-	readerMaxWait  = 250 * time.Millisecond
-	commitTimeout  = 5 * time.Second
-)
+const TopicBenchmarkStatusUpdated = "benchmark.status.updated"
 
 // BenchmarkStatusConsumer keeps the runs table in PostgreSQL in sync with
 // state transitions published by the bot-fleet-controller.
@@ -44,13 +37,9 @@ type BenchmarkStatusConsumer struct {
 
 func NewBenchmarkStatusConsumer(brokers, groupID string, pg *store.PostgresStore, log *slog.Logger) *BenchmarkStatusConsumer {
 	r := kafka.NewReader(kafka.ReaderConfig{
-		Brokers:     utils.ParseBrokers(brokers),
-		GroupID:     groupID,
-		Topic:       topics.TopicBenchmarkStatusUpdated,
-		StartOffset: kafka.FirstOffset,
-		MinBytes:    readerMinBytes,
-		MaxBytes:    readerMaxBytes,
-		MaxWait:     readerMaxWait,
+		Brokers: []string{brokers},
+		GroupID: groupID,
+		Topic:   TopicBenchmarkStatusUpdated,
 	})
 	return &BenchmarkStatusConsumer{reader: r, pg: pg, log: log}
 }
@@ -60,7 +49,7 @@ func NewBenchmarkStatusConsumer(brokers, groupID string, pg *store.PostgresStore
 // the consumer). On store failures, the message is NOT committed so the next
 // poll will retry.
 func (c *BenchmarkStatusConsumer) Start(ctx context.Context) {
-	c.log.Info("benchmark status consumer started", "topic", topics.TopicBenchmarkStatusUpdated)
+	c.log.Info("benchmark status consumer started", "topic", TopicBenchmarkStatusUpdated)
 	for {
 		m, err := c.reader.FetchMessage(ctx)
 		if err != nil {
@@ -71,77 +60,46 @@ func (c *BenchmarkStatusConsumer) Start(ctx context.Context) {
 			continue
 		}
 
-		c.handleMessage(ctx, m)
-	}
-}
-
-func (c *BenchmarkStatusConsumer) handleMessage(ctx context.Context, m kafka.Message) {
-	var msg topics.BenchmarkStatusUpdated
-	if err := json.Unmarshal(m.Value, &msg); err != nil {
-		c.log.Error("unmarshal benchmark status update", "error", err, "key", string(m.Key))
-		c.commitMessage("invalid benchmark status update", m, slog.String("key", string(m.Key)))
-		return
-	}
-
-	if !validRunStatus(msg.Status) {
-		c.log.Error("invalid benchmark run status", "session_id", msg.SessionID, "status", msg.Status)
-		c.commitMessage("invalid benchmark run status", m, slog.String("session_id", msg.SessionID), slog.String("status", msg.Status))
-		return
-	}
-
-	if err := c.pg.UpdateRunStatus(ctx, msg.SessionID, msg.Status, msg.Message); err != nil {
-		if errors.Is(err, cerrs.ErrRunNotFound) {
-			// Controller is ahead of us with a status for a run we never
-			// inserted. Should not happen — log loudly and commit so we
-			// don't get stuck on it.
-			c.log.Warn("status update for unknown run", "session_id", msg.SessionID, "status", msg.Status)
-			c.commitMessage("unknown benchmark run", m, slog.String("session_id", msg.SessionID), slog.String("status", msg.Status))
-			return
+		var msg topics.BenchmarkStatusUpdated
+		if err := json.Unmarshal(m.Value, &msg); err != nil {
+			c.log.Error("unmarshal benchmark status update", "error", err, "key", string(m.Key))
+			_ = c.reader.CommitMessages(ctx, m)
+			continue
 		}
-		c.log.Error("update run status failed", "session_id", msg.SessionID, "error", err)
-		// Don't commit; retry on next poll.
-		return
-	}
 
-	c.commitMessage("processed benchmark status update", m, slog.String("session_id", msg.SessionID), slog.String("status", msg.Status))
-}
-
-func (c *BenchmarkStatusConsumer) commitMessage(reason string, m kafka.Message, attrs ...slog.Attr) {
-	commitCtx, cancel := context.WithTimeout(context.Background(), commitTimeout)
-	defer cancel()
-
-	if err := c.reader.CommitMessages(commitCtx, m); err != nil {
-		logAttrs := []slog.Attr{
-			slog.String("reason", reason),
-			slog.String("topic", m.Topic),
-			slog.Int("partition", m.Partition),
-			slog.Int64("offset", m.Offset),
-			slog.Any("error", err),
+		if err := c.pg.UpdateRunStatus(ctx, msg.SessionID, msg.Status, msg.Message); err != nil {
+			if errors.Is(err, cerrs.ErrRunNotFound) {
+				// Controller is ahead of us with a status for a run we never
+				// inserted. Should not happen — log loudly and commit so we
+				// don't get stuck on it.
+				c.log.Warn("status update for unknown run", "session_id", msg.SessionID, "status", msg.Status)
+				_ = c.reader.CommitMessages(ctx, m)
+				continue
+			}
+			c.log.Error("update run status failed", "session_id", msg.SessionID, "error", err)
+			// Don't commit; retry on next poll.
+			continue
 		}
-		logAttrs = append(logAttrs, attrs...)
-		c.log.LogAttrs(context.Background(), slog.LevelWarn, "commit failed", logAttrs...)
+
+		// Roll the child's new status up into the parent run-group's denormalized
+		// status field. A failed rollup is logged but not fatal — the children
+		// are the source of truth, so a stale group row is a UX/leaderboard
+		// issue, not a correctness issue. We commit the Kafka offset regardless.
+		if msg.RunGroupID != "" {
+			if err := c.pg.RecomputeRunGroupStatus(ctx, msg.RunGroupID); err != nil {
+				c.log.Warn("recompute run-group status failed",
+					"run_group_id", msg.RunGroupID,
+					"session_id", msg.SessionID,
+					"error", err)
+			}
+		}
+
+		if err := c.reader.CommitMessages(ctx, m); err != nil {
+			c.log.Warn("commit failed", "session_id", msg.SessionID, "error", err)
+		}
 	}
 }
 
 func (c *BenchmarkStatusConsumer) Close() error {
-	if err := c.reader.Close(); err != nil {
-		c.log.Warn("benchmark status consumer close failed", "error", err)
-		return err
-	}
-	return nil
-}
-
-func validRunStatus(status string) bool {
-	switch status {
-	case topics.RunStatusRequested,
-		topics.RunStatusDeploying,
-		topics.RunStatusWaitingReady,
-		topics.RunStatusBarrierFired,
-		topics.RunStatusRunning,
-		topics.RunStatusCompleted,
-		topics.RunStatusFailed:
-		return true
-	default:
-		return false
-	}
+	return c.reader.Close()
 }

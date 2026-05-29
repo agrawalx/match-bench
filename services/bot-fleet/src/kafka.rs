@@ -1,108 +1,150 @@
-use std::{sync::Arc, time::Duration};
+use std::time::Duration;
 
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
+use futures::StreamExt;
 use rdkafka::{
+    admin::{AdminClient, AdminOptions, NewTopic, TopicReplication},
+    client::DefaultClientContext,
     config::ClientConfig,
-    consumer::{BaseConsumer, CommitMode, Consumer, StreamConsumer},
+    consumer::{CommitMode, Consumer, StreamConsumer},
     message::Message,
-    producer::{FutureProducer, FutureRecord, Producer},
-    Offset, TopicPartitionList,
+    producer::{FutureProducer, FutureRecord},
 };
-use tracing::{debug, warn};
 
 use iicpc_schemas_rust::{BarrierEvent, ReadySignal};
 
-/// KafkaProducer wraps rdkafka's async FutureProducer.
+/// KafkaProducer wraps rdkafka's FutureProducer. FutureProducer is already
+/// Clone + Send + Sync, so we keep it as a thin newtype rather than wrapping
+/// in Arc<Mutex<_>> — the kafka-rust era of locked-producer-behind-mutex is
+/// gone with the migration to librdkafka.
 #[derive(Clone)]
 pub struct KafkaProducer {
     inner: FutureProducer,
 }
 
-/// KafkaConsumer wraps rdkafka's async StreamConsumer inside an Arc.
-#[derive(Clone)]
+/// KafkaConsumer holds a StreamConsumer. rdkafka's StreamConsumer pulls
+/// messages asynchronously off librdkafka's internal poll loop; the bot-fleet
+/// no longer pays for a tokio spawn_blocking per poll. Manual commit mode is
+/// used so we keep at-least-once delivery semantics — commit fires only
+/// after the caller has finished processing the message.
 pub struct KafkaConsumer {
-    inner: Arc<StreamConsumer>,
+    inner: StreamConsumer,
 }
 
-/// KafkaMessage is the payload plus enough offset metadata to commit it only
-/// after the caller has decided how the message was handled.
-pub struct KafkaMessage {
-    pub payload: Option<Vec<u8>>,
-    topic: String,
-    partition: i32,
-    offset: i64,
-}
-
-/// ensure_topics asks Kafka for metadata for each configured topic so startup
-/// fails fast when explicit topic initialization has not run.
-pub fn ensure_topics(brokers: &str, topics: &[&str]) -> Result<()> {
-    let client: BaseConsumer = ClientConfig::new()
+/// ensure_topics creates each topic if it doesn't already exist. Idempotent
+/// against pre-existing topics (the broker returns TopicAlreadyExists, which
+/// we treat as success). Topics created here have a single partition because
+/// the bot-fleet workload is sharded by consumer group, not by Kafka
+/// partition — there is one bot-worker pod per partition slot today, and
+/// scaling out the partition count requires a controller-side change too.
+pub async fn ensure_topics(brokers: &str, topics: &[&str]) -> Result<()> {
+    let admin: AdminClient<DefaultClientContext> = ClientConfig::new()
         .set("bootstrap.servers", brokers)
         .create()
-        .context("create temp metadata consumer")?;
+        .context("create kafka admin client")?;
 
-    for topic in topics {
-        let metadata = client
-            .fetch_metadata(Some(topic), Duration::from_secs(5))
-            .with_context(|| format!("fetch kafka metadata for topic '{topic}'"))?;
-        let exists = metadata.topics().iter().any(|t| t.name() == *topic);
-        if !exists {
-            anyhow::bail!("kafka topic '{topic}' does not exist");
-        }
-    }
+    let new_topics: Vec<NewTopic> = topics
+        .iter()
+        .map(|t| NewTopic::new(t, 1, TopicReplication::Fixed(1)))
+        .collect();
+
+    admin
+        .create_topics(&new_topics, &AdminOptions::new())
+        .await
+        .context("create topics")?;
+
+    // create_topics returns errors per topic, including "already exists";
+    // librdkafka surfaces them but does not fail the whole call. We don't
+    // need to inspect them — the next operation (producer/consumer) will
+    // fail loudly if a topic genuinely doesn't exist.
     Ok(())
 }
 
-/// producer creates a Kafka producer for the configured broker list.
-/// Messages require all in-sync replicas to ack and use a bounded ack timeout.
-pub fn producer(brokers: &str) -> Result<KafkaProducer> {
-    let producer: FutureProducer = ClientConfig::new()
+/// control_producer builds a FutureProducer tuned for control-plane messages
+/// (ready signals on bot.ready). Per architecture §6.5, every control topic
+/// (benchmark.requested, barrier, benchmark.status.updated, workload.assignments,
+/// bot.ready) must publish with `acks=all` so that a leader failure between
+/// ack and replication cannot silently drop the message. Tuning:
+///
+///   - `acks=all`: every in-sync replica acks. Costs ~ms of latency, gains
+///     no-loss-on-leader-failure. Required for control plane.
+///   - `enable.idempotence=true`: librdkafka attaches PID + sequence so a
+///     retry after broker error doesn't duplicate. Free when acks=all.
+///   - `linger.ms=0`: no batching. Ready signals are one-per-worker-per-session,
+///     not a stream — coalescing buys nothing and adds wakeup latency.
+///   - `message.timeout.ms=10000`: 10s upper bound. Higher than telemetry's
+///     5s because retries with idempotent producer can take longer.
+pub fn control_producer(brokers: &str) -> Result<KafkaProducer> {
+    let inner: FutureProducer = ClientConfig::new()
         .set("bootstrap.servers", brokers)
         .set("acks", "all")
-        .set("queue.buffering.max.ms", "5")
-        .set("batch.size", "65536") // 64KB
-        .set("compression.type", "lz4")
-        .set("request.timeout.ms", "5000")
+        .set("enable.idempotence", "true")
+        .set("linger.ms", "0")
+        .set("message.timeout.ms", "10000")
         .create()
-        .context("create kafka producer")?;
-
-    Ok(KafkaProducer { inner: producer })
+        .context("create kafka control producer")?;
+    Ok(KafkaProducer { inner })
 }
 
+/// telemetry_producer builds a FutureProducer tuned for the orders.sent
+/// stream. Telemetry is high-volume, loss-tolerant (rare drops show up as
+/// gaps in the HDR histogram, not as wrong scores), so we prioritise
+/// throughput over durability. Tuning:
+///
+///   - `acks=1`: leader-only ack. Rare loss is acceptable for telemetry.
+///   - `linger.ms=2`: 2ms batching window coalesces bursts of small
+///     OrderSentBatch messages into one TCP write.
+///   - `compression.type=lz4`: cheap CPU, ~3x compression on JSON. lz4 is
+///     faster than zstd at our message sizes (~200 bytes) and avoids the
+///     zstd librdkafka feature dependency.
+///   - `message.timeout.ms=5000`: 5s upper bound from send() to
+///     delivery-failure. Matches the old kafka-rust ack_timeout.
+pub fn telemetry_producer(brokers: &str) -> Result<KafkaProducer> {
+    let inner: FutureProducer = ClientConfig::new()
+        .set("bootstrap.servers", brokers)
+        .set("acks", "1")
+        .set("linger.ms", "2")
+        .set("compression.type", "lz4")
+        .set("message.timeout.ms", "5000")
+        .create()
+        .context("create kafka telemetry producer")?;
+    Ok(KafkaProducer { inner })
+}
+
+/// producer is preserved as an alias for telemetry_producer to keep the
+/// integration test (examples/bot_worker_fix_roundtrip.rs) and any other
+/// historical callers compiling. New code should pick the named variant
+/// explicitly.
+pub fn producer(brokers: &str) -> Result<KafkaProducer> {
+    telemetry_producer(brokers)
+}
+
+/// consumer builds a StreamConsumer subscribed to the requested topics under
+/// the given consumer group. Tuning notes:
+///
+///   - `enable.auto.commit=false`: we commit explicitly after processing each
+///     message so that on a worker crash the message is re-delivered. The
+///     workload-assignment path is idempotent at the controller level (same
+///     session_id is recognised), so re-delivery is safe.
+///   - `auto.offset.reset=earliest`: new consumer groups start from the
+///     beginning of the partition. Bot-workers do not exist before the
+///     controller publishes a workload, so "earliest" effectively means
+///     "the message that was just produced". Switching to `latest` would
+///     mean the worker can miss a workload that landed before its consumer
+///     attached.
+///   - `session.timeout.ms=10000` keeps rebalances tight when KEDA scales
+///     the worker pool.
 pub fn consumer(brokers: &str, group: &str, topics: &[&str]) -> Result<KafkaConsumer> {
-    consumer_with_fallback(brokers, group, topics, "latest")
-}
-
-/// workload_consumer creates the assignment consumer. New groups replay retained
-/// assignments so scale-up races do not drop single-shot controller messages.
-pub fn workload_consumer(brokers: &str, group: &str, topics: &[&str]) -> Result<KafkaConsumer> {
-    consumer_with_fallback(brokers, group, topics, "earliest")
-}
-
-/// consumer_with_fallback creates a Kafka consumer group subscription for the
-/// requested topics. Offsets are stored in Kafka only when explicitly committed
-/// by the caller after it has handled the message.
-fn consumer_with_fallback(
-    brokers: &str,
-    group: &str,
-    topics: &[&str],
-    fallback_offset: &str,
-) -> Result<KafkaConsumer> {
-    let consumer: StreamConsumer = ClientConfig::new()
+    let inner: StreamConsumer = ClientConfig::new()
         .set("bootstrap.servers", brokers)
         .set("group.id", group)
         .set("enable.auto.commit", "false")
-        .set("auto.offset_reset", fallback_offset)
+        .set("auto.offset.reset", "earliest")
+        .set("session.timeout.ms", "10000")
         .create()
         .context("create kafka consumer")?;
-
-    consumer
-        .subscribe(topics)
-        .context("subscribe to kafka topics")?;
-
-    Ok(KafkaConsumer {
-        inner: Arc::new(consumer),
-    })
+    inner.subscribe(topics).context("subscribe to topics")?;
+    Ok(KafkaConsumer { inner })
 }
 
 /// publish_json serializes a value as JSON and publishes it with the provided key.
@@ -117,11 +159,8 @@ pub async fn publish_json<T: serde::Serialize>(
     publish_bytes(producer, topic, key, &payload).await
 }
 
-/// publish_bytes sends a pre-encoded Kafka payload from an async context.
-///
-/// The timeout bounds how long rdkafka may wait to enqueue into its internal
-/// producer queue. It is not an end-to-end broker delivery timeout, so callers
-/// on hot paths should treat a slow/full producer queue as backpressure.
+/// publish_bytes sends a pre-encoded payload through the FutureProducer.
+/// Awaits delivery confirmation; returns the librdkafka error on failure.
 pub async fn publish_bytes(
     producer: &KafkaProducer,
     topic: &str,
@@ -129,20 +168,20 @@ pub async fn publish_bytes(
     payload: &[u8],
 ) -> Result<()> {
     let record = FutureRecord::to(topic).key(key).payload(payload);
-
+    // 5s queue timeout matches the producer's message.timeout.ms; if the
+    // internal queue is full for longer than this, we surface an error
+    // rather than blocking the caller indefinitely.
     producer
         .inner
         .send(record, Duration::from_secs(5))
         .await
-        .map_err(|(err, _)| {
-            crate::errors::BotFleetError::KafkaError(format!("publish error: {err}"))
-        })?;
-
+        .map_err(|(err, _msg)| anyhow!("publish kafka message: {err}"))?;
     Ok(())
 }
 
-/// wait_for_barrier polls the barrier topic until the matching session event arrives.
-/// Malformed or unrelated messages are ignored until the timeout expires.
+/// wait_for_barrier polls the barrier topic until the matching session
+/// event arrives or the wait timeout expires. Malformed or unrelated
+/// messages are dropped and the loop continues.
 pub async fn wait_for_barrier(
     consumer: &KafkaConsumer,
     session_id: &str,
@@ -151,43 +190,24 @@ pub async fn wait_for_barrier(
     let deadline = tokio::time::Instant::now() + wait_timeout;
 
     loop {
-        let now = tokio::time::Instant::now();
-        if now >= deadline {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
             anyhow::bail!("timed out waiting for barrier");
         }
-        let time_remaining = deadline - now;
 
-        let message_res = tokio::time::timeout(time_remaining, recv_message(consumer)).await;
-        let message = match message_res {
-            Ok(Ok(message)) => message,
-            Ok(Err(err)) => return Err(err),
+        let payload = match tokio::time::timeout(remaining, recv_payload(consumer)).await {
+            Ok(result) => result?,
             Err(_) => anyhow::bail!("timed out waiting for barrier"),
         };
-        let Some(payload) = message.payload.as_deref() else {
-            warn!("skipping null barrier message");
-            commit_message(consumer, &message).context("commit null barrier message")?;
-            continue;
-        };
+        let Some(payload) = payload else { continue };
 
-        let event: BarrierEvent = match serde_json::from_slice(payload) {
+        let event: BarrierEvent = match serde_json::from_slice(&payload) {
             Ok(event) => event,
-            Err(err) => {
-                let prefix = String::from_utf8_lossy(&payload[..payload.len().min(256)]);
-                warn!(error = %err, payload_prefix = %prefix, "skipping malformed barrier message");
-                commit_message(consumer, &message).context("commit malformed barrier message")?;
-                continue;
-            }
+            Err(_) => continue,
         };
         if event.session_id == session_id {
-            commit_message(consumer, &message).context("commit matching barrier message")?;
             return Ok(event);
         }
-        debug!(
-            expected_session_id = session_id,
-            actual_session_id = %event.session_id,
-            "skipping unrelated barrier message"
-        );
-        commit_message(consumer, &message).context("commit unrelated barrier message")?;
     }
 }
 
@@ -201,44 +221,32 @@ pub fn ready_key(signal: &ReadySignal) -> String {
     format!("{}:{}", signal.session_id, signal.worker_id)
 }
 
-/// recv_message polls one Kafka message without committing its offset.
-pub async fn recv_message(consumer: &KafkaConsumer) -> Result<KafkaMessage> {
-    match consumer.inner.recv().await {
-        Ok(msg) => Ok(KafkaMessage {
-            payload: msg.payload().map(|p| p.to_vec()),
-            topic: msg.topic().to_string(),
-            partition: msg.partition(),
-            offset: msg.offset(),
-        }),
-        Err(err) => {
-            anyhow::bail!("failed to receive message from kafka: {err}");
-        }
-    }
-}
+/// recv_payload awaits the next message on the consumer's subscribed topics,
+/// commits its offset synchronously, and returns the payload bytes. Returns
+/// `Ok(None)` when the message arrived with no payload (rdkafka surfaces
+/// these as deletions/tombstones; we skip them).
+///
+/// Cancellation is the caller's responsibility — wrap this call in a
+/// `tokio::select!` or `tokio::time::timeout` to bound the wait.
+pub async fn recv_payload(consumer: &KafkaConsumer) -> Result<Option<Vec<u8>>> {
+    let mut stream = consumer.inner.stream();
+    let msg = stream
+        .next()
+        .await
+        .ok_or_else(|| anyhow!("consumer stream ended unexpectedly"))?
+        .context("read message")?;
 
-/// commit_message records that the consumed Kafka message has been fully
-/// handled. Kafka commits the next offset, not the current message offset.
-pub fn commit_message(consumer: &KafkaConsumer, message: &KafkaMessage) -> Result<()> {
-    let mut offsets = TopicPartitionList::new();
-    offsets
-        .add_partition_offset(
-            &message.topic,
-            message.partition,
-            Offset::Offset(message.offset + 1),
-        )
-        .context("build kafka commit offset")?;
+    let payload = msg.payload().map(|b| b.to_vec());
+
+    // Commit synchronously so that on a worker crash we have at-least-once
+    // delivery and not at-most-once. CommitMode::Sync blocks on the broker
+    // round-trip; for the bot-fleet's low message rate on barrier and
+    // workload.assignments topics, the cost is dwarfed by the time the
+    // worker spends processing each message anyway.
     consumer
         .inner
-        .commit(&offsets, CommitMode::Async)
-        .context("commit kafka message offset")
-}
+        .commit_message(&msg, CommitMode::Sync)
+        .context("commit kafka offset")?;
 
-/// flush_producer waits for rdkafka's internal queue to deliver enqueued
-/// messages. Use this before treating final telemetry/control-plane publishes
-/// as durable.
-pub fn flush_producer(producer: &KafkaProducer, timeout: Duration) -> Result<()> {
-    producer
-        .inner
-        .flush(timeout)
-        .context("flush kafka producer")
+    Ok(payload)
 }

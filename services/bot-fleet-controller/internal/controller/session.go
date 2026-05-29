@@ -26,6 +26,7 @@ type Session struct {
 	SessionID    string
 	SubmissionID string
 	ContestantID string
+	RunGroupID   string // parent group; included on every status update for rollup
 
 	Status  string // mirrors topics.RunStatus*
 	Message string
@@ -34,10 +35,10 @@ type Session struct {
 	SlotID   string
 	Endpoint *orchestrator.Endpoint
 
-	// Workload metadata
-	WorkerCount  uint32
-	BotCount     uint32
-	OrdersPerBot uint32
+	// Worker count for this session. Computed from the scenario's total task
+	// count and the per-pod task ceiling. Not a deployment-wide setting any
+	// longer — different scenarios produce different worker counts.
+	WorkerCount uint32
 
 	// Fan-in state. Keyed by worker_index so re-delivery is idempotent.
 	ReadyReceived map[uint32]topics.ReadySignal

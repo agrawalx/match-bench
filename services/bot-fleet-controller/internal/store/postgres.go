@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -123,6 +124,40 @@ func (s *Store) MarkRunFailed(ctx context.Context, sessionID, message string) er
 	_ = tag
 	return nil
 }
+
+// LoadScenario reads one row of the scenarios table. The controller calls
+// this on every benchmark.requested message to materialise the TaskSpec list
+// the bot-fleet workers will execute. The table is owned (created + seeded)
+// by submission-api; the controller is a read-only consumer.
+//
+// Returns (nil, ErrScenarioNotFound) when the scenario_id does not exist —
+// the controller treats this as a fatal session error (the user got a
+// stale benchmark.requested for a deleted scenario row).
+func (s *Store) LoadScenario(ctx context.Context, scenarioID string) (*topics.Scenario, error) {
+	row := s.pool.QueryRow(ctx,
+		`SELECT scenario_id, name, duration_ns, task_specs
+		   FROM scenarios WHERE scenario_id = $1`,
+		scenarioID,
+	)
+	var sc topics.Scenario
+	var taskSpecsJSON []byte
+	if err := row.Scan(&sc.ScenarioID, &sc.Name, &sc.DurationNs, &taskSpecsJSON); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, ErrScenarioNotFound
+		}
+		return nil, fmt.Errorf("load scenario %q: %w", scenarioID, err)
+	}
+	if err := json.Unmarshal(taskSpecsJSON, &sc.TaskSpecs); err != nil {
+		return nil, fmt.Errorf("unmarshal task_specs for scenario %q: %w", scenarioID, err)
+	}
+	return &sc, nil
+}
+
+// ErrScenarioNotFound signals a missing scenario row — controller fails the
+// session in that case (the trigger referenced a scenario that no longer
+// exists, almost certainly because a judge deleted it after the row was
+// referenced in a benchmark.requested message).
+var ErrScenarioNotFound = errors.New("scenario not found")
 
 // Healthcheck verifies the pool can issue a basic query. Used by /readyz.
 func (s *Store) Healthcheck(ctx context.Context) error {

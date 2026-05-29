@@ -11,7 +11,7 @@ use iicpc_schemas_rust::{BotProfile, OrderSentEvent, Protocol, ReadySignal, Side
 use rand::{rngs::SmallRng, Rng, SeedableRng};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt, ReadHalf, WriteHalf},
-    net::TcpStream,
+    net::{lookup_host, TcpStream},
     task::JoinSet,
     time::{self, Instant},
 };
@@ -276,9 +276,13 @@ fn validate_identifier(name: &str, value: &str) -> Result<()> {
 /// gated by per-task start_offset_ns inside the firing loop), so cold-start
 /// latency cannot leak into spike or ramp measurements.
 async fn connect_tasks(spec: &WorkloadSpec) -> Result<Vec<ConnectedTask>> {
-    let addr: SocketAddr = format!("{}:{}", spec.target_host, spec.target_port)
-        .parse()
-        .context("parse target socket address")?;
+    // The controller supplies target_host as the algo Service's cluster DNS
+    // name (algo-{session_id}.sandbox.svc.cluster.local), not a numeric IP, so
+    // we must resolve it — SocketAddr's FromStr only accepts IP literals and
+    // would reject every in-cluster target. lookup_host handles both DNS names
+    // and bare IPs, so local examples that pass 127.0.0.1 still work. Resolve
+    // once here and share the result across every task's connection.
+    let addr = resolve_target(&spec.target_host, spec.target_port).await?;
     let mut set = JoinSet::new();
     let shared_spec = Arc::new(spec.clone());
 
@@ -304,6 +308,22 @@ async fn connect_tasks(spec: &WorkloadSpec) -> Result<Vec<ConnectedTask>> {
         }
     }
     Ok(tasks)
+}
+
+/// resolve_target turns the controller-supplied (host, port) into a concrete
+/// SocketAddr. host is the algo Service's cluster DNS name in production
+/// (algo-{session_id}.sandbox.svc.cluster.local) and a bare IP in local
+/// examples; lookup_host handles both. This must NOT be `host:port`.parse()
+/// — SocketAddr::FromStr only accepts numeric IP literals and rejects every
+/// in-cluster DNS target, which would silently drop every workload.
+async fn resolve_target(host: &str, port: u16) -> Result<SocketAddr> {
+    let target = format!("{host}:{port}");
+    let mut addrs = lookup_host(&target)
+        .await
+        .with_context(|| format!("resolve target host {target}"))?;
+    addrs
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("no addresses resolved for target host {target}"))
 }
 
 /// fire_workload spawns one tokio task per ConnectedTask. Each tokio task
@@ -1009,5 +1029,49 @@ impl TargetClient {
                 Ok(Self::Ws(ws))
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resolve_target;
+    use std::net::SocketAddr;
+
+    // Regression: the controller passes target_host as a DNS name
+    // (algo-{session_id}.sandbox.svc.cluster.local), never a numeric IP.
+    // The old code did `"host:port".parse::<SocketAddr>()`, whose FromStr
+    // only accepts IP literals, so every in-cluster workload failed to
+    // connect. resolve_target must resolve a hostname. "localhost" is the
+    // portable stand-in that's guaranteed resolvable in CI.
+    #[tokio::test]
+    async fn resolves_hostname_target() {
+        let addr = resolve_target("localhost", 9876)
+            .await
+            .expect("localhost must resolve");
+        assert_eq!(addr.port(), 9876);
+        assert!(addr.ip().is_loopback(), "expected loopback, got {addr}");
+    }
+
+    // Bare IP literals (used by the local examples) must keep working.
+    #[tokio::test]
+    async fn resolves_ip_literal_target() {
+        let addr = resolve_target("127.0.0.1", 8080)
+            .await
+            .expect("ip literal must resolve");
+        assert_eq!(addr, "127.0.0.1:8080".parse::<SocketAddr>().unwrap());
+    }
+
+    // The exact production-shaped name that broke under SocketAddr::parse.
+    // It won't resolve off-cluster, so we assert we get a clean resolver
+    // error (not a parse rejection) — i.e. the code path now reaches DNS.
+    #[tokio::test]
+    async fn cluster_dns_name_reaches_resolver() {
+        let err = resolve_target("algo-sess-123.sandbox.svc.cluster.local", 8080)
+            .await
+            .expect_err("unresolvable off-cluster");
+        assert!(
+            err.to_string().contains("resolve target host"),
+            "expected a resolver error, got: {err}"
+        );
     }
 }

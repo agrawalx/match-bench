@@ -251,7 +251,19 @@ func (r *Runner) runSession(
 	select {
 	case <-time.After(totalDuration):
 	case <-ctx.Done():
-		log.Info("context cancelled during run; cleaning up")
+		// Shutdown (or parent cancellation) interrupted the run before its
+		// scenario duration elapsed. The slot is about to be torn down and
+		// the bot workers have not finished their schedule, so this is a
+		// failure, not a completion — reporting 'completed' here would write
+		// a terminal success that the recovery sweep can never correct.
+		// Release the slot and fail via a fresh (non-cancelled) context so
+		// the status publish itself isn't aborted by the same cancellation.
+		log.Info("context cancelled during run; marking failed and cleaning up")
+		r.releaseSlot(sess, log)
+		failCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		r.fail(failCtx, sess, "controller shutdown during run", log)
+		return
 	}
 
 	// Step 7 — cleanup + complete.

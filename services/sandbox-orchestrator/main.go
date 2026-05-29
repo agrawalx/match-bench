@@ -72,7 +72,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	mgr := k8s.NewManager(k8sClient, k8s.Config{
+	mgr, err := k8s.NewManager(k8sClient, k8s.Config{
 		Namespace:        namespace,
 		RuntimeClass:     runtimeClass,
 		CPU:              algoCPU,
@@ -81,6 +81,10 @@ func main() {
 		EgressBandwidth:  egressBw,
 		IngressBandwidth: ingressBw,
 	})
+	if err != nil {
+		log.Error("k8s manager init failed", "error", err)
+		os.Exit(1)
+	}
 
 	slots := store.NewSlotStore()
 
@@ -95,7 +99,7 @@ func main() {
 	// don't recognise (label app=algo + managed-by=sandbox-orchestrator,
 	// but slot label missing) is treated as leaked and ignored — it'll
 	// surface as a NotFound on the controller's eventual DELETE.
-	existing, err := mgr.ListExisting(ctx)
+	existing, skippedMissingSlotLabel, err := mgr.ListExisting(ctx)
 	if err != nil {
 		log.Error("list existing slots", "error", err)
 		os.Exit(1)
@@ -103,7 +107,10 @@ func main() {
 	for i := range existing {
 		slots.Put(&existing[i])
 	}
-	log.Info("rebuilt slot map from cluster", "count", len(existing), "namespace", namespace)
+	log.Info("rebuilt slot map from cluster", "count", slots.Len(), "namespace", namespace)
+	if skippedMissingSlotLabel > 0 {
+		log.Warn("skipped managed algo pods without slot label during restore", "count", skippedMissingSlotLabel, "namespace", namespace)
+	}
 
 	ready := handler.NewReadyState()
 

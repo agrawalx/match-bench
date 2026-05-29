@@ -2,26 +2,21 @@ package validator
 
 import (
 	"archive/zip"
-	"errors"
 	"fmt"
 	"io"
 	"regexp"
 	"strings"
 
+	"github.com/BurntSushi/toml"
+	cerrs "github.com/iicpc/submission-api/internal/errors"
 	"gopkg.in/yaml.v3"
 )
 
-var (
-	ErrNotZip          = errors.New("file is not a valid ZIP archive")
-	ErrTooLarge        = errors.New("file exceeds 100MB limit")
-	ErrNoBenchmarkYAML = errors.New("benchmark.yaml not found at zip root")
-	ErrNoSrcDir        = errors.New("src/ directory not found in zip")
-)
+const MaxZipBytes = 100 << 20      // 100 MB
+const maxRootConfigBytes = 1 << 20 // 1 MB per root config/build file after decompression
 
-const MaxZipBytes = 100 << 20 // 100 MB
-
-var validProtocols = map[string]bool{"FIX": true, "REST": true, "WS": true}
-var validLanguages = map[string]bool{"cpp": true, "rust": true, "go": true}
+var validProtocols = map[string]struct{}{"FIX": {}, "REST": {}, "WS": {}}
+var validLanguages = map[string]struct{}{"cpp": {}, "rust": {}, "go": {}}
 
 // BuildSection is the build stanza from benchmark.yaml.
 type BuildSection struct {
@@ -38,37 +33,35 @@ type BenchmarkConfig struct {
 	TeamName string       `yaml:"team_name"` // optional until auth is added
 }
 
-// DeclaredPort returns the declared port.
-func (c *BenchmarkConfig) DeclaredPort() int {
-	return c.Port
-}
-
 // ValidateSubmissionZip checks magic bytes, size, zip structure, benchmark.yaml,
 // src/ presence, build file existence, and target name consistency.
+// Root benchmark/build files are read with a 1 MiB decompressed limit so a
+// compressed ZIP cannot force unbounded memory allocation while validating.
 // Returns a parsed BenchmarkConfig on success, or a descriptive error.
 func ValidateSubmissionZip(r io.ReaderAt, size int64) (*BenchmarkConfig, error) {
 	if size > MaxZipBytes {
-		return nil, ErrTooLarge
+		return nil, cerrs.ErrTooLarge
 	}
 
 	// ZIP magic bytes: PK\x03\x04
 	var header [4]byte
 	if _, err := r.ReadAt(header[:], 0); err != nil {
-		return nil, ErrNotZip
+		return nil, cerrs.ErrNotZip
 	}
 	if header[0] != 0x50 || header[1] != 0x4B || header[2] != 0x03 || header[3] != 0x04 {
-		return nil, ErrNotZip
+		return nil, cerrs.ErrNotZip
 	}
 
 	zr, err := zip.NewReader(r, size)
 	if err != nil {
-		return nil, fmt.Errorf("corrupt zip: %w", err)
+		return nil, cerrs.ErrCorruptZip
 	}
 
 	var cfg BenchmarkConfig
 	var foundBenchmark, foundSrc bool
 	var buildFileContent []byte
 	var buildFileName string
+	rootEntries := make(map[string]struct{})
 
 	for _, f := range zr.File {
 		// Track src/ presence (any entry inside src/ counts)
@@ -80,26 +73,39 @@ func ValidateSubmissionZip(r io.ReaderAt, size int64) (*BenchmarkConfig, error) 
 		if strings.ContainsRune(f.Name, '/') {
 			continue
 		}
+		if _, seen := rootEntries[f.Name]; seen {
+			return nil, cerrs.ErrDuplicateRootEntry
+		}
+		rootEntries[f.Name] = struct{}{}
 
 		switch f.Name {
 		case "benchmark.yaml", "benchmark.yml":
+			if foundBenchmark {
+				return nil, cerrs.ErrMultipleBenchmarkYAML
+			}
 			rc, err := f.Open()
 			if err != nil {
 				return nil, fmt.Errorf("open benchmark.yaml: %w", err)
 			}
-			decodeErr := yaml.NewDecoder(rc).Decode(&cfg)
+			benchmarkData, readErr := readLimitedRootFile(rc)
 			rc.Close()
-			if decodeErr != nil {
+			if readErr != nil {
+				return nil, fmt.Errorf("read benchmark.yaml: %w", readErr)
+			}
+			if decodeErr := yaml.Unmarshal(benchmarkData, &cfg); decodeErr != nil {
 				return nil, fmt.Errorf("invalid benchmark.yaml: %w", decodeErr)
 			}
 			foundBenchmark = true
 
 		case "CMakeLists.txt", "Cargo.toml", "go.mod":
+			if buildFileName != "" {
+				return nil, fmt.Errorf("multiple build files at zip root: %s and %s", buildFileName, f.Name)
+			}
 			rc, err := f.Open()
 			if err != nil {
 				return nil, fmt.Errorf("open %s: %w", f.Name, err)
 			}
-			buildFileContent, err = io.ReadAll(rc)
+			buildFileContent, err = readLimitedRootFile(rc)
 			rc.Close()
 			if err != nil {
 				return nil, fmt.Errorf("read %s: %w", f.Name, err)
@@ -109,23 +115,23 @@ func ValidateSubmissionZip(r io.ReaderAt, size int64) (*BenchmarkConfig, error) 
 	}
 
 	if !foundBenchmark {
-		return nil, ErrNoBenchmarkYAML
+		return nil, cerrs.ErrNoBenchmarkYAML
 	}
 	if !foundSrc {
-		return nil, ErrNoSrcDir
+		return nil, cerrs.ErrNoSrcDir
 	}
 
-	if !validProtocols[cfg.Protocol] {
-		return nil, fmt.Errorf("invalid protocol %q: must be FIX, REST, or WS", cfg.Protocol)
+	if _, ok := validProtocols[cfg.Protocol]; !ok {
+		return nil, cerrs.ErrInvalidProtocol
 	}
-	if !validLanguages[cfg.Language] {
-		return nil, fmt.Errorf("invalid language %q: must be cpp, rust, or go", cfg.Language)
+	if _, ok := validLanguages[cfg.Language]; !ok {
+		return nil, cerrs.ErrInvalidLanguage
 	}
 	if cfg.Build.Target == "" {
-		return nil, fmt.Errorf("build.target is required in benchmark.yaml")
+		return nil, cerrs.ErrMissingBuildTarget
 	}
 	if cfg.Port < 1024 || cfg.Port > 65535 {
-		return nil, fmt.Errorf("port %d out of allowed range (1024–65535)", cfg.Port)
+		return nil, cerrs.ErrInvalidPortRange
 	}
 
 	if err := validateBuildTarget(&cfg, buildFileName, buildFileContent); err != nil {
@@ -135,38 +141,53 @@ func ValidateSubmissionZip(r io.ReaderAt, size int64) (*BenchmarkConfig, error) 
 	return &cfg, nil
 }
 
+func readLimitedRootFile(r io.Reader) ([]byte, error) {
+	data, err := io.ReadAll(io.LimitReader(r, maxRootConfigBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(data) > maxRootConfigBytes {
+		return nil, cerrs.ErrRootConfigTooLarge
+	}
+	return data, nil
+}
+
 // validateBuildTarget checks that the declared build.type is consistent with the
 // language, the required build file is present, and the target name exists in it.
 func validateBuildTarget(cfg *BenchmarkConfig, buildFileName string, buildFileContent []byte) error {
 	switch cfg.Language {
 	case "cpp":
 		if cfg.Build.Type != "cmake" {
-			return fmt.Errorf("language cpp requires build.type: cmake, got %q", cfg.Build.Type)
+			return cerrs.ErrInvalidBuildType
 		}
 		if buildFileName != "CMakeLists.txt" {
-			return errors.New("cpp project must include CMakeLists.txt at zip root")
+			return cerrs.ErrMissingCMakeLists
 		}
-		if !cmakeHasTarget(buildFileContent, cfg.Build.Target) {
-			return fmt.Errorf("CMakeLists.txt has no add_executable target %q", cfg.Build.Target)
+		hasTarget, err := cmakeHasTarget(buildFileContent, cfg.Build.Target)
+		if err != nil {
+			return err
+		}
+		if !hasTarget {
+			return cerrs.ErrMissingCMakeTarget
 		}
 
 	case "rust":
 		if cfg.Build.Type != "cargo" {
-			return fmt.Errorf("language rust requires build.type: cargo, got %q", cfg.Build.Type)
+			return cerrs.ErrInvalidBuildType
 		}
 		if buildFileName != "Cargo.toml" {
-			return errors.New("rust project must include Cargo.toml at zip root")
+			return cerrs.ErrMissingCargoToml
 		}
 		if !cargoHasBin(buildFileContent, cfg.Build.Target) {
-			return fmt.Errorf("Cargo.toml has no [[bin]] with name %q", cfg.Build.Target)
+			return cerrs.ErrMissingCargoBin
 		}
 
 	case "go":
 		if cfg.Build.Type != "go" {
-			return fmt.Errorf("language go requires build.type: go, got %q", cfg.Build.Type)
+			return cerrs.ErrInvalidBuildType
 		}
 		if buildFileName != "go.mod" {
-			return errors.New("go project must include go.mod at zip root")
+			return cerrs.ErrMissingGoMod
 		}
 		// No target name validation for Go — go build -o {target} ./... accepts any name.
 	}
@@ -177,38 +198,28 @@ func validateBuildTarget(cfg *BenchmarkConfig, buildFileName string, buildFileCo
 // cmakeHasTarget checks that CMakeLists.txt contains add_executable(target ...).
 // regex is compiled per call because target varies;
 // acceptable since this runs once per submission, not on the hot path.
-func cmakeHasTarget(data []byte, target string) bool {
+func cmakeHasTarget(data []byte, target string) (bool, error) {
 	pattern := `(?im)^\s*add_executable\s*\(\s*` + regexp.QuoteMeta(target) + `[\s),]`
 	re, err := regexp.Compile(pattern)
 	if err != nil {
-		return false
+		return false, fmt.Errorf("invalid generated CMake target regex: %w", err)
 	}
-	return re.Match(data)
+	return re.Match(data), nil
 }
 
 // cargoHasBin checks that Cargo.toml has a [[bin]] section with the given name.
 func cargoHasBin(data []byte, target string) bool {
-	lines := strings.Split(string(data), "\n")
-	inBin := false
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if line == "[[bin]]" {
-			inBin = true
-			continue
-		}
-		// Any new section header ends the current [[bin]] block
-		if strings.HasPrefix(line, "[") {
-			inBin = false
-			continue
-		}
-		if inBin && strings.HasPrefix(line, "name") {
-			parts := strings.SplitN(line, "=", 2)
-			if len(parts) == 2 {
-				name := strings.Trim(strings.TrimSpace(parts[1]), `"`)
-				if name == target {
-					return true
-				}
-			}
+	var manifest struct {
+		Bin []struct {
+			Name string `toml:"name"`
+		} `toml:"bin"`
+	}
+	if err := toml.Unmarshal(data, &manifest); err != nil {
+		return false
+	}
+	for _, bin := range manifest.Bin {
+		if bin.Name == target {
+			return true
 		}
 	}
 	return false

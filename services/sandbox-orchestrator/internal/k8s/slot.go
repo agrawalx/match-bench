@@ -3,6 +3,7 @@ package k8s
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
 
 	cerrs "github.com/iicpc/sandbox-orchestrator/internal/errors"
@@ -88,7 +89,10 @@ type Config struct {
 // Used by handlers to build Service FQDNs without duplicating the env value.
 func (m *Manager) Namespace() string { return m.namespace }
 
-func NewManager(client kubernetes.Interface, cfg Config) *Manager {
+func NewManager(client kubernetes.Interface, cfg Config) (*Manager, error) {
+	if err := validateConfig(cfg); err != nil {
+		return nil, err
+	}
 	return &Manager{
 		client:       client,
 		namespace:    cfg.Namespace,
@@ -98,34 +102,51 @@ func NewManager(client kubernetes.Interface, cfg Config) *Manager {
 		nodePool:     cfg.NodePool,
 		egressBwBps:  cfg.EgressBandwidth,
 		ingressBwBps: cfg.IngressBandwidth,
+	}, nil
+}
+
+func validateConfig(cfg Config) error {
+	if cfg.Namespace == "" {
+		return fmt.Errorf("namespace is required")
 	}
+	if cfg.CPU != "" {
+		cpu, err := resource.ParseQuantity(cfg.CPU)
+		if err != nil {
+			return fmt.Errorf("invalid CPU resource %q: %w", cfg.CPU, err)
+		}
+		if _, err := strconv.Atoi(cfg.CPU); err != nil || cpu.MilliValue()%1000 != 0 {
+			return fmt.Errorf("CPU must be an integer core count for cpuset pinning, got %q", cfg.CPU)
+		}
+	}
+	if cfg.Memory != "" {
+		if _, err := resource.ParseQuantity(cfg.Memory); err != nil {
+			return fmt.Errorf("invalid memory resource %q: %w", cfg.Memory, err)
+		}
+	}
+	return nil
 }
 
 // CreateSlot creates the Pod + Service pair for a slot.
 // Idempotent: if both resources already exist with matching image, returns
 // nil (caller observes via Refresh). If a resource exists with a different
 // image, returns ErrSlotImageMismatch.
+//
+// If Service creation fails after Pod creation, a Pod-without-Service orphan
+// can remain. The operation is deliberately retryable: the next CreateSlot call
+// for the same slot/image reuses the Pod and attempts Service creation again.
 func (m *Manager) CreateSlot(ctx context.Context, slotID, image string, port int) error {
 	resourceName := podName(slotID)
 
-	existing, err := m.client.CoreV1().Pods(m.namespace).Get(ctx, resourceName, metav1.GetOptions{})
-	switch {
-	case err == nil:
-		// Pod exists — verify image matches.
-		if len(existing.Spec.Containers) == 0 || existing.Spec.Containers[0].Image != image {
-			return fmt.Errorf("%w: existing pod image %q", cerrs.ErrSlotImageMismatch, existing.Spec.Containers[0].Image)
+	existing, err := m.ensurePod(ctx, resourceName, slotID, image, port)
+	if err != nil {
+		return err
+	}
+	if len(existing.Spec.Containers) == 0 || existing.Spec.Containers[0].Image != image {
+		existingImage := ""
+		if len(existing.Spec.Containers) > 0 {
+			existingImage = existing.Spec.Containers[0].Image
 		}
-	case apierrors.IsNotFound(err):
-		// Expected path: create the Pod.
-		if _, err := m.client.CoreV1().Pods(m.namespace).Create(ctx, m.podSpec(slotID, image, port), metav1.CreateOptions{}); err != nil {
-			// Race: someone created the pod between our Get and Create.
-			if apierrors.IsAlreadyExists(err) {
-				return m.CreateSlot(ctx, slotID, image, port)
-			}
-			return fmt.Errorf("create pod: %w", err)
-		}
-	default:
-		return fmt.Errorf("get pod: %w", err)
+		return fmt.Errorf("%w: existing pod image %q", cerrs.ErrSlotImageMismatch, existingImage)
 	}
 
 	if _, err := m.client.CoreV1().Services(m.namespace).Get(ctx, resourceName, metav1.GetOptions{}); err != nil {
@@ -138,6 +159,31 @@ func (m *Manager) CreateSlot(ctx context.Context, slotID, image string, port int
 	}
 
 	return nil
+}
+
+func (m *Manager) ensurePod(ctx context.Context, resourceName, slotID, image string, port int) (*corev1.Pod, error) {
+	existing, err := m.client.CoreV1().Pods(m.namespace).Get(ctx, resourceName, metav1.GetOptions{})
+	switch {
+	case err == nil:
+		return existing, nil
+	case apierrors.IsNotFound(err):
+		// Expected path: create the Pod.
+		created, err := m.client.CoreV1().Pods(m.namespace).Create(ctx, m.podSpec(slotID, image, port), metav1.CreateOptions{})
+		if err != nil {
+			// Race: someone created the pod between our Get and Create.
+			if apierrors.IsAlreadyExists(err) {
+				existing, err := m.client.CoreV1().Pods(m.namespace).Get(ctx, resourceName, metav1.GetOptions{})
+				if err != nil {
+					return nil, fmt.Errorf("get pod after create race: %w", err)
+				}
+				return existing, nil
+			}
+			return nil, fmt.Errorf("create pod: %w", err)
+		}
+		return created, nil
+	default:
+		return nil, fmt.Errorf("get pod: %w", err)
+	}
 }
 
 // DeleteSlot removes both the Pod and the Service for a slot.
@@ -180,17 +226,19 @@ func (m *Manager) Refresh(ctx context.Context, slotID string) (store.SlotState, 
 // without its Pod) — both surface in subsequent DELETE calls failing
 // with NotFound, which is acceptable because there's nothing live to
 // clean up anyway.
-func (m *Manager) ListExisting(ctx context.Context) ([]store.Slot, error) {
+func (m *Manager) ListExisting(ctx context.Context) ([]store.Slot, int, error) {
 	selector := fmt.Sprintf("%s=%s,%s=%s", LabelApp, AppValue, LabelManagedBy, ManagedByValue)
 	pods, err := m.client.CoreV1().Pods(m.namespace).List(ctx, metav1.ListOptions{LabelSelector: selector})
 	if err != nil {
-		return nil, fmt.Errorf("list existing pods: %w", err)
+		return nil, 0, fmt.Errorf("list existing pods: %w", err)
 	}
 
 	out := make([]store.Slot, 0, len(pods.Items))
+	skippedMissingSlotLabel := 0
 	for _, pod := range pods.Items {
 		slotID := pod.Labels[LabelSlot]
 		if slotID == "" {
+			skippedMissingSlotLabel++
 			continue
 		}
 		image := ""
@@ -212,7 +260,7 @@ func (m *Manager) ListExisting(ctx context.Context) ([]store.Slot, error) {
 			CreatedAt: pod.CreationTimestamp.Time,
 		})
 	}
-	return out, nil
+	return out, skippedMissingSlotLabel, nil
 }
 
 // podName returns the pod (and service) name for a slot.
@@ -408,13 +456,14 @@ func (m *Manager) containerResources() corev1.ResourceRequirements {
 // deriveState turns a live Pod into the orchestrator's SlotState + message.
 //
 // Slot lifecycle the controller depends on (returned as `state` in the JSON):
-//   creating  → Pod object exists but is not yet schedulable/ready
-//   ready     → Pod has the PodReady=True condition (algo is accepting TCP)
-//   failed    → Pod hit a terminal phase (PodFailed/PodSucceeded with
-//               restartPolicy=Never) OR a terminal waiting reason
-//               (ImagePullBackOff, ErrImagePull, CrashLoopBackOff,
-//               CreateContainerConfigError)
-//   terminating → Pod is being deleted (DeletionTimestamp set)
+//
+//	creating  → Pod object exists but is not yet schedulable/ready
+//	ready     → Pod has the PodReady=True condition (algo is accepting TCP)
+//	failed    → Pod hit a terminal phase (PodFailed/PodSucceeded with
+//	            restartPolicy=Never) OR a terminal waiting reason
+//	            (ImagePullBackOff, ErrImagePull, CrashLoopBackOff,
+//	            CreateContainerConfigError)
+//	terminating → Pod is being deleted (DeletionTimestamp set)
 //
 // Returning failed promptly for terminal waiting reasons matters: the
 // controller's GET /slots/{id} poll loop would otherwise wait the full
@@ -422,6 +471,10 @@ func (m *Manager) containerResources() corev1.ResourceRequirements {
 // the contestant image doesn't exist in Harbor). Fail fast → user
 // re-triggers sooner.
 func deriveState(pod *corev1.Pod) (store.SlotState, string) {
+	if pod.DeletionTimestamp != nil {
+		return store.StateTerminating, "pod deletion in progress"
+	}
+
 	// Terminal phases first.
 	switch pod.Status.Phase {
 	case corev1.PodFailed:
@@ -461,6 +514,8 @@ func isTerminalWaitingReason(reason string) bool {
 		"CreateContainerError", "CrashLoopBackOff":
 		return true
 	}
-	// Defensive: any Reason starting with "Err" is likely terminal.
+	// Defensive and intentionally conservative: false positives fail fast and
+	// release a broken slot sooner, while false negatives can burn the full
+	// deploy deadline on an unrecoverable image/container error.
 	return strings.HasPrefix(reason, "Err")
 }

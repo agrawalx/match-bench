@@ -1,6 +1,8 @@
 package k8s
 
 import (
+	"fmt"
+
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
@@ -23,9 +25,14 @@ func NewClient() (kubernetes.Interface, error) {
 }
 
 func loadConfig() (*rest.Config, error) {
-	if cfg, err := rest.InClusterConfig(); err == nil {
+	cfg, inClusterErr := rest.InClusterConfig()
+	if inClusterErr == nil {
 		return cfg, nil
 	}
 	rules := clientcmd.NewDefaultClientConfigLoadingRules()
-	return clientcmd.NewNonInteractiveDeferredLoadingClientConfig(rules, nil).ClientConfig()
+	cfg, kubeconfigErr := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(rules, nil).ClientConfig()
+	if kubeconfigErr != nil {
+		return nil, fmt.Errorf("load k8s config: in-cluster config failed: %v; kubeconfig failed: %w", inClusterErr, kubeconfigErr)
+	}
+	return cfg, nil
 }

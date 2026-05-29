@@ -2,31 +2,29 @@ package handler
 
 import (
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net/http"
-	"os"
-
-	cerrs "github.com/iicpc/submission-api/internal/errors"
 )
 
-func Health(log *slog.Logger) http.HandlerFunc {
+const healthServiceName = "submission-api"
+
+func Health(log *slog.Logger) (http.HandlerFunc, error) {
+	// Pre-marshal the tiny static response once; health checks can be among the
+	// hottest endpoints in production and do not need per-request allocation.
 	resp, err := json.Marshal(map[string]string{
 		"status":  "ok",
-		"service": "iicpc",
+		"service": healthServiceName,
 	})
-
 	if err != nil {
-		log.Error("fatal: failed to marshal health response", "error", err)
-		os.Exit(1)
+		return nil, fmt.Errorf("marshal health response: %w", err)
 	}
 
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
 		_, writeErr := w.Write(resp)
 		if writeErr != nil {
 			log.ErrorContext(r.Context(), "failed to write health response", "error", writeErr)
-			http.Error(w, cerrs.ErrInternal.Error(), http.StatusInternalServerError)
 		}
-	}
+	}, nil
 }

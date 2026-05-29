@@ -3,20 +3,18 @@ package publisher
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
-	"strings"
 	"time"
 
 	"github.com/iicpc/schemas/topics"
 	cerrs "github.com/iicpc/submission-api/internal/errors"
+	"github.com/iicpc/submission-api/internal/utils"
 	kafka "github.com/segmentio/kafka-go"
 )
 
-const (
-	topicBuildRequested     = "submission.build.requested"
-	topicBenchmarkRequested = "benchmark.requested"
-)
+const writerTimeout = 5 * time.Second
 
 type Publisher interface {
 	PublishBuildRequested(ctx context.Context, meta PublishMeta) error
@@ -27,6 +25,7 @@ type Publisher interface {
 // PublishMeta carries all fields needed for the build.requested Kafka message.
 type PublishMeta struct {
 	SubmissionID string
+	ContestantID string
 	SHA256       string
 	Language     string
 	Protocol     string
@@ -60,8 +59,10 @@ type KafkaPublisher struct {
 }
 
 // NewKafkaPublisher returns a no-op publisher when brokers is empty.
+// In no-op mode publish calls return nil after intentionally discarding the
+// event; callers must not treat nil as proof of Kafka delivery in local dev.
 func NewKafkaPublisher(brokers string, log *slog.Logger) *KafkaPublisher {
-	brokerList := parseBrokers(brokers)
+	brokerList := utils.ParseBrokers(brokers)
 	if len(brokerList) == 0 {
 		log.Warn("KAFKA_BROKERS not set — Kafka publishing disabled")
 		return &KafkaPublisher{noop: true, log: log}
@@ -69,13 +70,17 @@ func NewKafkaPublisher(brokers string, log *slog.Logger) *KafkaPublisher {
 
 	addr := kafka.TCP(brokerList...)
 
+	// Build requests are recoverable from the submissions row and build-worker
+	// retry model, so this path uses leader-only acks to keep upload latency
+	// lower than the benchmark control-plane path.
 	build := &kafka.Writer{
 		Addr:                   addr,
-		Topic:                  topicBuildRequested,
+		Topic:                  topics.TopicSubmissionBuildRequested,
 		Balancer:               &kafka.LeastBytes{},
 		RequiredAcks:           kafka.RequireOne,
 		Async:                  false,
-		AllowAutoTopicCreation: true,
+		AllowAutoTopicCreation: false,
+		WriteTimeout:           writerTimeout,
 	}
 
 	// Synchronous publish for benchmark.requested: the user got a run_id back
@@ -83,26 +88,15 @@ func NewKafkaPublisher(brokers string, log *slog.Logger) *KafkaPublisher {
 	// never see it. Losing this silently strands the run in 'requested'.
 	bench := &kafka.Writer{
 		Addr:                   addr,
-		Topic:                  topicBenchmarkRequested,
+		Topic:                  topics.TopicBenchmarkRequested,
 		Balancer:               &kafka.LeastBytes{},
 		RequiredAcks:           kafka.RequireAll,
 		Async:                  false,
-		AllowAutoTopicCreation: true,
+		AllowAutoTopicCreation: false,
+		WriteTimeout:           writerTimeout,
 	}
 
 	return &KafkaPublisher{buildWriter: build, benchmarkWriter: bench, log: log}
-}
-
-func parseBrokers(brokers string) []string {
-	parts := strings.Split(brokers, ",")
-	out := make([]string, 0, len(parts))
-	for _, part := range parts {
-		part = strings.TrimSpace(part)
-		if part != "" {
-			out = append(out, part)
-		}
-	}
-	return out
 }
 
 func (p *KafkaPublisher) PublishBuildRequested(ctx context.Context, meta PublishMeta) error {
@@ -112,7 +106,7 @@ func (p *KafkaPublisher) PublishBuildRequested(ctx context.Context, meta Publish
 
 	msg := topics.SubmissionBuildRequested{
 		SubmissionID: meta.SubmissionID,
-		ContestantID: "",
+		ContestantID: meta.ContestantID,
 		ArtifactPath: meta.ArtifactPath,
 		Language:     meta.Language,
 		Protocol:     meta.Protocol,
@@ -166,11 +160,13 @@ func (p *KafkaPublisher) Close() error {
 	if p.buildWriter != nil {
 		if err := p.buildWriter.Close(); err != nil {
 			firstErr = err
+			p.log.Warn("build kafka writer close failed", "error", err)
 		}
 	}
 	if p.benchmarkWriter != nil {
-		if err := p.benchmarkWriter.Close(); err != nil && firstErr == nil {
-			firstErr = err
+		if err := p.benchmarkWriter.Close(); err != nil {
+			p.log.Warn("benchmark kafka writer close failed", "error", err)
+			firstErr = errors.Join(firstErr, err)
 		}
 	}
 	return firstErr

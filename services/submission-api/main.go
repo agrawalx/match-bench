@@ -35,16 +35,28 @@ func main() {
 	minioSecret := mustEnv("MINIO_SECRET_KEY")
 	minioBucket := envOr("MINIO_BUCKET", "submissions")
 	minioSSL := os.Getenv("MINIO_USE_SSL") == "true"
+	minioCreateBucket := os.Getenv("MINIO_CREATE_BUCKET_IF_MISSING") == "true"
 	kafkaBrokers := os.Getenv("KAFKA_BROKERS")
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
 
-	minioStore, err := store.NewMinioStore(minioEndpoint, minioAccess, minioSecret, minioBucket, minioSSL)
+	minioInitCtx, minioCancel := context.WithTimeout(ctx, 5*time.Second)
+	minioStore, err := store.NewMinioStoreWithOptions(
+		minioInitCtx,
+		minioEndpoint,
+		minioAccess,
+		minioSecret,
+		minioBucket,
+		minioSSL,
+		store.MinioStoreOptions{CreateBucketIfMissing: minioCreateBucket},
+	)
+	minioCancel()
 	if err != nil {
 		log.Error("minio init failed", "error", err)
 		os.Exit(1)
 	}
+	defer minioStore.Close()
 
 	pgStore, err := store.NewPostgresStore(ctx, dbURL)
 	if err != nil {
@@ -81,9 +93,15 @@ func main() {
 	r.Use(requestLogger(log))
 	r.Use(middleware.Recoverer)
 
-	r.Get("/health", handler.Health(log))
+	healthHandler, err := handler.Health(log)
+	if err != nil {
+		log.Error("health handler init failed", "error", err)
+		os.Exit(1)
+	}
+
+	r.Get("/health", healthHandler)
 	r.Post("/submit", handler.Submit(minioStore, pgStore, kafkaPub, log))
-	r.Get("/submissions/{id}", handler.GetSubmission(pgStore, log))
+	r.Get("/submissions/{submission_id}", handler.GetSubmission(pgStore, log))
 	r.Post("/benchmarks/{submission_id}", handler.StartBenchmark(pgStore, kafkaPub, log))
 	r.Get("/runs/{session_id}", handler.GetRun(pgStore, log))
 

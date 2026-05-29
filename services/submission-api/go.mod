@@ -5,6 +5,7 @@ go 1.23
 toolchain go1.23.10
 
 require (
+	github.com/BurntSushi/toml v1.4.0
 	github.com/go-chi/chi/v5 v5.1.0
 	github.com/google/uuid v1.6.0
 	github.com/iicpc/libs v0.0.0

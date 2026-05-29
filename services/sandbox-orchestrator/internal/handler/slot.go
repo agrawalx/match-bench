@@ -13,6 +13,10 @@ import (
 	"github.com/iicpc/sandbox-orchestrator/internal/store"
 )
 
+// Slot endpoints are internal controller-to-orchestrator APIs, not public user
+// APIs. Error responses may include underlying k8s messages for operator
+// visibility.
+
 // createSlotRequest is the controller → orchestrator contract for POST /slots.
 //
 // slot_id MUST be the controller's session_id verbatim. The orchestrator
@@ -65,6 +69,8 @@ func CreateSlot(mgr *k8s.Manager, slots *store.SlotStore, log *slog.Logger) http
 				return
 			}
 			if !errors.Is(err, cerrs.ErrSlotNotFound) {
+				// existing is a copy returned by SlotStore.Get; mutate it and Put
+				// to publish the refreshed state back into the shared cache.
 				existing.State = state
 				existing.Message = msg
 				slots.Put(existing)
@@ -138,7 +144,9 @@ func GetSlot(mgr *k8s.Manager, slots *store.SlotStore, log *slog.Logger) http.Ha
 }
 
 // DeleteSlot is the DELETE /slots/{slot_id} handler.
-// Idempotent: 204 whether or not the slot existed.
+// Idempotent: 204 whether or not the slot existed. k8s remains the source of
+// truth, so we still call DeleteSlot for unknown in-memory IDs in case the map
+// is stale after a restart or partial restore.
 func DeleteSlot(mgr *k8s.Manager, slots *store.SlotStore, log *slog.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		slotID := chi.URLParam(r, "slot_id")
@@ -148,6 +156,11 @@ func DeleteSlot(mgr *k8s.Manager, slots *store.SlotStore, log *slog.Logger) http
 		}
 
 		ctx := r.Context()
+		if slot, ok := slots.Get(slotID); ok {
+			slot.State = store.StateTerminating
+			slot.Message = "delete requested"
+			slots.Put(slot)
+		}
 		if err := mgr.DeleteSlot(ctx, slotID); err != nil {
 			log.ErrorContext(ctx, "delete slot", "slot_id", slotID, "error", err)
 			writeError(w, http.StatusInternalServerError, "delete slot: "+err.Error())

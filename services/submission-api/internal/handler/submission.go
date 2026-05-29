@@ -17,13 +17,13 @@ type submissionResponse struct {
 	Port         int       `json:"port"`
 	TeamName     string    `json:"team_name"`
 	SHA256       string    `json:"sha256"`
-	ArtifactPath string    `json:"artifact_path"`
 	CreatedAt    time.Time `json:"created_at"`
 }
 
 func GetSubmission(pg *store.PostgresStore, log *slog.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		submissionID := chi.URLParam(r, "id")
+		// TODO(auth): enforce contestant ownership before ContestantID becomes non-empty.
+		submissionID := chi.URLParam(r, "submission_id")
 		if submissionID == "" {
 			writeError(w, http.StatusBadRequest, "missing submission id")
 			return
@@ -48,7 +48,6 @@ func GetSubmission(pg *store.PostgresStore, log *slog.Logger) http.HandlerFunc {
 			Port:         meta.Port,
 			TeamName:     meta.TeamName,
 			SHA256:       meta.SHA256,
-			ArtifactPath: meta.ArtifactPath,
 			CreatedAt:    meta.CreatedAt,
 		})
 	}

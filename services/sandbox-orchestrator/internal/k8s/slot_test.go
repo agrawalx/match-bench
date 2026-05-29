@@ -27,6 +27,16 @@ func TestDeriveState(t *testing.T) {
 			wantState: store.StateCreating,
 		},
 		{
+			name: "deletion timestamp is terminating",
+			pod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					DeletionTimestamp: &metav1.Time{},
+				},
+				Status: corev1.PodStatus{Phase: corev1.PodRunning},
+			},
+			wantState: store.StateTerminating,
+		},
+		{
 			name: "image pull backoff is failed",
 			pod: &corev1.Pod{
 				Status: corev1.PodStatus{
@@ -103,6 +113,20 @@ func TestDeriveState(t *testing.T) {
 				t.Errorf("got %s, want %s", got, tc.wantState)
 			}
 		})
+	}
+}
+
+func TestValidateConfigRejectsMillicpu(t *testing.T) {
+	err := validateConfig(Config{Namespace: "sandbox", CPU: "2000m", Memory: "1Gi"})
+	if err == nil {
+		t.Fatal("expected millicpu CPU to be rejected")
+	}
+}
+
+func TestValidateConfigRejectsInvalidMemory(t *testing.T) {
+	err := validateConfig(Config{Namespace: "sandbox", CPU: "2", Memory: "not-memory"})
+	if err == nil {
+		t.Fatal("expected invalid memory to be rejected")
 	}
 }
 

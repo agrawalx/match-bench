@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"encoding/json"
 	"net/http"
 	"sync/atomic"
 )
@@ -15,6 +16,9 @@ import (
 // Two endpoints, not one, so a Service that is briefly unhealthy at
 // startup (slot map not rebuilt yet) is not routed to by kube-proxy
 // while still being kept alive by the kubelet's livenessProbe.
+
+var healthzResponse = mustMarshalStaticJSON(map[string]string{"status": "ok"})
+var readyzResponse = mustMarshalStaticJSON(map[string]string{"status": "ready"})
 
 // ReadyState is a process-wide atomic flag flipped to true once startup
 // initialisation completes. main.go sets it after slot restore.
@@ -31,7 +35,8 @@ func (r *ReadyState) MarkReady() {
 }
 
 func Healthz(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = w.Write(healthzResponse)
 }
 
 func Readyz(r *ReadyState) http.HandlerFunc {
@@ -40,6 +45,15 @@ func Readyz(r *ReadyState) http.HandlerFunc {
 			writeError(w, http.StatusServiceUnavailable, "starting up")
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]string{"status": "ready"})
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(readyzResponse)
 	}
+}
+
+func mustMarshalStaticJSON(v any) []byte {
+	data, err := json.Marshal(v)
+	if err != nil {
+		panic(err)
+	}
+	return data
 }

@@ -69,6 +69,12 @@ func (s *SlotStore) Delete(slotID string) {
 	delete(s.slots, slotID)
 }
 
+func (s *SlotStore) Len() int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return len(s.slots)
+}
+
 // List returns a snapshot of all known slots.
 func (s *SlotStore) List() []Slot {
 	s.mu.RLock()

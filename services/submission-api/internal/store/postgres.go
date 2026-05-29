@@ -77,6 +77,9 @@ func NewPostgresStore(ctx context.Context, dsn string) (*PostgresStore, error) {
 		return nil, fmt.Errorf("pgx pool: %w", err)
 	}
 
+	// Bootstrap-only DDL for greenfield local/dev environments. Production
+	// schema changes must go through explicit migrations; IF NOT EXISTS will
+	// not evolve existing tables or indexes.
 	if _, err := pool.Exec(ctx, createTableSQL); err != nil {
 		return nil, fmt.Errorf("create tables: %w", err)
 	}
@@ -97,7 +100,8 @@ type RunMeta struct {
 
 // FindActiveRun returns the active (non-terminal) run for a submission, or
 // (nil, nil) when there is none. Used by the benchmark endpoint to decide
-// whether to mint a new session_id or return the existing one.
+// whether to mint a new session_id or return the existing one. LIMIT 1 is safe
+// because idx_runs_one_active_per_submission enforces at most one active row.
 func (s *PostgresStore) FindActiveRun(ctx context.Context, submissionID string) (*RunMeta, error) {
 	row := s.pool.QueryRow(ctx,
 		`SELECT session_id, submission_id, contestant_id, status, message, created_at, updated_at
@@ -138,7 +142,9 @@ func (s *PostgresStore) GetRun(ctx context.Context, sessionID string) (*RunMeta,
 
 // InsertRun creates a new run row. Returns ErrActiveRunExists when the
 // partial unique index rejects the insert because another active run is
-// already in flight for this submission.
+// already in flight for this submission. Callers that want idempotent UX must
+// handle ErrActiveRunExists by re-querying FindActiveRun and returning the
+// winning row.
 func (s *PostgresStore) InsertRun(ctx context.Context, r RunMeta) error {
 	_, err := s.pool.Exec(ctx,
 		`INSERT INTO runs
@@ -169,23 +175,75 @@ func (s *PostgresStore) InsertRun(ctx context.Context, r RunMeta) error {
 // events. Do not add other callers — every other status writer in this
 // repo violates the one-writer invariant that protects the partial unique
 // index from being freed by an unauthorized actor.
+//
+// The update is intentionally monotonic and idempotent. Kafka can replay an
+// already-handled event if the process crashes after PostgreSQL commits but
+// before the Kafka offset commit succeeds. Replayed older states must not
+// regress a run that has already advanced or reached a terminal status.
 func (s *PostgresStore) UpdateRunStatus(ctx context.Context, sessionID, status, message string) error {
 	tag, err := s.pool.Exec(ctx,
-		`UPDATE runs
-		    SET status = $2, message = $3, updated_at = now()
-		  WHERE session_id = $1`,
+		`WITH incoming(rank) AS (
+			SELECT CASE $2
+				WHEN 'requested' THEN 0
+				WHEN 'deploying' THEN 1
+				WHEN 'waiting_ready' THEN 2
+				WHEN 'barrier_fired' THEN 3
+				WHEN 'running' THEN 4
+				WHEN 'completed' THEN 5
+				WHEN 'failed' THEN 5
+				ELSE -1
+			END
+		)
+		UPDATE runs
+		   SET status = $2, message = $3, updated_at = now()
+		  FROM incoming
+		 WHERE session_id = $1
+		   AND incoming.rank >= 0
+		   AND (
+		       runs.status = $2
+		       OR (
+		           runs.status NOT IN ('completed', 'failed')
+		           AND incoming.rank >= CASE runs.status
+		               WHEN 'requested' THEN 0
+		               WHEN 'deploying' THEN 1
+		               WHEN 'waiting_ready' THEN 2
+		               WHEN 'barrier_fired' THEN 3
+		               WHEN 'running' THEN 4
+		               WHEN 'completed' THEN 5
+		               WHEN 'failed' THEN 5
+		               ELSE -1
+		           END
+		       )
+		   )`,
 		sessionID, status, message,
 	)
 	if err != nil {
 		return fmt.Errorf("%w: update run status: %v", cerrs.ErrStoreDatabaseFailed, err)
 	}
 	if tag.RowsAffected() == 0 {
+		exists, err := s.runExists(ctx, sessionID)
+		if err != nil {
+			return err
+		}
+		if exists {
+			return nil
+		}
 		return cerrs.ErrRunNotFound
 	}
 	return nil
 }
 
+func (s *PostgresStore) runExists(ctx context.Context, sessionID string) (bool, error) {
+	var exists bool
+	err := s.pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM runs WHERE session_id = $1)`, sessionID).Scan(&exists)
+	if err != nil {
+		return false, fmt.Errorf("%w: check run exists: %v", cerrs.ErrStoreDatabaseFailed, err)
+	}
+	return exists, nil
+}
+
 func (s *PostgresStore) Close() {
+	// pgxpool.Close has no error return; shutdown is best-effort drain/close.
 	s.pool.Close()
 }
 
@@ -200,7 +258,7 @@ func (s *PostgresStore) FindBySHA256(ctx context.Context, sha256hex string) (sub
 		if errors.Is(err, pgx.ErrNoRows) {
 			return "", false, nil
 		}
-		return "", false, fmt.Errorf("sha256 lookup: %w", err)
+		return "", false, fmt.Errorf("%w: sha256 lookup: %v", cerrs.ErrStoreDatabaseFailed, err)
 	}
 	return submissionID, true, nil
 }

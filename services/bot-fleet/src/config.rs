@@ -37,7 +37,13 @@ impl Default for Config {
             telemetry_flush_interval: Duration::from_millis(5),
             telemetry_batch_size: 4096,
             telemetry_channel_capacity: 65536,
-            max_bots_per_worker: 200,
+            // Must match worker::MAX_TASKS_PER_WORKER and the controller's
+            // MaxTasksPerWorker (both 1000). The controller shards a scenario
+            // into specs of up to 1000 tasks; a lower value here makes the
+            // worker reject valid specs (e.g. the 511-task baseline scenario),
+            // dropping the workload so the controller's bot.ready fan-in times
+            // out.
+            max_bots_per_worker: 1000,
         }
     }
 }

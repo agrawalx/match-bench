@@ -541,4 +541,42 @@ mod tests {
         assert_eq!(msgs[0].msg_type, b"D");
         assert_eq!(msgs[0].clord_id, Some(b"ORDER_X".as_ref()));
     }
+
+    /// Recompute the FIX modulo-256 checksum over everything before the
+    /// "10=XXX\x01" trailer (the last 7 bytes) and compare to the embedded value.
+    fn embedded_checksum_is_valid(fix: &[u8]) -> bool {
+        let len = fix.len();
+        let computed: u32 = fix[..len - 7].iter().map(|&b| u32::from(b)).sum::<u32>() % 256;
+        let embedded = u32::from(fix[len - 4] - b'0') * 100
+            + u32::from(fix[len - 3] - b'0') * 10
+            + u32::from(fix[len - 2] - b'0');
+        computed == embedded
+    }
+
+    #[test]
+    fn patch_timestamp_sets_sending_time_and_keeps_checksum_valid() {
+        let mut frame = order_frame("FIX.4.2", "sess1", "host", 7, 42, 10_000, 5, Side::Buy);
+        let off = frame.tag52_offset.expect("tag 52 offset must be located");
+
+        // order_frame emits the epoch placeholder, and that frame's checksum is valid.
+        assert_eq!(
+            &frame.fix[off..off + FIX_TIMESTAMP_LEN],
+            &FIX_TIMESTAMP_PLACEHOLDER[..]
+        );
+        assert!(embedded_checksum_is_valid(&frame.fix));
+
+        let ns = 1_716_023_400_123_000_000_u64; // 2024-05-18T08:30:00.123Z
+        frame.patch_timestamp(ns);
+
+        // Tag 52 now reflects the real send time, not the placeholder.
+        let expected = time::format_fix_timestamp(ns);
+        assert_eq!(&frame.fix[off..off + FIX_TIMESTAMP_LEN], &expected[..]);
+        assert_ne!(
+            &frame.fix[off..off + FIX_TIMESTAMP_LEN],
+            &FIX_TIMESTAMP_PLACEHOLDER[..]
+        );
+
+        // The delta-checksum rewrite kept the trailer consistent.
+        assert!(embedded_checksum_is_valid(&frame.fix));
+    }
 }

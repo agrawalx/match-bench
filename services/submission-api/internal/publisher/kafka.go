@@ -86,20 +86,28 @@ func NewKafkaPublisher(brokers string, log *slog.Logger) *KafkaPublisher {
 		Balancer:               &kafka.LeastBytes{},
 		RequiredAcks:           kafka.RequireOne,
 		Async:                  false,
-		AllowAutoTopicCreation: false,
+		AllowAutoTopicCreation: true,
 		WriteTimeout:           writerTimeout,
 	}
 
 	// Synchronous publish for benchmark.requested: the user got a run_id back
 	// in the HTTP response, and if the message is dropped the controller will
 	// never see it. Losing this silently strands the run in 'requested'.
+	//
+	// AllowAutoTopicCreation is true for both control topics: they are
+	// single-partition, so the broker default partition count is correct and
+	// invariant 6.5 explicitly permits auto-create for v1 here. This avoids
+	// stranding a run on the first publish to a not-yet-created topic. When a
+	// dedicated topic-bootstrap Job is added (the long-term plan for topics
+	// where partition count matters, e.g. workload.assignments/orders.sent),
+	// flip these back to false and let the Job own topic creation.
 	bench := &kafka.Writer{
 		Addr:                   addr,
 		Topic:                  topics.TopicBenchmarkRequested,
 		Balancer:               &kafka.LeastBytes{},
 		RequiredAcks:           kafka.RequireAll,
 		Async:                  false,
-		AllowAutoTopicCreation: false,
+		AllowAutoTopicCreation: true,
 		WriteTimeout:           writerTimeout,
 	}
 

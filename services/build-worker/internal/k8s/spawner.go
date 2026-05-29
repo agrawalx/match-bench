@@ -22,6 +22,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
+	"k8s.io/client-go/tools/clientcmd"
 )
 
 const (
@@ -349,7 +350,7 @@ func (s *Spawner) buildJobSpec(jobName string, msg topics.SubmissionBuildRequest
 								"--dockerfile=/workspace/Dockerfile",
 								"--destination=" + stagingRef,
 							},
-							SecurityContext: containerSecurityContext(),
+							SecurityContext: kanikoSecurityContext(),
 							VolumeMounts: []corev1.VolumeMount{
 								{Name: "workspace", MountPath: "/workspace"},
 								{Name: "kaniko-config", MountPath: "/kaniko/.docker", ReadOnly: true},
@@ -539,8 +540,22 @@ func jobFailureMessage(job *batchv1.Job) string {
 	return "job failed"
 }
 
+// loadK8sConfig uses in-cluster config when running inside a pod, falling back
+// to kubeconfig for local dev. This mirrors sandbox-orchestrator's loadConfig —
+// the standard loader for every service in this repo (see invariant 6.8). The
+// in-cluster path succeeds only with a mounted ServiceAccount token, so the
+// kubeconfig fallback only fires out-of-cluster.
 func loadK8sConfig() (*rest.Config, error) {
-	return rest.InClusterConfig()
+	cfg, inClusterErr := rest.InClusterConfig()
+	if inClusterErr == nil {
+		return cfg, nil
+	}
+	rules := clientcmd.NewDefaultClientConfigLoadingRules()
+	cfg, kubeconfigErr := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(rules, nil).ClientConfig()
+	if kubeconfigErr != nil {
+		return nil, fmt.Errorf("load k8s config: in-cluster config failed: %v; kubeconfig failed: %w", inClusterErr, kubeconfigErr)
+	}
+	return cfg, nil
 }
 
 func resourceName(prefix, submissionID string) string {
@@ -602,6 +617,29 @@ func containerSecurityContext() *corev1.SecurityContext {
 	}
 }
 
+// kanikoSecurityContext is the per-container override for the kaniko build
+// container only. The kaniko executor image runs as root (UID 0) and must
+// extract base-image layers into the container root filesystem, chowning files
+// to match the source image — so RunAsNonRoot, ReadOnlyRootFilesystem, and
+// dropping all capabilities (CAP_CHOWN/CAP_DAC_OVERRIDE/CAP_FOWNER are needed
+// for extraction) all break it. The container-level RunAsNonRoot:false
+// overrides the pod-level RunAsNonRoot:true, so the sibling fetch init
+// container stays hardened while only kaniko is relaxed.
+// AllowPrivilegeEscalation stays false (kaniko is already root and does not
+// need to gain new privileges).
+func kanikoSecurityContext() *corev1.SecurityContext {
+	return &corev1.SecurityContext{
+		RunAsNonRoot:             boolPtr(false),
+		RunAsUser:                int64Ptr(0),
+		ReadOnlyRootFilesystem:   boolPtr(false),
+		AllowPrivilegeEscalation: boolPtr(false),
+	}
+}
+
 func boolPtr(v bool) *bool {
+	return &v
+}
+
+func int64Ptr(v int64) *int64 {
 	return &v
 }

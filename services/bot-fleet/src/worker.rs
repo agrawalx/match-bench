@@ -591,7 +591,7 @@ async fn fix_write_loop(
 
         seq += 1;
         let (price, qty, side) = order_shape(task.profile, seq, &mut rng);
-        let frame = fix::order_frame(
+        let mut frame = fix::order_frame(
             &fix_version,
             &session_id,
             &target_host,
@@ -601,6 +601,12 @@ async fn fix_write_loop(
             qty,
             side,
         );
+        // Set FIX SendingTime (tag 52) to the actual transmit instant.
+        // order_frame emits a fixed-width epoch placeholder; patch_timestamp
+        // rewrites those 21 bytes and delta-fixes the checksum in place.
+        // Without this, every order ships SendingTime=19700101-00:00:00.000 and
+        // a contestant FIX engine validating tag 52 freshness rejects it.
+        frame.patch_timestamp(unix_nanos());
 
         // The pending insert must happen BEFORE the write so that a fast
         // contestant cannot reply before we've recorded the pending entry.

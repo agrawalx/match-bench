@@ -67,7 +67,11 @@ func TestJobSpecsUseSecretRefsForCredentials(t *testing.T) {
 	assertSecretEnv(t, fetchEnv, "HARBOR_USER", "spawner-secret", "harbor-user")
 	assertSecretEnv(t, fetchEnv, "HARBOR_PASSWORD", "spawner-secret", "harbor-password")
 	assertLockedDownContainer(t, build.Spec.Template.Spec.InitContainers[0].SecurityContext)
-	assertLockedDownContainer(t, build.Spec.Template.Spec.Containers[0].SecurityContext)
+	// The kaniko build container must NOT be locked down: it runs as root and
+	// writes to the root filesystem during layer extraction. Hardening it
+	// produces CreateContainerConfigError / extraction failures and breaks
+	// every build.
+	assertKanikoCompatibleContainer(t, build.Spec.Template.Spec.Containers[0].SecurityContext)
 
 	scan := spawner.scanJobSpec("scan-sub-123", "sub-123", "registry.example/iicpc/sub-123:latest")
 	scanContainer := scan.Spec.Template.Spec.Containers[0]
@@ -123,5 +127,28 @@ func assertLockedDownContainer(t *testing.T, securityContext *corev1.SecurityCon
 	}
 	if securityContext.Capabilities == nil || len(securityContext.Capabilities.Drop) != 1 || securityContext.Capabilities.Drop[0] != "ALL" {
 		t.Fatal("container must drop all capabilities")
+	}
+}
+
+// assertKanikoCompatibleContainer verifies the kaniko build container is left
+// runnable: root user, writable root filesystem, and capabilities not dropped
+// (it needs CAP_CHOWN et al. for layer extraction). It still keeps
+// AllowPrivilegeEscalation disabled.
+func assertKanikoCompatibleContainer(t *testing.T, securityContext *corev1.SecurityContext) {
+	t.Helper()
+	if securityContext == nil {
+		t.Fatal("missing kaniko container security context")
+	}
+	if securityContext.RunAsNonRoot != nil && *securityContext.RunAsNonRoot {
+		t.Fatal("kaniko container must be allowed to run as root")
+	}
+	if securityContext.RunAsUser == nil || *securityContext.RunAsUser != 0 {
+		t.Fatal("kaniko container must run as UID 0")
+	}
+	if securityContext.ReadOnlyRootFilesystem == nil || *securityContext.ReadOnlyRootFilesystem {
+		t.Fatal("kaniko container must have a writable root filesystem")
+	}
+	if securityContext.Capabilities != nil && len(securityContext.Capabilities.Drop) > 0 {
+		t.Fatal("kaniko container must not drop capabilities (needs CAP_CHOWN for extraction)")
 	}
 }

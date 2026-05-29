@@ -90,6 +90,7 @@ type BenchmarkRequested struct {
 //     above). All non-terminal transitions are written by the controller's
 //     per-session goroutine.
 //   - sse-gateway (fan-out to frontend SSE clients) — future, not built yet.
+//
 // Key: session_id.
 type BenchmarkStatusUpdated struct {
 	SessionID    string    `json:"session_id"`
@@ -118,18 +119,18 @@ type SubmissionStatusUpdated struct {
 // emerges from the schedule of TaskSpecs: tasks start at their StartOffsetNs
 // and stop after DurationNs. Bots never change behavior mid-flight.
 type WorkloadSpec struct {
-	SessionID        string     `json:"session_id"`
-	SubmissionID     string     `json:"submission_id"`
-	ContestantID     string     `json:"contestant_id"`
-	TargetHost       string     `json:"target_host"` // IP of contestant pod
-	TargetPort       uint16     `json:"target_port"`
-	Protocol         string     `json:"protocol"` // FIX | REST | WS
-	WorkerIndex      uint32     `json:"worker_index"`
-	WorkerCount      uint32     `json:"worker_count"` // Total worker pods
-	GlobalSeed       uint64     `json:"global_seed"`
-	FIXVersion       string     `json:"fix_version"`
-	ConnectTimeoutMS uint64     `json:"connect_timeout_ms"`
-	WriteTimeoutMS   uint64     `json:"write_timeout_ms"`
+	SessionID        string `json:"session_id"`
+	SubmissionID     string `json:"submission_id"`
+	ContestantID     string `json:"contestant_id"`
+	TargetHost       string `json:"target_host"` // IP of contestant pod
+	TargetPort       uint16 `json:"target_port"`
+	Protocol         string `json:"protocol"` // FIX | REST | WS
+	WorkerIndex      uint32 `json:"worker_index"`
+	WorkerCount      uint32 `json:"worker_count"` // Total worker pods
+	GlobalSeed       uint64 `json:"global_seed"`
+	FIXVersion       string `json:"fix_version"`
+	ConnectTimeoutMS uint64 `json:"connect_timeout_ms"`
+	WriteTimeoutMS   uint64 `json:"write_timeout_ms"`
 	// barrier_epoch_ns was historically carried here as a "fallback" if the
 	// BarrierEvent was lost, but workers never read this field — they wait
 	// for BarrierEvent (kafka::wait_for_barrier) and use its target_epoch_unix_nanos.
@@ -217,16 +218,16 @@ type OrderSentBatch struct {
 //
 // task_id replaces the old bot_id field (per-task loop, not per-bot loop).
 type OrderSentEvent struct {
-	SessionID        string `json:"session_id" msgpack:"session_id"`
-	SubmissionID     string `json:"submission_id" msgpack:"submission_id"`
-	WorkerID         string `json:"worker_id" msgpack:"worker_id"`
-	TaskID           uint32 `json:"task_id" msgpack:"task_id"`
-	OrderID          string `json:"order_id" msgpack:"order_id"`
-	TargetSendTSNS   uint64 `json:"target_send_ts_ns" msgpack:"target_send_ts_ns"`
-	SendTSNS         uint64 `json:"send_ts_ns" msgpack:"send_ts_ns"`
-	RecvDoneTSNS     uint64 `json:"recv_done_ts_ns" msgpack:"recv_done_ts_ns"`
-	TimedOut         bool   `json:"timed_out" msgpack:"timed_out"`
-	Price            uint64 `json:"price" msgpack:"price"`
-	Qty              uint64 `json:"qty" msgpack:"qty"`
-	Side             string `json:"side" msgpack:"side"` // BUY | SELL
+	SessionID      string `json:"session_id" msgpack:"session_id"`
+	SubmissionID   string `json:"submission_id" msgpack:"submission_id"`
+	WorkerID       string `json:"worker_id" msgpack:"worker_id"`
+	TaskID         uint32 `json:"task_id" msgpack:"task_id"`
+	OrderID        string `json:"order_id" msgpack:"order_id"`
+	TargetSendTSNS uint64 `json:"target_send_ts_ns" msgpack:"target_send_ts_ns"`
+	SendTSNS       uint64 `json:"send_ts_ns" msgpack:"send_ts_ns"`
+	RecvDoneTSNS   uint64 `json:"recv_done_ts_ns" msgpack:"recv_done_ts_ns"`
+	TimedOut       bool   `json:"timed_out" msgpack:"timed_out"`
+	Price          uint64 `json:"price" msgpack:"price"`
+	Qty            uint64 `json:"qty" msgpack:"qty"`
+	Side           string `json:"side" msgpack:"side"` // BUY | SELL
 }

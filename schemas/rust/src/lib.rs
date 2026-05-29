@@ -23,6 +23,15 @@ pub enum Protocol {
     Ws,
 }
 
+/// PayloadType identifies the order lifecycle operation carried by an event.
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "UPPERCASE")]
+pub enum PayloadType {
+    New,
+    Cancel,
+    Replace,
+}
+
 /// BotProfile is the participant archetype a task simulates. Per-bot RPS and
 /// order-shape biasing are determined by the profile; the controller does not
 /// dictate a per-message mix.

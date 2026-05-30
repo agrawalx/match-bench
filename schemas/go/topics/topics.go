@@ -15,6 +15,7 @@ const (
 	TopicOrdersAcked              = "orders.acked"
 	TopicScoresCorrectness        = "scores.correctness"
 	TopicLeaderboardUpdates       = "leaderboard.updates"
+	TelemetryPriceScale           = uint64(1_000_000_000)
 )
 
 // SubmissionBuildRequested is published to "submission.build.requested"
@@ -239,4 +240,33 @@ type OrderSentEvent struct {
 	Side           string `json:"side" msgpack:"side"`                 // BUY | SELL
 	PayloadType    string `json:"payload_type" msgpack:"payload_type"` // NEW | CANCEL | REPLACE — lets the validator/ingester separate cancels from new orders (cancel throughput).
 	OrdType        string `json:"ord_type" msgpack:"ord_type"`         // LIMIT | MARKET (FIX tag 40) — distinguishes market from limit new orders, which share payload_type=NEW.
+}
+
+// OrderAckedBatch is MessagePack-encoded on "orders.acked" by the eBPF
+// latency publisher. Consumers join these kernel-side response timestamps
+// with OrderSentEvent on (session_id, order_id).
+type OrderAckedBatch struct {
+	SessionID    string            `json:"session_id" msgpack:"session_id"`
+	ContestantID string            `json:"contestant_id" msgpack:"contestant_id"`
+	Events       []OrderAckedEvent `json:"events" msgpack:"events"`
+}
+
+// OrderAckedEvent records kernel-side request ingress and response egress
+// timestamps. The primary contestant metric is PodServiceTimeNS.
+type OrderAckedEvent struct {
+	SessionID           string `json:"session_id" msgpack:"session_id"`
+	ContestantID        string `json:"contestant_id" msgpack:"contestant_id"`
+	OrderID             string `json:"order_id" msgpack:"order_id"`
+	SrcIP               uint32 `json:"src_ip" msgpack:"src_ip"`
+	SrcPort             uint16 `json:"src_port" msgpack:"src_port"`
+	TCPSeq              uint32 `json:"tcp_seq" msgpack:"tcp_seq"`
+	T3XDPIngressNS      uint64 `json:"t3_xdp_ingress_ns" msgpack:"t3_xdp_ingress_ns"`
+	T7XDPEgressNS       uint64 `json:"t7_xdp_egress_ns" msgpack:"t7_xdp_egress_ns"`
+	PodServiceTimeNS    uint64 `json:"pod_service_time_ns" msgpack:"pod_service_time_ns"`
+	ExecType            string `json:"exec_type" msgpack:"exec_type"`
+	FillQty             uint64 `json:"fill_qty" msgpack:"fill_qty"`
+	FillPrice           uint64 `json:"fill_price" msgpack:"fill_price"` // fixed-point, scaled by TelemetryPriceScale
+	OrigOrderID         string `json:"orig_order_id" msgpack:"orig_order_id"`
+	ReorderingDetected  bool   `json:"reordering_detected" msgpack:"reordering_detected"`
+	RetransmissionCount uint32 `json:"retransmission_count" msgpack:"retransmission_count"`
 }

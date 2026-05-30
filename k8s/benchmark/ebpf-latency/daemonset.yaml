@@ -1,0 +1,82 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: ebpf-latency
+  namespace: benchmark
+  labels:
+    app: ebpf-latency
+spec:
+  selector:
+    matchLabels:
+      app: ebpf-latency
+  template:
+    metadata:
+      labels:
+        app: ebpf-latency
+    spec:
+      hostNetwork: true
+      hostPID: true
+      nodeSelector:
+        iicpc.dev/node-pool: sandbox
+      tolerations:
+        - key: iicpc.dev/sandbox
+          operator: Exists
+          effect: NoSchedule
+      containers:
+        - name: ebpf-latency
+          image: iicpc-ebpf-latency:latest
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            privileged: true
+            capabilities:
+              add:
+                - BPF
+                - NET_ADMIN
+                - SYS_ADMIN
+          resources:
+            requests:
+              cpu: "1"
+              memory: 256Mi
+            limits:
+              cpu: "1"
+              memory: 256Mi
+          env:
+            - name: RUST_LOG
+              value: info
+            - name: KAFKA_BROKERS
+              valueFrom:
+                secretKeyRef:
+                  name: bot-fleet-controller-secrets
+                  key: KAFKA_BROKERS
+            # The orchestrator must patch these per run after it discovers the
+            # contestant pod's init/main process PID. The loader enters that
+            # network namespace and attaches to pod-side eth0 so ingress means
+            # request entering the pod and egress means response leaving it.
+            - name: SESSION_ID
+              value: PATCH_ME_SESSION_ID
+            - name: CONTESTANT_ID
+              value: PATCH_ME_CONTESTANT_ID
+            - name: EBPF_IFACE
+              value: eth0
+            - name: EBPF_NETNS_PATH
+              value: /proc/PATCH_ME_ALGO_PID/ns/net
+            - name: EBPF_OBJECT_PATH
+              value: /opt/iicpc/ebpf/iicpc_latency.bpf.o
+            - name: EBPF_XDP_INGRESS_PROGRAM
+              value: iicpc_xdp_ingress
+            - name: EBPF_TC_EGRESS_PROGRAM
+              value: iicpc_tc_egress
+          volumeMounts:
+            - name: bpffs
+              mountPath: /sys/fs/bpf
+            - name: ebpf-objects
+              mountPath: /opt/iicpc/ebpf
+              readOnly: true
+      volumes:
+        - name: bpffs
+          hostPath:
+            path: /sys/fs/bpf
+            type: DirectoryOrCreate
+        - name: ebpf-objects
+          configMap:
+            name: ebpf-latency-objects

@@ -12,6 +12,7 @@ pub const TOPIC_ORDERS_SENT: &str = "orders.sent";
 pub const TOPIC_ORDERS_ACKED: &str = "orders.acked";
 pub const TOPIC_SCORES_CORRECTNESS: &str = "scores.correctness";
 pub const TOPIC_LEADERBOARD_UPDATES: &str = "leaderboard.updates";
+pub const TELEMETRY_PRICE_SCALE: u64 = 1_000_000_000;
 
 /// Protocol identifies the transport a bot-fleet worker should use.
 /// Serialized as FIX, REST, or WS to match controller payloads.
@@ -202,6 +203,77 @@ pub struct OrderSentBatch {
     pub session_id: String,
     pub worker_id: String,
     pub events: Vec<OrderSentEvent>,
+}
+
+/// OrderAckedEvent records the kernel-side lifecycle for one FIX ClOrdID.
+///
+/// Timestamp definitions:
+///   - t3_xdp_ingress_ns: CLOCK_REALTIME nanoseconds captured by XDP when the
+///     request packet enters the algo pod's veth.
+///   - t7_xdp_egress_ns: CLOCK_REALTIME nanoseconds captured by tc egress when
+///     the response packet leaves the algo pod's veth.
+/// The telemetry ingester joins this stream with `orders.sent` on
+/// `(session_id, order_id)`. The primary contestant latency metric is
+/// `pod_service_time_ns = max(0, t7_xdp_egress_ns - t3_xdp_ingress_ns)`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OrderAckedEvent {
+    pub session_id: String,
+    pub contestant_id: String,
+    pub order_id: String,
+    pub src_ip: u32,
+    pub src_port: u16,
+    pub tcp_seq: u32,
+    pub t3_xdp_ingress_ns: u64,
+    pub t7_xdp_egress_ns: u64,
+    pub pod_service_time_ns: u64,
+    pub exec_type: String,
+    pub fill_qty: u64,
+    /// Fill price as a fixed-point integer scaled by TELEMETRY_PRICE_SCALE.
+    pub fill_price: u64,
+    pub orig_order_id: String,
+    pub reordering_detected: bool,
+    pub retransmission_count: u32,
+}
+
+/// Borrowed serialization view for `OrderAckedEvent`.
+///
+/// Producers that already carry `session_id` and `contestant_id` at the batch
+/// level can use this to avoid allocating cloned id strings for every event.
+#[derive(Debug, Clone, Copy, Serialize)]
+pub struct OrderAckedEventRef<'a> {
+    pub session_id: &'a str,
+    pub contestant_id: &'a str,
+    pub order_id: &'a str,
+    pub src_ip: u32,
+    pub src_port: u16,
+    pub tcp_seq: u32,
+    pub t3_xdp_ingress_ns: u64,
+    pub t7_xdp_egress_ns: u64,
+    pub pod_service_time_ns: u64,
+    pub exec_type: &'a str,
+    pub fill_qty: u64,
+    pub fill_price: u64,
+    pub orig_order_id: &'a str,
+    pub reordering_detected: bool,
+    pub retransmission_count: u32,
+}
+
+/// OrderAckedBatch is MessagePack-encoded on "orders.acked".
+/// Batching keeps one Kafka record per drain interval instead of one record
+/// per response packet.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OrderAckedBatch {
+    pub session_id: String,
+    pub contestant_id: String,
+    pub events: Vec<OrderAckedEvent>,
+}
+
+/// Borrowed serialization view for `OrderAckedBatch`.
+#[derive(Debug, Clone, Copy, Serialize)]
+pub struct OrderAckedBatchRef<'a> {
+    pub session_id: &'a str,
+    pub contestant_id: &'a str,
+    pub events: &'a [OrderAckedEventRef<'a>],
 }
 
 /// Side is serialized as BUY or SELL in telemetry payloads.

@@ -1,0 +1,27 @@
+[package]
+name = "iicpc-ebpf-latency"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+ebpf = []
+
+[target.'cfg(not(target_arch = "bpf"))'.dependencies]
+anyhow = "1.0"
+aya = "0.13.1"
+iicpc-bot-fleet = { path = "../bot-fleet" }
+iicpc-schemas-rust = { path = "../../schemas/rust" }
+libc = "0.2"
+rmp-serde = "1.3"
+tokio = { version = "1.38", features = ["macros", "rt-multi-thread", "signal", "time"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+[target.'cfg(target_arch = "bpf")'.dependencies]
+aya-ebpf = "0.1.1"
+aya-ebpf-macros = "0.1.1"
+
+[lib]
+crate-type = ["cdylib"]
+path = "src/ebpf.rs"
+required-features = ["ebpf"]

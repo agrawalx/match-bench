@@ -153,6 +153,13 @@ type TaskSpec struct {
 	TargetRPS     uint32 `json:"target_rps"`      // orders per second, constant for this task's lifetime
 	StartOffsetNs uint64 `json:"start_offset_ns"` // relative to barrier epoch
 	DurationNs    uint64 `json:"duration_ns"`     // how long this task fires
+	// Order-type mix as a percentage of messages sent by this task. The limit
+	// fraction is implied: 100 - MarketPct - CancelPct - ReplacePct. Source:
+	// architecture_v2.md Bot Profiles. Omitted (zero) decodes as all-limit,
+	// which preserves the pre-mix behaviour for older scenarios.
+	MarketPct  uint8 `json:"market_pct"`
+	CancelPct  uint8 `json:"cancel_pct"`
+	ReplacePct uint8 `json:"replace_pct"`
 }
 
 // Scenario is the controller-side representation of a row in the scenarios table.
@@ -229,5 +236,7 @@ type OrderSentEvent struct {
 	TimedOut       bool   `json:"timed_out" msgpack:"timed_out"`
 	Price          uint64 `json:"price" msgpack:"price"`
 	Qty            uint64 `json:"qty" msgpack:"qty"`
-	Side           string `json:"side" msgpack:"side"` // BUY | SELL
+	Side           string `json:"side" msgpack:"side"`                 // BUY | SELL
+	PayloadType    string `json:"payload_type" msgpack:"payload_type"` // NEW | CANCEL | REPLACE — lets the validator/ingester separate cancels from new orders (cancel throughput).
+	OrdType        string `json:"ord_type" msgpack:"ord_type"`         // LIMIT | MARKET (FIX tag 40) — distinguishes market from limit new orders, which share payload_type=NEW.
 }

@@ -32,6 +32,19 @@ pub enum PayloadType {
     Replace,
 }
 
+/// OrdType is the FIX OrdType (tag 40) of the order an event pertains to:
+/// Limit (40=2) or Market (40=1). The bot records it so the correctness
+/// validator can replay market orders (immediate execution) vs limit orders
+/// (rest in the book) without re-parsing tag 40 from the wire on the algo side.
+/// Cancel/Replace events carry the OrdType of the resting order they act on,
+/// which is always Limit in v1 (market orders never rest).
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "UPPERCASE")]
+pub enum OrdType {
+    Limit,
+    Market,
+}
+
 /// BotProfile is the participant archetype a task simulates. Per-bot RPS and
 /// order-shape biasing are determined by the profile; the controller does not
 /// dictate a per-message mix.
@@ -98,6 +111,16 @@ pub struct TaskSpec {
     pub target_rps: u32,
     pub start_offset_ns: u64,
     pub duration_ns: u64,
+    /// Order-type mix as a percentage of messages sent by this task. The limit
+    /// fraction is implied: 100 - market_pct - cancel_pct - replace_pct. Source:
+    /// architecture_v2.md Bot Profiles. `#[serde(default)]` so older
+    /// WorkloadSpecs without these fields decode as all-limit (0/0/0).
+    #[serde(default)]
+    pub market_pct: u8,
+    #[serde(default)]
+    pub cancel_pct: u8,
+    #[serde(default)]
+    pub replace_pct: u8,
 }
 
 /// BarrierEvent is published to "barrier" once all workers have reported ready.
@@ -164,6 +187,12 @@ pub struct OrderSentEvent {
     pub price: u64,
     pub qty: u64,
     pub side: Side,
+    /// NEW | CANCEL | REPLACE. Lets the validator/ingester separate cancels and
+    /// replaces from new orders (e.g. the HFT cancel-throughput metric).
+    pub payload_type: PayloadType,
+    /// LIMIT | MARKET (FIX tag 40). Distinguishes market from limit new orders,
+    /// which share payload_type=NEW, so the validator can replay them correctly.
+    pub ord_type: OrdType,
 }
 
 /// OrderSentBatch is MessagePack-encoded on "orders.sent".
@@ -176,7 +205,7 @@ pub struct OrderSentBatch {
 }
 
 /// Side is serialized as BUY or SELL in telemetry payloads.
-#[derive(Debug, Clone, Copy, Serialize)]
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "UPPERCASE")]
 pub enum Side {
     Buy,

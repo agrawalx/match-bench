@@ -7,6 +7,7 @@
 //! duplicating them.
 
 pub mod config;
+pub mod content;
 pub mod errors;
 pub mod fix;
 pub mod kafka;

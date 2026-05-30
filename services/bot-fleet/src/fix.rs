@@ -1,4 +1,4 @@
-use iicpc_schemas_rust::{PayloadType, Side};
+use iicpc_schemas_rust::{OrdType, PayloadType, Side};
 
 use crate::time;
 
@@ -8,6 +8,21 @@ pub const FIX_TIMESTAMP_LEN: usize = 21;
 const FIX_TIMESTAMP_PLACEHOLDER: &[u8; FIX_TIMESTAMP_LEN] = b"19700101-00:00:00.000";
 
 const SOH: u8 = 0x01;
+
+/// new_limit_order_id is the ClOrdID a new *limit* order at this seq carries
+/// (the `_O` suffix). Exposed so the content generator can record the id of an
+/// order it places and later reference it as the OrigClOrdID of a cancel/replace
+/// — keeping a single source of truth for the id format (see INFO-6).
+pub fn new_limit_order_id(session_id: &str, bot_id: u64, seq: u64) -> String {
+    format!("{session_id}_{bot_id}_{seq}_O")
+}
+
+/// replace_order_id is the ClOrdID a replace at this seq carries (the `_R`
+/// suffix). A replace re-rests under this new id, so the generator records it
+/// for a possible later cancel/replace.
+pub fn replace_order_id(session_id: &str, bot_id: u64, seq: u64) -> String {
+    format!("{session_id}_{bot_id}_{seq}_R")
+}
 
 /// OrderFrame holds the pre-rendered payloads for each supported transport.
 /// Bots reuse these bytes during the live workload to avoid hot-path encoding.
@@ -28,6 +43,7 @@ pub struct OrderFrame {
     pub ws_bytes: Vec<u8>,
     pub tag52_offset: Option<usize>, // where timestamp bytes start in `fix` for in-place patching
     pub payload_type: PayloadType,
+    pub ord_type: OrdType,
 }
 
 impl OrderFrame {
@@ -87,6 +103,7 @@ fn find_tag52_offset(fix: &[u8]) -> Option<usize> {
 #[derive(Clone, Copy)]
 enum FrameKind {
     New,
+    Market,
     Cancel,
     Replace,
 }
@@ -94,23 +111,35 @@ enum FrameKind {
 impl FrameKind {
     fn payload_type(self) -> PayloadType {
         match self {
-            Self::New => PayloadType::New,
+            // Market is still a new-order lifecycle event; it differs from a
+            // limit order only in OrdType (40=1), not in payload type.
+            Self::New | Self::Market => PayloadType::New,
             Self::Cancel => PayloadType::Cancel,
             Self::Replace => PayloadType::Replace,
         }
     }
 
+    fn ord_type(self) -> OrdType {
+        match self {
+            Self::Market => OrdType::Market,
+            // New is a limit order (40=2); Cancel/Replace act on a resting
+            // limit order (market orders never rest), so they are Limit too.
+            Self::New | Self::Cancel | Self::Replace => OrdType::Limit,
+        }
+    }
+
     fn order_id(self, session_id: &str, bot_id: u64, seq: u64) -> String {
         match self {
-            Self::New => format!("{session_id}_{bot_id}_{seq}_O"),
+            Self::New => new_limit_order_id(session_id, bot_id, seq),
+            Self::Market => format!("{session_id}_{bot_id}_{seq}_M"),
             Self::Cancel => format!("{session_id}_{bot_id}_{seq}_C"),
-            Self::Replace => format!("{session_id}_{bot_id}_{seq}_R"),
+            Self::Replace => replace_order_id(session_id, bot_id, seq),
         }
     }
 
     fn rest_method(self) -> &'static str {
         match self {
-            Self::New => "POST",
+            Self::New | Self::Market => "POST",
             Self::Cancel => "DELETE",
             Self::Replace => "PUT",
         }
@@ -118,7 +147,7 @@ impl FrameKind {
 
     fn rest_path(self, orig_order_id: &str) -> String {
         match self {
-            Self::New => "/orders".to_string(),
+            Self::New | Self::Market => "/orders".to_string(),
             Self::Cancel | Self::Replace => format!("/orders/{orig_order_id}"),
         }
     }
@@ -141,6 +170,11 @@ fn build_fix_body(
     match kind {
         FrameKind::New => format!(
             "35=D\x0149=IICPC-BOT\x0156=CONTESTANT\x0134={seq}\x0152=19700101-00:00:00.000\x0111={order_id}\x0121=1\x0155=IICPC\x0154={side_tag}\x0138={qty}\x0140=2\x0144={price}\x0159=0\x01"
+        ),
+        // Market order: OrdType=1, no Price (44). Executes immediately against
+        // the book rather than resting, so it is never a cancel/replace target.
+        FrameKind::Market => format!(
+            "35=D\x0149=IICPC-BOT\x0156=CONTESTANT\x0134={seq}\x0152=19700101-00:00:00.000\x0111={order_id}\x0121=1\x0155=IICPC\x0154={side_tag}\x0138={qty}\x0140=1\x0159=0\x01"
         ),
         FrameKind::Cancel => {
             let orig_order_id = orig_order_id.expect("cancel requires orig_order_id");
@@ -174,6 +208,15 @@ fn build_json_payload(
             let encoded_order_id =
                 serde_json::to_string(order_id).expect("serializing String cannot fail");
             format!("{{\"cl_ord_id\":{encoded_order_id},\"symbol\":\"IICPC\",\"side\":\"{side_name}\",\"qty\":{qty},\"price\":{price}}}")
+        }
+        FrameKind::Market => {
+            let side_name = match side {
+                Side::Buy => "BUY",
+                Side::Sell => "SELL",
+            };
+            let encoded_order_id =
+                serde_json::to_string(order_id).expect("serializing String cannot fail");
+            format!("{{\"cl_ord_id\":{encoded_order_id},\"symbol\":\"IICPC\",\"side\":\"{side_name}\",\"qty\":{qty},\"ord_type\":\"MARKET\"}}")
         }
         FrameKind::Cancel => {
             let orig_order_id = orig_order_id.expect("cancel requires orig_order_id");
@@ -209,31 +252,22 @@ fn build_frame(
     target_host: &str,
     bot_id: u64,
     seq: u64,
-    orig_seq: Option<u64>,
+    orig_order_id: Option<&str>,
     price: u64,
     qty: u64,
     side: Side,
     kind: FrameKind,
 ) -> OrderFrame {
     let order_id = kind.order_id(session_id, bot_id, seq);
-    let orig_order_id = orig_seq.map(|orig_seq| format!("{session_id}_{bot_id}_{orig_seq}"));
 
-    let body = build_fix_body(
-        kind,
-        seq,
-        &order_id,
-        orig_order_id.as_deref(),
-        price,
-        qty,
-        side,
-    );
+    let body = build_fix_body(kind, seq, &order_id, orig_order_id, price, qty, side);
     let fix = finalize_fix(fix_version, &body);
 
-    let json = build_json_payload(kind, &order_id, orig_order_id.as_deref(), price, qty, side);
+    let json = build_json_payload(kind, &order_id, orig_order_id, price, qty, side);
     let rest = build_rest_request(
         kind.rest_method(),
         target_host,
-        &kind.rest_path(orig_order_id.as_deref().unwrap_or("")),
+        &kind.rest_path(orig_order_id.unwrap_or("")),
         &json,
     );
     let tag52_offset = find_tag52_offset(&fix);
@@ -248,6 +282,7 @@ fn build_frame(
         ws_bytes: json.into_bytes(),
         tag52_offset,
         payload_type: kind.payload_type(),
+        ord_type: kind.ord_type(),
     }
 }
 
@@ -259,18 +294,20 @@ fn build_frame(
 ///
 /// ## Order ID format
 ///
-/// order_id is `{session_id}_{bot_id}_{seq}`. This format is stable and
-/// unambiguous: session_id is validated to contain only `[a-zA-Z0-9._-]` (see
-/// `validate_identifier` in worker.rs), so underscores in session_id cannot
-/// collide with the delimiter because bot_id and seq are always numeric.
-/// Downstream consumers may rely on this format for indexing.
+/// order_id is `{session_id}_{bot_id}_{seq}_O` (the `_O` suffix marks a new
+/// limit order; market is `_M`, cancel `_C`, replace `_R`). session_id is
+/// validated to contain only `[a-zA-Z0-9._-]` (see `validate_identifier` in
+/// worker.rs), so the `_` delimiter is unambiguous because bot_id and seq are
+/// numeric. A cancel/replace references a prior order by passing that order's
+/// full ClOrdID (including its suffix) as `orig_order_id`.
 ///
 /// ## FIX SendingTime (tag 52)
 ///
-/// Tag 52 is precomputed to a placeholder `19700101-00:00:00.000` and updated
-/// in-place on the hot path via `patch_timestamp()`. This satisfies strict Tag 52
-/// freshness validation checks on the matching engine side without incurring any
-/// heap allocations during active benchmark sends.
+/// Tag 52 is emitted as a fixed-width placeholder `19700101-00:00:00.000` and
+/// must be set to the real send instant via `OrderFrame::patch_timestamp()`
+/// before the frame is written (see the worker write loops). The placeholder
+/// keeps the field width constant so the timestamp + checksum can be patched in
+/// place.
 pub fn order_frame(
     fix_version: &str,
     session_id: &str,
@@ -295,7 +332,37 @@ pub fn order_frame(
     )
 }
 
+/// market_frame builds a new Market order (35=D, OrdType=1). Market orders carry
+/// no price and execute immediately, so they never rest and are never a
+/// cancel/replace target.
+pub fn market_frame(
+    fix_version: &str,
+    session_id: &str,
+    target_host: &str,
+    bot_id: u64,
+    seq: u64,
+    qty: u64,
+    side: Side,
+) -> OrderFrame {
+    build_frame(
+        fix_version,
+        session_id,
+        target_host,
+        bot_id,
+        seq,
+        None,
+        0, // market orders carry no price
+        qty,
+        side,
+        FrameKind::Market,
+    )
+}
+
 /// cancel_frame builds a FIX Order Cancel Request (35=F) and REST/WS equivalents.
+///
+/// `orig_order_id` MUST be the full ClOrdID of the resting order being cancelled
+/// (e.g. `{session}_{bot}_{seq}_O`), so tag 41 (OrigClOrdID) matches the original
+/// order's tag 11. The caller supplies it from its resting-order ledger.
 ///
 /// The REST / WS cancel JSON payload omits redundant price/qty/side fields to comply
 /// with strict REST validator standards.
@@ -305,7 +372,7 @@ pub fn cancel_frame(
     target_host: &str,
     bot_id: u64,
     seq: u64,
-    orig_seq: u64,
+    orig_order_id: &str,
     price: u64,
     qty: u64,
     side: Side,
@@ -316,7 +383,7 @@ pub fn cancel_frame(
         target_host,
         bot_id,
         seq,
-        Some(orig_seq),
+        Some(orig_order_id),
         price,
         qty,
         side,
@@ -325,14 +392,17 @@ pub fn cancel_frame(
 }
 
 /// replace_frame builds a FIX Order Cancel/Replace Request (35=G) and REST/WS equivalents.
-#[allow(dead_code)]
+///
+/// `orig_order_id` MUST be the full ClOrdID of the resting order being replaced,
+/// so tag 41 matches the original order's tag 11. `price`/`qty` carry the new
+/// values; a price change loses time priority, a qty-only decrease keeps it.
 pub fn replace_frame(
     fix_version: &str,
     session_id: &str,
     target_host: &str,
     bot_id: u64,
     seq: u64,
-    orig_seq: u64,
+    orig_order_id: &str,
     price: u64,
     qty: u64,
     side: Side,
@@ -343,7 +413,7 @@ pub fn replace_frame(
         target_host,
         bot_id,
         seq,
-        Some(orig_seq),
+        Some(orig_order_id),
         price,
         qty,
         side,

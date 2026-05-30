@@ -36,6 +36,29 @@ const (
 	rpsPerInstitutional uint32 = 300
 )
 
+// Per-profile order-type mix, as a percentage of messages sent. Source:
+// architecture_v2.md Bot Profiles. The limit fraction is implied
+// (100 - market - cancel - replace). Tunable via the scenarios table after seed.
+//
+// arch_v2 lists HFT as 50% limit / 10% market / 40% cancel. We split that 40%
+// "cancel" into 30% cancel + 10% cancel/replace so the cancel-replace
+// priority-loss validator path gets coverage; the 50/10/40 limit/market/mutation
+// split is preserved. Retail (30/65/5) and Institutional (80/20/0) match arch_v2
+// exactly and do not issue replaces.
+const (
+	hftMarketPct  uint8 = 10
+	hftCancelPct  uint8 = 30
+	hftReplacePct uint8 = 10
+
+	retailMarketPct  uint8 = 65
+	retailCancelPct  uint8 = 5
+	retailReplacePct uint8 = 0
+
+	institutionalMarketPct  uint8 = 20
+	institutionalCancelPct  uint8 = 0
+	institutionalReplacePct uint8 = 0
+)
+
 // Baseline RPS budgets per profile, derived from the 60/25/15 contribution
 // mix at a total of 10,000 RPS. Held as constants so the bot-counts below
 // fall out by simple integer division.
@@ -210,6 +233,9 @@ func buildLayer(startTaskID uint32, startOffset, duration time.Duration,
 			TargetRPS:     rpsPerHFT,
 			StartOffsetNs: uint64(startOffset.Nanoseconds()),
 			DurationNs:    uint64(duration.Nanoseconds()),
+			MarketPct:     hftMarketPct,
+			CancelPct:     hftCancelPct,
+			ReplacePct:    hftReplacePct,
 		})
 		id++
 	}
@@ -220,6 +246,9 @@ func buildLayer(startTaskID uint32, startOffset, duration time.Duration,
 			TargetRPS:     rpsPerRetail,
 			StartOffsetNs: uint64(startOffset.Nanoseconds()),
 			DurationNs:    uint64(duration.Nanoseconds()),
+			MarketPct:     retailMarketPct,
+			CancelPct:     retailCancelPct,
+			ReplacePct:    retailReplacePct,
 		})
 		id++
 	}
@@ -230,6 +259,9 @@ func buildLayer(startTaskID uint32, startOffset, duration time.Duration,
 			TargetRPS:     rpsPerInstitutional,
 			StartOffsetNs: uint64(startOffset.Nanoseconds()),
 			DurationNs:    uint64(duration.Nanoseconds()),
+			MarketPct:     institutionalMarketPct,
+			CancelPct:     institutionalCancelPct,
+			ReplacePct:    institutionalReplacePct,
 		})
 		id++
 	}

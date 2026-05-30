@@ -8,9 +8,10 @@ use std::{
 use anyhow::{Context, Result};
 use futures::SinkExt;
 use iicpc_schemas_rust::{
-    BotProfile, OrderSentEvent, Protocol, ReadySignal, Side, TaskSpec, WorkloadSpec,
+    BotProfile, OrdType, OrderSentEvent, PayloadType, Protocol, ReadySignal, Side, TaskSpec,
+    WorkloadSpec,
 };
-use rand::{rngs::SmallRng, Rng, SeedableRng};
+use rand::{rngs::SmallRng, Rng};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt, ReadHalf, WriteHalf},
     net::{lookup_host, TcpStream},
@@ -24,6 +25,7 @@ use tracing::{error, info, warn};
 
 use crate::{
     config::Config,
+    content::{self, TaskGenerator},
     fix::{self, OrderFrame},
     kafka::{self, KafkaProducer},
     telemetry::TelemetrySink,
@@ -422,6 +424,8 @@ struct PendingOrder {
     price: u64,
     qty: u64,
     side: Side,
+    payload_type: PayloadType,
+    ord_type: OrdType,
 }
 
 /// PendingMap is a shared map of ClOrdID → PendingOrder. Locked with a std
@@ -555,6 +559,88 @@ async fn run_fix_task(task: TaskSpec, fix: FixConnection, ctx: TaskContext) -> R
 /// loop in shape, but instead of emitting OrderSentEvent on each write it
 /// hands off PendingOrder to the shared pending map. Emission is the
 /// reader/watchdog's job.
+/// mix_from_task reads the per-task order-type mix percentages off the TaskSpec.
+fn mix_from_task(task: &TaskSpec) -> content::OrderMix {
+    content::OrderMix {
+        market_pct: task.market_pct,
+        cancel_pct: task.cancel_pct,
+        replace_pct: task.replace_pct,
+    }
+}
+
+/// render_frame turns a generated content::Action into the wire frame (FIX +
+/// REST + WS payloads) via the fix builders. A cancel/replace passes the resting
+/// order's full ClOrdID as OrigClOrdID so tag 41 matches the original tag 11.
+fn render_frame(
+    fix_version: &str,
+    session_id: &str,
+    target_host: &str,
+    task_id: u64,
+    action: &content::Action,
+) -> fix::OrderFrame {
+    use content::Action;
+    match action {
+        Action::NewLimit {
+            seq,
+            price,
+            qty,
+            side,
+        } => fix::order_frame(
+            fix_version,
+            session_id,
+            target_host,
+            task_id,
+            u64::from(*seq),
+            *price,
+            *qty,
+            *side,
+        ),
+        Action::NewMarket { seq, qty, side } => fix::market_frame(
+            fix_version,
+            session_id,
+            target_host,
+            task_id,
+            u64::from(*seq),
+            *qty,
+            *side,
+        ),
+        Action::Cancel {
+            seq,
+            orig_order_id,
+            price,
+            qty,
+            side,
+        } => fix::cancel_frame(
+            fix_version,
+            session_id,
+            target_host,
+            task_id,
+            u64::from(*seq),
+            orig_order_id,
+            *price,
+            *qty,
+            *side,
+        ),
+        Action::Replace {
+            seq,
+            orig_order_id,
+            price,
+            qty,
+            side,
+        } => fix::replace_frame(
+            fix_version,
+            session_id,
+            target_host,
+            task_id,
+            u64::from(*seq),
+            orig_order_id,
+            *price,
+            *qty,
+            *side,
+        ),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn fix_write_loop(
     mut write_half: WriteHalf<TcpStream>,
@@ -572,8 +658,13 @@ async fn fix_write_loop(
 
     let interval_ns = 1_000_000_000_u64 / u64::from(task.target_rps);
     let mut next_send_ns = task_start_ns;
-    let mut rng = SmallRng::seed_from_u64(global_seed ^ u64::from(task.task_id));
-    let mut seq: u32 = 0;
+    let mut generator = TaskGenerator::new(
+        session_id.clone(),
+        u64::from(task.task_id),
+        task.profile,
+        mix_from_task(&task),
+        global_seed ^ u64::from(task.task_id),
+    );
     let mut sent: u64 = 0;
 
     loop {
@@ -589,20 +680,12 @@ async fn fix_write_loop(
 
         time::sleep_until(instant_from_unix_nanos(next_send_ns)).await;
 
-        seq += 1;
-        let (price, qty, side) = order_shape(task.profile, seq, &mut rng);
-        let mut frame = fix::order_frame(
-            &fix_version,
-            &session_id,
-            &target_host,
-            u64::from(task.task_id),
-            u64::from(seq),
-            price,
-            qty,
-            side,
-        );
+        let action = generator.next();
+        let seq = action.seq();
+        let mut frame =
+            render_frame(&fix_version, &session_id, &target_host, u64::from(task.task_id), &action);
         // Set FIX SendingTime (tag 52) to the actual transmit instant.
-        // order_frame emits a fixed-width epoch placeholder; patch_timestamp
+        // The frame builders emit a fixed-width epoch placeholder; patch_timestamp
         // rewrites those 21 bytes and delta-fixes the checksum in place.
         // Without this, every order ships SendingTime=19700101-00:00:00.000 and
         // a contestant FIX engine validating tag 52 freshness rejects it.
@@ -622,6 +705,8 @@ async fn fix_write_loop(
                     price: frame.price,
                     qty: frame.qty,
                     side: frame.side,
+                    payload_type: frame.payload_type,
+                    ord_type: frame.ord_type,
                 },
             );
         }
@@ -757,6 +842,8 @@ async fn fix_read_loop(
                     price: p.price,
                     qty: p.qty,
                     side: p.side,
+                    payload_type: p.payload_type,
+                    ord_type: p.ord_type,
                 })
                 .await;
         }
@@ -844,6 +931,8 @@ async fn fix_watchdog_loop(
                     price: p.price,
                     qty: p.qty,
                     side: p.side,
+                    payload_type: p.payload_type,
+                    ord_type: p.ord_type,
                 })
                 .await;
         }
@@ -894,8 +983,13 @@ async fn run_writeonly_task(
 
     let interval_ns = 1_000_000_000_u64 / u64::from(task.target_rps);
     let mut next_send_ns = task_start_ns;
-    let mut rng = SmallRng::seed_from_u64(ctx.global_seed ^ u64::from(task.task_id));
-    let mut seq: u32 = 0;
+    let mut generator = TaskGenerator::new(
+        ctx.session_id.clone(),
+        u64::from(task.task_id),
+        task.profile,
+        mix_from_task(&task),
+        ctx.global_seed ^ u64::from(task.task_id),
+    );
     let mut sent: u64 = 0;
 
     loop {
@@ -906,17 +1000,16 @@ async fn run_writeonly_task(
 
         time::sleep_until(instant_from_unix_nanos(next_send_ns)).await;
 
-        seq += 1;
-        let (price, qty, side) = order_shape(task.profile, seq, &mut rng);
-        let frame = fix::order_frame(
+        let action = generator.next();
+        let seq = action.seq();
+        // REST/WS transports send frame.rest / frame.ws_bytes, which do not
+        // carry FIX tag 52, so no patch_timestamp is needed here.
+        let frame = render_frame(
             &ctx.fix_version,
             &ctx.session_id,
             &ctx.target_host,
             u64::from(task.task_id),
-            u64::from(seq),
-            price,
-            qty,
-            side,
+            &action,
         );
 
         match time::timeout(ctx.write_timeout, client.write(&frame)).await {
@@ -936,6 +1029,8 @@ async fn run_writeonly_task(
                         price: frame.price,
                         qty: frame.qty,
                         side: frame.side,
+                        payload_type: frame.payload_type,
+                        ord_type: frame.ord_type,
                     })
                     .await;
                 sent += 1;
@@ -963,7 +1058,7 @@ async fn run_writeonly_task(
 /// the given profile and sequence number. v1 shapes are participant-typical
 /// but not exhaustive — judges can rebalance via the scenarios table without
 /// editing this function.
-fn order_shape(profile: BotProfile, seq: u32, rng: &mut SmallRng) -> (u64, u64, Side) {
+pub(crate) fn order_shape(profile: BotProfile, seq: u32, rng: &mut SmallRng) -> (u64, u64, Side) {
     match profile {
         BotProfile::Hft => {
             // Market-making behaviour: tight spread around 10_000, alternating
@@ -1147,6 +1242,9 @@ mod tests {
                 target_rps: 10,
                 start_offset_ns: 0,
                 duration_ns: 1_000_000_000,
+                market_pct: 0,
+                cancel_pct: 0,
+                replace_pct: 0,
             }],
         }
     }

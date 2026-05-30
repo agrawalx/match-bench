@@ -195,6 +195,9 @@ async fn main() -> Result<()> {
             target_rps: TARGET_RPS,
             start_offset_ns: 0,
             duration_ns: Duration::from_secs(DURATION_SECS).as_nanos() as u64,
+            market_pct: 0,
+            cancel_pct: 0,
+            replace_pct: 0,
         }],
     };
 

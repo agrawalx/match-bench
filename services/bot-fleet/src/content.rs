@@ -303,7 +303,11 @@ mod tests {
         let pct = |c: i32| (c as f64) / (n as f64) * 100.0;
         assert!((pct(market) - 10.0).abs() < 1.5, "market {}", pct(market));
         assert!((pct(cancel) - 30.0).abs() < 1.5, "cancel {}", pct(cancel));
-        assert!((pct(replace) - 10.0).abs() < 1.5, "replace {}", pct(replace));
+        assert!(
+            (pct(replace) - 10.0).abs() < 1.5,
+            "replace {}",
+            pct(replace)
+        );
         assert!((pct(limit) - 50.0).abs() < 1.5, "limit {}", pct(limit));
     }
 
@@ -317,9 +321,7 @@ mod tests {
                     live.insert(fix::new_limit_order_id("sess1", 7, u64::from(seq)));
                 }
                 Action::Replace {
-                    seq,
-                    orig_order_id,
-                    ..
+                    seq, orig_order_id, ..
                 } => {
                     assert!(
                         live.remove(&orig_order_id),

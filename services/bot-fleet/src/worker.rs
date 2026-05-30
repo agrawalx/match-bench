@@ -682,8 +682,13 @@ async fn fix_write_loop(
 
         let action = generator.next();
         let seq = action.seq();
-        let mut frame =
-            render_frame(&fix_version, &session_id, &target_host, u64::from(task.task_id), &action);
+        let mut frame = render_frame(
+            &fix_version,
+            &session_id,
+            &target_host,
+            u64::from(task.task_id),
+            &action,
+        );
         // Set FIX SendingTime (tag 52) to the actual transmit instant.
         // The frame builders emit a fixed-width epoch placeholder; patch_timestamp
         // rewrites those 21 bytes and delta-fixes the checksum in place.

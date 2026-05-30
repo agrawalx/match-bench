@@ -3,4 +3,5 @@ resolver = "2"
 members = [
     "schemas/rust",
     "services/bot-fleet",
+    "services/ebpf-latency",
 ]

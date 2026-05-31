@@ -142,13 +142,13 @@ func TestPodNameAndFQDN(t *testing.T) {
 
 func TestPodSpecRuntimeClassOptional(t *testing.T) {
 	mgr := &Manager{namespace: "sandbox", cpu: "2", memory: "1Gi"}
-	pod := mgr.podSpec("s1", "img:tag", 8080)
+	pod := mgr.podSpec("s1", "", "img:tag", 8080)
 	if pod.Spec.RuntimeClassName != nil {
 		t.Errorf("expected no runtime class when env unset, got %v", *pod.Spec.RuntimeClassName)
 	}
 
 	mgr.runtimeClass = "gvisor"
-	pod = mgr.podSpec("s1", "img:tag", 8080)
+	pod = mgr.podSpec("s1", "", "img:tag", 8080)
 	if pod.Spec.RuntimeClassName == nil || *pod.Spec.RuntimeClassName != "gvisor" {
 		t.Errorf("expected gvisor runtime class, got %v", pod.Spec.RuntimeClassName)
 	}
@@ -156,7 +156,7 @@ func TestPodSpecRuntimeClassOptional(t *testing.T) {
 
 func TestPodSpecLabels(t *testing.T) {
 	mgr := &Manager{namespace: "sandbox", cpu: "2", memory: "1Gi"}
-	pod := mgr.podSpec("sess-AAA", "img:tag", 8080)
+	pod := mgr.podSpec("sess-AAA", "", "img:tag", 8080)
 	if pod.Labels[LabelApp] != AppValue {
 		t.Errorf("missing app label: %v", pod.Labels)
 	}
@@ -183,7 +183,7 @@ func TestPodSpecLabels(t *testing.T) {
 // physical cores even though they each "own" 2 CPUs.
 func TestGuaranteedQoSShape(t *testing.T) {
 	mgr := &Manager{namespace: "sandbox", cpu: "2", memory: "1Gi"}
-	pod := mgr.podSpec("s1", "img:tag", 8080)
+	pod := mgr.podSpec("s1", "", "img:tag", 8080)
 
 	c := pod.Spec.Containers[0]
 	cpuReq := c.Resources.Requests[corev1.ResourceCPU]
@@ -204,7 +204,7 @@ func TestGuaranteedQoSShape(t *testing.T) {
 // Either alone is incomplete.
 func TestReadOnlyRootAndTmpfsMounts(t *testing.T) {
 	mgr := &Manager{namespace: "sandbox", cpu: "2", memory: "1Gi"}
-	pod := mgr.podSpec("s1", "img:tag", 8080)
+	pod := mgr.podSpec("s1", "", "img:tag", 8080)
 
 	c := pod.Spec.Containers[0]
 	if c.SecurityContext == nil || c.SecurityContext.ReadOnlyRootFilesystem == nil || !*c.SecurityContext.ReadOnlyRootFilesystem {
@@ -236,13 +236,13 @@ func TestReadOnlyRootAndTmpfsMounts(t *testing.T) {
 
 func TestPodSpecNodePoolPinning(t *testing.T) {
 	mgr := &Manager{namespace: "sandbox", cpu: "2", memory: "1Gi"}
-	pod := mgr.podSpec("s1", "img:tag", 8080)
+	pod := mgr.podSpec("s1", "", "img:tag", 8080)
 	if len(pod.Spec.Tolerations) != 0 || pod.Spec.NodeSelector != nil {
 		t.Errorf("expected no node pinning when SANDBOX_NODE_POOL unset")
 	}
 
 	mgr.nodePool = "sandbox"
-	pod = mgr.podSpec("s1", "img:tag", 8080)
+	pod = mgr.podSpec("s1", "", "img:tag", 8080)
 	if pod.Spec.NodeSelector["pool"] != "sandbox" {
 		t.Errorf("expected pool=sandbox nodeSelector, got %v", pod.Spec.NodeSelector)
 	}
@@ -253,14 +253,14 @@ func TestPodSpecNodePoolPinning(t *testing.T) {
 
 func TestBandwidthAnnotations(t *testing.T) {
 	mgr := &Manager{namespace: "sandbox", cpu: "2", memory: "1Gi"}
-	pod := mgr.podSpec("s1", "img:tag", 8080)
+	pod := mgr.podSpec("s1", "", "img:tag", 8080)
 	if _, ok := pod.Annotations["kubernetes.io/egress-bandwidth"]; ok {
 		t.Errorf("expected no bandwidth annotation when env unset")
 	}
 
 	mgr.egressBwBps = "100M"
 	mgr.ingressBwBps = "50M"
-	pod = mgr.podSpec("s1", "img:tag", 8080)
+	pod = mgr.podSpec("s1", "", "img:tag", 8080)
 	if pod.Annotations["kubernetes.io/egress-bandwidth"] != "100M" {
 		t.Errorf("egress bandwidth annotation not set")
 	}

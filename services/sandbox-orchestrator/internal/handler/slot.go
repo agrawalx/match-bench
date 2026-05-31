@@ -25,9 +25,10 @@ import (
 // without translation. The image ref is also supplied by the caller;
 // the orchestrator does not assemble Harbor refs itself.
 type createSlotRequest struct {
-	SlotID string `json:"slot_id"`
-	Image  string `json:"image"`
-	Port   int    `json:"port"`
+	SlotID       string `json:"slot_id"`
+	ContestantID string `json:"contestant_id"` // stamped onto the eBPF capture's latency events
+	Image        string `json:"image"`
+	Port         int    `json:"port"`
 }
 
 // slotResponse is returned by POST /slots and GET /slots/{id}.
@@ -79,7 +80,7 @@ func CreateSlot(mgr *k8s.Manager, slots *store.SlotStore, log *slog.Logger) http
 			return
 		}
 
-		if err := mgr.CreateSlot(ctx, req.SlotID, req.Image, req.Port); err != nil {
+		if err := mgr.CreateSlot(ctx, req.SlotID, req.ContestantID, req.Image, req.Port); err != nil {
 			switch {
 			case errors.Is(err, cerrs.ErrSlotImageMismatch):
 				writeError(w, http.StatusConflict, err.Error())

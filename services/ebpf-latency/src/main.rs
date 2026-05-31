@@ -9,6 +9,7 @@
 
 mod capture;
 mod matcher;
+mod netns;
 mod parse;
 mod pipeline;
 mod reassembly;
@@ -65,13 +66,34 @@ impl Config {
             .or_else(|_| env::var("IICPC_EBPF_OBJECT"))
             .context("EBPF_OBJECT_PATH must point at the compiled eBPF object")?;
 
+        // Resolve the target network namespace. An explicit EBPF_NETNS_PATH wins
+        // (used by the integration test's named netns); otherwise, in the cluster,
+        // the orchestrator passes the algo pod's UID and we resolve the netns on
+        // the node. With neither set, programs attach in the current namespace.
+        let netns_path = match optional_path_env("EBPF_NETNS_PATH") {
+            Some(p) => Some(p),
+            None => match env::var("EBPF_ALGO_POD_UID")
+                .ok()
+                .filter(|v| !v.trim().is_empty())
+            {
+                Some(uid) => {
+                    let cid = env::var("EBPF_ALGO_CONTAINER_ID").ok();
+                    Some(
+                        netns::resolve_netns_path(&uid, cid.as_deref())
+                            .context("resolve algo pod network namespace from pod UID")?,
+                    )
+                }
+                None => None,
+            },
+        };
+
         Ok(Self {
             kafka_brokers: env_or("KAFKA_BROKERS", "localhost:9092"),
             topic: env_or("ORDERS_ACKED_TOPIC", TOPIC_ORDERS_ACKED),
             session_id: required_env("SESSION_ID")?,
             contestant_id: required_env("CONTESTANT_ID")?,
             iface: required_env("EBPF_IFACE")?,
-            netns_path: optional_path_env("EBPF_NETNS_PATH"),
+            netns_path,
             object_path: PathBuf::from(object_path),
             xdp_ingress_program: env_or("EBPF_XDP_INGRESS_PROGRAM", DEFAULT_XDP_INGRESS_PROGRAM),
             tc_egress_program: env_or("EBPF_TC_EGRESS_PROGRAM", DEFAULT_TC_EGRESS_PROGRAM),

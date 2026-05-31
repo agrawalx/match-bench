@@ -10,6 +10,7 @@ ebpf = []
 anyhow = "1.0"
 aya = "0.13.1"
 iicpc-bot-fleet = { path = "../bot-fleet" }
+iicpc-logger-rust = { path = "../../libs/rust/logger" }
 iicpc-schemas-rust = { path = "../../schemas/rust" }
 libc = "0.2"
 rmp-serde = "1.3"

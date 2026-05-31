@@ -3,9 +3,9 @@
 
 #[cfg(target_arch = "bpf")]
 use aya_ebpf::{
-    bindings::{xdp_action::XDP_PASS, TC_ACT_PIPE},
-    macros::{classifier, map, xdp},
-    maps::{LruHashMap, RingBuf},
+    bindings::{__sk_buff, xdp_action::XDP_PASS, TC_ACT_PIPE},
+    macros::{map, xdp},
+    maps::{LruHashMap, PerCpuArray, RingBuf},
     programs::{TcContext, XdpContext},
 };
 #[cfg(target_arch = "bpf")]
@@ -23,23 +23,33 @@ const FIX_PORT: u16 = 9898;
 #[cfg(target_arch = "bpf")]
 const HTTP_WS_PORT: u16 = 8080;
 #[cfg(target_arch = "bpf")]
-const MAX_ORDER_ID_LEN: usize = 96;
+const MAX_ORDER_ID_LEN: usize = 32;
 #[cfg(target_arch = "bpf")]
 const MAX_EXEC_TYPE_LEN: usize = 16;
 #[cfg(target_arch = "bpf")]
-const MAX_FIX_SCAN: usize = 768;
+const MAX_JSON_ORDER_ID_SCAN: usize = 16;
 #[cfg(target_arch = "bpf")]
-const MAX_JSON_SCAN: usize = 1024;
+// Keep parser bounds small enough for the kernel verifier to finish. The hot
+// fields used by supported order/ack payloads are expected near the front.
+const MAX_FIX_SCAN: usize = 96;
+#[cfg(target_arch = "bpf")]
+const MAX_FIX_FIELDS: usize = 12;
+#[cfg(target_arch = "bpf")]
+const MAX_HTTP_HEADER_SCAN: usize = 80;
+#[cfg(target_arch = "bpf")]
+const MAX_RESPONSE_SCAN: usize = 192;
 #[cfg(target_arch = "bpf")]
 const EVENT_FLAG_REORDERING: u16 = 0x1;
 #[cfg(target_arch = "bpf")]
 const PRICE_SCALE: u64 = 1_000_000_000;
 #[cfg(target_arch = "bpf")]
-const ORDER_KEY_SIZE: usize = 98;
+const ORDER_KEY_SIZE: usize = 34;
+#[cfg(target_arch = "bpf")]
+const FLOW_KEY_SIZE: usize = 8;
 #[cfg(target_arch = "bpf")]
 const EXEC_TYPE_SIZE: usize = 18;
 #[cfg(target_arch = "bpf")]
-const LATENCY_EVENT_SIZE: usize = 272;
+const LATENCY_EVENT_SIZE: usize = 144;
 
 #[cfg(target_arch = "bpf")]
 #[repr(C)]
@@ -51,6 +61,18 @@ pub struct OrderKey {
 
 #[cfg(target_arch = "bpf")]
 const _: [(); ORDER_KEY_SIZE] = [(); mem::size_of::<OrderKey>()];
+
+#[cfg(target_arch = "bpf")]
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct FlowKey {
+    src_ip: u32,
+    src_port: u16,
+    _pad: u16,
+}
+
+#[cfg(target_arch = "bpf")]
+const _: [(); FLOW_KEY_SIZE] = [(); mem::size_of::<FlowKey>()];
 
 #[cfg(target_arch = "bpf")]
 #[repr(C)]
@@ -127,27 +149,19 @@ struct TcpHdr {
 }
 
 #[cfg(target_arch = "bpf")]
-struct ParsedFix {
+struct ParsedResponse {
     key: OrderKey,
     exec_type: ExecType,
     fill_qty: u64,
     fill_price: u64,
     orig_order_id: OrderKey,
-    is_request: bool,
-    is_execution_report: bool,
-    is_retransmission_candidate: bool,
 }
 
 #[cfg(target_arch = "bpf")]
-struct ParsedPacket {
-    key: OrderKey,
-    exec_type: ExecType,
-    fill_qty: u64,
-    fill_price: u64,
-    orig_order_id: OrderKey,
-    is_request: bool,
-    is_response: bool,
-    is_retransmission_candidate: bool,
+#[repr(C)]
+struct ParserScratch {
+    response: ParsedResponse,
+    payload: [u8; MAX_RESPONSE_SCAN],
 }
 
 #[cfg(target_arch = "bpf")]
@@ -165,7 +179,6 @@ const _: [(); EXEC_TYPE_SIZE] = [(); mem::size_of::<ExecType>()];
 #[derive(Clone, Copy)]
 struct PacketBounds {
     payload_start: usize,
-    payload_end: usize,
     target_port: u16,
     src_ip: u32,
     src_port: u16,
@@ -174,53 +187,52 @@ struct PacketBounds {
 
 #[cfg(target_arch = "bpf")]
 #[map]
-static IN_FLIGHT: LruHashMap<OrderKey, InFlightOrder> = LruHashMap::with_max_entries(262_144, 0);
+static IN_FLIGHT: LruHashMap<FlowKey, InFlightOrder> = LruHashMap::with_max_entries(262_144, 0);
 
 #[cfg(target_arch = "bpf")]
 #[map]
 static EVENTS: RingBuf = RingBuf::with_byte_size(16 * 1024 * 1024, 0);
 
+// Per-CPU scratch is only used for the duration of a single XDP or TC program
+// invocation. Do not store pointers to fields from this map in long-lived maps.
+#[cfg(target_arch = "bpf")]
+#[map]
+static PARSER_SCRATCH: PerCpuArray<ParserScratch> = PerCpuArray::with_max_entries(1, 0);
+
+#[cfg(target_arch = "bpf")]
+#[map]
+static DROPPED_EVENTS: PerCpuArray<u64> = PerCpuArray::with_max_entries(1, 0);
+
 #[cfg(target_arch = "bpf")]
 #[xdp]
 pub fn iicpc_xdp_ingress(ctx: XdpContext) -> u32 {
-    match try_xdp_ingress(ctx) {
-        Ok(action) => action,
-        Err(action) => action,
-    }
+    try_xdp_ingress(ctx)
 }
 
 #[cfg(target_arch = "bpf")]
-#[classifier]
-pub fn iicpc_tc_egress(ctx: TcContext) -> i32 {
-    match try_tc_egress(ctx) {
-        Ok(action) => action,
-        Err(action) => action,
-    }
+#[no_mangle]
+#[link_section = "classifier"]
+pub extern "C" fn iicpc_tc_egress(ctx: *mut __sk_buff) -> i32 {
+    try_tc_egress(TcContext::new(ctx))
 }
 
 #[cfg(target_arch = "bpf")]
-fn try_xdp_ingress(ctx: XdpContext) -> Result<u32, u32> {
+#[inline(always)]
+fn try_xdp_ingress(ctx: XdpContext) -> u32 {
     let data = ctx.data();
     let data_end = ctx.data_end();
-    let payload = tcp_payload_bounds(data, data_end, true).ok_or(XDP_PASS)?;
-    let parsed = parse_payload(
-        payload.payload_start,
-        payload.payload_end,
-        payload.target_port,
-        true,
-    )
-    .ok_or(XDP_PASS)?;
-    if !parsed.is_request {
-        return Ok(XDP_PASS);
-    }
+    let Some(payload) = tcp_payload_bounds(data, data_end, true) else {
+        return XDP_PASS;
+    };
+    let flow_key = flow_key(payload.src_ip, payload.src_port);
 
-    let now = unsafe { bpf_ktime_get_real_ns() };
-    let value = unsafe { IN_FLIGHT.get(&parsed.key).copied() };
+    let now = unsafe { bpf_ktime_get_ns() };
+    let value = unsafe { IN_FLIGHT.get(&flow_key).copied() };
     match value {
         Some(mut existing) => {
-            if parsed.is_retransmission_candidate {
+            if existing.tcp_seq == payload.tcp_seq {
                 existing.retransmission_count = existing.retransmission_count.saturating_add(1);
-                let _ = IN_FLIGHT.insert(&parsed.key, &existing, 0);
+                let _ = IN_FLIGHT.insert(&flow_key, &existing, 0);
             }
         }
         None => {
@@ -232,35 +244,71 @@ fn try_xdp_ingress(ctx: XdpContext) -> Result<u32, u32> {
                 tcp_seq: payload.tcp_seq,
                 retransmission_count: 0,
             };
-            let _ = IN_FLIGHT.insert(&parsed.key, &order, 0);
+            let _ = IN_FLIGHT.insert(&flow_key, &order, 0);
         }
     }
 
-    Ok(XDP_PASS)
+    XDP_PASS
 }
 
 #[cfg(target_arch = "bpf")]
-fn try_tc_egress(ctx: TcContext) -> Result<i32, i32> {
+#[inline(always)]
+fn try_tc_egress(ctx: TcContext) -> i32 {
     let data = ctx.data();
     let data_end = ctx.data_end();
-    let payload = tcp_payload_bounds(data, data_end, false).ok_or(TC_ACT_PIPE)?;
-    let parsed = parse_payload(
-        payload.payload_start,
-        payload.payload_end,
-        payload.target_port,
-        false,
-    )
-    .ok_or(TC_ACT_PIPE)?;
-    if !parsed.is_response {
-        return Ok(TC_ACT_PIPE);
+    let Some(payload) = tcp_payload_bounds(data, data_end, false) else {
+        return TC_ACT_PIPE;
+    };
+    let Some(scratch) = PARSER_SCRATCH.get_ptr_mut(0) else {
+        return TC_ACT_PIPE;
+    };
+    let Some(payload_offset) = payload.payload_start.checked_sub(data) else {
+        return TC_ACT_PIPE;
+    };
+    let scratch = unsafe { &mut *scratch };
+    let Ok(scan_len) = ctx.load_bytes(payload_offset, &mut scratch.payload) else {
+        return TC_ACT_PIPE;
+    };
+    if scan_len == 0 {
+        return TC_ACT_PIPE;
+    }
+    let payload_start = scratch.payload.as_ptr() as usize;
+    let Some(payload_end) = payload_start.checked_add(scan_len) else {
+        return TC_ACT_PIPE;
+    };
+    let parsed = &mut scratch.response;
+    if payload.target_port == FIX_PORT {
+        if parse_fix_response_payload(payload_start, payload_end, parsed).is_none() {
+            return TC_ACT_PIPE;
+        }
+    } else {
+        let Some(first) = byte_at(payload_start, payload_end, 0) else {
+            return TC_ACT_PIPE;
+        };
+        if first == b'H' {
+            if parse_http_json_response_payload(payload_start, payload_end, parsed).is_none()
+            {
+                return TC_ACT_PIPE;
+            }
+        } else if parse_websocket_json_response_payload(
+            payload_start,
+            payload_end,
+            false,
+            parsed,
+        )
+        .is_none()
+        {
+            return TC_ACT_PIPE;
+        }
     }
 
-    let Some(in_flight) = (unsafe { IN_FLIGHT.get(&parsed.key).copied() }) else {
-        return Ok(TC_ACT_PIPE);
+    let flow_key = flow_key(payload.src_ip, payload.src_port);
+    let Some(in_flight) = (unsafe { IN_FLIGHT.get(&flow_key).copied() }) else {
+        return TC_ACT_PIPE;
     };
-    let _ = IN_FLIGHT.remove(&parsed.key);
+    let _ = IN_FLIGHT.remove(&flow_key);
 
-    let t7 = unsafe { bpf_ktime_get_real_ns() };
+    let t7 = unsafe { bpf_ktime_get_ns() };
     let mut flags = 0;
     let service_time = if t7 >= in_flight.t3_xdp_ingress_ns {
         t7 - in_flight.t3_xdp_ingress_ns
@@ -272,33 +320,60 @@ fn try_tc_egress(ctx: TcContext) -> Result<i32, i32> {
     if let Some(mut entry) = EVENTS.reserve::<LatencyEvent>(0) {
         let event = entry.as_mut_ptr();
         unsafe {
-            ptr::write(
-                event,
-                LatencyEvent {
-                    t3_xdp_ingress_ns: in_flight.t3_xdp_ingress_ns,
-                    t7_xdp_egress_ns: t7,
-                    pod_service_time_ns: service_time,
-                    fill_qty: parsed.fill_qty,
-                    fill_price: parsed.fill_price,
-                    src_ip: in_flight.src_ip,
-                    tcp_seq: in_flight.tcp_seq,
-                    retransmission_count: in_flight.retransmission_count,
-                    src_port: in_flight.src_port,
-                    order_id_len: parsed.key.len,
-                    exec_type_len: parsed.exec_type.len,
-                    orig_order_id_len: parsed.orig_order_id.len,
-                    flags,
-                    _pad: 0,
-                    order_id: parsed.key.bytes,
-                    exec_type: parsed.exec_type.bytes,
-                    orig_order_id: parsed.orig_order_id.bytes,
-                },
-            );
+            ptr::addr_of_mut!((*event).t3_xdp_ingress_ns).write(in_flight.t3_xdp_ingress_ns);
+            ptr::addr_of_mut!((*event).t7_xdp_egress_ns).write(t7);
+            ptr::addr_of_mut!((*event).pod_service_time_ns).write(service_time);
+            ptr::addr_of_mut!((*event).fill_qty).write(parsed.fill_qty);
+            ptr::addr_of_mut!((*event).fill_price).write(parsed.fill_price);
+            ptr::addr_of_mut!((*event).src_ip).write(in_flight.src_ip);
+            ptr::addr_of_mut!((*event).tcp_seq).write(in_flight.tcp_seq);
+            ptr::addr_of_mut!((*event).retransmission_count).write(in_flight.retransmission_count);
+            ptr::addr_of_mut!((*event).src_port).write(in_flight.src_port);
+            ptr::addr_of_mut!((*event).order_id_len).write(clamp_order_key_len(parsed.key.len));
+            ptr::addr_of_mut!((*event).exec_type_len)
+                .write(clamp_exec_type_len(parsed.exec_type.len));
+            ptr::addr_of_mut!((*event).orig_order_id_len)
+                .write(clamp_order_key_len(parsed.orig_order_id.len));
+            ptr::addr_of_mut!((*event).flags).write(flags);
+            ptr::addr_of_mut!((*event)._pad).write(0);
+
+            let mut i = 0usize;
+            while i < MAX_ORDER_ID_LEN {
+                let b = ptr::read(parsed.key.bytes.as_ptr().add(i));
+                ptr::addr_of_mut!((*event).order_id)
+                    .cast::<u8>()
+                    .add(i)
+                    .write(b);
+                i += 1;
+            }
+            i = 0;
+            while i < MAX_EXEC_TYPE_LEN {
+                let b = ptr::read(parsed.exec_type.bytes.as_ptr().add(i));
+                ptr::addr_of_mut!((*event).exec_type)
+                    .cast::<u8>()
+                    .add(i)
+                    .write(b);
+                i += 1;
+            }
+            i = 0;
+            while i < MAX_ORDER_ID_LEN {
+                let b = ptr::read(parsed.orig_order_id.bytes.as_ptr().add(i));
+                ptr::addr_of_mut!((*event).orig_order_id)
+                    .cast::<u8>()
+                    .add(i)
+                    .write(b);
+                i += 1;
+            }
         }
         entry.submit(0);
+    } else if let Some(dropped) = DROPPED_EVENTS.get_ptr_mut(0) {
+        unsafe {
+            let current = ptr::read(dropped);
+            ptr::write(dropped, current.saturating_add(1));
+        }
     }
 
-    Ok(TC_ACT_PIPE)
+    TC_ACT_PIPE
 }
 
 #[cfg(target_arch = "bpf")]
@@ -333,16 +408,23 @@ fn tcp_payload_bounds(data: usize, data_end: usize, inbound_request: bool) -> Op
         return None;
     }
 
-    let payload_start = tcp_offset + data_offset;
+    let payload_start = data + tcp_offset + data_offset;
     if payload_start >= data_end {
         return None;
     }
+    // Use the client address as flow identity on both directions. For outbound
+    // responses that means the destination tuple, not the server source tuple.
+    let (src_ip, src_port) = if inbound_request {
+        (u32::from_be(ip.saddr), source)
+    } else {
+        (u32::from_be(ip.daddr), dest)
+    };
+
     Some(PacketBounds {
         payload_start,
-        payload_end: data_end,
         target_port,
-        src_ip: u32::from_be(ip.saddr),
-        src_port: source,
+        src_ip,
+        src_port,
         tcp_seq: u32::from_be(tcp.seq),
     })
 }
@@ -359,168 +441,166 @@ fn load<T: Copy>(data: usize, data_end: usize, offset: usize) -> Option<T> {
 }
 
 #[cfg(target_arch = "bpf")]
-fn parse_payload(
+fn parse_fix_response_payload(
     payload_start: usize,
     payload_end: usize,
-    target_port: u16,
-    inbound_request: bool,
-) -> Option<ParsedPacket> {
-    if target_port == FIX_PORT {
-        let parsed = parse_fix_payload(payload_start, payload_end)?;
-        return Some(ParsedPacket {
-            key: parsed.key,
-            exec_type: parsed.exec_type,
-            fill_qty: parsed.fill_qty,
-            fill_price: parsed.fill_price,
-            orig_order_id: parsed.orig_order_id,
-            is_request: parsed.is_request,
-            is_response: parsed.is_execution_report,
-            is_retransmission_candidate: parsed.is_retransmission_candidate,
-        });
-    }
-
-    let parsed = parse_json_payload(payload_start, payload_end)
-        .or_else(|| parse_websocket_json_payload(payload_start, payload_end, inbound_request))?;
-    Some(ParsedPacket {
-        key: parsed.key,
-        exec_type: parsed.exec_type,
-        fill_qty: parsed.fill_qty,
-        fill_price: parsed.fill_price,
-        orig_order_id: parsed.orig_order_id,
-        is_request: inbound_request,
-        is_response: !inbound_request,
-        is_retransmission_candidate: true,
-    })
-}
-
-#[cfg(target_arch = "bpf")]
-fn parse_fix_payload(payload_start: usize, payload_end: usize) -> Option<ParsedFix> {
+    out: &mut ParsedResponse,
+) -> Option<()> {
     let scan_len = core::cmp::min(payload_end - payload_start, MAX_FIX_SCAN);
     if !starts_with_fix(payload_start, payload_end, scan_len)? {
         return None;
     }
 
     let mut msg_type = 0u8;
-    let mut key = empty_order_key();
-    let mut exec_type = empty_exec_type();
-    let mut ord_status = empty_exec_type();
-    let mut orig_order_id = empty_order_key();
-    let mut fill_qty = 0;
-    let mut fill_price = 0;
+    reset_response(out);
 
     let mut i = 0usize;
-    while i < scan_len {
-        let field_start = payload_start + i;
-        let soh_prefixed =
-            i == 0 || byte_at(payload_start, payload_end, i.wrapping_sub(1))? == 0x01;
-
-        if soh_prefixed && i + 3 < scan_len {
-            if matches_tag(payload_start, payload_end, i, b'3', b'5', b'=')? {
-                msg_type = byte_at(payload_start, payload_end, i + 3)?;
-            }
-            if matches_tag(payload_start, payload_end, i, b'1', b'1', b'=')? {
-                let value_start = i + 3;
-                copy_fix_value_to_order_key(
-                    payload_start,
-                    payload_end,
-                    scan_len,
-                    value_start,
-                    &mut key,
-                )?;
-            }
-            if matches_tag(payload_start, payload_end, i, b'3', b'2', b'=')? {
-                fill_qty = parse_fix_u64(payload_start, payload_end, scan_len, i + 3)?;
-            }
-            if matches_tag(payload_start, payload_end, i, b'3', b'1', b'=')? {
-                fill_price = parse_fix_decimal_scaled(payload_start, payload_end, scan_len, i + 3)?;
-            }
-            if matches_tag(payload_start, payload_end, i, b'3', b'9', b'=')? {
-                copy_fix_value_to_exec_type(
-                    payload_start,
-                    payload_end,
-                    scan_len,
-                    i + 3,
-                    &mut ord_status,
-                )?;
-            }
-        }
-
-        if soh_prefixed && i + 4 < scan_len {
-            if matches_tag4(payload_start, payload_end, i, b'1', b'5', b'0', b'=')? {
-                copy_fix_value_to_exec_type(
-                    payload_start,
-                    payload_end,
-                    scan_len,
-                    i + 4,
-                    &mut exec_type,
-                )?;
+    let mut fields = 0usize;
+    while i < scan_len && fields < MAX_FIX_FIELDS {
+        if i + 3 < scan_len {
+            let t0 = byte_at(payload_start, payload_end, i)?;
+            let t1 = byte_at(payload_start, payload_end, i + 1)?;
+            let t2 = byte_at(payload_start, payload_end, i + 2)?;
+            if t2 == b'=' {
+                if t0 == b'3' && t1 == b'5' {
+                    msg_type = byte_at(payload_start, payload_end, i + 3)?;
+                } else if t0 == b'1' && t1 == b'1' {
+                    copy_fix_value_to_order_key(
+                        payload_start,
+                        payload_end,
+                        scan_len,
+                        i + 3,
+                        &mut out.key,
+                    )?;
+                } else if t0 == b'3' && t1 == b'2' {
+                    out.fill_qty = parse_fix_u64(payload_start, payload_end, scan_len, i + 3)?;
+                } else if t0 == b'3' && t1 == b'1' {
+                    out.fill_price =
+                        parse_fix_decimal_scaled(payload_start, payload_end, scan_len, i + 3)?;
+                } else if t0 == b'3' && t1 == b'9' && out.exec_type.len == 0 {
+                    copy_fix_value_to_exec_type(
+                        payload_start,
+                        payload_end,
+                        scan_len,
+                        i + 3,
+                        &mut out.exec_type,
+                    )?;
+                } else if t0 == b'4' && t1 == b'1' {
+                    copy_fix_value_to_order_key(
+                        payload_start,
+                        payload_end,
+                        scan_len,
+                        i + 3,
+                        &mut out.orig_order_id,
+                    )?;
+                }
             }
         }
 
-        if soh_prefixed && i + 3 < scan_len {
-            if matches_tag(payload_start, payload_end, i, b'4', b'1', b'=')? {
-                copy_fix_value_to_order_key(
-                    payload_start,
-                    payload_end,
-                    scan_len,
-                    i + 3,
-                    &mut orig_order_id,
-                )?;
-            }
+        if i + 4 < scan_len
+            && byte_at(payload_start, payload_end, i)? == b'1'
+            && byte_at(payload_start, payload_end, i + 1)? == b'5'
+            && byte_at(payload_start, payload_end, i + 2)? == b'0'
+            && byte_at(payload_start, payload_end, i + 3)? == b'='
+        {
+            copy_fix_value_to_exec_type(
+                payload_start,
+                payload_end,
+                scan_len,
+                i + 4,
+                &mut out.exec_type,
+            )?;
         }
 
-        let mut next = i + 1;
-        while next < scan_len {
-            if byte_at(payload_start, payload_end, next)? == 0x01 {
+        while i < scan_len {
+            let b = byte_at(payload_start, payload_end, i)?;
+            i += 1;
+            if b == 0x01 {
                 break;
             }
-            next += 1;
         }
-        i = if next == field_start { i + 1 } else { next + 1 };
+        fields += 1;
     }
 
-    if key.len == 0 {
+    if out.key.len == 0 || msg_type != b'8' {
         return None;
     }
-    if exec_type.len == 0 {
-        exec_type = ord_status;
+
+    Some(())
+}
+
+#[cfg(target_arch = "bpf")]
+#[inline(always)]
+fn parse_http_json_response_payload(
+    payload_start: usize,
+    payload_end: usize,
+    out: &mut ParsedResponse,
+) -> Option<()> {
+    if !packet_has_range(payload_start, payload_end, 0, 5) {
+        return None;
+    }
+    if byte_at(payload_start, payload_end, 0)? != b'H'
+        || byte_at(payload_start, payload_end, 1)? != b'T'
+        || byte_at(payload_start, payload_end, 2)? != b'T'
+        || byte_at(payload_start, payload_end, 3)? != b'P'
+        || byte_at(payload_start, payload_end, 4)? != b'/'
+    {
+        return None;
     }
 
-    Some(ParsedFix {
-        key,
-        exec_type,
-        fill_qty,
-        fill_price,
-        orig_order_id,
-        is_request: msg_type == b'D' || msg_type == b'F' || msg_type == b'G',
-        is_execution_report: msg_type == b'8',
-        is_retransmission_candidate: msg_type == b'D',
-    })
+    let mut header_offset = 0usize;
+    let mut crlf_state = 0u8;
+    let mut body_offset = 0usize;
+    while header_offset < MAX_HTTP_HEADER_SCAN {
+        let cursor = payload_start.checked_add(header_offset)?;
+        if cursor >= payload_end {
+            return None;
+        }
+        let b = unsafe { ptr::read(cursor as *const u8) };
+        if crlf_state == 0 {
+            if b == b'\r' {
+                crlf_state = 1;
+            }
+        } else if crlf_state == 1 {
+            if b == b'\n' {
+                crlf_state = 2;
+            } else if b != b'\r' {
+                crlf_state = 0;
+            }
+        } else if crlf_state == 2 {
+            if b == b'\r' {
+                crlf_state = 3;
+            } else {
+                crlf_state = 0;
+            }
+        } else if b == b'\n' {
+            body_offset = header_offset.checked_add(1)?;
+            break;
+        } else if b == b'\r' {
+            crlf_state = 1;
+        } else {
+            crlf_state = 0;
+        }
+        header_offset += 1;
+    }
+    if body_offset == 0 {
+        return None;
+    }
+    let body_start = payload_start.checked_add(body_offset)?;
+    let body_end = checked_packet_end(body_start, payload_end, 14)?;
+    let body_len = payload_end.checked_sub(body_start)?;
+    parse_compact_json_response_body(body_start, body_end, payload_end, body_len, out)
 }
 
 #[cfg(target_arch = "bpf")]
-#[derive(Clone, Copy)]
-struct ParsedJson {
-    key: OrderKey,
-    exec_type: ExecType,
-    fill_qty: u64,
-    fill_price: u64,
-    orig_order_id: OrderKey,
-}
-
-#[cfg(target_arch = "bpf")]
-fn parse_json_payload(payload_start: usize, payload_end: usize) -> Option<ParsedJson> {
-    parse_json_fields(payload_start, payload_end, 0, 0, false)
-}
-
-#[cfg(target_arch = "bpf")]
-fn parse_websocket_json_payload(
+#[inline(always)]
+fn parse_websocket_json_response_payload(
     payload_start: usize,
     payload_end: usize,
     client_to_server: bool,
-) -> Option<ParsedJson> {
-    let available = payload_end.checked_sub(payload_start)?;
-    if available < 2 {
+    out: &mut ParsedResponse,
+) -> Option<()> {
+    if !packet_has_range(payload_start, payload_end, 0, 2) {
         return None;
     }
 
@@ -535,195 +615,123 @@ fn parse_websocket_json_payload(
     if client_to_server && !masked {
         return None;
     }
+    if !client_to_server && masked {
+        return None;
+    }
 
     let len_code = second & 0x7f;
-    let mut header_len = 2usize;
-    let payload_len = if len_code < 126 {
-        usize::from(len_code)
-    } else if len_code == 126 {
-        if available < 4 {
-            return None;
-        }
-        header_len = 4;
-        let hi = usize::from(byte_at(payload_start, payload_end, 2)?);
-        let lo = usize::from(byte_at(payload_start, payload_end, 3)?);
-        (hi << 8) | lo
-    } else {
+    // Order ack payloads are expected to fit in compact WebSocket frames. The
+    // extended-length branch produced packet-range proofs the verifier rejected.
+    if len_code >= 126 {
         return None;
-    };
+    }
 
-    let mask_offset = header_len;
+    let payload_len = usize::from(len_code);
+    let mut header_len = 2usize;
     if masked {
         header_len = header_len.checked_add(4)?;
     }
-    if available < header_len {
+    if !packet_has_range(payload_start, payload_end, 0, header_len) {
+        return None;
+    }
+    let available = payload_end
+        .checked_sub(payload_start)?
+        .checked_sub(header_len)?;
+    if payload_len == 0 || payload_len > available {
         return None;
     }
 
-    let scan_len = core::cmp::min(payload_len, MAX_JSON_SCAN);
-    if available < header_len + scan_len {
+    let min_json_end = payload_start.checked_add(header_len)?.checked_add(14)?;
+    if min_json_end > payload_end {
         return None;
     }
 
-    let mask = if masked { mask_offset } else { 0 };
-    parse_json_fields(payload_start, payload_end, header_len, mask, masked)
+    let body_start = payload_start.checked_add(header_len)?;
+    let body_end = body_start.checked_add(payload_len)?;
+    if body_end > payload_end {
+        return None;
+    }
+    let min_body_end = checked_packet_end(body_start, payload_end, 14)?;
+    parse_compact_json_response_body(body_start, min_body_end, payload_end, payload_len, out)
 }
 
 #[cfg(target_arch = "bpf")]
-fn parse_json_fields(
-    base: usize,
-    data_end: usize,
-    payload_offset: usize,
-    mask_offset: usize,
-    masked: bool,
-) -> Option<ParsedJson> {
-    let available = data_end.checked_sub(base)?.checked_sub(payload_offset)?;
-    let scan_len = core::cmp::min(available, MAX_JSON_SCAN);
-    if scan_len == 0 {
+#[inline(always)]
+fn parse_compact_json_response_body(
+    body_start: usize,
+    min_body_end: usize,
+    packet_end: usize,
+    body_len: usize,
+    parsed: &mut ParsedResponse,
+) -> Option<()> {
+    if body_len < 14 {
+        return None;
+    }
+    if min_body_end > packet_end {
         return None;
     }
 
-    let mut parsed = ParsedJson {
-        key: empty_order_key(),
-        exec_type: empty_exec_type(),
-        fill_qty: 0,
-        fill_price: 0,
-        orig_order_id: empty_order_key(),
-    };
+    reset_response(parsed);
 
-    let mut i = 0usize;
-    while i < scan_len {
-        if json_key_matches(
-            base,
-            data_end,
-            payload_offset,
-            mask_offset,
-            masked,
-            i,
-            b"cl_ord_id",
-        )? {
-            let value = i + 13;
-            copy_json_string_to_order_key(
-                base,
-                data_end,
-                payload_offset,
-                mask_offset,
-                masked,
-                scan_len,
-                value,
-                &mut parsed.key,
-            )?;
-        }
-        if json_key_matches(
-            base,
-            data_end,
-            payload_offset,
-            mask_offset,
-            masked,
-            i,
-            b"orig_cl_ord_id",
-        )? {
-            let value = i + 18;
-            copy_json_string_to_order_key(
-                base,
-                data_end,
-                payload_offset,
-                mask_offset,
-                masked,
-                scan_len,
-                value,
-                &mut parsed.orig_order_id,
-            )?;
-        }
-        if json_key_matches(
-            base,
-            data_end,
-            payload_offset,
-            mask_offset,
-            masked,
-            i,
-            b"exec_type",
-        )? {
-            let value = i + 13;
-            copy_json_string_to_exec_type(
-                base,
-                data_end,
-                payload_offset,
-                mask_offset,
-                masked,
-                scan_len,
-                value,
-                &mut parsed.exec_type,
-            )?;
-        }
-        if json_key_matches(
-            base,
-            data_end,
-            payload_offset,
-            mask_offset,
-            masked,
-            i,
-            b"ord_status",
-        )? && parsed.exec_type.len == 0
-        {
-            let value = i + 14;
-            copy_json_string_to_exec_type(
-                base,
-                data_end,
-                payload_offset,
-                mask_offset,
-                masked,
-                scan_len,
-                value,
-                &mut parsed.exec_type,
-            )?;
-        }
-        if json_key_matches(
-            base,
-            data_end,
-            payload_offset,
-            mask_offset,
-            masked,
-            i,
-            b"fill_qty",
-        )? {
-            parsed.fill_qty = parse_json_u64(
-                base,
-                data_end,
-                payload_offset,
-                mask_offset,
-                masked,
-                scan_len,
-                i + 11,
-            )?;
-        }
-        if json_key_matches(
-            base,
-            data_end,
-            payload_offset,
-            mask_offset,
-            masked,
-            i,
-            b"fill_price",
-        )? {
-            parsed.fill_price = parse_json_decimal_scaled(
-                base,
-                data_end,
-                payload_offset,
-                mask_offset,
-                masked,
-                scan_len,
-                i + 13,
-            )?;
-        }
-
-        i += 1;
+    if !json_matches_cl_ord_id_prefix(body_start, packet_end)? {
+        return None;
     }
+    let mut offset = 14usize;
+    offset =
+        copy_json_string_to_order_key(body_start, packet_end, body_len, offset, &mut parsed.key)?;
+
+    if offset.checked_add(15)? > body_len
+        || !packet_has_range(body_start, packet_end, offset, 15)
+    {
+        return None;
+    }
+    if byte_at(body_start, packet_end, offset)? != b'"'
+        || byte_at(body_start, packet_end, offset + 1)? != b','
+        || byte_at(body_start, packet_end, offset + 14)? != b'"'
+    {
+        return None;
+    }
+    offset += 15;
+    offset = copy_json_exec_type(body_start, packet_end, body_len, offset, &mut parsed.exec_type)?;
+
+    if offset.checked_add(13)? > body_len
+        || !packet_has_range(body_start, packet_end, offset, 13)
+    {
+        return None;
+    }
+    if byte_at(body_start, packet_end, offset)? != b'"'
+        || byte_at(body_start, packet_end, offset + 1)? != b','
+        || byte_at(body_start, packet_end, offset + 12)? != b':'
+    {
+        return None;
+    }
+    offset += 13;
+    offset = parse_json_u64(body_start, packet_end, body_len, offset, &mut parsed.fill_qty)?;
+
+    if offset.checked_add(14)? > body_len
+        || !packet_has_range(body_start, packet_end, offset, 14)
+    {
+        return None;
+    }
+    if byte_at(body_start, packet_end, offset)? != b','
+        || byte_at(body_start, packet_end, offset + 1)? != b'"'
+        || byte_at(body_start, packet_end, offset + 13)? != b':'
+    {
+        return None;
+    }
+    offset += 14;
+    let _ = parse_json_decimal_scaled(
+        body_start,
+        packet_end,
+        body_len,
+        offset,
+        &mut parsed.fill_price,
+    )?;
 
     if parsed.key.len == 0 {
         return None;
     }
-    Some(parsed)
+    Some(())
 }
 
 #[cfg(target_arch = "bpf")]
@@ -743,52 +751,48 @@ fn starts_with_fix(base: usize, data_end: usize, scan_len: usize) -> Option<bool
 
 #[cfg(target_arch = "bpf")]
 #[inline(always)]
-fn empty_order_key() -> OrderKey {
-    OrderKey {
-        len: 0,
-        bytes: [0; MAX_ORDER_ID_LEN],
+fn flow_key(src_ip: u32, src_port: u16) -> FlowKey {
+    FlowKey {
+        src_ip,
+        src_port,
+        _pad: 0,
     }
 }
 
 #[cfg(target_arch = "bpf")]
 #[inline(always)]
-fn empty_exec_type() -> ExecType {
-    ExecType {
-        len: 0,
-        bytes: [0; MAX_EXEC_TYPE_LEN],
+fn reset_response(out: &mut ParsedResponse) {
+    unsafe {
+        ptr::write_volatile(ptr::addr_of_mut!(out.key.len), 0);
+        ptr::write_volatile(ptr::addr_of_mut!(out.exec_type.len), 0);
+        ptr::write_volatile(ptr::addr_of_mut!(out.fill_qty), 0);
+        ptr::write_volatile(ptr::addr_of_mut!(out.fill_price), 0);
+        ptr::write_volatile(ptr::addr_of_mut!(out.orig_order_id.len), 0);
     }
 }
 
 #[cfg(target_arch = "bpf")]
 #[inline(always)]
-fn matches_tag(base: usize, data_end: usize, offset: usize, a: u8, b: u8, c: u8) -> Option<bool> {
-    Some(
-        byte_at(base, data_end, offset)? == a
-            && byte_at(base, data_end, offset + 1)? == b
-            && byte_at(base, data_end, offset + 2)? == c,
-    )
+fn clamp_order_key_len(len: u16) -> u16 {
+    if len > MAX_ORDER_ID_LEN as u16 {
+        MAX_ORDER_ID_LEN as u16
+    } else {
+        len
+    }
 }
 
 #[cfg(target_arch = "bpf")]
 #[inline(always)]
-fn matches_tag4(
-    base: usize,
-    data_end: usize,
-    offset: usize,
-    a: u8,
-    b: u8,
-    c: u8,
-    d: u8,
-) -> Option<bool> {
-    Some(
-        byte_at(base, data_end, offset)? == a
-            && byte_at(base, data_end, offset + 1)? == b
-            && byte_at(base, data_end, offset + 2)? == c
-            && byte_at(base, data_end, offset + 3)? == d,
-    )
+fn clamp_exec_type_len(len: u16) -> u16 {
+    if len > MAX_EXEC_TYPE_LEN as u16 {
+        MAX_EXEC_TYPE_LEN as u16
+    } else {
+        len
+    }
 }
 
 #[cfg(target_arch = "bpf")]
+#[inline(always)]
 fn copy_fix_value_to_order_key(
     base: usize,
     data_end: usize,
@@ -796,21 +800,28 @@ fn copy_fix_value_to_order_key(
     value_start: usize,
     out: &mut OrderKey,
 ) -> Option<()> {
-    *out = empty_order_key();
+    unsafe {
+        ptr::write_volatile(ptr::addr_of_mut!(out.len), 0);
+    }
     let mut j = value_start;
     while j < scan_len && j - value_start < MAX_ORDER_ID_LEN {
         let b = byte_at(base, data_end, j)?;
         if b == 0x01 {
             break;
         }
-        out.bytes[j - value_start] = b;
+        unsafe {
+            out.bytes.as_mut_ptr().add(j - value_start).write(b);
+        }
         j += 1;
     }
-    out.len = (j - value_start) as u16;
+    unsafe {
+        ptr::write_volatile(ptr::addr_of_mut!(out.len), (j - value_start) as u16);
+    }
     Some(())
 }
 
 #[cfg(target_arch = "bpf")]
+#[inline(always)]
 fn copy_fix_value_to_exec_type(
     base: usize,
     data_end: usize,
@@ -818,21 +829,28 @@ fn copy_fix_value_to_exec_type(
     value_start: usize,
     out: &mut ExecType,
 ) -> Option<()> {
-    *out = empty_exec_type();
+    unsafe {
+        ptr::write_volatile(ptr::addr_of_mut!(out.len), 0);
+    }
     let mut j = value_start;
     while j < scan_len && j - value_start < MAX_EXEC_TYPE_LEN {
         let b = byte_at(base, data_end, j)?;
         if b == 0x01 {
             break;
         }
-        out.bytes[j - value_start] = b;
+        unsafe {
+            out.bytes.as_mut_ptr().add(j - value_start).write(b);
+        }
         j += 1;
     }
-    out.len = (j - value_start) as u16;
+    unsafe {
+        ptr::write_volatile(ptr::addr_of_mut!(out.len), (j - value_start) as u16);
+    }
     Some(())
 }
 
 #[cfg(target_arch = "bpf")]
+#[inline(always)]
 fn parse_fix_u64(base: usize, data_end: usize, scan_len: usize, value_start: usize) -> Option<u64> {
     let mut value = 0u64;
     let mut j = value_start;
@@ -844,13 +862,14 @@ fn parse_fix_u64(base: usize, data_end: usize, scan_len: usize, value_start: usi
         if b < b'0' || b > b'9' {
             return Some(value);
         }
-        value = value.saturating_mul(10).saturating_add(u64::from(b - b'0'));
+        value = value.wrapping_mul(10).wrapping_add(u64::from(b - b'0'));
         j += 1;
     }
     Some(value)
 }
 
 #[cfg(target_arch = "bpf")]
+#[inline(always)]
 fn parse_fix_decimal_scaled(
     base: usize,
     data_end: usize,
@@ -877,224 +896,219 @@ fn parse_fix_decimal_scaled(
         }
         if seen_dot {
             if frac_digits < 9 {
-                frac = frac.saturating_mul(10).saturating_add(u64::from(b - b'0'));
+                frac = frac.wrapping_mul(10).wrapping_add(u64::from(b - b'0'));
                 frac_digits += 1;
             }
         } else {
-            whole = whole.saturating_mul(10).saturating_add(u64::from(b - b'0'));
+            whole = whole.wrapping_mul(10).wrapping_add(u64::from(b - b'0'));
         }
         j += 1;
     }
     while frac_digits < 9 {
-        frac = frac.saturating_mul(10);
+        frac = frac.wrapping_mul(10);
         frac_digits += 1;
     }
-    Some(whole.saturating_mul(PRICE_SCALE).saturating_add(frac))
-}
-
-#[cfg(target_arch = "bpf")]
-fn json_key_matches(
-    base: usize,
-    data_end: usize,
-    payload_offset: usize,
-    mask_offset: usize,
-    masked: bool,
-    offset: usize,
-    key: &[u8],
-) -> Option<bool> {
-    if payload_byte_at(base, data_end, payload_offset, mask_offset, masked, offset)? != b'"' {
-        return Some(false);
-    }
-    let mut i = 0usize;
-    while i < key.len() {
-        if payload_byte_at(
-            base,
-            data_end,
-            payload_offset,
-            mask_offset,
-            masked,
-            offset + 1 + i,
-        )? != key[i]
-        {
-            return Some(false);
-        }
-        i += 1;
-    }
-    let end_quote = offset + 1 + key.len();
-    Some(
-        payload_byte_at(
-            base,
-            data_end,
-            payload_offset,
-            mask_offset,
-            masked,
-            end_quote,
-        )? == b'"'
-            && payload_byte_at(
-                base,
-                data_end,
-                payload_offset,
-                mask_offset,
-                masked,
-                end_quote + 1,
-            )? == b':',
-    )
-}
-
-#[cfg(target_arch = "bpf")]
-fn copy_json_string_to_order_key(
-    base: usize,
-    data_end: usize,
-    payload_offset: usize,
-    mask_offset: usize,
-    masked: bool,
-    scan_len: usize,
-    value_start: usize,
-    out: &mut OrderKey,
-) -> Option<()> {
-    *out = empty_order_key();
-    let mut j = value_start;
-    while j < scan_len && j - value_start < MAX_ORDER_ID_LEN {
-        let b = payload_byte_at(base, data_end, payload_offset, mask_offset, masked, j)?;
-        if b == b'"' || b == b'\\' {
-            break;
-        }
-        out.bytes[j - value_start] = b;
-        j += 1;
-    }
-    out.len = (j - value_start) as u16;
-    Some(())
-}
-
-#[cfg(target_arch = "bpf")]
-fn copy_json_string_to_exec_type(
-    base: usize,
-    data_end: usize,
-    payload_offset: usize,
-    mask_offset: usize,
-    masked: bool,
-    scan_len: usize,
-    value_start: usize,
-    out: &mut ExecType,
-) -> Option<()> {
-    *out = empty_exec_type();
-    let mut j = value_start;
-    while j < scan_len && j - value_start < MAX_EXEC_TYPE_LEN {
-        let b = payload_byte_at(base, data_end, payload_offset, mask_offset, masked, j)?;
-        if b == b'"' || b == b'\\' {
-            break;
-        }
-        out.bytes[j - value_start] = b;
-        j += 1;
-    }
-    out.len = (j - value_start) as u16;
-    Some(())
-}
-
-#[cfg(target_arch = "bpf")]
-fn parse_json_u64(
-    base: usize,
-    data_end: usize,
-    payload_offset: usize,
-    mask_offset: usize,
-    masked: bool,
-    scan_len: usize,
-    value_start: usize,
-) -> Option<u64> {
-    let mut value = 0u64;
-    let mut j = value_start;
-    while j < scan_len {
-        let b = payload_byte_at(base, data_end, payload_offset, mask_offset, masked, j)?;
-        if b == b'"' || b == b',' || b == b'}' || b == b'.' {
-            break;
-        }
-        if b >= b'0' && b <= b'9' {
-            value = value.saturating_mul(10).saturating_add(u64::from(b - b'0'));
-        } else if b != b' ' {
-            return Some(value);
-        }
-        j += 1;
-    }
-    Some(value)
-}
-
-#[cfg(target_arch = "bpf")]
-fn parse_json_decimal_scaled(
-    base: usize,
-    data_end: usize,
-    payload_offset: usize,
-    mask_offset: usize,
-    masked: bool,
-    scan_len: usize,
-    value_start: usize,
-) -> Option<u64> {
-    let mut whole = 0u64;
-    let mut frac = 0u64;
-    let mut frac_digits = 0usize;
-    let mut seen_dot = false;
-    let mut j = value_start;
-    while j < scan_len {
-        let b = payload_byte_at(base, data_end, payload_offset, mask_offset, masked, j)?;
-        if b == b'"' || b == b',' || b == b'}' {
-            break;
-        }
-        if b == b'.' {
-            seen_dot = true;
-            j += 1;
-            continue;
-        }
-        if b >= b'0' && b <= b'9' {
-            if seen_dot {
-                if frac_digits < 9 {
-                    frac = frac.saturating_mul(10).saturating_add(u64::from(b - b'0'));
-                    frac_digits += 1;
-                }
-            } else {
-                whole = whole.saturating_mul(10).saturating_add(u64::from(b - b'0'));
-            }
-        } else if b != b' ' {
-            break;
-        }
-        j += 1;
-    }
-    while frac_digits < 9 {
-        frac = frac.saturating_mul(10);
-        frac_digits += 1;
-    }
-    Some(whole.saturating_mul(PRICE_SCALE).saturating_add(frac))
+    Some(whole.wrapping_mul(PRICE_SCALE).wrapping_add(frac))
 }
 
 #[cfg(target_arch = "bpf")]
 #[inline(always)]
-fn payload_byte_at(
+fn json_matches_cl_ord_id_prefix(base: usize, data_end: usize) -> Option<bool> {
+    if !packet_has_range(base, data_end, 0, 14) {
+        return Some(false);
+    }
+    Some(
+        byte_at(base, data_end, 0)? == b'{'
+            && byte_at(base, data_end, 1)? == b'"'
+            && byte_at(base, data_end, 11)? == b'"'
+            && byte_at(base, data_end, 12)? == b':'
+            && byte_at(base, data_end, 13)? == b'"',
+    )
+}
+
+#[cfg(target_arch = "bpf")]
+#[inline(always)]
+fn copy_json_string_to_order_key(
     base: usize,
     data_end: usize,
-    payload_offset: usize,
-    mask_offset: usize,
-    masked: bool,
-    offset: usize,
-) -> Option<u8> {
-    let mut b = byte_at(base + payload_offset, data_end, offset)?;
-    if masked {
-        let mask = byte_at(base, data_end, mask_offset + (offset & 3))?;
-        b ^= mask;
+    body_len: usize,
+    value_start: usize,
+    out: &mut OrderKey,
+) -> Option<usize> {
+    unsafe {
+        ptr::write_volatile(ptr::addr_of_mut!(out.len), 0);
     }
-    Some(b)
+
+    let mut j = value_start;
+    let mut idx = 0usize;
+    while idx < MAX_JSON_ORDER_ID_SCAN {
+        if j >= body_len {
+            break;
+        }
+        let b = byte_at(base, data_end, j)?;
+        if b == b'"' || b == b'\\' {
+            break;
+        }
+        unsafe {
+            out.bytes.as_mut_ptr().add(idx).write(b);
+        }
+        j += 1;
+        idx += 1;
+    }
+    unsafe {
+        ptr::write_volatile(ptr::addr_of_mut!(out.len), idx as u16);
+    }
+    Some(j)
+}
+
+#[cfg(target_arch = "bpf")]
+#[inline(always)]
+fn copy_json_exec_type(
+    base: usize,
+    data_end: usize,
+    body_len: usize,
+    value_start: usize,
+    out: &mut ExecType,
+) -> Option<usize> {
+    unsafe {
+        ptr::write_volatile(ptr::addr_of_mut!(out.len), 0);
+    }
+    if value_start.checked_add(2)? > body_len {
+        return Some(value_start);
+    }
+    let b = byte_at(base, data_end, value_start)?;
+    if b == b'"' || b == b'\\' {
+        return Some(value_start);
+    }
+    if byte_at(base, data_end, value_start + 1)? != b'"' {
+        return Some(value_start);
+    }
+    unsafe {
+        out.bytes.as_mut_ptr().write(b);
+    }
+    unsafe {
+        ptr::write_volatile(ptr::addr_of_mut!(out.len), 1);
+    }
+    Some(value_start + 1)
+}
+
+#[cfg(target_arch = "bpf")]
+#[inline(always)]
+fn parse_json_u64(
+    base: usize,
+    data_end: usize,
+    body_len: usize,
+    value_start: usize,
+    out: &mut u64,
+) -> Option<usize> {
+    *out = 0;
+    if value_start.checked_add(2)? > body_len {
+        return Some(value_start);
+    }
+    let b0 = byte_at(base, data_end, value_start)?;
+    if b0 < b'0' || b0 > b'9' {
+        return Some(value_start);
+    }
+    let mut value = u64::from(b0 - b'0');
+    let mut j = value_start + 1;
+    let b1 = byte_at(base, data_end, j)?;
+    if b1 >= b'0' && b1 <= b'9' {
+        value = value.wrapping_mul(10).wrapping_add(u64::from(b1 - b'0'));
+        j += 1;
+    }
+    *out = value;
+    Some(j)
+}
+
+#[cfg(target_arch = "bpf")]
+#[inline(always)]
+fn parse_json_decimal_scaled(
+    base: usize,
+    data_end: usize,
+    body_len: usize,
+    value_start: usize,
+    out: &mut u64,
+) -> Option<usize> {
+    *out = 0;
+    if value_start.checked_add(2)? > body_len {
+        return Some(value_start);
+    }
+    let b0 = byte_at(base, data_end, value_start)?;
+    if b0 < b'0' || b0 > b'9' {
+        return Some(value_start);
+    }
+    let mut whole = u64::from(b0 - b'0');
+    let mut frac = 0u64;
+    let mut j = value_start + 1;
+
+    let b1 = byte_at(base, data_end, j)?;
+    if b1 >= b'0' && b1 <= b'9' {
+        whole = whole.wrapping_mul(10).wrapping_add(u64::from(b1 - b'0'));
+        j += 1;
+    }
+
+    if byte_at(base, data_end, j)? == b'.' {
+        j += 1;
+        if j >= body_len {
+            *out = whole.wrapping_mul(PRICE_SCALE);
+            return Some(j);
+        }
+        let d1 = byte_at(base, data_end, j)?;
+        if d1 >= b'0' && d1 <= b'9' {
+            frac = frac.wrapping_add(u64::from(d1 - b'0') * 100_000_000);
+            j += 1;
+        }
+        if j >= body_len {
+            *out = whole.wrapping_mul(PRICE_SCALE).wrapping_add(frac);
+            return Some(j);
+        }
+        let d2 = byte_at(base, data_end, j)?;
+        if d2 >= b'0' && d2 <= b'9' {
+            frac = frac.wrapping_add(u64::from(d2 - b'0') * 10_000_000);
+            j += 1;
+        }
+    }
+    *out = whole.wrapping_mul(PRICE_SCALE).wrapping_add(frac);
+    Some(j)
 }
 
 #[cfg(target_arch = "bpf")]
 #[inline(always)]
 fn byte_at(base: usize, data_end: usize, offset: usize) -> Option<u8> {
-    if base + offset + 1 > data_end {
+    let cursor = base.checked_add(offset)?;
+    let end = unsafe { ptr::read_volatile(&data_end) };
+    if cursor >= end {
         return None;
     }
-    Some(unsafe { ptr::read((base + offset) as *const u8) })
+    Some(unsafe { ptr::read_volatile(cursor as *const u8) })
 }
 
 #[cfg(target_arch = "bpf")]
 #[inline(always)]
-unsafe fn bpf_ktime_get_real_ns() -> u64 {
-    let helper: extern "C" fn() -> u64 = mem::transmute(212usize);
+fn checked_packet_end(base: usize, data_end: usize, len: usize) -> Option<usize> {
+    let end = base.checked_add(len)?;
+    if end > data_end {
+        return None;
+    }
+    Some(end)
+}
+
+#[cfg(target_arch = "bpf")]
+#[inline(always)]
+fn packet_has_range(base: usize, data_end: usize, offset: usize, len: usize) -> bool {
+    match base
+        .checked_add(offset)
+        .and_then(|start| start.checked_add(len))
+    {
+        Some(end) => end <= data_end,
+        None => false,
+    }
+}
+
+#[cfg(target_arch = "bpf")]
+#[inline(always)]
+unsafe fn bpf_ktime_get_ns() -> u64 {
+    let helper: extern "C" fn() -> u64 = mem::transmute(5usize);
     helper()
 }
 

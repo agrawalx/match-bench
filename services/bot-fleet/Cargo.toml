@@ -6,6 +6,7 @@ edition = "2021"
 [dependencies]
 anyhow = "1.0"
 futures = "0.3"
+iicpc-logger-rust = { path = "../../libs/rust/logger" }
 iicpc-schemas-rust = { path = "../../schemas/rust" }
 # Build librdkafka from the vendored source so CI and developer machines do
 # not need a matching system librdkafka.pc installed.

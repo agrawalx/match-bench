@@ -27,8 +27,8 @@ Supported wire formats:
   response body. Response metadata is parsed from `"exec_type"`/`"ord_status"`,
   `"fill_qty"`, `"fill_price"`, and optional `"orig_cl_ord_id"`.
 - WebSocket on TCP port `8080`: JSON field `"cl_ord_id"` in text or binary
-  frames, with the same response metadata fields as REST. Client-to-server
-  masked frames are unmasked in the parser.
+  frames with payload lengths below 126 bytes, with the same response metadata
+  fields as REST. Client-to-server masked frames are unmasked in the parser.
 
 Required environment:
 
@@ -74,3 +74,44 @@ struct event {
 
 Both kernel stamps must use `bpf_ktime_get_real_ns()` so they remain in the
 same CLOCK_REALTIME domain as bot fleet `t0/t1/r9` telemetry.
+
+## Tests
+
+Fast, unprivileged coverage:
+
+```bash
+cargo test -p iicpc-ebpf-latency
+```
+
+Real eBPF coverage is available as an ignored integration test. It creates a
+temporary network namespace and veth pair, attaches the real XDP and tc
+programs to netns-side `eth0`, sends a FIX request/response roundtrip, and
+asserts that the `EVENTS` ringbuf emits the expected order ack event.
+
+Prerequisites:
+
+- Linux with eBPF, XDP, tc clsact, and ringbuf support.
+- Root privileges for netns, veth, tc, XDP, and BPF syscalls.
+- `ip` and `python3` on PATH.
+- Either set `EBPF_OBJECT_PATH=/path/to/iicpc_latency.bpf.o`, or install
+  `bpf-linker` and use the nightly Rust toolchain so the test can build the
+  object with `cargo +nightly build -Z build-std=core`.
+
+Run it explicitly:
+
+```bash
+sudo -E env "PATH=$PATH" cargo test -p iicpc-ebpf-latency --test real_ebpf -- --ignored --nocapture
+```
+
+By default, the real eBPF test skips when prerequisites are missing. To make
+missing prerequisites fail CI instead of skipping, set:
+
+```bash
+IICPC_REAL_EBPF_STRICT=1
+```
+
+For example:
+
+```bash
+IICPC_REAL_EBPF_STRICT=1 sudo -E env "PATH=$PATH" cargo test -p iicpc-ebpf-latency --test real_ebpf -- --ignored --nocapture
+```

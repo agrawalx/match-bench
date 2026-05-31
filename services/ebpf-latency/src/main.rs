@@ -5,24 +5,25 @@ use std::{env, mem, path::PathBuf, time::Duration};
 
 use anyhow::{anyhow, bail, Context, Result};
 use aya::{
-    maps::{MapData, RingBuf},
+    maps::{MapData, PerCpuArray, RingBuf},
     programs::{tc, SchedClassifier, TcAttachType, Xdp, XdpFlags},
     Ebpf,
 };
 use iicpc_bot_fleet::kafka::{self, KafkaProducer};
+use iicpc_logger_rust::loki;
 use iicpc_schemas_rust::{OrderAckedBatchRef, OrderAckedEventRef, TOPIC_ORDERS_ACKED};
 use tokio::time;
 use tracing::{info, warn};
-use tracing_subscriber::EnvFilter;
 
 const DEFAULT_RINGBUF_MAP: &str = "EVENTS";
+const DROPPED_EVENTS_MAP: &str = "DROPPED_EVENTS";
 const DEFAULT_XDP_INGRESS_PROGRAM: &str = "iicpc_xdp_ingress";
 const DEFAULT_TC_EGRESS_PROGRAM: &str = "iicpc_tc_egress";
 const DEFAULT_FLUSH_INTERVAL: Duration = Duration::from_millis(5);
 const DEFAULT_BATCH_SIZE: usize = 4096;
-const MAX_ORDER_ID_LEN: usize = 96;
+const MAX_ORDER_ID_LEN: usize = 32;
 const MAX_EXEC_TYPE_LEN: usize = 16;
-const KERNEL_EVENT_SIZE: usize = 272;
+const KERNEL_EVENT_SIZE: usize = 144;
 
 /// KernelEvent is the fixed ABI written by the eBPF program into the ringbuf.
 ///
@@ -147,10 +148,7 @@ impl Config {
 
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .json()
-        .with_env_filter(EnvFilter::from_default_env())
-        .init();
+    let _loki_guard = loki::init("ebpf-latency");
 
     let config = Config::from_env()?;
     config.validate()?;
@@ -169,6 +167,11 @@ async fn run(config: Config, producer: KafkaProducer) -> Result<()> {
             .ok_or_else(|| anyhow!("ringbuf map {} not found", config.ringbuf_map))?,
     )
     .with_context(|| format!("open ringbuf map {}", config.ringbuf_map))?;
+    let dropped_events = bpf
+        .take_map(DROPPED_EVENTS_MAP)
+        .map(PerCpuArray::<_, u64>::try_from)
+        .transpose()
+        .with_context(|| format!("open dropped-event counter map {DROPPED_EVENTS_MAP}"))?;
 
     info!(
         iface = %config.iface,
@@ -183,6 +186,7 @@ async fn run(config: Config, producer: KafkaProducer) -> Result<()> {
 
     let mut ticker = time::interval(config.flush_interval);
     let mut events = Vec::with_capacity(config.batch_size);
+    let mut last_dropped_events = 0u64;
 
     loop {
         tokio::select! {
@@ -193,6 +197,18 @@ async fn run(config: Config, producer: KafkaProducer) -> Result<()> {
             _ = ticker.tick() => {
                 drain_ringbuf(&mut ringbuf, &producer, &config, &mut events).await?;
                 flush(&producer, &config, &mut events).await?;
+                if let Some(dropped_events) = &dropped_events {
+                    let dropped = total_dropped_events(dropped_events)
+                        .context("read eBPF dropped-event counter")?;
+                    if dropped > last_dropped_events {
+                        warn!(
+                            dropped_events = dropped,
+                            dropped_since_last_poll = dropped - last_dropped_events,
+                            "eBPF ring buffer dropped events"
+                        );
+                    }
+                    last_dropped_events = dropped;
+                }
             }
         }
     }
@@ -210,7 +226,6 @@ fn attach_programs(bpf: &mut Ebpf, config: &Config) -> Result<()> {
 
     attach()
 }
-
 
 // switch namespace and execute the provided closure, then switch back to the original namespace. This is necessary to attach eBPF programs to interfaces in a different network namespace.
 fn with_network_namespace<T>(netns_path: &PathBuf, f: impl FnOnce() -> Result<T>) -> Result<T> {
@@ -312,7 +327,24 @@ async fn drain_ringbuf(
 ) -> Result<()> {
     while let Some(item) = ringbuf.next() {
         match decode_kernel_event(&item) {
-            Ok(event) => events.push(event),
+            Ok(event) => {
+                info!(
+                    order_id = %event.order_id,
+                    src_ip = event.src_ip,
+                    src_port = event.src_port,
+                    tcp_seq = event.tcp_seq,
+                    request_ingress_t3_ns = event.t3_xdp_ingress_ns,
+                    response_egress_t7_ns = event.t7_xdp_egress_ns,
+                    pod_service_time_ns = event.pod_service_time_ns,
+                    exec_type = %event.exec_type,
+                    fill_qty = event.fill_qty,
+                    fill_price = event.fill_price,
+                    retransmission_count = event.retransmission_count,
+                    reordering_detected = event.reordering_detected,
+                    "decoded eBPF request/response boundary timestamps"
+                );
+                events.push(event);
+            }
             Err(err) => {
                 warn!(error = %err, "dropping malformed eBPF event");
                 continue;
@@ -325,6 +357,11 @@ async fn drain_ringbuf(
     Ok(())
 }
 
+fn total_dropped_events(map: &PerCpuArray<MapData, u64>) -> Result<u64> {
+    let values = map.get(&0, 0).context("read DROPPED_EVENTS[0]")?;
+    Ok(values.iter().copied().sum())
+}
+
 fn decode_kernel_event(bytes: &[u8]) -> Result<DecodedOrderAckedEvent> {
     if bytes.len() != mem::size_of::<KernelEvent>() {
         bail!(
@@ -334,6 +371,8 @@ fn decode_kernel_event(bytes: &[u8]) -> Result<DecodedOrderAckedEvent> {
         );
     }
 
+    // Ring buffer samples are byte slices and are not guaranteed to be aligned
+    // for KernelEvent, so this must stay as an unaligned read.
     let raw = unsafe { (bytes.as_ptr() as *const KernelEvent).read_unaligned() };
     let order_id_len = usize::from(raw.order_id_len);
     if order_id_len == 0 || order_id_len > raw.order_id.len() {
@@ -349,6 +388,13 @@ fn decode_kernel_event(bytes: &[u8]) -> Result<DecodedOrderAckedEvent> {
         usize::from(raw.orig_order_id_len),
         "orig_order_id",
     )?;
+    if raw.orig_order_id_len == 0 {
+        warn!(
+            order_id = %order_id,
+            exec_type = %exec_type,
+            "eBPF event has empty orig_order_id"
+        );
+    }
 
     Ok(DecodedOrderAckedEvent {
         order_id,
@@ -422,16 +468,320 @@ fn optional_path_env(key: &str) -> Option<PathBuf> {
 }
 
 fn env_usize(key: &str, default: usize) -> usize {
-    env::var(key)
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(default)
+    match env::var(key) {
+        Ok(value) if !value.trim().is_empty() => match value.parse() {
+            Ok(parsed) => parsed,
+            Err(err) => {
+                warn!(
+                    key,
+                    value,
+                    error = %err,
+                    default,
+                    "invalid numeric environment value; using default"
+                );
+                default
+            }
+        },
+        _ => default,
+    }
 }
 
 fn env_duration_ms(key: &str, default: Duration) -> Duration {
-    env::var(key)
-        .ok()
-        .and_then(|v| v.parse::<u64>().ok())
-        .map(Duration::from_millis)
-        .unwrap_or(default)
+    match env::var(key) {
+        Ok(value) if !value.trim().is_empty() => match value.parse::<u64>() {
+            Ok(ms) => Duration::from_millis(ms),
+            Err(err) => {
+                warn!(
+                    key,
+                    value,
+                    error = %err,
+                    default_ms = default.as_millis(),
+                    "invalid duration environment value; using default"
+                );
+                default
+            }
+        },
+        _ => default,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use iicpc_schemas_rust::OrderAckedBatch;
+    use std::sync::{Mutex, OnceLock};
+
+    const ENV_KEYS: &[&str] = &[
+        "KAFKA_BROKERS",
+        "ORDERS_ACKED_TOPIC",
+        "SESSION_ID",
+        "CONTESTANT_ID",
+        "EBPF_IFACE",
+        "EBPF_NETNS_PATH",
+        "EBPF_OBJECT_PATH",
+        "IICPC_EBPF_OBJECT",
+        "EBPF_XDP_INGRESS_PROGRAM",
+        "EBPF_TC_EGRESS_PROGRAM",
+        "EBPF_RINGBUF_MAP",
+        "EBPF_FLUSH_INTERVAL_MS",
+        "EBPF_BATCH_SIZE",
+    ];
+
+    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(())).lock().unwrap()
+    }
+
+    fn clear_test_env() {
+        for key in ENV_KEYS {
+            unsafe {
+                env::remove_var(key);
+            }
+        }
+    }
+
+    fn set_env(key: &str, value: &str) {
+        unsafe {
+            env::set_var(key, value);
+        }
+    }
+
+    fn base_kernel_event() -> KernelEvent {
+        let mut event = KernelEvent {
+            t3_xdp_ingress_ns: 100,
+            t7_xdp_egress_ns: 450,
+            pod_service_time_ns: 350,
+            fill_qty: 12,
+            fill_price: 42_500_000_000,
+            src_ip: 0x0a00_0001,
+            tcp_seq: 123_456,
+            retransmission_count: 2,
+            src_port: 51_234,
+            order_id_len: 0,
+            exec_type_len: 0,
+            orig_order_id_len: 0,
+            flags: 0x1,
+            _pad: 0,
+            order_id: [0; MAX_ORDER_ID_LEN],
+            exec_type: [0; MAX_EXEC_TYPE_LEN],
+            orig_order_id: [0; MAX_ORDER_ID_LEN],
+        };
+        write_inline(&mut event.order_id, &mut event.order_id_len, b"order-123");
+        write_inline(&mut event.exec_type, &mut event.exec_type_len, b"FILL");
+        write_inline(
+            &mut event.orig_order_id,
+            &mut event.orig_order_id_len,
+            b"orig-123",
+        );
+        event
+    }
+
+    fn write_inline<const N: usize>(dst: &mut [u8; N], len: &mut u16, value: &[u8]) {
+        dst[..value.len()].copy_from_slice(value);
+        *len = value.len().try_into().unwrap();
+    }
+
+    fn event_bytes(event: &KernelEvent) -> &[u8] {
+        unsafe {
+            std::slice::from_raw_parts(
+                (event as *const KernelEvent).cast::<u8>(),
+                mem::size_of::<KernelEvent>(),
+            )
+        }
+    }
+
+    #[test]
+    fn kernel_event_abi_size_is_stable() {
+        assert_eq!(mem::size_of::<KernelEvent>(), KERNEL_EVENT_SIZE);
+        assert_eq!(mem::size_of::<KernelEvent>(), 144);
+    }
+
+    #[test]
+    fn config_from_env_uses_required_values_and_defaults() {
+        let _guard = env_lock();
+        clear_test_env();
+        set_env("SESSION_ID", "session-a");
+        set_env("CONTESTANT_ID", "contestant-a");
+        set_env("EBPF_IFACE", "eth0");
+        set_env("EBPF_OBJECT_PATH", "/opt/iicpc/ebpf/iicpc_latency.bpf.o");
+
+        let config = Config::from_env().unwrap();
+
+        assert_eq!(config.kafka_brokers, "localhost:9092");
+        assert_eq!(config.topic, TOPIC_ORDERS_ACKED);
+        assert_eq!(config.session_id, "session-a");
+        assert_eq!(config.contestant_id, "contestant-a");
+        assert_eq!(config.iface, "eth0");
+        assert_eq!(config.netns_path, None);
+        assert_eq!(
+            config.object_path,
+            PathBuf::from("/opt/iicpc/ebpf/iicpc_latency.bpf.o")
+        );
+        assert_eq!(config.xdp_ingress_program, DEFAULT_XDP_INGRESS_PROGRAM);
+        assert_eq!(config.tc_egress_program, DEFAULT_TC_EGRESS_PROGRAM);
+        assert_eq!(config.ringbuf_map, DEFAULT_RINGBUF_MAP);
+        assert_eq!(config.flush_interval, DEFAULT_FLUSH_INTERVAL);
+        assert_eq!(config.batch_size, DEFAULT_BATCH_SIZE);
+        config.validate().unwrap();
+
+        clear_test_env();
+    }
+
+    #[test]
+    fn config_from_env_honors_overrides_and_object_alias() {
+        let _guard = env_lock();
+        clear_test_env();
+        set_env("SESSION_ID", "session-b");
+        set_env("CONTESTANT_ID", "contestant-b");
+        set_env("EBPF_IFACE", "veth0");
+        set_env("IICPC_EBPF_OBJECT", "/tmp/latency.o");
+        set_env("KAFKA_BROKERS", "kafka:9092");
+        set_env("ORDERS_ACKED_TOPIC", "custom.acked");
+        set_env("EBPF_NETNS_PATH", "/proc/123/ns/net");
+        set_env("EBPF_XDP_INGRESS_PROGRAM", "xdp_custom");
+        set_env("EBPF_TC_EGRESS_PROGRAM", "tc_custom");
+        set_env("EBPF_RINGBUF_MAP", "CUSTOM_EVENTS");
+        set_env("EBPF_FLUSH_INTERVAL_MS", "25");
+        set_env("EBPF_BATCH_SIZE", "64");
+
+        let config = Config::from_env().unwrap();
+
+        assert_eq!(config.kafka_brokers, "kafka:9092");
+        assert_eq!(config.topic, "custom.acked");
+        assert_eq!(config.object_path, PathBuf::from("/tmp/latency.o"));
+        assert_eq!(config.netns_path, Some(PathBuf::from("/proc/123/ns/net")));
+        assert_eq!(config.xdp_ingress_program, "xdp_custom");
+        assert_eq!(config.tc_egress_program, "tc_custom");
+        assert_eq!(config.ringbuf_map, "CUSTOM_EVENTS");
+        assert_eq!(config.flush_interval, Duration::from_millis(25));
+        assert_eq!(config.batch_size, 64);
+        config.validate().unwrap();
+
+        clear_test_env();
+    }
+
+    #[test]
+    fn config_from_env_rejects_missing_required_values() {
+        let _guard = env_lock();
+        clear_test_env();
+        set_env("SESSION_ID", "session-a");
+        set_env("CONTESTANT_ID", "contestant-a");
+        set_env("EBPF_OBJECT_PATH", "/tmp/latency.o");
+
+        let err = Config::from_env().unwrap_err().to_string();
+
+        assert!(err.contains("EBPF_IFACE must be set"));
+        clear_test_env();
+    }
+
+    #[test]
+    fn config_validate_rejects_zero_batch_size_and_flush_interval() {
+        let mut config = Config {
+            kafka_brokers: "localhost:9092".to_string(),
+            topic: TOPIC_ORDERS_ACKED.to_string(),
+            session_id: "session-a".to_string(),
+            contestant_id: "contestant-a".to_string(),
+            iface: "eth0".to_string(),
+            netns_path: None,
+            object_path: PathBuf::from("/tmp/latency.o"),
+            xdp_ingress_program: DEFAULT_XDP_INGRESS_PROGRAM.to_string(),
+            tc_egress_program: DEFAULT_TC_EGRESS_PROGRAM.to_string(),
+            ringbuf_map: DEFAULT_RINGBUF_MAP.to_string(),
+            flush_interval: DEFAULT_FLUSH_INTERVAL,
+            batch_size: 0,
+        };
+
+        assert!(config
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("EBPF_BATCH_SIZE"));
+
+        config.batch_size = 1;
+        config.flush_interval = Duration::ZERO;
+        assert!(config
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("EBPF_FLUSH_INTERVAL_MS"));
+    }
+
+    #[test]
+    fn decode_kernel_event_maps_all_fields() {
+        let event = base_kernel_event();
+
+        let decoded = decode_kernel_event(event_bytes(&event)).unwrap();
+
+        assert_eq!(decoded.order_id, "order-123");
+        assert_eq!(decoded.src_ip, 0x0a00_0001);
+        assert_eq!(decoded.src_port, 51_234);
+        assert_eq!(decoded.tcp_seq, 123_456);
+        assert_eq!(decoded.t3_xdp_ingress_ns, 100);
+        assert_eq!(decoded.t7_xdp_egress_ns, 450);
+        assert_eq!(decoded.pod_service_time_ns, 350);
+        assert_eq!(decoded.exec_type, "FILL");
+        assert_eq!(decoded.fill_qty, 12);
+        assert_eq!(decoded.fill_price, 42_500_000_000);
+        assert_eq!(decoded.orig_order_id, "orig-123");
+        assert!(decoded.reordering_detected);
+        assert_eq!(decoded.retransmission_count, 2);
+    }
+
+    #[test]
+    fn decode_kernel_event_rejects_wrong_size_and_invalid_lengths() {
+        assert!(decode_kernel_event(&[0; KERNEL_EVENT_SIZE - 1])
+            .unwrap_err()
+            .to_string()
+            .contains("unexpected eBPF event size"));
+
+        let mut event = base_kernel_event();
+        event.order_id_len = 0;
+        assert!(decode_kernel_event(event_bytes(&event))
+            .unwrap_err()
+            .to_string()
+            .contains("invalid order_id_len"));
+
+        let mut event = base_kernel_event();
+        event.exec_type_len = (MAX_EXEC_TYPE_LEN + 1).try_into().unwrap();
+        assert!(decode_kernel_event(event_bytes(&event))
+            .unwrap_err()
+            .to_string()
+            .contains("invalid exec_type_len"));
+    }
+
+    #[test]
+    fn decode_kernel_event_rejects_invalid_utf8() {
+        let mut event = base_kernel_event();
+        event.order_id[0] = 0xff;
+
+        assert!(decode_kernel_event(event_bytes(&event))
+            .unwrap_err()
+            .to_string()
+            .contains("order_id is not UTF-8"));
+    }
+
+    #[test]
+    fn decoded_event_serializes_to_order_acked_batch_schema() {
+        let event = decode_kernel_event(event_bytes(&base_kernel_event())).unwrap();
+        let event_refs = [event.as_schema_ref("session-a", "contestant-a")];
+        let batch = OrderAckedBatchRef {
+            session_id: "session-a",
+            contestant_id: "contestant-a",
+            events: &event_refs,
+        };
+
+        let payload = rmp_serde::to_vec_named(&batch).unwrap();
+        let decoded: OrderAckedBatch = rmp_serde::from_slice(&payload).unwrap();
+
+        assert_eq!(decoded.session_id, "session-a");
+        assert_eq!(decoded.contestant_id, "contestant-a");
+        assert_eq!(decoded.events.len(), 1);
+        let event = &decoded.events[0];
+        assert_eq!(event.session_id, "session-a");
+        assert_eq!(event.contestant_id, "contestant-a");
+        assert_eq!(event.order_id, "order-123");
+        assert_eq!(event.pod_service_time_ns, 350);
+        assert_eq!(event.exec_type, "FILL");
+        assert_eq!(event.retransmission_count, 2);
+    }
 }

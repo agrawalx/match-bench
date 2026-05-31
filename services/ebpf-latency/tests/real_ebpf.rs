@@ -19,6 +19,22 @@ use aya::{
 const MAX_ORDER_ID_LEN: usize = 32;
 const MAX_EXEC_TYPE_LEN: usize = 16;
 const KERNEL_EVENT_SIZE: usize = 144;
+const DEBUG_COUNTER_LABELS: [&str; 14] = [
+    "xdp_match",
+    "xdp_insert",
+    "xdp_existing",
+    "tc_match",
+    "tc_load_ok",
+    "tc_parse_fix_ok",
+    "tc_parse_http_ok",
+    "tc_parse_ws_ok",
+    "tc_lookup_miss",
+    "tc_lookup_hit",
+    "tc_event_submit",
+    "tc_reserve_fail",
+    "tc_entry",
+    "tc_bounds_miss",
+];
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -87,9 +103,18 @@ fn attaches_real_ebpf_to_netns_veth_and_observes_fix_rest_ws_roundtrips() -> Res
         .map(PerCpuArray::<_, u64>::try_from)
         .transpose()
         .context("open DROPPED_EVENTS map")?;
+    let debug_counters = bpf
+        .take_map("DEBUG_COUNTERS")
+        .map(PerCpuArray::<_, u64>::try_from)
+        .transpose()
+        .context("open DEBUG_COUNTERS map")?;
     assert!(
         dropped_events.is_some(),
         "DROPPED_EVENTS map not found in eBPF object"
+    );
+    assert!(
+        debug_counters.is_some(),
+        "DEBUG_COUNTERS map not found in eBPF object"
     );
     log_step(
         "flow key contract: XDP ingress keys on (client_ip, client_port); tc egress keys on outbound (ip.daddr, tcp.dest), which is the same client tuple",
@@ -103,6 +128,7 @@ fn attaches_real_ebpf_to_netns_veth_and_observes_fix_rest_ws_roundtrips() -> Res
     let event = read_matching_event(
         &mut ringbuf,
         dropped_events.as_ref(),
+        debug_counters.as_ref(),
         "order-real-1",
         Duration::from_secs(3),
     )?;
@@ -118,6 +144,7 @@ fn attaches_real_ebpf_to_netns_veth_and_observes_fix_rest_ws_roundtrips() -> Res
     let event = read_matching_event(
         &mut ringbuf,
         dropped_events.as_ref(),
+        debug_counters.as_ref(),
         "order-rest-1",
         Duration::from_secs(3),
     )?;
@@ -133,6 +160,7 @@ fn attaches_real_ebpf_to_netns_veth_and_observes_fix_rest_ws_roundtrips() -> Res
     let event = read_matching_event(
         &mut ringbuf,
         dropped_events.as_ref(),
+        debug_counters.as_ref(),
         "order-ws-1",
         Duration::from_secs(3),
     )?;
@@ -435,6 +463,7 @@ fn masked_ws_frame(body: &[u8]) -> Result<Vec<u8>> {
 fn read_matching_event(
     ringbuf: &mut RingBuf<MapData>,
     dropped_events: Option<&PerCpuArray<MapData, u64>>,
+    debug_counters: Option<&PerCpuArray<MapData, u64>>,
     order_id: &str,
     timeout: Duration,
 ) -> Result<DecodedEvent> {
@@ -456,18 +485,41 @@ fn read_matching_event(
         .map(total_dropped_events)
         .transpose()?
         .unwrap_or(0);
+    let debug = debug_counters
+        .map(debug_counter_summary)
+        .transpose()?
+        .unwrap_or_else(|| "unavailable".to_string());
     bail!(
-        "timed out after {:.1}s waiting for eBPF event for {order_id}; observed order ids: {:?}; malformed events: {:?}; dropped events: {}",
+        "timed out after {:.1}s waiting for eBPF event for {order_id}; observed order ids: {:?}; malformed events: {:?}; dropped events: {}; debug counters: {}",
         start.elapsed().as_secs_f32(),
         observed,
         malformed,
-        dropped
+        dropped,
+        debug
     )
 }
 
 fn total_dropped_events(map: &PerCpuArray<MapData, u64>) -> Result<u64> {
     let values = map.get(&0, 0).context("read DROPPED_EVENTS[0]")?;
     Ok(values.iter().copied().sum())
+}
+
+fn debug_counter_summary(map: &PerCpuArray<MapData, u64>) -> Result<String> {
+    let mut parts = Vec::new();
+    for (index, label) in DEBUG_COUNTER_LABELS.iter().enumerate() {
+        let values = map
+            .get(&(index as u32), 0)
+            .with_context(|| format!("read DEBUG_COUNTERS[{index}]"))?;
+        let total: u64 = values.iter().copied().sum();
+        if total > 0 {
+            parts.push(format!("{label}={total}"));
+        }
+    }
+    if parts.is_empty() {
+        Ok("all zero".to_string())
+    } else {
+        Ok(parts.join(", "))
+    }
 }
 
 fn decode_event(bytes: &[u8]) -> Result<DecodedEvent> {

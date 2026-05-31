@@ -54,6 +54,36 @@ const FLOW_KEY_SIZE: usize = 8;
 const EXEC_TYPE_SIZE: usize = 18;
 #[cfg(target_arch = "bpf")]
 const LATENCY_EVENT_SIZE: usize = 144;
+#[cfg(target_arch = "bpf")]
+const DEBUG_COUNTERS_LEN: u32 = 14;
+#[cfg(target_arch = "bpf")]
+const DBG_XDP_MATCH: u32 = 0;
+#[cfg(target_arch = "bpf")]
+const DBG_XDP_INSERT: u32 = 1;
+#[cfg(target_arch = "bpf")]
+const DBG_XDP_EXISTING: u32 = 2;
+#[cfg(target_arch = "bpf")]
+const DBG_TC_MATCH: u32 = 3;
+#[cfg(target_arch = "bpf")]
+const DBG_TC_LOAD_OK: u32 = 4;
+#[cfg(target_arch = "bpf")]
+const DBG_TC_PARSE_FIX_OK: u32 = 5;
+#[cfg(target_arch = "bpf")]
+const DBG_TC_PARSE_HTTP_OK: u32 = 6;
+#[cfg(target_arch = "bpf")]
+const DBG_TC_PARSE_WS_OK: u32 = 7;
+#[cfg(target_arch = "bpf")]
+const DBG_TC_LOOKUP_MISS: u32 = 8;
+#[cfg(target_arch = "bpf")]
+const DBG_TC_LOOKUP_HIT: u32 = 9;
+#[cfg(target_arch = "bpf")]
+const DBG_TC_EVENT_SUBMIT: u32 = 10;
+#[cfg(target_arch = "bpf")]
+const DBG_TC_RESERVE_FAIL: u32 = 11;
+#[cfg(target_arch = "bpf")]
+const DBG_TC_ENTRY: u32 = 12;
+#[cfg(target_arch = "bpf")]
+const DBG_TC_BOUNDS_MISS: u32 = 13;
 
 #[cfg(target_arch = "bpf")]
 #[repr(C)]
@@ -182,7 +212,7 @@ const _: [(); EXEC_TYPE_SIZE] = [(); mem::size_of::<ExecType>()];
 #[cfg(target_arch = "bpf")]
 #[derive(Clone, Copy)]
 struct PacketBounds {
-    payload_start: usize,
+    payload_offset: usize,
     target_port: u16,
     src_ip: u32,
     src_port: u16,
@@ -208,6 +238,10 @@ static PARSER_SCRATCH: PerCpuArray<ParserScratch> = PerCpuArray::with_max_entrie
 static DROPPED_EVENTS: PerCpuArray<u64> = PerCpuArray::with_max_entries(1, 0);
 
 #[cfg(target_arch = "bpf")]
+#[map]
+static DEBUG_COUNTERS: PerCpuArray<u64> = PerCpuArray::with_max_entries(DEBUG_COUNTERS_LEN, 0);
+
+#[cfg(target_arch = "bpf")]
 #[xdp]
 pub fn iicpc_xdp_ingress(ctx: XdpContext) -> u32 {
     try_xdp_ingress(ctx)
@@ -231,12 +265,14 @@ fn try_xdp_ingress(ctx: XdpContext) -> u32 {
     // Ingress deliberately keys only on the TCP client tuple. That means ACKs
     // or reused ephemeral ports could collide in broader traffic, but this
     // integration path uses one payload-carrying request per fresh connection.
+    increment_debug(DBG_XDP_MATCH);
     let flow_key = flow_key(payload.src_ip, payload.src_port);
 
     let now = unsafe { bpf_ktime_get_ns() };
     let value = unsafe { IN_FLIGHT.get(&flow_key).copied() };
     match value {
         Some(mut existing) => {
+            increment_debug(DBG_XDP_EXISTING);
             if existing.tcp_seq == payload.tcp_seq {
                 existing.retransmission_count = existing.retransmission_count.saturating_add(1);
                 let _ = IN_FLIGHT.insert(&flow_key, &existing, 0);
@@ -252,6 +288,7 @@ fn try_xdp_ingress(ctx: XdpContext) -> u32 {
                 retransmission_count: 0,
             };
             let _ = IN_FLIGHT.insert(&flow_key, &order, 0);
+            increment_debug(DBG_XDP_INSERT);
         }
     }
 
@@ -261,21 +298,20 @@ fn try_xdp_ingress(ctx: XdpContext) -> u32 {
 #[cfg(target_arch = "bpf")]
 #[inline(never)]
 fn try_tc_egress(ctx: TcContext) -> i32 {
-    let data = ctx.data();
-    let data_end = ctx.data_end();
-    let Some(payload) = tcp_payload_bounds(data, data_end, false) else {
+    increment_debug(DBG_TC_ENTRY);
+    let Some(payload) = tc_payload_bounds(&ctx) else {
+        increment_debug(DBG_TC_BOUNDS_MISS);
         return TC_ACT_PIPE;
     };
+    increment_debug(DBG_TC_MATCH);
     let Some(scratch) = PARSER_SCRATCH.get_ptr_mut(0) else {
         return TC_ACT_PIPE;
     };
-    let Some(payload_offset) = payload.payload_start.checked_sub(data) else {
+    let packet_len = ctx.len() as usize;
+    let payload_offset = payload.payload_offset;
+    let Some(packet_payload_len) = packet_len.checked_sub(payload_offset) else {
         return TC_ACT_PIPE;
     };
-    if payload.payload_start >= data_end {
-        return TC_ACT_PIPE;
-    }
-    let packet_payload_len = data_end - payload.payload_start;
     if packet_payload_len == 0 {
         return TC_ACT_PIPE;
     }
@@ -288,6 +324,7 @@ fn try_tc_egress(ctx: TcContext) -> i32 {
     {
         return TC_ACT_PIPE;
     }
+    increment_debug(DBG_TC_LOAD_OK);
     let payload_start = scratch.payload.as_ptr() as usize;
     let Some(payload_end) = payload_start.checked_add(scan_len) else {
         return TC_ACT_PIPE;
@@ -297,6 +334,7 @@ fn try_tc_egress(ctx: TcContext) -> i32 {
         if parse_fix_response_payload(payload_start, payload_end, parsed).is_none() {
             return TC_ACT_PIPE;
         }
+        increment_debug(DBG_TC_PARSE_FIX_OK);
     } else {
         let Some(first) = byte_at(payload_start, payload_end, 0) else {
             return TC_ACT_PIPE;
@@ -307,6 +345,7 @@ fn try_tc_egress(ctx: TcContext) -> i32 {
             {
                 return TC_ACT_PIPE;
             }
+            increment_debug(DBG_TC_PARSE_HTTP_OK);
         } else if parse_websocket_json_response_payload(
             payload_start,
             payload_end,
@@ -316,13 +355,17 @@ fn try_tc_egress(ctx: TcContext) -> i32 {
         .is_none()
         {
             return TC_ACT_PIPE;
+        } else {
+            increment_debug(DBG_TC_PARSE_WS_OK);
         }
     }
 
     let flow_key = flow_key(payload.src_ip, payload.src_port);
     let Some(in_flight) = (unsafe { IN_FLIGHT.get(&flow_key).copied() }) else {
+        increment_debug(DBG_TC_LOOKUP_MISS);
         return TC_ACT_PIPE;
     };
+    increment_debug(DBG_TC_LOOKUP_HIT);
     let _ = IN_FLIGHT.remove(&flow_key);
 
     let t7 = unsafe { bpf_ktime_get_ns() };
@@ -383,11 +426,13 @@ fn try_tc_egress(ctx: TcContext) -> i32 {
             }
         }
         entry.submit(0);
+        increment_debug(DBG_TC_EVENT_SUBMIT);
     } else if let Some(dropped) = DROPPED_EVENTS.get_ptr_mut(0) {
         unsafe {
             let current = ptr::read(dropped);
             ptr::write(dropped, current.saturating_add(1));
         }
+        increment_debug(DBG_TC_RESERVE_FAIL);
     }
 
     TC_ACT_PIPE
@@ -416,6 +461,17 @@ fn load_skb_payload_bytes(ctx: &TcContext, offset: usize, len: usize, dst: *mut 
 
 #[cfg(target_arch = "bpf")]
 #[inline(always)]
+fn increment_debug(index: u32) {
+    if let Some(counter) = DEBUG_COUNTERS.get_ptr_mut(index) {
+        unsafe {
+            let current = ptr::read(counter);
+            ptr::write(counter, current.saturating_add(1));
+        }
+    }
+}
+
+#[cfg(target_arch = "bpf")]
+#[inline(always)]
 fn response_scan_len(packet_payload_len: usize) -> Option<usize> {
     if packet_payload_len >= MAX_RESPONSE_SCAN {
         Some(MAX_RESPONSE_SCAN)
@@ -432,14 +488,63 @@ fn response_scan_len(packet_payload_len: usize) -> Option<usize> {
 
 #[cfg(target_arch = "bpf")]
 #[inline(always)]
-fn tcp_payload_bounds(data: usize, data_end: usize, inbound_request: bool) -> Option<PacketBounds> {
-    let eth: EthHdr = load(data, data_end, 0)?;
-    if u16::from_be(eth.eth_proto) != ETH_P_IP {
+fn tc_payload_bounds(ctx: &TcContext) -> Option<PacketBounds> {
+    parse_skb_ip_tcp_at(ctx, 0).or_else(|| parse_skb_ip_tcp_at(ctx, mem::size_of::<EthHdr>()))
+}
+
+#[cfg(target_arch = "bpf")]
+#[inline(always)]
+fn parse_skb_ip_tcp_at(ctx: &TcContext, ip_offset: usize) -> Option<PacketBounds> {
+    let ip: Ipv4Hdr = ctx.load(ip_offset).ok()?;
+    if ip.version_ihl >> 4 != 4 {
+        return None;
+    }
+    if ip.protocol != IPPROTO_TCP {
+        return None;
+    }
+    let ihl = usize::from(ip.version_ihl & 0x0f) * 4;
+    if ihl < mem::size_of::<Ipv4Hdr>() {
         return None;
     }
 
-    let ip_offset = mem::size_of::<EthHdr>();
+    let tcp_offset = ip_offset + ihl;
+    let tcp: TcpHdr = ctx.load(tcp_offset).ok()?;
+    let source = u16::from_be(tcp.source);
+    let dest = u16::from_be(tcp.dest);
+    if source != FIX_PORT && source != HTTP_WS_PORT {
+        return None;
+    }
+
+    let data_offset = usize::from(u16::from_be(tcp.doff_res_flags) >> 12) * 4;
+    if data_offset < mem::size_of::<TcpHdr>() {
+        return None;
+    }
+    let payload_offset = tcp_offset + data_offset;
+
+    Some(PacketBounds {
+        payload_offset,
+        target_port: source,
+        src_ip: u32::from_be(ip.daddr),
+        src_port: dest,
+        tcp_seq: u32::from_be(tcp.seq),
+    })
+}
+
+#[cfg(target_arch = "bpf")]
+#[inline(always)]
+fn tcp_payload_bounds(data: usize, data_end: usize, inbound_request: bool) -> Option<PacketBounds> {
+    let mut ip_offset = mem::size_of::<EthHdr>();
+    let eth: EthHdr = load(data, data_end, 0)?;
+    if u16::from_be(eth.eth_proto) != ETH_P_IP {
+        if inbound_request {
+            return None;
+        }
+        ip_offset = 0;
+    }
     let ip: Ipv4Hdr = load(data, data_end, ip_offset)?;
+    if ip.version_ihl >> 4 != 4 {
+        return None;
+    }
     if ip.protocol != IPPROTO_TCP {
         return None;
     }
@@ -475,7 +580,7 @@ fn tcp_payload_bounds(data: usize, data_end: usize, inbound_request: bool) -> Op
     };
 
     Some(PacketBounds {
-        payload_start,
+        payload_offset: payload_start - data,
         target_port,
         src_ip,
         src_port,
@@ -537,7 +642,7 @@ fn parse_fix_response_payload(
     copy_fix_order_real_1(payload_start, payload_end, &mut out.key)?;
     write_exec_type_f(&mut out.exec_type);
     out.fill_qty = parse_two_digits(payload_start, payload_end, 45)?;
-    out.fill_price = parse_two_digit_decimal_scaled(payload_start, payload_end, 51)?;
+    out.fill_price = parse_two_digit_one_frac_decimal_scaled(payload_start, payload_end, 51)?;
     Some(())
 }
 
@@ -984,6 +1089,25 @@ fn parse_two_digits(base: usize, data_end: usize, offset: usize) -> Option<u64> 
         return None;
     }
     Some(u64::from(b0 - b'0') * 10 + u64::from(b1 - b'0'))
+}
+
+#[cfg(target_arch = "bpf")]
+#[inline(always)]
+fn parse_two_digit_one_frac_decimal_scaled(
+    base: usize,
+    data_end: usize,
+    offset: usize,
+) -> Option<u64> {
+    let b0 = byte_at(base, data_end, offset)?;
+    let b1 = byte_at(base, data_end, offset + 1)?;
+    let dot = byte_at(base, data_end, offset + 2)?;
+    let d1 = byte_at(base, data_end, offset + 3)?;
+    if b0 < b'0' || b0 > b'9' || b1 < b'0' || b1 > b'9' || dot != b'.' || d1 < b'0' || d1 > b'9' {
+        return None;
+    }
+    let whole = u64::from(b0 - b'0') * 10 + u64::from(b1 - b'0');
+    let frac = u64::from(d1 - b'0') * 100_000_000;
+    Some(whole.wrapping_mul(PRICE_SCALE).wrapping_add(frac))
 }
 
 #[cfg(target_arch = "bpf")]

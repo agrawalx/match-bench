@@ -1,5 +1,29 @@
+//! Real eBPF integration test.
+//!
+//! Loads the actual capture-only kernel program (this is where the BPF verifier
+//! runs), attaches XDP ingress + tc egress to a netns veth, drives real
+//! FIX/REST/WS round-trips, and feeds the kernel's CaptureRecords through the
+//! REAL userspace pipeline (capture -> reassembly -> parse -> matcher, included
+//! below via #[path]) — asserting the emitted OrderAckedEvents. This exercises
+//! the same code `main` runs, end to end.
+//!
+//! Run (needs root + bpf-linker/nightly or EBPF_OBJECT_PATH):
+//!   IICPC_REAL_EBPF_STRICT=1 sudo -E env "PATH=$PATH" \
+//!     cargo test -p iicpc-ebpf-latency --test real_ebpf -- --ignored --nocapture
+
+#[path = "../src/capture.rs"]
+mod capture;
+#[path = "../src/matcher.rs"]
+mod matcher;
+#[path = "../src/parse.rs"]
+mod parse;
+#[path = "../src/pipeline.rs"]
+mod pipeline;
+#[path = "../src/reassembly.rs"]
+mod reassembly;
+
 use std::{
-    fs::{self, File},
+    fs::File,
     io::{Read, Write},
     net::TcpStream,
     os::fd::AsRawFd,
@@ -16,172 +40,327 @@ use aya::{
     Ebpf,
 };
 
-const MAX_ORDER_ID_LEN: usize = 32;
-const MAX_EXEC_TYPE_LEN: usize = 16;
-const KERNEL_EVENT_SIZE: usize = 144;
-const DEBUG_COUNTER_LABELS: [&str; 14] = [
-    "xdp_match",
-    "xdp_insert",
-    "xdp_existing",
-    "tc_match",
-    "tc_load_ok",
-    "tc_parse_fix_ok",
-    "tc_parse_http_ok",
-    "tc_parse_ws_ok",
-    "tc_lookup_miss",
-    "tc_lookup_hit",
-    "tc_event_submit",
-    "tc_reserve_fail",
-    "tc_entry",
-    "tc_bounds_miss",
-];
-
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct KernelEvent {
-    t3_xdp_ingress_ns: u64,
-    t7_xdp_egress_ns: u64,
-    pod_service_time_ns: u64,
-    fill_qty: u64,
-    fill_price: u64,
-    src_ip: u32,
-    tcp_seq: u32,
-    retransmission_count: u32,
-    src_port: u16,
-    order_id_len: u16,
-    exec_type_len: u16,
-    orig_order_id_len: u16,
-    flags: u16,
-    _pad: u16,
-    order_id: [u8; MAX_ORDER_ID_LEN],
-    exec_type: [u8; MAX_EXEC_TYPE_LEN],
-    orig_order_id: [u8; MAX_ORDER_ID_LEN],
-}
-
-const _: [(); KERNEL_EVENT_SIZE] = [(); std::mem::size_of::<KernelEvent>()];
+use matcher::MatchedEvent;
+use pipeline::Pipeline;
 
 #[test]
 #[ignore = "requires root, bpf-linker/nightly or EBPF_OBJECT_PATH, and local netns privileges"]
-fn attaches_real_ebpf_to_netns_veth_and_observes_fix_rest_ws_roundtrips() -> Result<()> {
+fn captures_and_matches_fix_rest_ws_including_partial_fills() -> Result<()> {
     log_step("starting real eBPF integration test");
     if !require_root()? || !require_command("ip")? || !require_command("python3")? {
         return Ok(());
     }
-
     let Some(object_path) = ebpf_object_path()? else {
         return Ok(());
     };
     log_step(format!("using eBPF object {}", object_path.display()));
 
-    log_step("creating temporary network namespace and veth pair");
     let fixture = NetnsFixture::create()?;
-    log_step(format!(
-        "fixture ready: netns={}, netns_path={}, host_veth={}, pod_iface=eth0",
-        fixture.ns_name,
-        fixture.netns_path.display(),
-        fixture.host_veth
-    ));
+    log_step(format!("fixture ready: netns={}", fixture.ns_name));
 
-    log_step("loading eBPF object with Aya");
     let mut bpf = Ebpf::load_file(&object_path)
         .with_context(|| format!("load eBPF object {}", object_path.display()))?;
-
-    log_step("entering target netns and attaching XDP ingress + tc egress to eth0");
+    log_step("eBPF object loaded (verifier accepted); attaching programs");
     with_network_namespace(&fixture.netns_path, || {
         attach_xdp_ingress(&mut bpf, "iicpc_xdp_ingress", "eth0")?;
         attach_tc_egress(&mut bpf, "iicpc_tc_egress", "eth0")
     })?;
-    log_step("programs attached; opening EVENTS ringbuf");
 
     let mut ringbuf = RingBuf::try_from(
         bpf.take_map("EVENTS")
             .ok_or_else(|| anyhow!("ringbuf map EVENTS not found"))?,
     )
     .context("open EVENTS ringbuf")?;
-    let dropped_events = bpf
-        .take_map("DROPPED_EVENTS")
-        .map(PerCpuArray::<_, u64>::try_from)
-        .transpose()
-        .context("open DROPPED_EVENTS map")?;
-    let debug_counters = bpf
-        .take_map("DEBUG_COUNTERS")
-        .map(PerCpuArray::<_, u64>::try_from)
-        .transpose()
-        .context("open DEBUG_COUNTERS map")?;
-    assert!(
-        dropped_events.is_some(),
-        "DROPPED_EVENTS map not found in eBPF object"
-    );
-    assert!(
-        debug_counters.is_some(),
-        "DEBUG_COUNTERS map not found in eBPF object"
-    );
-    log_step(
-        "flow key contract: XDP ingress keys on (client_ip, client_port); tc egress keys on outbound (ip.daddr, tcp.dest), which is the same client tuple",
-    );
+    let dropped = take_counter(&mut bpf, "DROPPED_EVENTS");
+    let truncated = take_counter(&mut bpf, "TRUNCATED_CAPTURES");
 
-    log_step("starting real TCP FIX server inside target network namespace");
-    let mut server = fixture.spawn_fix_server()?;
-    log_step("sending real FIX request from host namespace to netns server");
-    send_fix_roundtrip()?;
-    log_step("FIX response received; polling eBPF ringbuf for order-real-1");
-    let event = read_matching_event(
-        &mut ringbuf,
-        dropped_events.as_ref(),
-        debug_counters.as_ref(),
-        "order-real-1",
-        Duration::from_secs(3),
-    )?;
-    assert_event(&event, "order-real-1", "F", 12, 42_500_000_000);
-    let _ = server.kill();
-    let _ = server.wait();
+    let mut pipeline = Pipeline::new();
 
-    log_step("starting REST JSON server inside target network namespace");
-    let mut server = fixture.spawn_rest_server()?;
-    log_step("sending real REST JSON request from host namespace to netns server");
-    send_rest_roundtrip()?;
-    log_step("REST response received; polling eBPF ringbuf for order-rest-1");
-    let event = read_matching_event(
-        &mut ringbuf,
-        dropped_events.as_ref(),
-        debug_counters.as_ref(),
-        "order-rest-1",
-        Duration::from_secs(3),
-    )?;
-    assert_event(&event, "order-rest-1", "F", 7, 99_250_000_000);
-    let _ = server.kill();
-    let _ = server.wait();
+    // 1) Single FIX round-trip → one event.
+    {
+        let mut server = fixture.spawn_python(
+            9898,
+            &fix_server_script(&[fix_exec("order-real-1", "F", 12, "42.5")]),
+        )?;
+        send_fix(&[fix_new_order("order-real-1")])?;
+        let events = collect(&mut ringbuf, &mut pipeline, 1, Duration::from_secs(3))?;
+        let e = find(&events, "order-real-1");
+        assert_event(e, "order-real-1", "F", 12, 42_500_000_000);
+        kill(&mut server);
+    }
 
-    log_step("starting raw WebSocket frame server inside target network namespace");
-    let mut server = fixture.spawn_ws_server()?;
-    log_step("sending masked WebSocket order request from host namespace to netns server");
-    send_ws_roundtrip()?;
-    log_step("WebSocket response received; polling eBPF ringbuf for order-ws-1");
-    let event = read_matching_event(
-        &mut ringbuf,
-        dropped_events.as_ref(),
-        debug_counters.as_ref(),
-        "order-ws-1",
-        Duration::from_secs(3),
-    )?;
-    assert_event(&event, "order-ws-1", "F", 3, 11_750_000_000);
-    let _ = server.kill();
-    let _ = server.wait();
+    // 2) Partial fills: one order, TWO ExecutionReports → TWO events sharing t3.
+    {
+        let mut server = fixture.spawn_python(
+            9898,
+            &fix_server_script(&[
+                fix_exec("order-multi-1", "0", 0, "0"),
+                fix_exec("order-multi-1", "2", 9, "10.5"),
+            ]),
+        )?;
+        send_fix(&[fix_new_order("order-multi-1")])?;
+        let events = collect(&mut ringbuf, &mut pipeline, 2, Duration::from_secs(3))?;
+        let mine: Vec<&MatchedEvent> = events
+            .iter()
+            .filter(|e| e.order_id == "order-multi-1")
+            .collect();
+        assert_eq!(
+            mine.len(),
+            2,
+            "expected ACK + FILL events, got {}",
+            mine.len()
+        );
+        assert_eq!(mine[0].exec_type, "0");
+        assert_eq!(mine[1].exec_type, "2");
+        assert_eq!(mine[1].fill_qty, 9);
+        assert_eq!(mine[1].fill_price, 10_500_000_000);
+        assert_eq!(
+            mine[0].t3_ns, mine[1].t3_ns,
+            "both responses share the request's t3"
+        );
+        assert!(mine[1].t7_ns >= mine[0].t7_ns);
+        kill(&mut server);
+    }
 
+    // 3) Two orders pipelined on ONE connection, responses out of order → matched
+    //    per-ClOrdID (the EBPF-10 regression).
+    {
+        let mut server = fixture.spawn_python(
+            9898,
+            &fix_server_script(&[
+                fix_exec("order-pipe-B", "2", 5, "2.0"),
+                fix_exec("order-pipe-A", "2", 7, "1.0"),
+            ]),
+        )?;
+        send_fix(&[fix_new_order("order-pipe-A"), fix_new_order("order-pipe-B")])?;
+        let events = collect(&mut ringbuf, &mut pipeline, 2, Duration::from_secs(3))?;
+        let a = find(&events, "order-pipe-A");
+        let b = find(&events, "order-pipe-B");
+        assert_eq!(a.fill_qty, 7);
+        assert_eq!(b.fill_qty, 5);
+        assert!(a.t3_ns > 0 && b.t3_ns > 0);
+        kill(&mut server);
+    }
+
+    // 4) REST JSON round-trip.
+    {
+        let body =
+            br#"{"cl_ord_id":"order-rest-1","exec_type":"F","fill_qty":7,"fill_price":99.25}"#;
+        let mut server = fixture.spawn_python(8080, &http_server_script(body))?;
+        send_rest("order-rest-1")?;
+        let events = collect(&mut ringbuf, &mut pipeline, 1, Duration::from_secs(3))?;
+        assert_event(
+            find(&events, "order-rest-1"),
+            "order-rest-1",
+            "F",
+            7,
+            99_250_000_000,
+        );
+        kill(&mut server);
+    }
+
+    // 5) WebSocket JSON round-trip (server sends an unmasked text frame).
+    {
+        let body = br#"{"cl_ord_id":"order-ws-1","exec_type":"F","fill_qty":3,"fill_price":11.75}"#;
+        let mut server = fixture.spawn_python(8080, &ws_server_script(body))?;
+        send_ws("order-ws-1")?;
+        let events = collect(&mut ringbuf, &mut pipeline, 1, Duration::from_secs(3))?;
+        assert_event(
+            find(&events, "order-ws-1"),
+            "order-ws-1",
+            "F",
+            3,
+            11_750_000_000,
+        );
+        kill(&mut server);
+    }
+
+    log_diagnostics(&dropped, &truncated);
     log_step("real eBPF integration test completed");
     Ok(())
 }
 
-#[derive(Debug)]
-struct DecodedEvent {
-    order_id: String,
-    exec_type: String,
-    t3_xdp_ingress_ns: u64,
-    t7_xdp_egress_ns: u64,
-    pod_service_time_ns: u64,
-    fill_qty: u64,
-    fill_price: u64,
+// ---- pipeline driving -------------------------------------------------------
+
+fn collect(
+    ringbuf: &mut RingBuf<MapData>,
+    pipeline: &mut Pipeline,
+    want: usize,
+    timeout: Duration,
+) -> Result<Vec<MatchedEvent>> {
+    let mut out = Vec::new();
+    let start = Instant::now();
+    while start.elapsed() < timeout {
+        while let Some(item) = ringbuf.next() {
+            match capture::decode(&item) {
+                Ok(cap) => pipeline.process(&cap, &mut out),
+                Err(err) => log_step(format!("malformed capture: {err}")),
+            }
+        }
+        if out.len() >= want {
+            return Ok(out);
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    Ok(out)
 }
+
+fn find<'a>(events: &'a [MatchedEvent], order_id: &str) -> &'a MatchedEvent {
+    events
+        .iter()
+        .find(|e| e.order_id == order_id)
+        .unwrap_or_else(|| {
+            let ids: Vec<&str> = events.iter().map(|e| e.order_id.as_str()).collect();
+            panic!("no event for {order_id}; observed {ids:?}")
+        })
+}
+
+fn assert_event(e: &MatchedEvent, order_id: &str, exec_type: &str, fill_qty: u64, fill_price: u64) {
+    log_step(format!(
+        "event: order_id={}, exec_type={}, fill_qty={}, fill_price={}, t3={}, t7={}, svc={}",
+        e.order_id, e.exec_type, e.fill_qty, e.fill_price, e.t3_ns, e.t7_ns, e.pod_service_time_ns
+    ));
+    assert_eq!(e.order_id, order_id);
+    assert_eq!(e.exec_type, exec_type);
+    assert_eq!(e.fill_qty, fill_qty);
+    assert_eq!(e.fill_price, fill_price);
+    assert!(e.t3_ns > 0);
+    assert!(e.t7_ns >= e.t3_ns);
+    assert_eq!(e.pod_service_time_ns, e.t7_ns - e.t3_ns);
+}
+
+// ---- FIX/JSON wire builders -------------------------------------------------
+
+/// Wrap a FIX body (`|`-separated, no 8=/9=/10=) into a full wire message.
+fn fix(body: &str) -> Vec<u8> {
+    let body = body.replace('|', "\x01");
+    let head = format!("8=FIX.4.2\x019={}\x01", body.len());
+    let mut bytes = format!("{head}{body}").into_bytes();
+    let sum: u32 = bytes.iter().map(|&b| b as u32).sum::<u32>() % 256;
+    bytes.extend_from_slice(format!("10={sum:03}\x01").as_bytes());
+    bytes
+}
+
+fn fix_new_order(clordid: &str) -> Vec<u8> {
+    // Every field, including the last, is SOH-terminated (trailing `|`).
+    fix(&format!(
+        "35=D|49=IICPC-BOT|56=CONTESTANT|34=1|52=19700101-00:00:00.000|11={clordid}|21=1|55=IICPC|54=1|38=12|40=2|44=42.5|59=0|"
+    ))
+}
+
+fn fix_exec(clordid: &str, exec_type: &str, qty: u64, px: &str) -> Vec<u8> {
+    fix(&format!(
+        "35=8|49=CONTESTANT|56=IICPC-BOT|34=1|37=EXEC|11={clordid}|17=E|150={exec_type}|39={exec_type}|32={qty}|31={px}|"
+    ))
+}
+
+/// Python that emits the given pre-built frames as one bytes literal.
+fn py_bytes(frames: &[Vec<u8>]) -> String {
+    let mut joined = Vec::new();
+    for f in frames {
+        joined.extend_from_slice(f);
+    }
+    let escaped: String = joined.iter().map(|b| format!("\\x{b:02x}")).collect();
+    format!("b\"{escaped}\"")
+}
+
+fn fix_server_script(responses: &[Vec<u8>]) -> String {
+    server_script(9898, &py_bytes(responses))
+}
+
+fn http_server_script(body: &[u8]) -> String {
+    let body_lit = py_bytes(&[body.to_vec()]);
+    let resp = format!(
+        "b\"HTTP/1.1 200 OK\\r\\nContent-Type: application/json\\r\\nContent-Length: \" + str(len({body_lit})).encode() + b\"\\r\\n\\r\\n\" + {body_lit}"
+    );
+    server_script(8080, &resp)
+}
+
+fn ws_server_script(body: &[u8]) -> String {
+    let body_lit = py_bytes(&[body.to_vec()]);
+    let resp = format!("bytes([0x81, len({body_lit})]) + {body_lit}");
+    server_script(8080, &resp)
+}
+
+fn server_script(port: u16, response_expr: &str) -> String {
+    format!(
+        r#"
+import socket
+response = {response_expr}
+with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    s.bind(("10.241.0.2", {port}))
+    s.listen(1)
+    conn, _ = s.accept()
+    with conn:
+        conn.recv(4096)
+        conn.sendall(response)
+"#
+    )
+}
+
+// ---- clients ----------------------------------------------------------------
+
+fn send_fix(requests: &[Vec<u8>]) -> Result<()> {
+    let mut stream = connect_with_retry("10.241.0.2:9898", "FIX server")?;
+    for r in requests {
+        stream.write_all(r).context("write FIX request")?;
+    }
+    let mut buf = [0u8; 1024];
+    let _ = stream.read(&mut buf);
+    Ok(())
+}
+
+fn send_rest(_clordid: &str) -> Result<()> {
+    let body = br#"{"cl_ord_id":"order-rest-1","qty":7,"price":99.25}"#;
+    let request = format!(
+        "POST /orders HTTP/1.1\r\nHost: 10.241.0.2\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n",
+        body.len()
+    );
+    let mut stream = connect_with_retry("10.241.0.2:8080", "REST server")?;
+    stream
+        .write_all(request.as_bytes())
+        .context("write REST headers")?;
+    stream.write_all(body).context("write REST body")?;
+    let mut buf = [0u8; 512];
+    let _ = stream.read(&mut buf);
+    Ok(())
+}
+
+fn send_ws(_clordid: &str) -> Result<()> {
+    let body = br#"{"cl_ord_id":"order-ws-1","qty":3,"price":11.75}"#;
+    let mask = [0x13u8, 0x37, 0xc0, 0xde];
+    let mut frame = vec![0x81u8, 0x80 | body.len() as u8];
+    frame.extend_from_slice(&mask);
+    for (i, &b) in body.iter().enumerate() {
+        frame.push(b ^ mask[i % 4]);
+    }
+    let mut stream = connect_with_retry("10.241.0.2:8080", "WebSocket server")?;
+    stream.write_all(&frame).context("write WS frame")?;
+    let mut buf = [0u8; 256];
+    let _ = stream.read(&mut buf);
+    Ok(())
+}
+
+fn connect_with_retry(addr: &str, label: &str) -> Result<TcpStream> {
+    let start = Instant::now();
+    let mut last = None;
+    while start.elapsed() < Duration::from_secs(2) {
+        match TcpStream::connect(addr) {
+            Ok(s) => return Ok(s),
+            Err(e) => {
+                last = Some(e);
+                thread::sleep(Duration::from_millis(50));
+            }
+        }
+    }
+    Err(last
+        .map(anyhow::Error::from)
+        .unwrap_or_else(|| anyhow!("timed out connecting to {label}")))
+    .with_context(|| format!("connect to netns {label}"))
+}
+
+// ---- netns fixture / attach / build (unchanged structure) -------------------
 
 struct NetnsFixture {
     ns_name: String,
@@ -191,7 +370,7 @@ struct NetnsFixture {
 
 impl NetnsFixture {
     fn create() -> Result<Self> {
-        let suffix = format!("{}-{}", std::process::id(), now_nanos());
+        let suffix = format!("{}-{}", std::process::id(), monotonic_suffix());
         let ns_name = format!("iicpc-ebpf-{suffix}");
         let host_veth = format!("iicpc{}", &suffix[..suffix.len().min(8)]);
         let fixture = Self {
@@ -199,13 +378,7 @@ impl NetnsFixture {
             ns_name,
             host_veth,
         };
-
-        log_step(format!("ip netns add {}", fixture.ns_name));
         run_ip(&["netns", "add", &fixture.ns_name])?;
-        log_step(format!(
-            "ip link add {} type veth peer name eth0 netns {}",
-            fixture.host_veth, fixture.ns_name
-        ));
         run_ip(&[
             "link",
             "add",
@@ -218,13 +391,8 @@ impl NetnsFixture {
             "netns",
             &fixture.ns_name,
         ])?;
-        log_step(format!(
-            "assigning host veth address 10.241.0.1/24 on {}",
-            fixture.host_veth
-        ));
         run_ip(&["addr", "add", "10.241.0.1/24", "dev", &fixture.host_veth])?;
         run_ip(&["link", "set", &fixture.host_veth, "up"])?;
-        log_step("assigning netns eth0 address 10.241.0.2/24 and bringing links up");
         run_ip(&[
             "netns",
             "exec",
@@ -256,97 +424,41 @@ impl NetnsFixture {
             "eth0",
             "up",
         ])?;
-
+        // Disable segmentation offload so tc egress sees per-MTU segments.
+        let _ = Command::new("ip")
+            .args([
+                "netns",
+                "exec",
+                &fixture.ns_name,
+                "ethtool",
+                "-K",
+                "eth0",
+                "tso",
+                "off",
+                "gso",
+                "off",
+                "gro",
+                "off",
+            ])
+            .status();
         Ok(fixture)
     }
 
-    fn spawn_fix_server(&self) -> Result<Child> {
-        let script = r#"
-import socket
-response = b"8=FIX.4.2\x0135=8\x0111=order-real-1\x01150=F\x0139=2\x0132=12\x0131=42.5\x01"
-with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    s.bind(("10.241.0.2", 9898))
-    s.listen(1)
-    conn, _ = s.accept()
-    with conn:
-        conn.recv(4096)
-        conn.sendall(response)
-"#;
+    fn spawn_python(&self, port: u16, script: &str) -> Result<Child> {
         let child = Command::new("ip")
             .args(["netns", "exec", &self.ns_name, "python3", "-c", script])
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::inherit())
             .spawn()
-            .context("spawn FIX server in netns")?;
-
+            .with_context(|| format!("spawn server on {port} in netns"))?;
         thread::sleep(Duration::from_millis(250));
-        log_step("FIX server process spawned inside netns on 10.241.0.2:9898");
-        Ok(child)
-    }
-
-    fn spawn_rest_server(&self) -> Result<Child> {
-        let script = r#"
-import socket
-body = b'{"cl_ord_id":"order-rest-1","exec_type":"F","fill_qty":7,"fill_price":99.25}'
-response = b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: " + str(len(body)).encode() + b"\r\n\r\n" + body
-with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    s.bind(("10.241.0.2", 8080))
-    s.listen(1)
-    conn, _ = s.accept()
-    with conn:
-        conn.recv(4096)
-        conn.sendall(response)
-"#;
-        let child = Command::new("ip")
-            .args(["netns", "exec", &self.ns_name, "python3", "-c", script])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::inherit())
-            .spawn()
-            .context("spawn REST server in netns")?;
-
-        thread::sleep(Duration::from_millis(250));
-        log_step("REST server process spawned inside netns on 10.241.0.2:8080");
-        Ok(child)
-    }
-
-    fn spawn_ws_server(&self) -> Result<Child> {
-        let script = r#"
-import socket
-body = b'{"cl_ord_id":"order-ws-1","exec_type":"F","fill_qty":3,"fill_price":11.75}'
-response = bytes([0x81, len(body)]) + body
-with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    s.bind(("10.241.0.2", 8080))
-    s.listen(1)
-    conn, _ = s.accept()
-    with conn:
-        conn.recv(4096)
-        conn.sendall(response)
-"#;
-        let child = Command::new("ip")
-            .args(["netns", "exec", &self.ns_name, "python3", "-c", script])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::inherit())
-            .spawn()
-            .context("spawn WebSocket server in netns")?;
-
-        thread::sleep(Duration::from_millis(250));
-        log_step("WebSocket server process spawned inside netns on 10.241.0.2:8080");
         Ok(child)
     }
 }
 
 impl Drop for NetnsFixture {
     fn drop(&mut self) {
-        log_step(format!(
-            "cleaning up fixture: deleting {} and netns {}",
-            self.host_veth, self.ns_name
-        ));
         let _ = Command::new("ip")
             .args(["link", "del", &self.host_veth])
             .status();
@@ -356,236 +468,12 @@ impl Drop for NetnsFixture {
     }
 }
 
-fn send_fix_roundtrip() -> Result<()> {
-    let request =
-        b"8=FIX.4.2\x0135=D\x0111=order-real-1\x0155=IICPC\x0138=12\x0144=42.5\x0154=1\x01";
-    let start = Instant::now();
-    let mut last_err = None;
-    while start.elapsed() < Duration::from_secs(2) {
-        match TcpStream::connect("10.241.0.2:9898") {
-            Ok(mut stream) => {
-                log_step("connected to netns FIX server over veth");
-                stream.write_all(request).context("write FIX request")?;
-                let mut response = [0; 256];
-                let n = stream.read(&mut response).context("read FIX response")?;
-                if n == 0 {
-                    bail!("FIX server closed without response");
-                }
-                log_step(format!("received {n} bytes from netns FIX server"));
-                return Ok(());
-            }
-            Err(err) => {
-                last_err = Some(err);
-                thread::sleep(Duration::from_millis(50));
-            }
-        }
-    }
-    Err(last_err
-        .map(anyhow::Error::from)
-        .unwrap_or_else(|| anyhow!("timed out connecting to FIX server")))
-    .context("connect to netns FIX server")
-}
-
-fn send_rest_roundtrip() -> Result<()> {
-    let body = br#"{"cl_ord_id":"order-rest-1","qty":7,"price":99.25}"#;
-    let request = format!(
-        "POST /orders HTTP/1.1\r\nHost: 10.241.0.2\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n",
-        body.len()
-    );
-    let mut stream = connect_with_retry("10.241.0.2:8080", "REST server")?;
-    stream
-        .write_all(request.as_bytes())
-        .context("write REST headers")?;
-    stream.write_all(body).context("write REST body")?;
-    let mut response = [0; 512];
-    let n = stream.read(&mut response).context("read REST response")?;
-    if n == 0 {
-        bail!("REST server closed without response");
-    }
-    log_step(format!("received {n} bytes from netns REST server"));
-    Ok(())
-}
-
-fn send_ws_roundtrip() -> Result<()> {
-    let body = br#"{"cl_ord_id":"order-ws-1","qty":3,"price":11.75}"#;
-    let request = masked_ws_frame(body)?;
-    let mut stream = connect_with_retry("10.241.0.2:8080", "WebSocket server")?;
-    stream
-        .write_all(&request)
-        .context("write WebSocket frame")?;
-    let mut response = [0; 256];
-    let n = stream
-        .read(&mut response)
-        .context("read WebSocket response")?;
-    if n == 0 {
-        bail!("WebSocket server closed without response");
-    }
-    log_step(format!("received {n} bytes from netns WebSocket server"));
-    Ok(())
-}
-
-fn connect_with_retry(addr: &str, label: &str) -> Result<TcpStream> {
-    let start = Instant::now();
-    let mut last_err = None;
-    while start.elapsed() < Duration::from_secs(2) {
-        match TcpStream::connect(addr) {
-            Ok(stream) => {
-                log_step(format!("connected to netns {label} over veth"));
-                return Ok(stream);
-            }
-            Err(err) => {
-                last_err = Some(err);
-                thread::sleep(Duration::from_millis(50));
-            }
-        }
-    }
-    Err(last_err
-        .map(anyhow::Error::from)
-        .unwrap_or_else(|| anyhow!("timed out connecting to {label}")))
-    .with_context(|| format!("connect to netns {label}"))
-}
-
-fn masked_ws_frame(body: &[u8]) -> Result<Vec<u8>> {
-    if body.len() >= 126 {
-        bail!("test WebSocket frame helper only supports payloads shorter than 126 bytes");
-    }
-    let mask = [0x13, 0x37, 0xc0, 0xde];
-    let mut frame = Vec::with_capacity(6 + body.len());
-    frame.push(0x81);
-    frame.push(0x80 | body.len() as u8);
-    frame.extend_from_slice(&mask);
-    for (i, byte) in body.iter().enumerate() {
-        frame.push(byte ^ mask[i % mask.len()]);
-    }
-    Ok(frame)
-}
-
-fn read_matching_event(
-    ringbuf: &mut RingBuf<MapData>,
-    dropped_events: Option<&PerCpuArray<MapData, u64>>,
-    debug_counters: Option<&PerCpuArray<MapData, u64>>,
-    order_id: &str,
-    timeout: Duration,
-) -> Result<DecodedEvent> {
-    let start = Instant::now();
-    let mut malformed = Vec::new();
-    let mut observed = Vec::new();
-    while start.elapsed() < timeout {
-        while let Some(item) = ringbuf.next() {
-            log_step(format!("read {} bytes from EVENTS ringbuf", item.len()));
-            match decode_event(&item) {
-                Ok(event) if event.order_id == order_id => return Ok(event),
-                Ok(event) => observed.push(event.order_id),
-                Err(err) => malformed.push(err.to_string()),
-            }
-        }
-        thread::sleep(Duration::from_millis(10));
-    }
-    let dropped = dropped_events
-        .map(total_dropped_events)
-        .transpose()?
-        .unwrap_or(0);
-    let debug = debug_counters
-        .map(debug_counter_summary)
-        .transpose()?
-        .unwrap_or_else(|| "unavailable".to_string());
-    bail!(
-        "timed out after {:.1}s waiting for eBPF event for {order_id}; observed order ids: {:?}; malformed events: {:?}; dropped events: {}; debug counters: {}",
-        start.elapsed().as_secs_f32(),
-        observed,
-        malformed,
-        dropped,
-        debug
-    )
-}
-
-fn total_dropped_events(map: &PerCpuArray<MapData, u64>) -> Result<u64> {
-    let values = map.get(&0, 0).context("read DROPPED_EVENTS[0]")?;
-    Ok(values.iter().copied().sum())
-}
-
-fn debug_counter_summary(map: &PerCpuArray<MapData, u64>) -> Result<String> {
-    let mut parts = Vec::new();
-    for (index, label) in DEBUG_COUNTER_LABELS.iter().enumerate() {
-        let values = map
-            .get(&(index as u32), 0)
-            .with_context(|| format!("read DEBUG_COUNTERS[{index}]"))?;
-        let total: u64 = values.iter().copied().sum();
-        if total > 0 {
-            parts.push(format!("{label}={total}"));
-        }
-    }
-    if parts.is_empty() {
-        Ok("all zero".to_string())
-    } else {
-        Ok(parts.join(", "))
-    }
-}
-
-fn decode_event(bytes: &[u8]) -> Result<DecodedEvent> {
-    if bytes.len() != std::mem::size_of::<KernelEvent>() {
-        bail!(
-            "unexpected event size: got {}, want {}",
-            bytes.len(),
-            std::mem::size_of::<KernelEvent>()
-        );
-    }
-    let raw = unsafe { (bytes.as_ptr() as *const KernelEvent).read_unaligned() };
-    let order_id = inline_utf8(&raw.order_id, raw.order_id_len, "order_id")?;
-    let exec_type = inline_utf8(&raw.exec_type, raw.exec_type_len, "exec_type")?;
-    Ok(DecodedEvent {
-        order_id,
-        exec_type,
-        t3_xdp_ingress_ns: raw.t3_xdp_ingress_ns,
-        t7_xdp_egress_ns: raw.t7_xdp_egress_ns,
-        pod_service_time_ns: raw.pod_service_time_ns,
-        fill_qty: raw.fill_qty,
-        fill_price: raw.fill_price,
-    })
-}
-
-fn assert_event(
-    event: &DecodedEvent,
-    order_id: &str,
-    exec_type: &str,
-    fill_qty: u64,
-    fill_price: u64,
-) {
-    log_step(format!(
-        "observed real eBPF event: order_id={}, exec_type={}, fill_qty={}, fill_price={}, request_ingress_t3={}, response_egress_t7={}, service_time={}",
-        event.order_id,
-        event.exec_type,
-        event.fill_qty,
-        event.fill_price,
-        event.t3_xdp_ingress_ns,
-        event.t7_xdp_egress_ns,
-        event.pod_service_time_ns
-    ));
-
-    assert_eq!(event.order_id, order_id);
-    assert_eq!(event.exec_type, exec_type);
-    assert_eq!(event.fill_qty, fill_qty);
-    assert_eq!(event.fill_price, fill_price);
-    assert!(event.t3_xdp_ingress_ns > 0);
-    assert!(event.t7_xdp_egress_ns >= event.t3_xdp_ingress_ns);
-    assert_eq!(
-        event.pod_service_time_ns,
-        event.t7_xdp_egress_ns - event.t3_xdp_ingress_ns
-    );
-}
-
-fn inline_utf8<const N: usize>(bytes: &[u8; N], len: u16, field: &str) -> Result<String> {
-    let len = usize::from(len);
-    if len > N {
-        bail!("{field} length {len} exceeds {N}");
-    }
-    std::str::from_utf8(&bytes[..len])
-        .with_context(|| format!("{field} is not UTF-8"))
-        .map(str::to_string)
+fn kill(child: &mut Child) {
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
 fn attach_xdp_ingress(bpf: &mut Ebpf, program_name: &str, iface: &str) -> Result<()> {
-    log_step(format!("loading XDP program {program_name}"));
     let program: &mut Xdp = bpf
         .program_mut(program_name)
         .ok_or_else(|| anyhow!("XDP program {program_name} not found"))?
@@ -595,32 +483,16 @@ fn attach_xdp_ingress(bpf: &mut Ebpf, program_name: &str, iface: &str) -> Result
         .load()
         .with_context(|| format!("load XDP program {program_name}"))?;
     match program.attach(iface, XdpFlags::DRV_MODE) {
-        Ok(_) => {
-            log_step(format!(
-                "attached XDP program {program_name} to {iface} in driver mode"
-            ));
-            Ok(())
-        }
-        Err(err) => {
-            log_step(format!(
-                "XDP driver mode attach failed ({err}); trying skb/generic mode"
-            ));
-            program
-                .attach(iface, XdpFlags::SKB_MODE)
-                .map(|_| ())
-                .with_context(|| format!("attach XDP program {program_name} to {iface}"))?;
-            log_step(format!(
-                "attached XDP program {program_name} to {iface} in skb mode"
-            ));
-            Ok(())
-        }
+        Ok(_) => Ok(()),
+        Err(_) => program
+            .attach(iface, XdpFlags::SKB_MODE)
+            .map(|_| ())
+            .with_context(|| format!("attach XDP program {program_name} to {iface}")),
     }
 }
 
 fn attach_tc_egress(bpf: &mut Ebpf, program_name: &str, iface: &str) -> Result<()> {
-    log_step(format!("adding clsact qdisc on {iface}"));
     let _ = tc::qdisc_add_clsact(iface);
-    log_step(format!("loading tc classifier program {program_name}"));
     let program: &mut SchedClassifier = bpf
         .program_mut(program_name)
         .ok_or_else(|| anyhow!("tc egress program {program_name} not found"))?
@@ -632,36 +504,23 @@ fn attach_tc_egress(bpf: &mut Ebpf, program_name: &str, iface: &str) -> Result<(
     program
         .attach(iface, TcAttachType::Egress)
         .with_context(|| format!("attach tc egress program {program_name} to {iface}"))?;
-    log_step(format!(
-        "attached tc egress program {program_name} to {iface}"
-    ));
     Ok(())
 }
 
 fn with_network_namespace<T>(netns_path: &Path, f: impl FnOnce() -> Result<T>) -> Result<T> {
-    log_step(format!(
-        "opening current netns and target {}",
-        netns_path.display()
-    ));
     let original = File::open("/proc/self/ns/net").context("open current network namespace")?;
     let target = File::open(netns_path)
         .with_context(|| format!("open target network namespace {}", netns_path.display()))?;
-    log_step(format!("setns into {}", netns_path.display()));
     set_network_namespace(target.as_raw_fd())
         .with_context(|| format!("enter target network namespace {}", netns_path.display()))?;
-
     let result = f();
-    log_step("restoring original network namespace");
     let restore =
         set_network_namespace(original.as_raw_fd()).context("restore original network namespace");
-
     match (result, restore) {
-        (Ok(value), Ok(())) => Ok(value),
-        (Err(err), Ok(())) => Err(err),
-        (Ok(_), Err(err)) => Err(err),
-        (Err(err), Err(restore_err)) => Err(err).context(format!(
-            "also failed to restore original network namespace: {restore_err}"
-        )),
+        (Ok(v), Ok(())) => Ok(v),
+        (Err(e), Ok(())) => Err(e),
+        (Ok(_), Err(e)) => Err(e),
+        (Err(e), Err(re)) => Err(e).context(format!("also failed to restore netns: {re}")),
     }
 }
 
@@ -674,9 +533,32 @@ fn set_network_namespace(fd: i32) -> Result<()> {
     }
 }
 
+fn take_counter(bpf: &mut Ebpf, name: &str) -> Option<PerCpuArray<MapData, u64>> {
+    bpf.take_map(name)
+        .and_then(|m| PerCpuArray::try_from(m).ok())
+}
+
+fn log_diagnostics(
+    dropped: &Option<PerCpuArray<MapData, u64>>,
+    truncated: &Option<PerCpuArray<MapData, u64>>,
+) {
+    let sum = |m: &Option<PerCpuArray<MapData, u64>>| {
+        m.as_ref()
+            .and_then(|m| m.get(&0, 0).ok())
+            .map(|v| v.iter().copied().sum::<u64>())
+            .unwrap_or(0)
+    };
+    log_step(format!(
+        "dropped_events={}, truncated_captures={}",
+        sum(dropped),
+        sum(truncated)
+    ));
+}
+
+// ---- build / env ------------------------------------------------------------
+
 fn ebpf_object_path() -> Result<Option<PathBuf>> {
     if let Some(path) = std::env::var_os("EBPF_OBJECT_PATH").map(PathBuf::from) {
-        log_step(format!("EBPF_OBJECT_PATH supplied: {}", path.display()));
         if path.exists() {
             return Ok(Some(path));
         }
@@ -686,31 +568,20 @@ fn ebpf_object_path() -> Result<Option<PathBuf>> {
         ))?;
         return Ok(None);
     }
-
     if command_exists("bpf-linker") {
-        log_step("bpf-linker found; building optimized eBPF object with cargo +nightly");
         if !build_ebpf_object()? {
             return Ok(None);
         }
     } else {
-        skip_or_fail(
-            "bpf-linker is not installed; set EBPF_OBJECT_PATH to a prebuilt object or install bpf-linker",
-        )?;
+        skip_or_fail("bpf-linker is not installed; set EBPF_OBJECT_PATH or install bpf-linker")?;
         return Ok(None);
     }
-
     Ok(Some(find_built_object().ok_or_else(|| {
-        anyhow!(
-            "could not find built optimized eBPF object under {}",
-            workspace_root()
-                .join("target/bpfel-unknown-none/release")
-                .display()
-        )
+        anyhow!("could not find built eBPF object under target/bpfel-unknown-none/release")
     })?))
 }
 
 fn build_ebpf_object() -> Result<bool> {
-    log_step("running cargo +nightly build --release -Z build-std=core for bpfel-unknown-none");
     let status = Command::new("cargo")
         .args([
             "+nightly",
@@ -737,18 +608,18 @@ fn build_ebpf_object() -> Result<bool> {
 
 fn find_built_object() -> Option<PathBuf> {
     let dir = workspace_root().join("target/bpfel-unknown-none/release");
-    let entries = fs::read_dir(dir).ok()?;
-    entries
+    std::fs::read_dir(dir)
+        .ok()?
         .filter_map(Result::ok)
-        .map(|entry| entry.path())
-        .find(|path| {
-            path.file_name()
-                .and_then(|name| name.to_str())
-                .map(|name| {
-                    name.contains("iicpc_ebpf_latency")
-                        && !name.ends_with(".d")
-                        && !name.ends_with(".rlib")
-                        && !name.ends_with(".rmeta")
+        .map(|e| e.path())
+        .find(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .map(|n| {
+                    n.contains("iicpc_ebpf_latency")
+                        && !n.ends_with(".d")
+                        && !n.ends_with(".rlib")
+                        && !n.ends_with(".rmeta")
                 })
                 .unwrap_or(false)
         })
@@ -797,7 +668,6 @@ fn skip_or_fail(reason: impl AsRef<str>) -> Result<bool> {
 }
 
 fn run_ip(args: &[&str]) -> Result<()> {
-    log_step(format!("running: ip {}", args.join(" ")));
     let status = Command::new("ip")
         .args(args)
         .status()
@@ -809,7 +679,7 @@ fn run_ip(args: &[&str]) -> Result<()> {
     }
 }
 
-fn now_nanos() -> u128 {
+fn monotonic_suffix() -> u128 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()

@@ -1,0 +1,89 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: bot-fleet-worker
+  namespace: benchmark
+spec:
+  # Base replica count. Workers are fungible and stateless: each consumes
+  # whatever WorkloadSpec lands on its partition (the worker_index is carried in
+  # the message, not the pod identity), so any worker can run any assignment.
+  #
+  # The controller shards a session into ceil(total_tasks / 1000) WorkloadSpecs.
+  # For a session to barrier correctly, there must be at least that many worker
+  # pods so each WorkloadSpec is handled by a distinct pod concurrently (a single
+  # worker processes assignments serially, so two specs for the same session on
+  # one pod would miss the barrier). The 511-task baseline = 1 worker, so 2 is
+  # plenty for that; raise the count (or use the KEDA ScaledObject) before the
+  # ramp, which needs more.
+  replicas: 2
+  selector:
+    matchLabels:
+      app: bot-fleet-worker
+  template:
+    metadata:
+      labels:
+        app: bot-fleet-worker
+    spec:
+      # The worker never calls the Kubernetes API — it only consumes Kafka and
+      # opens TCP to algo pods. No ServiceAccount token is mounted.
+      automountServiceAccountToken: false
+      # On SIGTERM the worker is killed; a longer grace period gives an in-flight
+      # session a chance to finish its short run before the pod goes away.
+      # (Graceful SIGTERM draining in the worker is a follow-up; today the run
+      # loop only catches SIGINT.)
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: bot-fleet-worker
+          image: ghcr.io/agrawalx/bot-fleet:dev
+          env:
+            # worker_id is read from HOSTNAME (config.rs from_env). Setting it
+            # explicitly from the Downward API guarantees it equals the pod name
+            # regardless of container runtime, satisfying the per-pod-unique
+            # worker_id invariant (each pod must publish bot.ready with a unique
+            # id or the controller's fan-in never completes).
+            - name: HOSTNAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: KAFKA_BROKERS
+              value: kafka.data.svc.cluster.local:9092
+            - name: KAFKA_CONSUMER_GROUP
+              value: bot-fleet
+            # Per-pod task ceiling. Must be >= the controller's MaxTasksPerWorker
+            # (1000); the worker also hard-caps at 1000 internally. Lower it only
+            # to deliberately reduce per-pod load (never above 1000).
+            - name: MAX_BOTS_PER_WORKER
+              value: "1000"
+          # No HTTP server (the worker is a Kafka consumer), so no httpGet
+          # probes. KEDA scales on consumer lag; liveness is process-level.
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            capabilities:
+              drop:
+                - ALL
+          resources:
+            # Modest requests so workers schedule on a small/test cluster, with
+            # headroom to burst during a run. For accurate pacing under the heavy
+            # scenarios (HFT tasks at 1000 rps each), raise requests toward the
+            # limit and consider Guaranteed QoS on the botworker node pool.
+            requests:
+              cpu: 500m
+              memory: 512Mi
+            limits:
+              cpu: "4"
+              memory: 2Gi
+      securityContext:
+        runAsNonRoot: true
+      # Pin to the dedicated bot-worker node pool in production so the load
+      # generator never shares a node with other workloads (measurement
+      # fairness). Left commented so the Deployment schedules anywhere on a
+      # test cluster — uncomment and match your node pool's label/taint.
+      # nodeSelector:
+      #   node-pool: botworker
+      # tolerations:
+      #   - key: botworker
+      #     operator: Equal
+      #     value: "true"
+      #     effect: NoSchedule

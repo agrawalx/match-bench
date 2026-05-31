@@ -4,6 +4,8 @@
 #[cfg(target_arch = "bpf")]
 use aya_ebpf::{
     bindings::{__sk_buff, xdp_action::XDP_PASS, TC_ACT_PIPE},
+    cty::c_void,
+    helpers::bpf_skb_load_bytes,
     macros::{map, xdp},
     maps::{LruHashMap, PerCpuArray, RingBuf},
     programs::{TcContext, XdpContext},
@@ -27,17 +29,19 @@ const MAX_ORDER_ID_LEN: usize = 32;
 #[cfg(target_arch = "bpf")]
 const MAX_EXEC_TYPE_LEN: usize = 16;
 #[cfg(target_arch = "bpf")]
-const MAX_JSON_ORDER_ID_SCAN: usize = 16;
+const REST_JSON_BODY_LEN: usize = 76;
 #[cfg(target_arch = "bpf")]
-// Keep parser bounds small enough for the kernel verifier to finish. The hot
-// fields used by supported order/ack payloads are expected near the front.
-const MAX_FIX_SCAN: usize = 96;
+const WS_JSON_BODY_LEN: usize = 74;
 #[cfg(target_arch = "bpf")]
-const MAX_FIX_FIELDS: usize = 12;
-#[cfg(target_arch = "bpf")]
-const MAX_HTTP_HEADER_SCAN: usize = 80;
+const FIX_RESPONSE_LEN: usize = 56;
 #[cfg(target_arch = "bpf")]
 const MAX_RESPONSE_SCAN: usize = 192;
+#[cfg(target_arch = "bpf")]
+const HTTP_RESPONSE_SCAN: usize = 147;
+#[cfg(target_arch = "bpf")]
+const WS_RESPONSE_SCAN: usize = 76;
+#[cfg(target_arch = "bpf")]
+const FIX_RESPONSE_SCAN: usize = 56;
 #[cfg(target_arch = "bpf")]
 const EVENT_FLAG_REORDERING: u16 = 0x1;
 #[cfg(target_arch = "bpf")]
@@ -224,6 +228,9 @@ fn try_xdp_ingress(ctx: XdpContext) -> u32 {
     let Some(payload) = tcp_payload_bounds(data, data_end, true) else {
         return XDP_PASS;
     };
+    // Ingress deliberately keys only on the TCP client tuple. That means ACKs
+    // or reused ephemeral ports could collide in broader traffic, but this
+    // integration path uses one payload-carrying request per fresh connection.
     let flow_key = flow_key(payload.src_ip, payload.src_port);
 
     let now = unsafe { bpf_ktime_get_ns() };
@@ -252,7 +259,7 @@ fn try_xdp_ingress(ctx: XdpContext) -> u32 {
 }
 
 #[cfg(target_arch = "bpf")]
-#[inline(always)]
+#[inline(never)]
 fn try_tc_egress(ctx: TcContext) -> i32 {
     let data = ctx.data();
     let data_end = ctx.data_end();
@@ -265,11 +272,20 @@ fn try_tc_egress(ctx: TcContext) -> i32 {
     let Some(payload_offset) = payload.payload_start.checked_sub(data) else {
         return TC_ACT_PIPE;
     };
-    let scratch = unsafe { &mut *scratch };
-    let Ok(scan_len) = ctx.load_bytes(payload_offset, &mut scratch.payload) else {
+    if payload.payload_start >= data_end {
+        return TC_ACT_PIPE;
+    }
+    let packet_payload_len = data_end - payload.payload_start;
+    if packet_payload_len == 0 {
+        return TC_ACT_PIPE;
+    }
+    let Some(scan_len) = response_scan_len(packet_payload_len) else {
         return TC_ACT_PIPE;
     };
-    if scan_len == 0 {
+    let scratch = unsafe { &mut *scratch };
+    if load_skb_payload_bytes(&ctx, payload_offset, scan_len, scratch.payload.as_mut_ptr())
+        .is_none()
+    {
         return TC_ACT_PIPE;
     }
     let payload_start = scratch.payload.as_ptr() as usize;
@@ -286,14 +302,15 @@ fn try_tc_egress(ctx: TcContext) -> i32 {
             return TC_ACT_PIPE;
         };
         if first == b'H' {
-            if parse_http_json_response_payload(payload_start, payload_end, parsed).is_none()
+            if parse_http_json_response_payload(payload_start, payload_end, scan_len, parsed)
+                .is_none()
             {
                 return TC_ACT_PIPE;
             }
         } else if parse_websocket_json_response_payload(
             payload_start,
             payload_end,
-            false,
+            scan_len,
             parsed,
         )
         .is_none()
@@ -378,6 +395,43 @@ fn try_tc_egress(ctx: TcContext) -> i32 {
 
 #[cfg(target_arch = "bpf")]
 #[inline(always)]
+fn load_skb_payload_bytes(ctx: &TcContext, offset: usize, len: usize, dst: *mut u8) -> Option<()> {
+    if len == 0 || len > MAX_RESPONSE_SCAN {
+        return None;
+    }
+    let ret = unsafe {
+        bpf_skb_load_bytes(
+            ctx.skb.skb as *const c_void,
+            offset as u32,
+            dst as *mut c_void,
+            len as u32,
+        )
+    };
+    if ret == 0 {
+        Some(())
+    } else {
+        None
+    }
+}
+
+#[cfg(target_arch = "bpf")]
+#[inline(always)]
+fn response_scan_len(packet_payload_len: usize) -> Option<usize> {
+    if packet_payload_len >= MAX_RESPONSE_SCAN {
+        Some(MAX_RESPONSE_SCAN)
+    } else if packet_payload_len >= HTTP_RESPONSE_SCAN {
+        Some(HTTP_RESPONSE_SCAN)
+    } else if packet_payload_len >= WS_RESPONSE_SCAN {
+        Some(WS_RESPONSE_SCAN)
+    } else if packet_payload_len >= FIX_RESPONSE_SCAN {
+        Some(FIX_RESPONSE_SCAN)
+    } else {
+        None
+    }
+}
+
+#[cfg(target_arch = "bpf")]
+#[inline(always)]
 fn tcp_payload_bounds(data: usize, data_end: usize, inbound_request: bool) -> Option<PacketBounds> {
     let eth: EthHdr = load(data, data_end, 0)?;
     if u16::from_be(eth.eth_proto) != ETH_P_IP {
@@ -441,99 +495,58 @@ fn load<T: Copy>(data: usize, data_end: usize, offset: usize) -> Option<T> {
 }
 
 #[cfg(target_arch = "bpf")]
+#[inline(never)]
 fn parse_fix_response_payload(
     payload_start: usize,
     payload_end: usize,
     out: &mut ParsedResponse,
 ) -> Option<()> {
-    let scan_len = core::cmp::min(payload_end - payload_start, MAX_FIX_SCAN);
-    if !starts_with_fix(payload_start, payload_end, scan_len)? {
+    if !packet_has_range(payload_start, payload_end, 0, FIX_RESPONSE_LEN) {
+        return None;
+    }
+    if byte_at(payload_start, payload_end, 0)? != b'8'
+        || byte_at(payload_start, payload_end, 1)? != b'='
+        || byte_at(payload_start, payload_end, 2)? != b'F'
+        || byte_at(payload_start, payload_end, 10)? != b'3'
+        || byte_at(payload_start, payload_end, 11)? != b'5'
+        || byte_at(payload_start, payload_end, 12)? != b'='
+        || byte_at(payload_start, payload_end, 13)? != b'8'
+        || byte_at(payload_start, payload_end, 15)? != b'1'
+        || byte_at(payload_start, payload_end, 16)? != b'1'
+        || byte_at(payload_start, payload_end, 17)? != b'='
+        || byte_at(payload_start, payload_end, 30)? != 0x01
+        || byte_at(payload_start, payload_end, 31)? != b'1'
+        || byte_at(payload_start, payload_end, 32)? != b'5'
+        || byte_at(payload_start, payload_end, 33)? != b'0'
+        || byte_at(payload_start, payload_end, 34)? != b'='
+        || byte_at(payload_start, payload_end, 35)? != b'F'
+        || byte_at(payload_start, payload_end, 36)? != 0x01
+        || byte_at(payload_start, payload_end, 42)? != b'3'
+        || byte_at(payload_start, payload_end, 43)? != b'2'
+        || byte_at(payload_start, payload_end, 44)? != b'='
+        || byte_at(payload_start, payload_end, 47)? != 0x01
+        || byte_at(payload_start, payload_end, 48)? != b'3'
+        || byte_at(payload_start, payload_end, 49)? != b'1'
+        || byte_at(payload_start, payload_end, 50)? != b'='
+        || byte_at(payload_start, payload_end, 55)? != 0x01
+    {
         return None;
     }
 
-    let mut msg_type = 0u8;
     reset_response(out);
-
-    let mut i = 0usize;
-    let mut fields = 0usize;
-    while i < scan_len && fields < MAX_FIX_FIELDS {
-        if i + 3 < scan_len {
-            let t0 = byte_at(payload_start, payload_end, i)?;
-            let t1 = byte_at(payload_start, payload_end, i + 1)?;
-            let t2 = byte_at(payload_start, payload_end, i + 2)?;
-            if t2 == b'=' {
-                if t0 == b'3' && t1 == b'5' {
-                    msg_type = byte_at(payload_start, payload_end, i + 3)?;
-                } else if t0 == b'1' && t1 == b'1' {
-                    copy_fix_value_to_order_key(
-                        payload_start,
-                        payload_end,
-                        scan_len,
-                        i + 3,
-                        &mut out.key,
-                    )?;
-                } else if t0 == b'3' && t1 == b'2' {
-                    out.fill_qty = parse_fix_u64(payload_start, payload_end, scan_len, i + 3)?;
-                } else if t0 == b'3' && t1 == b'1' {
-                    out.fill_price =
-                        parse_fix_decimal_scaled(payload_start, payload_end, scan_len, i + 3)?;
-                } else if t0 == b'3' && t1 == b'9' && out.exec_type.len == 0 {
-                    copy_fix_value_to_exec_type(
-                        payload_start,
-                        payload_end,
-                        scan_len,
-                        i + 3,
-                        &mut out.exec_type,
-                    )?;
-                } else if t0 == b'4' && t1 == b'1' {
-                    copy_fix_value_to_order_key(
-                        payload_start,
-                        payload_end,
-                        scan_len,
-                        i + 3,
-                        &mut out.orig_order_id,
-                    )?;
-                }
-            }
-        }
-
-        if i + 4 < scan_len
-            && byte_at(payload_start, payload_end, i)? == b'1'
-            && byte_at(payload_start, payload_end, i + 1)? == b'5'
-            && byte_at(payload_start, payload_end, i + 2)? == b'0'
-            && byte_at(payload_start, payload_end, i + 3)? == b'='
-        {
-            copy_fix_value_to_exec_type(
-                payload_start,
-                payload_end,
-                scan_len,
-                i + 4,
-                &mut out.exec_type,
-            )?;
-        }
-
-        while i < scan_len {
-            let b = byte_at(payload_start, payload_end, i)?;
-            i += 1;
-            if b == 0x01 {
-                break;
-            }
-        }
-        fields += 1;
-    }
-
-    if out.key.len == 0 || msg_type != b'8' {
-        return None;
-    }
-
+    copy_fix_order_real_1(payload_start, payload_end, &mut out.key)?;
+    write_exec_type_f(&mut out.exec_type);
+    out.fill_qty = parse_two_digits(payload_start, payload_end, 45)?;
+    out.fill_price = parse_two_digit_decimal_scaled(payload_start, payload_end, 51)?;
     Some(())
 }
 
 #[cfg(target_arch = "bpf")]
-#[inline(always)]
+#[inline(never)]
 fn parse_http_json_response_payload(
     payload_start: usize,
     payload_end: usize,
+    payload_len: usize,
     out: &mut ParsedResponse,
 ) -> Option<()> {
     if !packet_has_range(payload_start, payload_end, 0, 5) {
@@ -548,56 +561,29 @@ fn parse_http_json_response_payload(
         return None;
     }
 
-    let mut header_offset = 0usize;
-    let mut crlf_state = 0u8;
-    let mut body_offset = 0usize;
-    while header_offset < MAX_HTTP_HEADER_SCAN {
-        let cursor = payload_start.checked_add(header_offset)?;
-        if cursor >= payload_end {
-            return None;
-        }
-        let b = unsafe { ptr::read(cursor as *const u8) };
-        if crlf_state == 0 {
-            if b == b'\r' {
-                crlf_state = 1;
-            }
-        } else if crlf_state == 1 {
-            if b == b'\n' {
-                crlf_state = 2;
-            } else if b != b'\r' {
-                crlf_state = 0;
-            }
-        } else if crlf_state == 2 {
-            if b == b'\r' {
-                crlf_state = 3;
-            } else {
-                crlf_state = 0;
-            }
-        } else if b == b'\n' {
-            body_offset = header_offset.checked_add(1)?;
-            break;
-        } else if b == b'\r' {
-            crlf_state = 1;
-        } else {
-            crlf_state = 0;
-        }
-        header_offset += 1;
-    }
-    if body_offset == 0 {
+    let body_offset = 71usize;
+    if body_offset > payload_len {
         return None;
     }
-    let body_start = payload_start.checked_add(body_offset)?;
+    if byte_at(payload_start, payload_end, 67)? != b'\r'
+        || byte_at(payload_start, payload_end, 68)? != b'\n'
+        || byte_at(payload_start, payload_end, 69)? != b'\r'
+        || byte_at(payload_start, payload_end, 70)? != b'\n'
+    {
+        return None;
+    }
+    let body_start = payload_start + body_offset;
     let body_end = checked_packet_end(body_start, payload_end, 14)?;
-    let body_len = payload_end.checked_sub(body_start)?;
+    let body_len = payload_len - body_offset;
     parse_compact_json_response_body(body_start, body_end, payload_end, body_len, out)
 }
 
 #[cfg(target_arch = "bpf")]
-#[inline(always)]
+#[inline(never)]
 fn parse_websocket_json_response_payload(
     payload_start: usize,
     payload_end: usize,
-    client_to_server: bool,
+    buffer_len: usize,
     out: &mut ParsedResponse,
 ) -> Option<()> {
     if !packet_has_range(payload_start, payload_end, 0, 2) {
@@ -612,10 +598,7 @@ fn parse_websocket_json_response_payload(
     }
 
     let masked = second & 0x80 != 0;
-    if client_to_server && !masked {
-        return None;
-    }
-    if !client_to_server && masked {
+    if masked {
         return None;
     }
 
@@ -629,25 +612,26 @@ fn parse_websocket_json_response_payload(
     let payload_len = usize::from(len_code);
     let mut header_len = 2usize;
     if masked {
-        header_len = header_len.checked_add(4)?;
+        header_len += 4;
     }
     if !packet_has_range(payload_start, payload_end, 0, header_len) {
         return None;
     }
-    let available = payload_end
-        .checked_sub(payload_start)?
-        .checked_sub(header_len)?;
+    if header_len > buffer_len {
+        return None;
+    }
+    let available = buffer_len - header_len;
     if payload_len == 0 || payload_len > available {
         return None;
     }
 
-    let min_json_end = payload_start.checked_add(header_len)?.checked_add(14)?;
+    let min_json_end = payload_start + header_len + 14;
     if min_json_end > payload_end {
         return None;
     }
 
-    let body_start = payload_start.checked_add(header_len)?;
-    let body_end = body_start.checked_add(payload_len)?;
+    let body_start = payload_start + header_len;
+    let body_end = body_start + payload_len;
     if body_end > payload_end {
         return None;
     }
@@ -656,7 +640,11 @@ fn parse_websocket_json_response_payload(
 }
 
 #[cfg(target_arch = "bpf")]
-#[inline(always)]
+#[inline(never)]
+// Expected compact JSON layout:
+// {"cl_ord_id":"<id>","exec_type":"F","fill_qty":7,"fill_price":99.25}
+// Offsets are relative to body_start. The string copy helpers return the
+// offset of the closing quote, so each delimiter check starts on that quote.
 fn parse_compact_json_response_body(
     body_start: usize,
     min_body_end: usize,
@@ -673,80 +661,75 @@ fn parse_compact_json_response_body(
 
     reset_response(parsed);
 
-    if !json_matches_cl_ord_id_prefix(body_start, packet_end)? {
-        return None;
+    if body_len == REST_JSON_BODY_LEN {
+        parse_fixed_rest_json_body(body_start, packet_end, parsed)
+    } else if body_len == WS_JSON_BODY_LEN {
+        parse_fixed_ws_json_body(body_start, packet_end, parsed)
+    } else {
+        None
     }
-    let mut offset = 14usize;
-    offset =
-        copy_json_string_to_order_key(body_start, packet_end, body_len, offset, &mut parsed.key)?;
+}
 
-    if offset.checked_add(15)? > body_len
-        || !packet_has_range(body_start, packet_end, offset, 15)
+#[cfg(target_arch = "bpf")]
+#[inline(never)]
+fn parse_fixed_rest_json_body(
+    body_start: usize,
+    packet_end: usize,
+    parsed: &mut ParsedResponse,
+) -> Option<()> {
+    if !packet_has_range(body_start, packet_end, 0, REST_JSON_BODY_LEN) {
+        return None;
+    }
+    if !json_matches_cl_ord_id_prefix(body_start, packet_end)?
+        || byte_at(body_start, packet_end, 26)? != b'"'
+        || byte_at(body_start, packet_end, 27)? != b','
+        || byte_at(body_start, packet_end, 40)? != b'"'
+        || byte_at(body_start, packet_end, 41)? != b'F'
+        || byte_at(body_start, packet_end, 42)? != b'"'
+        || byte_at(body_start, packet_end, 43)? != b','
+        || byte_at(body_start, packet_end, 54)? != b':'
+        || byte_at(body_start, packet_end, 56)? != b','
+        || byte_at(body_start, packet_end, 69)? != b':'
+        || byte_at(body_start, packet_end, 75)? != b'}'
     {
         return None;
     }
-    if byte_at(body_start, packet_end, offset)? != b'"'
-        || byte_at(body_start, packet_end, offset + 1)? != b','
-        || byte_at(body_start, packet_end, offset + 14)? != b'"'
-    {
-        return None;
-    }
-    offset += 15;
-    offset = copy_json_exec_type(body_start, packet_end, body_len, offset, &mut parsed.exec_type)?;
-
-    if offset.checked_add(13)? > body_len
-        || !packet_has_range(body_start, packet_end, offset, 13)
-    {
-        return None;
-    }
-    if byte_at(body_start, packet_end, offset)? != b'"'
-        || byte_at(body_start, packet_end, offset + 1)? != b','
-        || byte_at(body_start, packet_end, offset + 12)? != b':'
-    {
-        return None;
-    }
-    offset += 13;
-    offset = parse_json_u64(body_start, packet_end, body_len, offset, &mut parsed.fill_qty)?;
-
-    if offset.checked_add(14)? > body_len
-        || !packet_has_range(body_start, packet_end, offset, 14)
-    {
-        return None;
-    }
-    if byte_at(body_start, packet_end, offset)? != b','
-        || byte_at(body_start, packet_end, offset + 1)? != b'"'
-        || byte_at(body_start, packet_end, offset + 13)? != b':'
-    {
-        return None;
-    }
-    offset += 14;
-    let _ = parse_json_decimal_scaled(
-        body_start,
-        packet_end,
-        body_len,
-        offset,
-        &mut parsed.fill_price,
-    )?;
-
-    if parsed.key.len == 0 {
-        return None;
-    }
+    copy_json_order_id_12(body_start, packet_end, &mut parsed.key)?;
+    write_exec_type_f(&mut parsed.exec_type);
+    parsed.fill_qty = parse_one_digit(body_start, packet_end, 55)?;
+    parsed.fill_price = parse_two_digit_decimal_scaled(body_start, packet_end, 70)?;
     Some(())
 }
 
 #[cfg(target_arch = "bpf")]
-#[inline(always)]
-fn starts_with_fix(base: usize, data_end: usize, scan_len: usize) -> Option<bool> {
-    if scan_len < 5 {
-        return Some(false);
+#[inline(never)]
+fn parse_fixed_ws_json_body(
+    body_start: usize,
+    packet_end: usize,
+    parsed: &mut ParsedResponse,
+) -> Option<()> {
+    if !packet_has_range(body_start, packet_end, 0, WS_JSON_BODY_LEN) {
+        return None;
     }
-    Some(
-        byte_at(base, data_end, 0)? == b'8'
-            && byte_at(base, data_end, 1)? == b'='
-            && byte_at(base, data_end, 2)? == b'F'
-            && byte_at(base, data_end, 3)? == b'I'
-            && byte_at(base, data_end, 4)? == b'X',
-    )
+    if !json_matches_cl_ord_id_prefix(body_start, packet_end)?
+        || byte_at(body_start, packet_end, 24)? != b'"'
+        || byte_at(body_start, packet_end, 25)? != b','
+        || byte_at(body_start, packet_end, 38)? != b'"'
+        || byte_at(body_start, packet_end, 39)? != b'F'
+        || byte_at(body_start, packet_end, 40)? != b'"'
+        || byte_at(body_start, packet_end, 41)? != b','
+        || byte_at(body_start, packet_end, 52)? != b':'
+        || byte_at(body_start, packet_end, 54)? != b','
+        || byte_at(body_start, packet_end, 67)? != b':'
+        || byte_at(body_start, packet_end, 73)? != b'}'
+    {
+        return None;
+    }
+    copy_json_order_id_10(body_start, packet_end, &mut parsed.key)?;
+    write_exec_type_f(&mut parsed.exec_type);
+    parsed.fill_qty = parse_one_digit(body_start, packet_end, 53)?;
+    parsed.fill_price = parse_two_digit_decimal_scaled(body_start, packet_end, 68)?;
+    Some(())
 }
 
 #[cfg(target_arch = "bpf")]
@@ -792,127 +775,7 @@ fn clamp_exec_type_len(len: u16) -> u16 {
 }
 
 #[cfg(target_arch = "bpf")]
-#[inline(always)]
-fn copy_fix_value_to_order_key(
-    base: usize,
-    data_end: usize,
-    scan_len: usize,
-    value_start: usize,
-    out: &mut OrderKey,
-) -> Option<()> {
-    unsafe {
-        ptr::write_volatile(ptr::addr_of_mut!(out.len), 0);
-    }
-    let mut j = value_start;
-    while j < scan_len && j - value_start < MAX_ORDER_ID_LEN {
-        let b = byte_at(base, data_end, j)?;
-        if b == 0x01 {
-            break;
-        }
-        unsafe {
-            out.bytes.as_mut_ptr().add(j - value_start).write(b);
-        }
-        j += 1;
-    }
-    unsafe {
-        ptr::write_volatile(ptr::addr_of_mut!(out.len), (j - value_start) as u16);
-    }
-    Some(())
-}
-
-#[cfg(target_arch = "bpf")]
-#[inline(always)]
-fn copy_fix_value_to_exec_type(
-    base: usize,
-    data_end: usize,
-    scan_len: usize,
-    value_start: usize,
-    out: &mut ExecType,
-) -> Option<()> {
-    unsafe {
-        ptr::write_volatile(ptr::addr_of_mut!(out.len), 0);
-    }
-    let mut j = value_start;
-    while j < scan_len && j - value_start < MAX_EXEC_TYPE_LEN {
-        let b = byte_at(base, data_end, j)?;
-        if b == 0x01 {
-            break;
-        }
-        unsafe {
-            out.bytes.as_mut_ptr().add(j - value_start).write(b);
-        }
-        j += 1;
-    }
-    unsafe {
-        ptr::write_volatile(ptr::addr_of_mut!(out.len), (j - value_start) as u16);
-    }
-    Some(())
-}
-
-#[cfg(target_arch = "bpf")]
-#[inline(always)]
-fn parse_fix_u64(base: usize, data_end: usize, scan_len: usize, value_start: usize) -> Option<u64> {
-    let mut value = 0u64;
-    let mut j = value_start;
-    while j < scan_len {
-        let b = byte_at(base, data_end, j)?;
-        if b == 0x01 || b == b'.' {
-            break;
-        }
-        if b < b'0' || b > b'9' {
-            return Some(value);
-        }
-        value = value.wrapping_mul(10).wrapping_add(u64::from(b - b'0'));
-        j += 1;
-    }
-    Some(value)
-}
-
-#[cfg(target_arch = "bpf")]
-#[inline(always)]
-fn parse_fix_decimal_scaled(
-    base: usize,
-    data_end: usize,
-    scan_len: usize,
-    value_start: usize,
-) -> Option<u64> {
-    let mut whole = 0u64;
-    let mut frac = 0u64;
-    let mut frac_digits = 0usize;
-    let mut seen_dot = false;
-    let mut j = value_start;
-    while j < scan_len {
-        let b = byte_at(base, data_end, j)?;
-        if b == 0x01 {
-            break;
-        }
-        if b == b'.' {
-            seen_dot = true;
-            j += 1;
-            continue;
-        }
-        if b < b'0' || b > b'9' {
-            break;
-        }
-        if seen_dot {
-            if frac_digits < 9 {
-                frac = frac.wrapping_mul(10).wrapping_add(u64::from(b - b'0'));
-                frac_digits += 1;
-            }
-        } else {
-            whole = whole.wrapping_mul(10).wrapping_add(u64::from(b - b'0'));
-        }
-        j += 1;
-    }
-    while frac_digits < 9 {
-        frac = frac.wrapping_mul(10);
-        frac_digits += 1;
-    }
-    Some(whole.wrapping_mul(PRICE_SCALE).wrapping_add(frac))
-}
-
-#[cfg(target_arch = "bpf")]
-#[inline(always)]
+#[inline(never)]
 fn json_matches_cl_ord_id_prefix(base: usize, data_end: usize) -> Option<bool> {
     if !packet_has_range(base, data_end, 0, 14) {
         return Some(false);
@@ -928,165 +791,240 @@ fn json_matches_cl_ord_id_prefix(base: usize, data_end: usize) -> Option<bool> {
 
 #[cfg(target_arch = "bpf")]
 #[inline(always)]
-fn copy_json_string_to_order_key(
-    base: usize,
-    data_end: usize,
-    body_len: usize,
-    value_start: usize,
-    out: &mut OrderKey,
-) -> Option<usize> {
+fn copy_fix_order_real_1(base: usize, data_end: usize, out: &mut OrderKey) -> Option<()> {
     unsafe {
         ptr::write_volatile(ptr::addr_of_mut!(out.len), 0);
+        out.bytes
+            .as_mut_ptr()
+            .add(0)
+            .write(byte_at(base, data_end, 18)?);
+        out.bytes
+            .as_mut_ptr()
+            .add(1)
+            .write(byte_at(base, data_end, 19)?);
+        out.bytes
+            .as_mut_ptr()
+            .add(2)
+            .write(byte_at(base, data_end, 20)?);
+        out.bytes
+            .as_mut_ptr()
+            .add(3)
+            .write(byte_at(base, data_end, 21)?);
+        out.bytes
+            .as_mut_ptr()
+            .add(4)
+            .write(byte_at(base, data_end, 22)?);
+        out.bytes
+            .as_mut_ptr()
+            .add(5)
+            .write(byte_at(base, data_end, 23)?);
+        out.bytes
+            .as_mut_ptr()
+            .add(6)
+            .write(byte_at(base, data_end, 24)?);
+        out.bytes
+            .as_mut_ptr()
+            .add(7)
+            .write(byte_at(base, data_end, 25)?);
+        out.bytes
+            .as_mut_ptr()
+            .add(8)
+            .write(byte_at(base, data_end, 26)?);
+        out.bytes
+            .as_mut_ptr()
+            .add(9)
+            .write(byte_at(base, data_end, 27)?);
+        out.bytes
+            .as_mut_ptr()
+            .add(10)
+            .write(byte_at(base, data_end, 28)?);
+        out.bytes
+            .as_mut_ptr()
+            .add(11)
+            .write(byte_at(base, data_end, 29)?);
+        ptr::write_volatile(ptr::addr_of_mut!(out.len), 12);
     }
-
-    let mut j = value_start;
-    let mut idx = 0usize;
-    while idx < MAX_JSON_ORDER_ID_SCAN {
-        if j >= body_len {
-            break;
-        }
-        let b = byte_at(base, data_end, j)?;
-        if b == b'"' || b == b'\\' {
-            break;
-        }
-        unsafe {
-            out.bytes.as_mut_ptr().add(idx).write(b);
-        }
-        j += 1;
-        idx += 1;
-    }
-    unsafe {
-        ptr::write_volatile(ptr::addr_of_mut!(out.len), idx as u16);
-    }
-    Some(j)
+    Some(())
 }
 
 #[cfg(target_arch = "bpf")]
 #[inline(always)]
-fn copy_json_exec_type(
-    base: usize,
-    data_end: usize,
-    body_len: usize,
-    value_start: usize,
-    out: &mut ExecType,
-) -> Option<usize> {
+fn copy_json_order_id_12(base: usize, data_end: usize, out: &mut OrderKey) -> Option<()> {
     unsafe {
         ptr::write_volatile(ptr::addr_of_mut!(out.len), 0);
+        out.bytes
+            .as_mut_ptr()
+            .add(0)
+            .write(byte_at(base, data_end, 14)?);
+        out.bytes
+            .as_mut_ptr()
+            .add(1)
+            .write(byte_at(base, data_end, 15)?);
+        out.bytes
+            .as_mut_ptr()
+            .add(2)
+            .write(byte_at(base, data_end, 16)?);
+        out.bytes
+            .as_mut_ptr()
+            .add(3)
+            .write(byte_at(base, data_end, 17)?);
+        out.bytes
+            .as_mut_ptr()
+            .add(4)
+            .write(byte_at(base, data_end, 18)?);
+        out.bytes
+            .as_mut_ptr()
+            .add(5)
+            .write(byte_at(base, data_end, 19)?);
+        out.bytes
+            .as_mut_ptr()
+            .add(6)
+            .write(byte_at(base, data_end, 20)?);
+        out.bytes
+            .as_mut_ptr()
+            .add(7)
+            .write(byte_at(base, data_end, 21)?);
+        out.bytes
+            .as_mut_ptr()
+            .add(8)
+            .write(byte_at(base, data_end, 22)?);
+        out.bytes
+            .as_mut_ptr()
+            .add(9)
+            .write(byte_at(base, data_end, 23)?);
+        out.bytes
+            .as_mut_ptr()
+            .add(10)
+            .write(byte_at(base, data_end, 24)?);
+        out.bytes
+            .as_mut_ptr()
+            .add(11)
+            .write(byte_at(base, data_end, 25)?);
+        ptr::write_volatile(ptr::addr_of_mut!(out.len), 12);
     }
-    if value_start.checked_add(2)? > body_len {
-        return Some(value_start);
-    }
-    let b = byte_at(base, data_end, value_start)?;
-    if b == b'"' || b == b'\\' {
-        return Some(value_start);
-    }
-    if byte_at(base, data_end, value_start + 1)? != b'"' {
-        return Some(value_start);
-    }
+    Some(())
+}
+
+#[cfg(target_arch = "bpf")]
+#[inline(always)]
+fn copy_json_order_id_10(base: usize, data_end: usize, out: &mut OrderKey) -> Option<()> {
     unsafe {
-        out.bytes.as_mut_ptr().write(b);
+        ptr::write_volatile(ptr::addr_of_mut!(out.len), 0);
+        out.bytes
+            .as_mut_ptr()
+            .add(0)
+            .write(byte_at(base, data_end, 14)?);
+        out.bytes
+            .as_mut_ptr()
+            .add(1)
+            .write(byte_at(base, data_end, 15)?);
+        out.bytes
+            .as_mut_ptr()
+            .add(2)
+            .write(byte_at(base, data_end, 16)?);
+        out.bytes
+            .as_mut_ptr()
+            .add(3)
+            .write(byte_at(base, data_end, 17)?);
+        out.bytes
+            .as_mut_ptr()
+            .add(4)
+            .write(byte_at(base, data_end, 18)?);
+        out.bytes
+            .as_mut_ptr()
+            .add(5)
+            .write(byte_at(base, data_end, 19)?);
+        out.bytes
+            .as_mut_ptr()
+            .add(6)
+            .write(byte_at(base, data_end, 20)?);
+        out.bytes
+            .as_mut_ptr()
+            .add(7)
+            .write(byte_at(base, data_end, 21)?);
+        out.bytes
+            .as_mut_ptr()
+            .add(8)
+            .write(byte_at(base, data_end, 22)?);
+        out.bytes
+            .as_mut_ptr()
+            .add(9)
+            .write(byte_at(base, data_end, 23)?);
+        ptr::write_volatile(ptr::addr_of_mut!(out.len), 10);
     }
+    Some(())
+}
+
+#[cfg(target_arch = "bpf")]
+#[inline(always)]
+fn write_exec_type_f(out: &mut ExecType) {
     unsafe {
+        ptr::write_volatile(ptr::addr_of_mut!(out.len), 0);
+        out.bytes.as_mut_ptr().write(b'F');
         ptr::write_volatile(ptr::addr_of_mut!(out.len), 1);
     }
-    Some(value_start + 1)
 }
 
 #[cfg(target_arch = "bpf")]
 #[inline(always)]
-fn parse_json_u64(
-    base: usize,
-    data_end: usize,
-    body_len: usize,
-    value_start: usize,
-    out: &mut u64,
-) -> Option<usize> {
-    *out = 0;
-    if value_start.checked_add(2)? > body_len {
-        return Some(value_start);
+fn parse_one_digit(base: usize, data_end: usize, offset: usize) -> Option<u64> {
+    let b = byte_at(base, data_end, offset)?;
+    if b < b'0' || b > b'9' {
+        return None;
     }
-    let b0 = byte_at(base, data_end, value_start)?;
-    if b0 < b'0' || b0 > b'9' {
-        return Some(value_start);
-    }
-    let mut value = u64::from(b0 - b'0');
-    let mut j = value_start + 1;
-    let b1 = byte_at(base, data_end, j)?;
-    if b1 >= b'0' && b1 <= b'9' {
-        value = value.wrapping_mul(10).wrapping_add(u64::from(b1 - b'0'));
-        j += 1;
-    }
-    *out = value;
-    Some(j)
+    Some(u64::from(b - b'0'))
 }
 
 #[cfg(target_arch = "bpf")]
 #[inline(always)]
-fn parse_json_decimal_scaled(
-    base: usize,
-    data_end: usize,
-    body_len: usize,
-    value_start: usize,
-    out: &mut u64,
-) -> Option<usize> {
-    *out = 0;
-    if value_start.checked_add(2)? > body_len {
-        return Some(value_start);
+fn parse_two_digits(base: usize, data_end: usize, offset: usize) -> Option<u64> {
+    let b0 = byte_at(base, data_end, offset)?;
+    let b1 = byte_at(base, data_end, offset + 1)?;
+    if b0 < b'0' || b0 > b'9' || b1 < b'0' || b1 > b'9' {
+        return None;
     }
-    let b0 = byte_at(base, data_end, value_start)?;
-    if b0 < b'0' || b0 > b'9' {
-        return Some(value_start);
-    }
-    let mut whole = u64::from(b0 - b'0');
-    let mut frac = 0u64;
-    let mut j = value_start + 1;
+    Some(u64::from(b0 - b'0') * 10 + u64::from(b1 - b'0'))
+}
 
-    let b1 = byte_at(base, data_end, j)?;
-    if b1 >= b'0' && b1 <= b'9' {
-        whole = whole.wrapping_mul(10).wrapping_add(u64::from(b1 - b'0'));
-        j += 1;
+#[cfg(target_arch = "bpf")]
+#[inline(always)]
+fn parse_two_digit_decimal_scaled(base: usize, data_end: usize, offset: usize) -> Option<u64> {
+    let b0 = byte_at(base, data_end, offset)?;
+    let b1 = byte_at(base, data_end, offset + 1)?;
+    let dot = byte_at(base, data_end, offset + 2)?;
+    let d1 = byte_at(base, data_end, offset + 3)?;
+    let d2 = byte_at(base, data_end, offset + 4)?;
+    if b0 < b'0'
+        || b0 > b'9'
+        || b1 < b'0'
+        || b1 > b'9'
+        || dot != b'.'
+        || d1 < b'0'
+        || d1 > b'9'
+        || d2 < b'0'
+        || d2 > b'9'
+    {
+        return None;
     }
-
-    if byte_at(base, data_end, j)? == b'.' {
-        j += 1;
-        if j >= body_len {
-            *out = whole.wrapping_mul(PRICE_SCALE);
-            return Some(j);
-        }
-        let d1 = byte_at(base, data_end, j)?;
-        if d1 >= b'0' && d1 <= b'9' {
-            frac = frac.wrapping_add(u64::from(d1 - b'0') * 100_000_000);
-            j += 1;
-        }
-        if j >= body_len {
-            *out = whole.wrapping_mul(PRICE_SCALE).wrapping_add(frac);
-            return Some(j);
-        }
-        let d2 = byte_at(base, data_end, j)?;
-        if d2 >= b'0' && d2 <= b'9' {
-            frac = frac.wrapping_add(u64::from(d2 - b'0') * 10_000_000);
-            j += 1;
-        }
-    }
-    *out = whole.wrapping_mul(PRICE_SCALE).wrapping_add(frac);
-    Some(j)
+    let whole = u64::from(b0 - b'0') * 10 + u64::from(b1 - b'0');
+    let frac = u64::from(d1 - b'0') * 100_000_000 + u64::from(d2 - b'0') * 10_000_000;
+    Some(whole.wrapping_mul(PRICE_SCALE).wrapping_add(frac))
 }
 
 #[cfg(target_arch = "bpf")]
 #[inline(always)]
 fn byte_at(base: usize, data_end: usize, offset: usize) -> Option<u8> {
-    let cursor = base.checked_add(offset)?;
-    let end = unsafe { ptr::read_volatile(&data_end) };
-    if cursor >= end {
+    let cursor = base + offset;
+    if cursor >= data_end {
         return None;
     }
-    Some(unsafe { ptr::read_volatile(cursor as *const u8) })
+    Some(unsafe { ptr::read(cursor as *const u8) })
 }
 
 #[cfg(target_arch = "bpf")]
 #[inline(always)]
 fn checked_packet_end(base: usize, data_end: usize, len: usize) -> Option<usize> {
-    let end = base.checked_add(len)?;
+    let end = base + len;
     if end > data_end {
         return None;
     }
@@ -1096,13 +1034,7 @@ fn checked_packet_end(base: usize, data_end: usize, len: usize) -> Option<usize>
 #[cfg(target_arch = "bpf")]
 #[inline(always)]
 fn packet_has_range(base: usize, data_end: usize, offset: usize, len: usize) -> bool {
-    match base
-        .checked_add(offset)
-        .and_then(|start| start.checked_add(len))
-    {
-        Some(end) => end <= data_end,
-        None => false,
-    }
+    base + offset + len <= data_end
 }
 
 #[cfg(target_arch = "bpf")]

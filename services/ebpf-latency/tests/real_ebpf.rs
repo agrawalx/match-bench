@@ -87,6 +87,13 @@ fn attaches_real_ebpf_to_netns_veth_and_observes_fix_rest_ws_roundtrips() -> Res
         .map(PerCpuArray::<_, u64>::try_from)
         .transpose()
         .context("open DROPPED_EVENTS map")?;
+    assert!(
+        dropped_events.is_some(),
+        "DROPPED_EVENTS map not found in eBPF object"
+    );
+    log_step(
+        "flow key contract: XDP ingress keys on (client_ip, client_port); tc egress keys on outbound (ip.daddr, tcp.dest), which is the same client tuple",
+    );
 
     log_step("starting real TCP FIX server inside target network namespace");
     let mut server = fixture.spawn_fix_server()?;
@@ -450,7 +457,8 @@ fn read_matching_event(
         .transpose()?
         .unwrap_or(0);
     bail!(
-        "timed out waiting for eBPF event for {order_id}; observed order ids: {:?}; malformed events: {:?}; dropped events: {}",
+        "timed out after {:.1}s waiting for eBPF event for {order_id}; observed order ids: {:?}; malformed events: {:?}; dropped events: {}",
+        start.elapsed().as_secs_f32(),
         observed,
         malformed,
         dropped

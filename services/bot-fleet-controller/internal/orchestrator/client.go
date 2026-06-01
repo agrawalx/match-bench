@@ -66,16 +66,18 @@ func NewClient(baseURL string) *Client {
 }
 
 type createSlotRequest struct {
-	SlotID string `json:"slot_id"`
-	Image  string `json:"image"`
-	Port   int    `json:"port"`
+	SlotID       string `json:"slot_id"`
+	ContestantID string `json:"contestant_id"`
+	Image        string `json:"image"`
+	Port         int    `json:"port"`
 }
 
 // CreateSlot is POST /slots. Returns the current slot state. The endpoint
 // is populated synchronously; State is whatever the orchestrator observed
-// right after creation (typically "creating").
-func (c *Client) CreateSlot(ctx context.Context, slotID, image string, port int) (*Slot, error) {
-	body, err := json.Marshal(createSlotRequest{SlotID: slotID, Image: image, Port: port})
+// right after creation (typically "creating"). contestantID is forwarded so the
+// orchestrator can stamp it onto the eBPF capture's latency events.
+func (c *Client) CreateSlot(ctx context.Context, slotID, contestantID, image string, port int) (*Slot, error) {
+	body, err := json.Marshal(createSlotRequest{SlotID: slotID, ContestantID: contestantID, Image: image, Port: port})
 	if err != nil {
 		return nil, fmt.Errorf("marshal create slot: %w", err)
 	}

@@ -205,13 +205,17 @@ pub struct OrderSentBatch {
     pub events: Vec<OrderSentEvent>,
 }
 
-/// OrderAckedEvent records the kernel-side lifecycle for one FIX ClOrdID.
+/// OrderAckedEvent records the request/response boundary timestamps for one FIX
+/// ClOrdID. One order may produce SEVERAL events — one per response packet (ACK,
+/// then each partial fill) — all sharing the request's t3.
 ///
-/// Timestamp definitions:
-///   - t3_xdp_ingress_ns: CLOCK_REALTIME nanoseconds captured by XDP when the
-///     request packet enters the algo pod's veth.
-///   - t7_xdp_egress_ns: CLOCK_REALTIME nanoseconds captured by tc egress when
-///     the response packet leaves the algo pod's veth.
+/// Timestamp definitions (the kernel stamps CLOCK_MONOTONIC via bpf_ktime_get_ns;
+/// the ebpf-latency userspace adds a sampled realtime-minus-monotonic offset, so
+/// the published values are CLOCK_REALTIME, matching the bot fleet's t0/t1/r9):
+///   - t3_xdp_ingress_ns: captured by XDP when the request segment enters the
+///     algo pod's veth.
+///   - t7_xdp_egress_ns: captured by tc egress when the response segment leaves
+///     the algo pod's veth.
 /// The telemetry ingester joins this stream with `orders.sent` on
 /// `(session_id, order_id)`. The primary contestant latency metric is
 /// `pod_service_time_ns = max(0, t7_xdp_egress_ns - t3_xdp_ingress_ns)`.

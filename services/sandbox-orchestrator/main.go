@@ -62,6 +62,13 @@ func main() {
 	// kubernetes.io/{egress,ingress}-bandwidth annotations.
 	egressBw := os.Getenv("ALGO_EGRESS_BANDWIDTH")
 	ingressBw := os.Getenv("ALGO_INGRESS_BANDWIDTH")
+	// eBPF latency capture (per-slot Job). Off by default; when CAPTURE_ENABLED,
+	// a capture Job is created per slot once its algo pod is Ready. CAPTURE_IMAGE
+	// must carry the baked BPF object; KAFKA_BROKERS is where it publishes
+	// orders.acked.
+	captureEnabled := envOr("CAPTURE_ENABLED", "false") == "true"
+	captureImage := os.Getenv("CAPTURE_IMAGE")
+	kafkaBrokers := os.Getenv("KAFKA_BROKERS")
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
@@ -80,6 +87,9 @@ func main() {
 		NodePool:         nodePool,
 		EgressBandwidth:  egressBw,
 		IngressBandwidth: ingressBw,
+		CaptureEnabled:   captureEnabled,
+		CaptureImage:     captureImage,
+		KafkaBrokers:     kafkaBrokers,
 	})
 	if err != nil {
 		log.Error("k8s manager init failed", "error", err)

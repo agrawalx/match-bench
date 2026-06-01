@@ -183,7 +183,7 @@ func (r *Runner) runSession(
 	// Step 2 — allocate sandbox slot.
 	r.transition(ctx, sess, topics.RunStatusDeploying, "allocating sandbox slot", log)
 	image := r.harbor.ImageRef(sess.SubmissionID)
-	if _, err := r.orch.CreateSlot(ctx, sess.SessionID, image, sub.Port); err != nil {
+	if _, err := r.orch.CreateSlot(ctx, sess.SessionID, sess.ContestantID, image, sub.Port); err != nil {
 		r.fail(ctx, sess, "create slot: "+err.Error(), log)
 		return
 	}

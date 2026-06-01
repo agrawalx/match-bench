@@ -1,0 +1,83 @@
+# REFERENCE ONLY — the orchestrator builds this Job in Go (see
+# services/sandbox-orchestrator/internal/k8s/slot.go `captureJobSpec`). This file
+# documents the shape it produces; it is not applied directly. The DaemonSet that
+# used to live here was removed: it could not carry per-pod identity or watch more
+# than one algo pod per node.
+#
+# One of these is created per slot, in the sandbox namespace, when the algo pod
+# reaches Ready. <PLACEHOLDER> values are filled per slot by the orchestrator.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: capture-<SLOT_ID>          # = session_id
+  namespace: sandbox
+  labels:
+    app: ebpf-capture
+    slot: <SLOT_ID>
+    app.kubernetes.io/managed-by: sandbox-orchestrator
+spec:
+  backoffLimit: 0                  # a failed attach is reported, not retried
+  ttlSecondsAfterFinished: 300     # self-clean finished Jobs
+  template:
+    metadata:
+      labels:
+        app: ebpf-capture
+        slot: <SLOT_ID>
+        app.kubernetes.io/managed-by: sandbox-orchestrator
+    spec:
+      restartPolicy: Never
+      nodeName: <ALGO_POD_NODE>    # pinned to the algo pod's node
+      hostPID: true                # to read /proc/<pid>/ns/net on the host
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 5
+      # Toleration is added only when SANDBOX_NODE_POOL is set, matching the algo
+      # pod's taint so the capture can land on the dedicated sandbox node.
+      # tolerations:
+      #   - key: sandbox
+      #     operator: Equal
+      #     value: "true"
+      #     effect: NoSchedule
+      volumes:
+        - name: bpffs
+          hostPath:
+            path: /sys/fs/bpf
+            type: DirectoryOrCreate
+      containers:
+        - name: capture
+          image: <CAPTURE_IMAGE>   # carries the baked /opt/iicpc/ebpf/libiicpc_ebpf_latency.so
+          # Burstable QoS (request < limit) on purpose: the node CPU manager
+          # never gives this an exclusive cpuset, so it runs on shared cores and
+          # never steals from the algo pod's pinned cores.
+          resources:
+            requests:
+              cpu: 200m
+              memory: 256Mi
+            limits:
+              cpu: "2"
+              memory: 512Mi
+          securityContext:
+            privileged: true
+            capabilities:
+              add: [BPF, NET_ADMIN, SYS_ADMIN]
+          volumeMounts:
+            - name: bpffs
+              mountPath: /sys/fs/bpf
+          env:
+            - name: RUST_LOG
+              value: info
+            - name: SESSION_ID
+              value: <SLOT_ID>
+            - name: CONTESTANT_ID
+              value: <CONTESTANT_ID>
+            - name: EBPF_IFACE
+              value: eth0
+            # The capture resolves the algo pod's netns on the node from its UID
+            # (the API exposes the container ID but not the host PID).
+            - name: EBPF_ALGO_POD_UID
+              value: <ALGO_POD_UID>
+            - name: EBPF_ALGO_CONTAINER_ID
+              value: <ALGO_CONTAINER_ID>
+            - name: EBPF_OBJECT_PATH
+              value: /opt/iicpc/ebpf/libiicpc_ebpf_latency.so
+            - name: KAFKA_BROKERS
+              value: <KAFKA_BROKERS>

@@ -1,20 +1,56 @@
 # iicpc
 
-A competitive programming platform where contestants submit trading algorithm code.
-The platform builds their container image, runs security scans, deploys it in an isolated pod,
-sends synthetic orders to test latency and correctness, and scores the result.
+A benchmarking platform for **high-frequency-trading algorithms**. Contestants submit
+trading-engine code; the platform builds it into a container, security-scans it, deploys it in an
+isolated sandbox pod, fires a deterministic stream of synthetic exchange orders at it, and scores
+it on **latency, throughput, and correctness** — then ranks everyone on a live leaderboard.
+
+The hard problem the platform exists to solve is **fair, un-gameable latency measurement**: a
+contestant's engine runs untrusted code and could lie about its own timing, so the platform
+measures service time in the **kernel**, at the pod's network interface, before any contestant
+userspace code runs. That measurement is invariant to the contestant's syscall model (works for
+`recv`, `recvmsg`, `io_uring`, kernel-bypass alike) and is computed from same-node timestamps so
+no cross-node clock sync can skew it.
+
+> **Design docs:** `architecture_v2.md` is the canonical, self-contained design (services,
+> schemas, measurement, fairness, scoring, frontend). `MEASUREMENT_AND_FAIRNESS.md` covers the
+> timestamp catalog and platform invariants; `DEPLOYMENT.md`/`TESTING.md`/`STATE.md` cover
+> install, end-to-end verification, and built-vs-spec'd status.
+
+---
+
+## Key components
+
+Every service is its own module (`go.mod` / `Cargo.toml`); they share only Kafka message schemas
+and never import each other. The pipeline is Kafka-decoupled: load generation, sandboxing,
+measurement, and scoring are independent stages.
+
+| Component | Lang | Role | Status |
+|---|---|---|---|
+| **submission-api** | Go | Receives uploads, mints `session_id`, kicks off the build, triggers a benchmark run | built |
+| **build-worker** | Go | Builds the contestant image (Kaniko), scans it (Trivy/Syft), promotes it to the registry | built |
+| **sandbox-orchestrator** | Go | Spawns/tears down one isolated algo Pod + Service per run; launches the per-slot eBPF capture Job | built |
+| **bot-fleet-controller** | Go | Single-replica run conductor: consumes `benchmark.requested`, fans out workloads, fires the start barrier | built |
+| **bot-fleet** | Rust + Tokio | KEDA-scaled load workers: deterministic FIX/REST/WS order generation, barrier-synced simultaneous fire | built |
+| **ebpf-latency** | Rust + aya | **The measurement engine.** Kernel XDP/tc hooks copy request/response packets; userspace reassembles the TCP stream, parses FIX/JSON, matches responses to requests by ClOrdID, and emits one latency event per response to `orders.acked` | built + verified |
+| **schemas** / **libs** | Go + Rust | Shared Kafka message contracts; shared infra (logging, health) | built |
+| telemetry-ingester | Rust | Join `orders.sent` + `orders.acked`, HDR percentiles → TimescaleDB/Redis | designed |
+| correctness-validator | Go | Post-run order-book replay (TCP-delivery-order reconstruction) | designed |
+| scoring-service + leaderboard-api + SSE gateway | Go | Per-wave TPS scoring, rankings, live fan-out | designed |
+| frontend | Next.js | Leaderboard + per-run latency/fill analytics | designed |
+
+The order flows through Kafka as: `orders.sent` (bot side: `t0`/`t1`/`r9`) + `orders.acked` (eBPF
+side: `t3`/`t7` per response) → joined on `order_id` → scored. The primary metric is
+`pod_service_time = t7 − t3` (wire-to-wire service time at the algo's veth).
 
 ---
 
 ## End-to-end flow
 
-Five services + Kafka coordinate one benchmark run. The diagram below traces the
-full path from a user click to a completed result, including the contract for
-every Kafka message (key, encoding, acks).
-
-For deeper detail see `MEASUREMENT_AND_FAIRNESS.md` (timestamps, eBPF hooks,
-fairness controls, platform code invariants), `DEPLOYMENT.md` (install/upgrade),
-`TESTING.md` (end-to-end verification), and `STATE.md` (what's built vs spec'd).
+The diagram below traces one benchmark run from a user click to a completed result, with the
+contract for every Kafka message (key, encoding, acks). The `submission-api`,
+`bot-fleet-controller`, `sandbox-orchestrator`, the contestant pod, and the `bot-fleet` workers
+coordinate the run; the `ebpf-latency` capture (one Job per algo pod) records timings alongside.
 
 ```mermaid
 sequenceDiagram
@@ -135,21 +171,23 @@ iicpc/
 ├── schemas/                        # Shared data contracts across all services
 │   ├── go/                         # Go — Kafka message types, status constants
 │   └── rust/                       # Rust — Kafka message types shared by Rust services
-│   └── rust/                       # Rust — Kafka message types shared by Rust services
+│
+├── libs/                           # Shared infrastructure (logging, health) — go/ and rust/
 │
 ├── services/                       # One folder per microservice
 │   ├── submission-api/             # Go — receives ZIP uploads, kicks off build, mints session_id, triggers benchmark
 │   ├── build-worker/               # Go — builds, scans, and promotes contestant images
-│   ├── sandbox-orchestrator/       # Go — manages one Pod+Service per benchmark run (lazy lifecycle)
+│   ├── sandbox-orchestrator/       # Go — manages one Pod+Service per run + the per-slot eBPF capture Job
 │   ├── bot-fleet-controller/       # Go — single-replica orchestrator of benchmark runs (consumes benchmark.requested, fans out to workers, fires barrier)
-│   └── bot-fleet/                  # Rust + Tokio — KEDA-scaled workers; precompute frames, wait for barrier, fire on schedule
+│   ├── bot-fleet/                  # Rust + Tokio — KEDA-scaled load workers; deterministic frames, wait for barrier, fire on schedule
+│   └── ebpf-latency/               # Rust + aya — kernel capture + userspace parse/match; emits orders.acked (the measurement engine)
 │
 ├── k8s/                            # Kubernetes manifests — one folder per namespace
 │   ├── data/                       # Stateful services: postgres, kafka, minio
 │   ├── platform/                   # User-facing: submission-api
 │   ├── build/                      # build-worker (spawner) + the Job pods it spawns (kaniko, trivy, syft)
 │   ├── sandbox/                    # sandbox-orchestrator + the algo pods it spawns at runtime
-│   └── benchmark/                  # bot-fleet-controller + bot-fleet workers (workers manifests still missing — see STATE.md)
+│   └── benchmark/                  # bot-fleet-controller, bot-fleet workers, ebpf-latency capture (job-template)
 │
 ├── docker-compose.yml              # Local dev only — spins up data services
 ├── go.work                         # Ties all Go modules together (schemas, libs, services)
@@ -388,9 +426,7 @@ go run ./services/submission-api
 cargo run -p iicpc-bot-fleet
 
 # 5. Submit a test ZIP containing submission.yaml or benchmark.yaml at the ZIP root
-# 5. Submit a test ZIP containing submission.yaml or benchmark.yaml at the ZIP root
 curl -X POST http://localhost:8080/submit \
-  -F "file=@test.zip"
   -F "file=@test.zip"
 ```
 

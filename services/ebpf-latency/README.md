@@ -1,117 +1,101 @@
 # iicpc-ebpf-latency
 
-Rust userspace publisher for algo-pod wire-to-wire timestamps.
+Wire-to-wire latency capture for the algo pod. Measures `t3` (request ingress,
+XDP) and `t7` (response egress, tc) per FIX ClOrdID and publishes
+`OrderAckedBatch` records to `orders.acked`.
 
-The service loads an Aya-compatible object, attaches XDP ingress program
-`iicpc_xdp_ingress` and tc egress program `iicpc_tc_egress` to `EBPF_IFACE`,
-drains ring-buffer map `EVENTS`, and publishes MessagePack `OrderAckedBatch`
-records to `orders.acked`.
+## Architecture: dumb kernel, smart userspace
 
-In Kubernetes production mode, set `EBPF_NETNS_PATH` to the contestant pod's
-network namespace path, for example `/proc/<algo-pid>/ns/net`, and set
-`EBPF_IFACE=eth0`. The loader temporarily enters that network namespace while
-attaching programs, so XDP ingress sees requests entering the pod and tc egress
-sees responses leaving the pod.
+The kernel program (`src/ebpf.rs`) does the **minimum**: parse the eth/ip/tcp
+headers, stamp `bpf_ktime_get_ns`, and copy the TCP payload of every
+request/response segment into a ring buffer as a `CaptureRecord`. It does **no**
+protocol parsing or matching — so the BPF verifier surface is tiny and the
+captured bytes can have any (contestant-controlled) layout.
 
-This follows `MEASUREMENT_AND_FAIRNESS.md`: ingress stores
-`t3_xdp_ingress_ns` in an LRU in-flight map keyed by order id, egress matches
-the response carrying the same order id, captures `t7_xdp_egress_ns`, and
-emits `pod_service_time_ns = max(0, t7 - t3)`.
+The userspace binary (`src/main.rs` + modules) does everything else:
 
-Supported wire formats:
+- **`capture.rs`** — decode the `CaptureRecord` ring-buffer ABI.
+- **`reassembly.rs`** — per-`(flow, direction)` TCP stream reassembly. Handles
+  coalescing (several messages in one segment) and straddling (one message split
+  across segments), and attributes each message's timestamp to the segment
+  carrying its first byte.
+- **`parse.rs`** — frame messages (FIX by BodyLength; HTTP by Content-Length; WS
+  by frame length) and extract fields by scanning, with **no fixed offsets**.
+- **`matcher.rs`** — match responses to requests by ClOrdID and emit **one event
+  per response** (ACK, then each partial fill), all sharing the request's `t3`.
+- **`pipeline.rs`** — ties the above together; `main.rs` drains the ring,
+  converts the monotonic stamps to realtime, runs the pipeline, and publishes.
 
-- FIX on TCP port `9898`: request tag `11` from `35=D/F/G`, response tag `11`
-  from `35=8`. Response metadata is parsed from tags `150`/`39`, `32`, `31`,
-  and optional `41`.
-- REST on TCP port `8080`: JSON field `"cl_ord_id"` in the HTTP request and
-  response body. Response metadata is parsed from `"exec_type"`/`"ord_status"`,
-  `"fill_qty"`, `"fill_price"`, and optional `"orig_cl_ord_id"`.
-- WebSocket on TCP port `8080`: JSON field `"cl_ord_id"` in text or binary
-  frames with payload lengths below 126 bytes, with the same response metadata
-  fields as REST. Client-to-server masked frames are unmasked in the parser.
+XDP is used for ingress because it fires before the kernel network stack, giving
+the most faithful `t3`. tc egress is the only option for `t7`.
 
-Required environment:
+## Clocks
 
-- `SESSION_ID`
-- `CONTESTANT_ID`
-- `EBPF_IFACE`
-- `EBPF_OBJECT_PATH`
-- `KAFKA_BROKERS`
+The kernel stamps `CLOCK_MONOTONIC` (`bpf_ktime_get_ns`). Userspace samples a
+`realtime - monotonic` offset once at startup and adds it to every stamp, so
+`t3`/`t7` land in the same **CLOCK_REALTIME** domain as the bot fleet's
+`t0/t1/r9`, and `t7 - t3` stays exact (the offset cancels).
 
-Optional environment:
+## Deployment notes
 
-- `ORDERS_ACKED_TOPIC` default `orders.acked`
-- `EBPF_NETNS_PATH` optional target network namespace for pod-side attachment
-- `EBPF_XDP_INGRESS_PROGRAM` default `iicpc_xdp_ingress`
-- `EBPF_TC_EGRESS_PROGRAM` default `iicpc_tc_egress`
-- `EBPF_RINGBUF_MAP` default `EVENTS`
-- `EBPF_FLUSH_INTERVAL_MS` default `5`
-- `EBPF_BATCH_SIZE` default `4096`
+- Disable segmentation offload on the algo veth so tc egress sees per-MTU
+  segments (no 64 KB GSO super-segments) and `captured_len == payload_len`:
+  `ethtool -K <veth> tso off gso off gro off lro off`. Pairs with `TCP_NODELAY`
+  on the bot for a clean `t3`. The `TRUNCATED_CAPTURES` counter stays 0 when this
+  is set.
+- In Kubernetes, set `EBPF_NETNS_PATH=/proc/<algo-pid>/ns/net` and
+  `EBPF_IFACE=eth0`; the loader enters that netns to attach.
 
-The eBPF program must write this fixed event ABI:
+## CaptureRecord ABI
+
+Fixed 28-byte header + `captured_len` payload bytes (variable-length record):
 
 ```c
-struct event {
-    __u64 t3_xdp_ingress_ns;
-    __u64 t7_xdp_egress_ns;
-    __u64 pod_service_time_ns;
-    __u64 fill_qty;
-    __u64 fill_price; // fixed-point, scale = 1_000_000_000
-    __u32 src_ip;
-    __u32 tcp_seq;
-    __u32 retransmission_count;
-    __u16 src_port;
-    __u16 order_id_len;
-    __u16 exec_type_len;
-    __u16 orig_order_id_len;
-    __u16 flags; // bit 0: reordering_detected
-    __u16 _pad;
-    __u8  order_id[96];
-    __u8  exec_type[16];
-    __u8  orig_order_id[96];
+struct capture_record {
+    __u64 timestamp_ns;   // bpf_ktime_get_ns (CLOCK_MONOTONIC; userspace -> realtime)
+    __u32 client_ip;      // flow identity (bot side), host order, both directions
+    __u32 tcp_seq;        // this segment's starting sequence
+    __u32 payload_len;    // full on-wire TCP payload length
+    __u16 client_port;    // flow identity
+    __u16 server_port;    // 9898 (FIX) or 8080 (REST/WS)
+    __u16 captured_len;   // bytes copied (== min(payload_len, 1536))
+    __u8  direction;      // 0 = request (XDP ingress), 1 = response (tc egress)
+    __u8  _pad;
+    __u8  payload[captured_len];
 };
 ```
 
-Both kernel stamps must use `bpf_ktime_get_real_ns()` so they remain in the
-same CLOCK_REALTIME domain as bot fleet `t0/t1/r9` telemetry.
+## Required environment
+
+- `SESSION_ID`, `CONTESTANT_ID`, `EBPF_IFACE`, `EBPF_OBJECT_PATH`, `KAFKA_BROKERS`
+
+## Optional environment
+
+- `ORDERS_ACKED_TOPIC` (default `orders.acked`)
+- `EBPF_NETNS_PATH`, `EBPF_XDP_INGRESS_PROGRAM`, `EBPF_TC_EGRESS_PROGRAM`,
+  `EBPF_RINGBUF_MAP`, `EBPF_FLUSH_INTERVAL_MS`, `EBPF_BATCH_SIZE`
 
 ## Tests
 
-Fast, unprivileged coverage:
+Fast, unprivileged unit tests (capture/reassembly/parse/matcher/pipeline):
 
 ```bash
 cargo test -p iicpc-ebpf-latency
 ```
 
-Real eBPF coverage is available as an ignored integration test. It creates a
-temporary network namespace and veth pair, attaches the real XDP and tc
-programs to netns-side `eth0`, sends a FIX request/response roundtrip, and
-asserts that the `EVENTS` ringbuf emits the expected order ack event.
-
-Prerequisites:
-
-- Linux with eBPF, XDP, tc clsact, and ringbuf support.
-- Root privileges for netns, veth, tc, XDP, and BPF syscalls.
-- `ip` and `python3` on PATH.
-- Either set `EBPF_OBJECT_PATH=/path/to/iicpc_latency.bpf.o`, or install
-  `bpf-linker` and use the nightly Rust toolchain so the test can build the
-  object with `cargo +nightly build -Z build-std=core`.
-
-Run it explicitly:
+Build the BPF object:
 
 ```bash
-sudo -E env "PATH=$PATH" cargo test -p iicpc-ebpf-latency --test real_ebpf -- --ignored --nocapture
+cargo +nightly build --release -p iicpc-ebpf-latency --lib \
+  --target bpfel-unknown-none --features ebpf -Z build-std=core
 ```
 
-By default, the real eBPF test skips when prerequisites are missing. To make
-missing prerequisites fail CI instead of skipping, set:
+Real eBPF integration test — loads the program (the BPF verifier runs here),
+attaches to a netns veth, drives FIX/REST/WS round-trips (including partial fills
+and two pipelined orders), and asserts the events produced by the real userspace
+pipeline. Needs root + `bpf-linker`/nightly (or `EBPF_OBJECT_PATH`):
 
 ```bash
-IICPC_REAL_EBPF_STRICT=1
-```
-
-For example:
-
-```bash
-IICPC_REAL_EBPF_STRICT=1 sudo -E env "PATH=$PATH" cargo test -p iicpc-ebpf-latency --test real_ebpf -- --ignored --nocapture
+IICPC_REAL_EBPF_STRICT=1 sudo -E env "PATH=$PATH" \
+  cargo test -p iicpc-ebpf-latency --test real_ebpf -- --ignored --nocapture
 ```

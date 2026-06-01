@@ -384,9 +384,17 @@ async fn create_topics(brokers: &str, topics: &[&str]) -> Result<()> {
     let admin: AdminClient<DefaultClientContext> = ClientConfig::new()
         .set("bootstrap.servers", brokers)
         .create()?;
+    // Problem: the example helper used to create RF=1 topics, so successful
+    // examples could mask production topic-policy drift. Fix: use RF=3 and
+    // the same core topic configs as the real topic-init paths.
     let news: Vec<NewTopic> = topics
         .iter()
-        .map(|t| NewTopic::new(t, 1, TopicReplication::Fixed(1)))
+        .map(|t| {
+            NewTopic::new(t, 3, TopicReplication::Fixed(3))
+                .set("min.insync.replicas", "2")
+                .set("retention.ms", "86400000")
+                .set("max.message.bytes", "1048576")
+        })
         .collect();
     let _ = admin.create_topics(&news, &AdminOptions::new()).await;
     Ok(())

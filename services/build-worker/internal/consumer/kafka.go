@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
+	"strings"
+	"time"
 
 	"github.com/iicpc/schemas/topics"
 	kafka "github.com/segmentio/kafka-go"
@@ -23,9 +25,13 @@ type Consumer struct {
 
 func NewKafkaConsumer(brokers, groupID string, handler Handler, log *slog.Logger) *Consumer {
 	r := kafka.NewReader(kafka.ReaderConfig{
-		Brokers: []string{brokers},
-		GroupID: groupID,
-		Topic:   topics.TopicSubmissionBuildRequested,
+		Brokers:        parseBrokers(brokers),
+		GroupID:        groupID,
+		Topic:          topics.TopicSubmissionBuildRequested,
+		MinBytes:       1,
+		MaxBytes:       1 << 20,
+		MaxWait:        100 * time.Millisecond,
+		CommitInterval: 0,
 	})
 	return &Consumer{reader: r, handler: handler, log: log}
 }
@@ -61,4 +67,15 @@ func (c *Consumer) Start(ctx context.Context) {
 
 func (c *Consumer) Close() error {
 	return c.reader.Close()
+}
+
+func parseBrokers(brokers string) []string {
+	parts := strings.Split(brokers, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }

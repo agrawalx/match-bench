@@ -6,10 +6,13 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"time"
 
 	"github.com/iicpc/schemas/topics"
 	kafka "github.com/segmentio/kafka-go"
 )
+
+const writerTimeout = 5 * time.Second
 
 // Producer publishes the three controller-owned topics. Each topic gets its
 // own kafka.Writer because segmentio/kafka-go pins the topic on the writer.
@@ -39,7 +42,8 @@ func NewProducer(brokers string, log *slog.Logger) *Producer {
 			Balancer:               &kafka.LeastBytes{},
 			RequiredAcks:           kafka.RequireAll,
 			Async:                  false,
-			AllowAutoTopicCreation: true,
+			AllowAutoTopicCreation: false,
+			WriteTimeout:           writerTimeout,
 		}
 	}
 	return &Producer{
@@ -84,7 +88,10 @@ func (p *Producer) PublishWorkloadSpec(ctx context.Context, specs []topics.Workl
 			Value: payload,
 		})
 	}
-	return p.workloadWriter.WriteMessages(ctx, msgs...)
+	writeCtx, cancel := context.WithTimeout(ctx, writerTimeout)
+	defer cancel()
+
+	return p.workloadWriter.WriteMessages(writeCtx, msgs...)
 }
 
 // PublishBarrier publishes one BarrierEvent. Keyed by session_id so all
@@ -101,7 +108,10 @@ func (p *Producer) PublishBarrier(ctx context.Context, sessionID string, targetE
 	if err != nil {
 		return fmt.Errorf("marshal barrier: %w", err)
 	}
-	return p.barrierWriter.WriteMessages(ctx, kafka.Message{
+	writeCtx, cancel := context.WithTimeout(ctx, writerTimeout)
+	defer cancel()
+
+	return p.barrierWriter.WriteMessages(writeCtx, kafka.Message{
 		Key:   []byte(sessionID),
 		Value: payload,
 	})
@@ -124,7 +134,10 @@ func (p *Producer) PublishStatus(ctx context.Context, evt topics.BenchmarkStatus
 	if err != nil {
 		return fmt.Errorf("marshal status: %w", err)
 	}
-	return p.statusWriter.WriteMessages(ctx, kafka.Message{
+	writeCtx, cancel := context.WithTimeout(ctx, writerTimeout)
+	defer cancel()
+
+	return p.statusWriter.WriteMessages(writeCtx, kafka.Message{
 		Key:   []byte(evt.SessionID),
 		Value: payload,
 	})

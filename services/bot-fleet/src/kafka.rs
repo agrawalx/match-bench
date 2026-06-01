@@ -14,6 +14,10 @@ use rdkafka::{
 
 use iicpc_schemas_rust::{BarrierEvent, ReadySignal};
 
+const TOPIC_REPLICATION_FACTOR: i32 = 3;
+const DEFAULT_TOPIC_PARTITIONS: i32 = 3;
+const HIGH_THROUGHPUT_TOPIC_PARTITIONS: i32 = 24;
+
 /// KafkaProducer wraps rdkafka's FutureProducer. FutureProducer is already
 /// Clone + Send + Sync, so we keep it as a thin newtype rather than wrapping
 /// in Arc<Mutex<_>> — the kafka-rust era of locked-producer-behind-mutex is
@@ -41,12 +45,14 @@ pub struct KafkaMessage {
     offset: i64,
 }
 
-/// ensure_topics creates each topic if it doesn't already exist. Idempotent
-/// against pre-existing topics (the broker returns TopicAlreadyExists, which
-/// we treat as success). Topics created here have a single partition because
-/// the bot-fleet workload is sharded by consumer group, not by Kafka
-/// partition — there is one bot-worker pod per partition slot today, and
-/// scaling out the partition count requires a controller-side change too.
+/// ensure_topics creates each topic if it doesn't already exist.
+///
+/// Problem: the old fallback could create topics with one partition and RF=1,
+/// which violates the schema-defined Kafka contract. Fix: mirror the explicit
+/// topic-init partition, replication, ISR, retention, and message-size policy.
+///
+/// This is a developer fallback; production/local compose should provision the
+/// same topics before services start.
 pub async fn ensure_topics(brokers: &str, topics: &[&str]) -> Result<()> {
     let admin: AdminClient<DefaultClientContext> = ClientConfig::new()
         .set("bootstrap.servers", brokers)
@@ -55,7 +61,16 @@ pub async fn ensure_topics(brokers: &str, topics: &[&str]) -> Result<()> {
 
     let new_topics: Vec<NewTopic> = topics
         .iter()
-        .map(|t| NewTopic::new(t, 1, TopicReplication::Fixed(1)))
+        .map(|topic| {
+            NewTopic::new(
+                topic,
+                topic_partitions(topic),
+                TopicReplication::Fixed(TOPIC_REPLICATION_FACTOR),
+            )
+            .set("min.insync.replicas", "2")
+            .set("retention.ms", topic_retention_ms(topic))
+            .set("max.message.bytes", "1048576")
+        })
         .collect();
 
     admin
@@ -70,6 +85,27 @@ pub async fn ensure_topics(brokers: &str, topics: &[&str]) -> Result<()> {
     Ok(())
 }
 
+fn topic_partitions(topic: &str) -> i32 {
+    match topic {
+        iicpc_schemas_rust::TOPIC_ORDERS_ACKED
+        | iicpc_schemas_rust::TOPIC_ORDERS_SENT
+        | iicpc_schemas_rust::TOPIC_WORKLOAD_ASSIGNMENTS => HIGH_THROUGHPUT_TOPIC_PARTITIONS,
+        _ => DEFAULT_TOPIC_PARTITIONS,
+    }
+}
+
+fn topic_retention_ms(topic: &str) -> &'static str {
+    match topic {
+        iicpc_schemas_rust::TOPIC_ORDERS_ACKED
+        | iicpc_schemas_rust::TOPIC_ORDERS_SENT
+        | iicpc_schemas_rust::TOPIC_WORKLOAD_ASSIGNMENTS
+        | iicpc_schemas_rust::TOPIC_BARRIER
+        | iicpc_schemas_rust::TOPIC_BOT_READY => "86400000",
+        iicpc_schemas_rust::TOPIC_SCORES_CORRECTNESS => "2592000000",
+        _ => "604800000",
+    }
+}
+
 /// control_producer builds a FutureProducer tuned for control-plane messages
 /// (ready signals on bot.ready). Per architecture §6.5, every control topic
 /// (benchmark.requested, barrier, benchmark.status.updated, workload.assignments,
@@ -82,7 +118,7 @@ pub async fn ensure_topics(brokers: &str, topics: &[&str]) -> Result<()> {
 ///     retry after broker error doesn't duplicate. Free when acks=all.
 ///   - `linger.ms=0`: no batching. Ready signals are one-per-worker-per-session,
 ///     not a stream — coalescing buys nothing and adds wakeup latency.
-///   - `message.timeout.ms=10000`: 10s upper bound. Higher than telemetry's
+///   - `delivery.timeout.ms=10000`: 10s upper bound. Higher than telemetry's
 ///     5s because retries with idempotent producer can take longer.
 pub fn control_producer(brokers: &str) -> Result<KafkaProducer> {
     let inner: FutureProducer = ClientConfig::new()
@@ -90,7 +126,9 @@ pub fn control_producer(brokers: &str) -> Result<KafkaProducer> {
         .set("acks", "all")
         .set("enable.idempotence", "true")
         .set("linger.ms", "0")
-        .set("message.timeout.ms", "10000")
+        .set("retries", "2147483647")
+        .set("retry.backoff.ms", "100")
+        .set("delivery.timeout.ms", "10000")
         .create()
         .context("create kafka control producer")?;
     Ok(KafkaProducer { inner })
@@ -107,7 +145,7 @@ pub fn control_producer(brokers: &str) -> Result<KafkaProducer> {
 ///   - `compression.type=lz4`: cheap CPU, ~3x compression on JSON. lz4 is
 ///     faster than zstd at our message sizes (~200 bytes) and avoids the
 ///     zstd librdkafka feature dependency.
-///   - `message.timeout.ms=5000`: 5s upper bound from send() to
+///   - `delivery.timeout.ms=5000`: 5s upper bound from send() to
 ///     delivery-failure. Matches the old kafka-rust ack_timeout.
 pub fn telemetry_producer(brokers: &str) -> Result<KafkaProducer> {
     let inner: FutureProducer = ClientConfig::new()
@@ -115,7 +153,9 @@ pub fn telemetry_producer(brokers: &str) -> Result<KafkaProducer> {
         .set("acks", "1")
         .set("linger.ms", "2")
         .set("compression.type", "lz4")
-        .set("message.timeout.ms", "5000")
+        .set("retries", "3")
+        .set("retry.backoff.ms", "25")
+        .set("delivery.timeout.ms", "5000")
         .create()
         .context("create kafka telemetry producer")?;
     Ok(KafkaProducer { inner })
@@ -150,6 +190,9 @@ pub fn consumer(brokers: &str, group: &str, topics: &[&str]) -> Result<KafkaCons
         .set("group.id", group)
         .set("enable.auto.commit", "false")
         .set("auto.offset.reset", "earliest")
+        .set("fetch.min.bytes", "1")
+        .set("fetch.max.wait.ms", "100")
+        .set("max.poll.interval.ms", "300000")
         .set("session.timeout.ms", "10000")
         .create()
         .context("create kafka consumer")?;
@@ -178,7 +221,7 @@ pub async fn publish_bytes(
     payload: &[u8],
 ) -> Result<()> {
     let record = FutureRecord::to(topic).key(key).payload(payload);
-    // 5s queue timeout matches the producer's message.timeout.ms; if the
+    // 5s queue timeout matches the producer's delivery.timeout.ms; if the
     // internal queue is full for longer than this, we surface an error
     // rather than blocking the caller indefinitely.
     producer

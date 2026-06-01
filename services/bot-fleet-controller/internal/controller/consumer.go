@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
+	"time"
 
 	"github.com/iicpc/schemas/topics"
 	kafka "github.com/segmentio/kafka-go"
@@ -28,16 +29,25 @@ type Consumer struct {
 }
 
 func NewConsumer(brokers, benchmarkGroup, botReadyGroup string, runner *Runner, sessions *SessionManager, log *slog.Logger) *Consumer {
+	brokerList := parseBrokers(brokers)
 	return &Consumer{
 		benchmarkReader: kafka.NewReader(kafka.ReaderConfig{
-			Brokers: []string{brokers},
-			GroupID: benchmarkGroup,
-			Topic:   topics.TopicBenchmarkRequested,
+			Brokers:        brokerList,
+			GroupID:        benchmarkGroup,
+			Topic:          topics.TopicBenchmarkRequested,
+			MinBytes:       1,
+			MaxBytes:       1 << 20,
+			MaxWait:        100 * time.Millisecond,
+			CommitInterval: 0,
 		}),
 		botReadyReader: kafka.NewReader(kafka.ReaderConfig{
-			Brokers: []string{brokers},
-			GroupID: botReadyGroup,
-			Topic:   topics.TopicBotReady,
+			Brokers:        brokerList,
+			GroupID:        botReadyGroup,
+			Topic:          topics.TopicBotReady,
+			MinBytes:       1,
+			MaxBytes:       1 << 20,
+			MaxWait:        100 * time.Millisecond,
+			CommitInterval: 0,
 		}),
 		runner:   runner,
 		sessions: sessions,

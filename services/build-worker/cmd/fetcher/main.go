@@ -20,16 +20,9 @@ import (
 )
 
 func main() {
-	var lokiClient *logger.LokiClient
-	var log *slog.Logger
-
-	stdHandler := slog.NewJSONHandler(os.Stdout, nil)
-	if lokiURL := os.Getenv("LOKI_URL"); lokiURL != "" {
-		lokiClient = logger.NewLokiClient(lokiURL)
-		log = slog.New(logger.NewLokiHandler(lokiClient, stdHandler))
-	} else {
-		log = slog.New(stdHandler)
-	}
+	logCfg := logger.DefaultConfig()
+	logCfg.ServiceName = "build-worker-fetcher"
+	log, lokiClient := logger.NewProductionLogger(logCfg)
 	slog.SetDefault(log)
 
 	if lokiClient != nil {

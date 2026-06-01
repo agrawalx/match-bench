@@ -5,10 +5,12 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"time"
 
 	"github.com/iicpc/schemas/topics"
 	cerrs "github.com/iicpc/submission-api/internal/errors"
 	"github.com/iicpc/submission-api/internal/store"
+	"github.com/iicpc/submission-api/internal/utils"
 	kafka "github.com/segmentio/kafka-go"
 )
 
@@ -35,9 +37,13 @@ type BenchmarkStatusConsumer struct {
 
 func NewBenchmarkStatusConsumer(brokers, groupID string, pg *store.PostgresStore, log *slog.Logger) *BenchmarkStatusConsumer {
 	r := kafka.NewReader(kafka.ReaderConfig{
-		Brokers: []string{brokers},
-		GroupID: groupID,
-		Topic:   topics.TopicBenchmarkStatusUpdated,
+		Brokers:        utils.ParseBrokers(brokers),
+		GroupID:        groupID,
+		Topic:          topics.TopicBenchmarkStatusUpdated,
+		MinBytes:       1,
+		MaxBytes:       1 << 20,
+		MaxWait:        100 * time.Millisecond,
+		CommitInterval: 0,
 	})
 	return &BenchmarkStatusConsumer{reader: r, pg: pg, log: log}
 }

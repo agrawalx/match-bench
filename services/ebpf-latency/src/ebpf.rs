@@ -15,6 +15,11 @@
 //! layouts, and makes per-order matching a normal HashMap instead of a flow-keyed
 //! LRU map. XDP is kept for the ingress timestamp because it fires before the
 //! kernel network stack, giving the most faithful t3.
+//!
+//! Subtle but important: TCP payload length is derived from IPv4 `total_length`,
+//! not from the packet buffer's trailing boundary. Small Ethernet frames may
+//! carry L2 padding, and treating padding as TCP payload can inject fake bytes
+//! for SYN/ACK/control packets and poison userspace stream reassembly.
 
 #[cfg(not(target_arch = "bpf"))]
 pub fn host_placeholder() {}
@@ -117,11 +122,13 @@ struct TcpHdr {
 /// BOT side (canonicalized across both directions) so a flow is identified
 /// identically on ingress and egress. `server_port` is the FIX/HTTP port (a
 /// transport hint for userspace). `payload_offset` is from the start of packet
-/// data; `tcp_seq` is this segment's starting sequence number.
+/// data; `payload_len` is the TCP payload length from IPv4/TCP header math;
+/// `tcp_seq` is this segment's starting sequence number.
 #[cfg(target_arch = "bpf")]
 #[derive(Clone, Copy)]
 struct PacketBounds {
     payload_offset: usize,
+    payload_len: usize,
     server_port: u16,
     client_ip: u32,
     client_port: u16,
@@ -173,11 +180,9 @@ fn try_xdp_ingress(ctx: &XdpContext) {
     let Some(bounds) = xdp_payload_bounds(data, data_end) else {
         return;
     };
-    let payload_start = data + bounds.payload_offset;
-    if payload_start >= data_end {
+    if bounds.payload_len == 0 {
         return;
     }
-    let payload_len = data_end - payload_start;
 
     let Some(rec) = SCRATCH.get_ptr_mut(0) else {
         return;
@@ -186,7 +191,7 @@ fn try_xdp_ingress(ctx: &XdpContext) {
     // and the optimizer would fold a plain `cap == 0` guard away (it CAN prove
     // it). A volatile reload makes `cap` opaque so the guard survives into
     // codegen, giving bpf_xdp_load_bytes a provable 1..=CAPTURE_CAP length.
-    let cap = unsafe { ptr::read_volatile(&clamp_cap(payload_len)) };
+    let cap = unsafe { ptr::read_volatile(&clamp_cap(bounds.payload_len)) };
     if cap == 0 || cap > CAPTURE_CAP {
         return;
     }
@@ -196,7 +201,7 @@ fn try_xdp_ingress(ctx: &XdpContext) {
     if ret != 0 {
         return;
     }
-    emit_capture(rec, &bounds, payload_len, cap, DIR_REQUEST);
+    emit_capture(rec, &bounds, cap, DIR_REQUEST);
 }
 
 #[cfg(target_arch = "bpf")]
@@ -205,11 +210,7 @@ fn try_tc_egress(ctx: TcContext) {
     let Some(bounds) = tc_payload_bounds(&ctx) else {
         return;
     };
-    let packet_len = ctx.len() as usize;
-    let Some(payload_len) = packet_len.checked_sub(bounds.payload_offset) else {
-        return;
-    };
-    if payload_len == 0 {
+    if bounds.payload_len == 0 {
         return;
     }
 
@@ -217,7 +218,7 @@ fn try_tc_egress(ctx: TcContext) {
         return;
     };
     // See try_xdp_ingress: volatile reload keeps the >0 guard for the verifier.
-    let cap = unsafe { ptr::read_volatile(&clamp_cap(payload_len)) };
+    let cap = unsafe { ptr::read_volatile(&clamp_cap(bounds.payload_len)) };
     if cap == 0 || cap > CAPTURE_CAP {
         return;
     }
@@ -233,7 +234,7 @@ fn try_tc_egress(ctx: TcContext) {
     if ret != 0 {
         return;
     }
-    emit_capture(rec, &bounds, payload_len, cap, DIR_RESPONSE);
+    emit_capture(rec, &bounds, cap, DIR_RESPONSE);
 }
 
 /// Clamp the copy length to CAPTURE_CAP. Returning a value the verifier can prove
@@ -253,13 +254,7 @@ fn clamp_cap(payload_len: usize) -> usize {
 
 #[cfg(target_arch = "bpf")]
 #[inline(always)]
-fn emit_capture(
-    rec: *mut CaptureRecord,
-    bounds: &PacketBounds,
-    payload_len: usize,
-    cap: usize,
-    direction: u8,
-) {
+fn emit_capture(rec: *mut CaptureRecord, bounds: &PacketBounds, cap: usize, direction: u8) {
     // `cap` is proven <= CAPTURE_CAP by clamp_cap, so total <= size_of::<CaptureRecord>().
     let cap = if cap > CAPTURE_CAP { CAPTURE_CAP } else { cap };
     let total = CAPTURE_HEADER_LEN + cap;
@@ -267,7 +262,7 @@ fn emit_capture(
         ptr::addr_of_mut!((*rec).timestamp_ns).write(bpf_ktime_get_ns());
         ptr::addr_of_mut!((*rec).client_ip).write(bounds.client_ip);
         ptr::addr_of_mut!((*rec).tcp_seq).write(bounds.tcp_seq);
-        ptr::addr_of_mut!((*rec).payload_len).write(payload_len as u32);
+        ptr::addr_of_mut!((*rec).payload_len).write(bounds.payload_len as u32);
         ptr::addr_of_mut!((*rec).client_port).write(bounds.client_port);
         ptr::addr_of_mut!((*rec).server_port).write(bounds.server_port);
         ptr::addr_of_mut!((*rec).captured_len).write(cap as u16);
@@ -301,6 +296,14 @@ fn xdp_payload_bounds(data: usize, data_end: usize) -> Option<PacketBounds> {
     if ihl < mem::size_of::<Ipv4Hdr>() {
         return None;
     }
+    let ip_total = usize::from(u16::from_be(ip.tot_len));
+    if ip_total < ihl {
+        return None;
+    }
+    let ip_end = ip_offset.checked_add(ip_total)?;
+    if ip_end > data_end.saturating_sub(data) {
+        return None;
+    }
     let tcp_offset = ip_offset + ihl;
     let tcp: TcpHdr = load(data, data_end, tcp_offset)?;
     let source = u16::from_be(tcp.source);
@@ -312,8 +315,13 @@ fn xdp_payload_bounds(data: usize, data_end: usize) -> Option<PacketBounds> {
     if data_offset < mem::size_of::<TcpHdr>() {
         return None;
     }
+    let payload_offset = tcp_offset.checked_add(data_offset)?;
+    if payload_offset > ip_end {
+        return None;
+    }
     Some(PacketBounds {
-        payload_offset: tcp_offset + data_offset,
+        payload_offset,
+        payload_len: ip_end - payload_offset,
         server_port: dest,
         client_ip: u32::from_be(ip.saddr),
         client_port: source,
@@ -327,18 +335,41 @@ fn xdp_payload_bounds(data: usize, data_end: usize) -> Option<PacketBounds> {
 #[cfg(target_arch = "bpf")]
 #[inline(always)]
 fn tc_payload_bounds(ctx: &TcContext) -> Option<PacketBounds> {
-    parse_skb_ip_tcp_at(ctx, 0).or_else(|| parse_skb_ip_tcp_at(ctx, mem::size_of::<EthHdr>()))
+    // Prefer the Ethernet view when present because it validates EtherType
+    // before looking at IPv4/TCP fields. Falling back keeps raw-IP skb layouts
+    // working on tc paths that do not expose an L2 header.
+    let packet_len = ctx.len() as usize;
+    let framed = || -> Option<PacketBounds> {
+        let eth: EthHdr = ctx.load(0).ok()?;
+        if u16::from_be(eth.eth_proto) != ETH_P_IP {
+            return None;
+        }
+        parse_skb_ip_tcp_at(ctx, mem::size_of::<EthHdr>(), packet_len)
+    };
+    framed().or_else(|| parse_skb_ip_tcp_at(ctx, 0, packet_len))
 }
 
 #[cfg(target_arch = "bpf")]
 #[inline(always)]
-fn parse_skb_ip_tcp_at(ctx: &TcContext, ip_offset: usize) -> Option<PacketBounds> {
+fn parse_skb_ip_tcp_at(
+    ctx: &TcContext,
+    ip_offset: usize,
+    packet_len: usize,
+) -> Option<PacketBounds> {
     let ip: Ipv4Hdr = ctx.load(ip_offset).ok()?;
     if ip.version_ihl >> 4 != 4 || ip.protocol != IPPROTO_TCP {
         return None;
     }
     let ihl = usize::from(ip.version_ihl & 0x0f) * 4;
     if ihl < mem::size_of::<Ipv4Hdr>() {
+        return None;
+    }
+    let ip_total = usize::from(u16::from_be(ip.tot_len));
+    if ip_total < ihl {
+        return None;
+    }
+    let ip_end = ip_offset.checked_add(ip_total)?;
+    if ip_end > packet_len {
         return None;
     }
     let tcp_offset = ip_offset + ihl;
@@ -352,8 +383,13 @@ fn parse_skb_ip_tcp_at(ctx: &TcContext, ip_offset: usize) -> Option<PacketBounds
     if data_offset < mem::size_of::<TcpHdr>() {
         return None;
     }
+    let payload_offset = tcp_offset.checked_add(data_offset)?;
+    if payload_offset > ip_end {
+        return None;
+    }
     Some(PacketBounds {
-        payload_offset: tcp_offset + data_offset,
+        payload_offset,
+        payload_len: ip_end - payload_offset,
         server_port: source,
         client_ip: u32::from_be(ip.daddr),
         client_port: dest,

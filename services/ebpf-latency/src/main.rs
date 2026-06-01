@@ -404,6 +404,7 @@ fn env_duration_ms(key: &str, default: Duration) -> Duration {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use iicpc_schemas_rust::OrderAckedBatch;
     use std::sync::{Mutex, OnceLock};
 
     const ENV_KEYS: &[&str] = &[
@@ -439,6 +440,104 @@ mod tests {
         unsafe {
             env::set_var(key, value);
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn kafka_integration_flush_publishes_real_orders_acked_batch() {
+        let Ok(brokers) = env::var("KAFKA_BROKERS") else {
+            eprintln!("skipping real Kafka integration test: KAFKA_BROKERS is not set");
+            return;
+        };
+        if brokers.trim().is_empty() {
+            eprintln!("skipping real Kafka integration test: KAFKA_BROKERS is empty");
+            return;
+        }
+
+        kafka::ensure_topics(&brokers, &[TOPIC_ORDERS_ACKED])
+            .await
+            .expect("ensure orders.acked topic");
+        let suffix = integration_suffix();
+        let session_id = format!("itest-ebpf-session-{suffix}");
+        let contestant_id = format!("itest-contestant-{suffix}");
+        let consumer_group = format!("itest-ebpf-acked-{suffix}");
+        let consumer = kafka::consumer(&brokers, &consumer_group, &[TOPIC_ORDERS_ACKED])
+            .expect("create orders.acked consumer");
+        let producer = kafka::telemetry_producer(&brokers).expect("create telemetry producer");
+        let config = Config {
+            kafka_brokers: brokers,
+            topic: TOPIC_ORDERS_ACKED.to_string(),
+            session_id: session_id.clone(),
+            contestant_id: contestant_id.clone(),
+            iface: "eth0".to_string(),
+            netns_path: None,
+            object_path: PathBuf::from("/tmp/unused-ebpf-object.o"),
+            xdp_ingress_program: DEFAULT_XDP_INGRESS_PROGRAM.to_string(),
+            tc_egress_program: DEFAULT_TC_EGRESS_PROGRAM.to_string(),
+            ringbuf_map: DEFAULT_RINGBUF_MAP.to_string(),
+            flush_interval: DEFAULT_FLUSH_INTERVAL,
+            batch_size: DEFAULT_BATCH_SIZE,
+        };
+        let mut events = vec![MatchedEvent {
+            order_id: format!("order-{suffix}"),
+            src_ip: 0x7f000001,
+            src_port: 9898,
+            tcp_seq: 42,
+            t3_ns: 100,
+            t7_ns: 175,
+            pod_service_time_ns: 75,
+            exec_type: "FILL".to_string(),
+            fill_qty: 10,
+            fill_price: 123_000_000_000,
+            orig_order_id: format!("order-{suffix}"),
+            reordering_detected: true,
+            retransmission_count: 1,
+        }];
+
+        flush(&producer, &config, &mut events)
+            .await
+            .expect("flush orders.acked to Kafka");
+        assert!(events.is_empty(), "flush should clear events after publish");
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+        loop {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            assert!(
+                !remaining.is_zero(),
+                "timed out waiting for orders.acked batch"
+            );
+            let msg = tokio::time::timeout(remaining, kafka::recv_message(&consumer))
+                .await
+                .expect("receive timeout")
+                .expect("receive Kafka message");
+            let Some(payload) = msg.payload.as_deref() else {
+                kafka::commit_message(&consumer, &msg).expect("commit tombstone");
+                continue;
+            };
+            let batch = match rmp_serde::from_slice::<OrderAckedBatch>(payload) {
+                Ok(batch) => batch,
+                Err(_) => {
+                    kafka::commit_message(&consumer, &msg).expect("commit unrelated message");
+                    continue;
+                }
+            };
+            kafka::commit_message(&consumer, &msg).expect("commit orders.acked message");
+            if batch.session_id != session_id {
+                continue;
+            }
+            assert_eq!(batch.contestant_id, contestant_id);
+            assert_eq!(batch.events.len(), 1);
+            assert_eq!(batch.events[0].pod_service_time_ns, 75);
+            assert!(batch.events[0].reordering_detected);
+            break;
+        }
+    }
+
+    fn integration_suffix() -> String {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+            .to_string()
     }
 
     #[test]

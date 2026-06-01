@@ -9,10 +9,14 @@ import (
 
 	"github.com/iicpc/schemas/topics"
 	cerrs "github.com/iicpc/submission-api/internal/errors"
-	"github.com/iicpc/submission-api/internal/store"
 	"github.com/iicpc/submission-api/internal/utils"
 	kafka "github.com/segmentio/kafka-go"
 )
+
+type RunStatusStore interface {
+	UpdateRunStatus(ctx context.Context, sessionID, status, message string) error
+	RecomputeRunGroupStatus(ctx context.Context, runGroupID string) error
+}
 
 // BenchmarkStatusConsumer keeps the runs table in PostgreSQL in sync with
 // state transitions published by the bot-fleet-controller.
@@ -31,11 +35,11 @@ import (
 // can race a still-live algo pod / bot workload / orchestrator slot.
 type BenchmarkStatusConsumer struct {
 	reader *kafka.Reader
-	pg     *store.PostgresStore
+	pg     RunStatusStore
 	log    *slog.Logger
 }
 
-func NewBenchmarkStatusConsumer(brokers, groupID string, pg *store.PostgresStore, log *slog.Logger) *BenchmarkStatusConsumer {
+func NewBenchmarkStatusConsumer(brokers, groupID string, pg RunStatusStore, log *slog.Logger) *BenchmarkStatusConsumer {
 	r := kafka.NewReader(kafka.ReaderConfig{
 		Brokers:        utils.ParseBrokers(brokers),
 		GroupID:        groupID,

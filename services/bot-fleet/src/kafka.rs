@@ -191,7 +191,7 @@ pub fn consumer(brokers: &str, group: &str, topics: &[&str]) -> Result<KafkaCons
         .set("enable.auto.commit", "false")
         .set("auto.offset.reset", "earliest")
         .set("fetch.min.bytes", "1")
-        .set("fetch.max.wait.ms", "100")
+        .set("fetch.wait.max.ms", "100")
         .set("max.poll.interval.ms", "300000")
         .set("session.timeout.ms", "10000")
         .create()

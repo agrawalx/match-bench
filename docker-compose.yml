@@ -132,22 +132,24 @@ services:
         condition: service_healthy
       kafka-3:
         condition: service_healthy
-    entrypoint: ["/bin/bash", "-lc"]
     # Problem: relying on runtime producer auto-create loses required
     # partitions/RF/retention. Fix: pre-create every schema topic explicitly.
-    command: >
-      /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka-1:9092 --create --if-not-exists --topic submission.build.requested --partitions 3 --replication-factor 3 --config min.insync.replicas=2 --config retention.ms=604800000 --config max.message.bytes=1048576 &&
-      /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka-1:9092 --create --if-not-exists --topic submission.status.updated --partitions 3 --replication-factor 3 --config min.insync.replicas=2 --config retention.ms=604800000 --config max.message.bytes=1048576 &&
-      /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka-1:9092 --create --if-not-exists --topic benchmark.requested --partitions 3 --replication-factor 3 --config min.insync.replicas=2 --config retention.ms=604800000 --config max.message.bytes=1048576 &&
-      /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka-1:9092 --create --if-not-exists --topic benchmark.status.updated --partitions 3 --replication-factor 3 --config min.insync.replicas=2 --config retention.ms=604800000 --config max.message.bytes=1048576 &&
-      /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka-1:9092 --create --if-not-exists --topic workload.assignments --partitions 24 --replication-factor 3 --config min.insync.replicas=2 --config retention.ms=86400000 --config max.message.bytes=1048576 &&
-      /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka-1:9092 --create --if-not-exists --topic barrier --partitions 3 --replication-factor 3 --config min.insync.replicas=2 --config retention.ms=86400000 --config max.message.bytes=1048576 &&
-      /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka-1:9092 --create --if-not-exists --topic bot.ready --partitions 3 --replication-factor 3 --config min.insync.replicas=2 --config retention.ms=86400000 --config max.message.bytes=1048576 &&
-      /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka-1:9092 --create --if-not-exists --topic workload.failed --partitions 3 --replication-factor 3 --config min.insync.replicas=2 --config retention.ms=604800000 --config max.message.bytes=1048576 &&
-      /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka-1:9092 --create --if-not-exists --topic orders.sent --partitions 24 --replication-factor 3 --config min.insync.replicas=2 --config retention.ms=86400000 --config max.message.bytes=1048576 &&
-      /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka-1:9092 --create --if-not-exists --topic orders.acked --partitions 24 --replication-factor 3 --config min.insync.replicas=2 --config retention.ms=86400000 --config max.message.bytes=1048576 &&
-      /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka-1:9092 --create --if-not-exists --topic scores.correctness --partitions 3 --replication-factor 3 --config min.insync.replicas=2 --config retention.ms=2592000000 --config max.message.bytes=1048576 &&
-      /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka-1:9092 --create --if-not-exists --topic leaderboard.updates --partitions 3 --replication-factor 3 --config min.insync.replicas=2 --config retention.ms=604800000 --config max.message.bytes=1048576
+    entrypoint:
+      - /bin/bash
+      - -lc
+      - |
+        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka-1:9092 --create --if-not-exists --topic submission.build.requested --partitions 3 --replication-factor 3 --config min.insync.replicas=2 --config retention.ms=604800000 --config max.message.bytes=1048576 &&
+        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka-1:9092 --create --if-not-exists --topic submission.status.updated --partitions 3 --replication-factor 3 --config min.insync.replicas=2 --config retention.ms=604800000 --config max.message.bytes=1048576 &&
+        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka-1:9092 --create --if-not-exists --topic benchmark.requested --partitions 3 --replication-factor 3 --config min.insync.replicas=2 --config retention.ms=604800000 --config max.message.bytes=1048576 &&
+        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka-1:9092 --create --if-not-exists --topic benchmark.status.updated --partitions 3 --replication-factor 3 --config min.insync.replicas=2 --config retention.ms=604800000 --config max.message.bytes=1048576 &&
+        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka-1:9092 --create --if-not-exists --topic workload.assignments --partitions 24 --replication-factor 3 --config min.insync.replicas=2 --config retention.ms=86400000 --config max.message.bytes=1048576 &&
+        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka-1:9092 --create --if-not-exists --topic barrier --partitions 3 --replication-factor 3 --config min.insync.replicas=2 --config retention.ms=86400000 --config max.message.bytes=1048576 &&
+        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka-1:9092 --create --if-not-exists --topic bot.ready --partitions 3 --replication-factor 3 --config min.insync.replicas=2 --config retention.ms=86400000 --config max.message.bytes=1048576 &&
+        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka-1:9092 --create --if-not-exists --topic workload.failed --partitions 3 --replication-factor 3 --config min.insync.replicas=2 --config retention.ms=604800000 --config max.message.bytes=1048576 &&
+        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka-1:9092 --create --if-not-exists --topic orders.sent --partitions 24 --replication-factor 3 --config min.insync.replicas=2 --config retention.ms=86400000 --config max.message.bytes=1048576 &&
+        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka-1:9092 --create --if-not-exists --topic orders.acked --partitions 24 --replication-factor 3 --config min.insync.replicas=2 --config retention.ms=86400000 --config max.message.bytes=1048576 &&
+        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka-1:9092 --create --if-not-exists --topic scores.correctness --partitions 3 --replication-factor 3 --config min.insync.replicas=2 --config retention.ms=2592000000 --config max.message.bytes=1048576 &&
+        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka-1:9092 --create --if-not-exists --topic leaderboard.updates --partitions 3 --replication-factor 3 --config min.insync.replicas=2 --config retention.ms=604800000 --config max.message.bytes=1048576
 
   loki:
     image: grafana/loki:main-2e3da9a

@@ -1,5 +1,8 @@
 # Build context is the repository root (COPY paths are repo-relative).
-FROM rust:1.79-bookworm AS builder
+# Rust 1.96 (not 1.79): workspace deps now use edition 2024 (e.g. idna_adapter
+# ≥1.2.2, rust-version 1.86), which a 1.79 cargo cannot parse. `-bookworm` is kept
+# for parity with the other Rust images (Debian Bookworm toolchain libs).
+FROM rust:1.96-bookworm AS builder
 WORKDIR /app
 
 # rdkafka is built with the `cmake-build` feature (vendored librdkafka), so the

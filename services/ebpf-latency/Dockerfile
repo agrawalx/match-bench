@@ -16,13 +16,21 @@ COPY libs/rust libs/rust
 COPY schemas/rust schemas/rust
 COPY services/bot-fleet services/bot-fleet
 COPY services/ebpf-latency services/ebpf-latency
+# telemetry-ingester is a workspace member, so its manifest must be present for
+# cargo to load the workspace — even though this -p selection never compiles it.
+# A new workspace member added to the root Cargo.toml must also be copied here.
+COPY services/telemetry-ingester services/telemetry-ingester
 RUN cargo +nightly build --release -p iicpc-ebpf-latency --lib \
     --target bpfel-unknown-none --features ebpf -Z build-std=core
 
-# Stage 2 — compile the userspace binary (dynamic-linked librdkafka).
+# Stage 2 — compile the userspace binary. It pulls in iicpc-bot-fleet -> rdkafka
+# with the `cmake-build` feature (vendored librdkafka 2.3.0 built from source), so
+# this stage needs cmake + a C/C++ toolchain on top of librdkafka-dev/pkg-config.
+# (The BPF stage above never compiles rdkafka — bot-fleet is gated to the non-BPF
+# target in ebpf-latency/Cargo.toml — so it needs none of this.)
 FROM rust:bookworm AS builder
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends librdkafka-dev pkg-config \
+    && apt-get install -y --no-install-recommends cmake build-essential librdkafka-dev pkg-config \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY Cargo.toml Cargo.lock* ./
@@ -30,6 +38,7 @@ COPY libs/rust libs/rust
 COPY schemas/rust schemas/rust
 COPY services/bot-fleet services/bot-fleet
 COPY services/ebpf-latency services/ebpf-latency
+COPY services/telemetry-ingester services/telemetry-ingester
 RUN cargo build --release -p iicpc-ebpf-latency
 
 # Stage 3 — runtime. Runs as root (needs CAP_BPF/CAP_NET_ADMIN/CAP_SYS_ADMIN +

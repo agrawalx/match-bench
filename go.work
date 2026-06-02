@@ -7,4 +7,5 @@ use (
 	./services/build-worker
 	./services/sandbox-orchestrator
 	./services/bot-fleet-controller
+	./services/correctness-validator
 )

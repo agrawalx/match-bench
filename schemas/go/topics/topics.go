@@ -102,6 +102,19 @@ type BenchmarkStatusUpdated struct {
 	UpdatedAt    time.Time `json:"updated_at"`
 }
 
+// CorrectnessScoreEvent is published to "scores.correctness" (JSON) by the
+// correctness-validator after the post-run order-book replay. Consumed by the
+// scoring service for the hard correctness gate. Key: session_id.
+type CorrectnessScoreEvent struct {
+	SessionID        string  `json:"session_id"`
+	ContestantID     string  `json:"contestant_id"`
+	ValidFills       uint64  `json:"valid_fills"`
+	TotalFills       uint64  `json:"total_fills"`
+	CorrectnessScore float64 `json:"correctness_score"` // valid_fills / total_fills
+	ViolationCount   uint32  `json:"violation_count"`
+	ComputedAtNS     uint64  `json:"computed_at_ns"`
+}
+
 // SubmissionStatusUpdated is published to "submission.status.updated"
 // by the build-worker on every state transition. Consumed by: submission-api (status queries).
 type SubmissionStatusUpdated struct {

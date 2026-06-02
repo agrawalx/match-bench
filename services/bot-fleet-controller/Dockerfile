@@ -1,16 +1,17 @@
 # Build from repo root:
 #   docker build -f services/bot-fleet-controller/Dockerfile .
 #
-# Must build from root because the Go workspace (go.work) spans multiple modules.
+# Built in module mode (GOWORK=off), NOT workspace mode. The module's go.mod
+# replace directives point at ../../libs/go and ../../schemas/go, so only those two
+# siblings plus this service are needed — adding modules to go.work can never break
+# this build. go.sum pins every dependency, so the build stays reproducible. Build
+# context is the repo root (COPY paths are repo-relative).
 
 FROM golang:1.25 AS builder
+ENV GOWORK=off
 WORKDIR /workspace
-COPY go.work go.work.sum* ./
 COPY schemas/go ./schemas/go
 COPY libs/go ./libs/go
-COPY services/submission-api/go.mod services/submission-api/go.sum* ./services/submission-api/
-COPY services/build-worker/go.mod services/build-worker/go.sum* ./services/build-worker/
-COPY services/sandbox-orchestrator/go.mod services/sandbox-orchestrator/go.sum* ./services/sandbox-orchestrator/
 COPY services/bot-fleet-controller ./services/bot-fleet-controller
 WORKDIR /workspace/services/bot-fleet-controller
 RUN CGO_ENABLED=0 GOOS=linux go build -o /bin/bot-fleet-controller .

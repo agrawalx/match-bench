@@ -1,0 +1,91 @@
+# Correctness validator — post-run, event-sourced scoring.
+#
+# Triggered by benchmark.status.updated(status=completed): after a settle delay it
+# drains the session's full orders.sent + orders.acked log from Kafka, replays it in
+# TCP-delivery order through a reference matching engine, and scores the contestant's
+# reported fills. Writes the summary + violation log to the metadata Postgres and
+# publishes a CorrectnessScoreEvent to scores.correctness.
+#
+# Unlike the controller and telemetry-ingester, this service is horizontally
+# scalable: the benchmark.status.updated consumer group shards completed sessions
+# across replicas, each session is validated independently, and the
+# correctness_summary row makes re-dispatch idempotent. v1 ships a single replica
+# (post-run work is not latency-critical); raise replicas to parallelise across
+# many simultaneously-finishing sessions.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: correctness-validator
+  namespace: benchmark
+spec:
+  replicas: 1
+  strategy:
+    # RollingUpdate is safe here — two replicas briefly coexisting just means a
+    # session may be dispatched twice, which the HasSummary idempotency guard and
+    # the per-session transaction absorb.
+    type: RollingUpdate
+  selector:
+    matchLabels:
+      app: correctness-validator
+  template:
+    metadata:
+      labels:
+        app: correctness-validator
+    spec:
+      automountServiceAccountToken: false
+      containers:
+        - name: correctness-validator
+          image: ghcr.io/agrawalx/correctness-validator:dev
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          env:
+            - name: PORT
+              value: "8080"
+            - name: KAFKA_BROKERS
+              valueFrom:
+                secretKeyRef:
+                  name: correctness-validator-secret
+                  key: kafka-brokers
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: correctness-validator-secret
+                  key: database-url
+            - name: KAFKA_STATUS_GROUP
+              value: correctness-validator
+            # Settle window before draining: must exceed the eBPF reader's 5s
+            # terminal-event eviction so the session log is complete at watermark.
+            - name: SETTLE_DELAY_MS
+              value: "10000"
+            - name: VALIDATOR_CONCURRENCY
+              value: "4"
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            capabilities:
+              drop:
+                - ALL
+          resources:
+            requests:
+              cpu: 250m
+              memory: 256Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+      securityContext:
+        runAsNonRoot: true

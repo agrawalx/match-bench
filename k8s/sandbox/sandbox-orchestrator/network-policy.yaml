@@ -51,14 +51,21 @@ spec:
         - port: 3100
           protocol: TCP
     # k8s API server. Resolves to a ClusterIP in the default namespace
-    # (kubernetes.default.svc), backed by endpoints in kube-system on the
-    # control plane. Allow all cluster IPs on 443; tightening this further
-    # requires hardcoding the api-server endpoint, which differs across clusters.
+    # (kubernetes.default.svc :443), backed by endpoints in kube-system on the
+    # control plane. On k3s/kubeadm the ClusterIP is DNAT'd to the node's API
+    # port :6443, and the netpol is enforced against the POST-DNAT destination —
+    # so BOTH 443 (managed/cloud control planes) and 6443 (k3s/kubeadm node API)
+    # must be allowed, or `create slot` fails with
+    # "dial 10.43.0.1:443: connect: connection refused". Tightening the CIDR
+    # further requires hardcoding the api-server endpoint, which differs across
+    # clusters.
     - to:
         - ipBlock:
             cidr: 0.0.0.0/0
       ports:
         - port: 443
+          protocol: TCP
+        - port: 6443
           protocol: TCP
     # DNS (kube-system :53). Required to resolve kubernetes.default.svc.
     - to:

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/iicpc/libs/metrics"
 	cerrs "github.com/iicpc/submission-api/internal/errors"
 	"github.com/iicpc/submission-api/internal/publisher"
 	"github.com/iicpc/submission-api/internal/store"
@@ -41,6 +42,7 @@ func Submit(ms *store.MinioStore, pg *store.PostgresStore, pub publisher.Publish
 		r.Body = http.MaxBytesReader(w, r.Body, maxFormBytes)
 
 		if err := r.ParseMultipartForm(32 << 20); err != nil {
+			metrics.Counter("submission_validation_failures_total", "Submission validation failures.", metrics.Labels("reason", "parse_form"), 1)
 			writeError(w, http.StatusBadRequest, "failed to parse form: "+err.Error())
 			return
 		}
@@ -50,6 +52,7 @@ func Submit(ms *store.MinioStore, pg *store.PostgresStore, pub publisher.Publish
 
 		file, _, err := r.FormFile("file")
 		if err != nil {
+			metrics.Counter("submission_validation_failures_total", "Submission validation failures.", metrics.Labels("reason", "missing_file"), 1)
 			writeError(w, http.StatusBadRequest, "missing file field")
 			return
 		}
@@ -71,6 +74,7 @@ func Submit(ms *store.MinioStore, pg *store.PostgresStore, pub publisher.Publish
 		// Validate zip structure and parse benchmark.yaml.
 		cfg, err := validator.ValidateSubmissionZip(file, size)
 		if err != nil {
+			metrics.Counter("submission_validation_failures_total", "Submission validation failures.", metrics.Labels("reason", "invalid_zip"), 1)
 			writeError(w, http.StatusBadRequest, err.Error())
 			return
 		}
@@ -103,17 +107,20 @@ func Submit(ms *store.MinioStore, pg *store.PostgresStore, pub publisher.Publish
 			writeError(w, http.StatusInternalServerError, "lookup failed")
 			return
 		} else if found {
+			metrics.Counter("submission_duplicate_total", "Duplicate submissions detected by sha256.", nil, 1)
 			writeErrorWithID(w, http.StatusConflict, "duplicate submission", existingID)
 			return
 		}
 
 		// Upload artifact to MinIO.
+		uploadStart := time.Now()
 		if _, err := file.Seek(0, io.SeekStart); err != nil {
 			log.ErrorContext(r.Context(), "failed to reset upload file pointer", "error", err)
 			writeError(w, http.StatusInternalServerError, "failed to read file")
 			return
 		}
 		artifactPath, err := ms.Upload(r.Context(), submissionID, file, size, sha256hex)
+		metrics.Histogram("minio_operation_duration_seconds", "MinIO operation duration in seconds.", metrics.Labels("operation", "artifact_upload"), metrics.SinceSeconds(uploadStart))
 		if err != nil {
 			log.ErrorContext(r.Context(), "minio upload failed", "submission_id", submissionID, "error", err)
 			writeError(w, http.StatusInternalServerError, "failed to store artifact")
@@ -136,6 +143,7 @@ func Submit(ms *store.MinioStore, pg *store.PostgresStore, pub publisher.Publish
 		}
 		if err := pg.Insert(r.Context(), meta); err != nil {
 			if errors.Is(err, cerrs.ErrDuplicateSubmission) {
+				metrics.Counter("submission_duplicate_total", "Duplicate submissions detected by sha256.", nil, 1)
 				log.ErrorContext(r.Context(), "orphaned minio artifact after duplicate insert race", "submission_id", submissionID, "artifact_path", artifactPath)
 				existingID, found, findErr := pg.FindBySHA256(r.Context(), sha256hex)
 				if findErr != nil {
@@ -183,6 +191,8 @@ func Submit(ms *store.MinioStore, pg *store.PostgresStore, pub publisher.Publish
 			"port", cfg.Port,
 			"team_name", cfg.TeamName,
 		)
+		metrics.Counter("submissions_accepted_total", "Accepted submissions by language and protocol.", metrics.Labels("language", cfg.Language, "protocol", cfg.Protocol), 1)
+		metrics.Histogram("submission_upload_bytes", "Submission upload size in bytes.", nil, float64(size))
 
 		writeJSON(w, http.StatusCreated, submitResponse{
 			SubmissionID: submissionID,

@@ -1,0 +1,187 @@
+{
+  "annotations": {
+    "list": []
+  },
+  "editable": true,
+  "panels": [
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "iicpc-prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 0
+      },
+      "id": 1,
+      "targets": [
+        {
+          "expr": "sum by (service, path, status) (rate(iicpc_http_requests_total[5m]))",
+          "legendFormat": "{{service}} {{path}} {{status}}",
+          "refId": "A"
+        }
+      ],
+      "title": "HTTP Rate",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "iicpc-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 0
+      },
+      "id": 2,
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum by (le, service, path) (rate(iicpc_http_request_duration_seconds_bucket[5m])))",
+          "legendFormat": "{{service}} {{path}} p95",
+          "refId": "A"
+        }
+      ],
+      "title": "HTTP p95 Duration",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "iicpc-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 8
+      },
+      "id": 3,
+      "targets": [
+        {
+          "expr": "sum by (service, operation, result) (rate(iicpc_db_query_total[5m]))",
+          "legendFormat": "{{service}} {{operation}} {{result}}",
+          "refId": "A"
+        }
+      ],
+      "title": "DB Query Rate",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "iicpc-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 8
+      },
+      "id": 4,
+      "targets": [
+        {
+          "expr": "sum by (service, topic, result) (rate(iicpc_kafka_messages_produced_total[5m]))",
+          "legendFormat": "{{service}} {{topic}} {{result}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Kafka Produce Rate",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "iicpc-prometheus"
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 8,
+        "x": 0,
+        "y": 16
+      },
+      "id": 5,
+      "targets": [
+        {
+          "expr": "iicpc_pgxpool_acquired_conns / iicpc_pgxpool_max_conns",
+          "legendFormat": "{{service}}",
+          "refId": "A"
+        }
+      ],
+      "title": "pgx Pool Saturation",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "iicpc-prometheus"
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 8,
+        "x": 8,
+        "y": 16
+      },
+      "id": 6,
+      "targets": [
+        {
+          "expr": "increase(iicpc_bot_telemetry_events_dropped_total[5m]) or vector(0)",
+          "legendFormat": "bot telemetry drops",
+          "refId": "A"
+        },
+        {
+          "expr": "increase(iicpc_ebpf_ringbuf_dropped_total[5m]) or vector(0)",
+          "legendFormat": "eBPF ringbuf drops",
+          "refId": "B"
+        }
+      ],
+      "title": "Measurement Drops",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "iicpc-prometheus"
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 8,
+        "x": 16,
+        "y": 16
+      },
+      "id": 7,
+      "targets": [
+        {
+          "expr": "pg_up",
+          "legendFormat": "postgres exporter",
+          "refId": "A"
+        }
+      ],
+      "title": "Postgres Exporter Up",
+      "type": "stat"
+    }
+  ],
+  "refresh": "10s",
+  "schemaVersion": 39,
+  "tags": [
+    "iicpc",
+    "prometheus",
+    "observability"
+  ],
+  "time": {
+    "from": "now-1h",
+    "to": "now"
+  },
+  "title": "IICPC Observability",
+  "uid": "iicpc-observability",
+  "version": 1
+}

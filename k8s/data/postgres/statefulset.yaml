@@ -58,6 +58,33 @@ spec:
             limits:
               cpu: "1"
               memory: 1Gi
+        - name: postgres-exporter
+          image: quay.io/prometheuscommunity/postgres-exporter:v0.15.0
+          ports:
+            - name: metrics
+              containerPort: 9187
+          env:
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-secret
+                  key: password
+            - name: DATA_SOURCE_NAME
+              value: postgres://iicpc:$(POSTGRES_PASSWORD)@localhost:5432/iicpc?sslmode=disable
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            capabilities:
+              drop:
+                - ALL
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
       securityContext:
         runAsNonRoot: true
         # runAsNonRoot only asserts uid != 0; without an explicit numeric uid the

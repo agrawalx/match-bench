@@ -93,8 +93,8 @@
             "type": "loki",
             "uid": "iicpc-loki"
           },
-          "expr": "sum by (level) (count_over_time({service_name=\"submission-api\", environment=\"$environment\"} | json [$__interval]))",
-          "legendFormat": "{{level}}",
+          "expr": "sum by (service_name, level) (count_over_time({service_name=~\"$service\", environment=~\"$environment\"} | json [$__interval]))",
+          "legendFormat": "{{service_name}} {{level}}",
           "refId": "A"
         }
       ],
@@ -129,7 +129,7 @@
             "type": "loki",
             "uid": "iicpc-loki"
           },
-          "expr": "{service_name=\"submission-api\", environment=\"$environment\"} | json | level=~\"$level\"",
+          "expr": "{service_name=~\"$service\", environment=~\"$environment\"} | json | level=~\"$level\"",
           "refId": "A"
         }
       ],
@@ -192,7 +192,7 @@
             "type": "loki",
             "uid": "iicpc-loki"
           },
-          "expr": "sum(count_over_time({service_name=\"submission-api\", environment=\"$environment\"} | json | level=\"ERROR\" [$__range]))",
+          "expr": "sum(count_over_time({service_name=~\"$service\", environment=~\"$environment\"} | json | level=\"ERROR\" [$__range]))",
           "refId": "A"
         }
       ],
@@ -258,7 +258,7 @@
             "type": "loki",
             "uid": "iicpc-loki"
           },
-          "expr": "topk(10, sum by (http_path) (count_over_time({service_name=\"submission-api\", environment=\"$environment\"} | json | http_path != \"\" [$__range])))",
+          "expr": "topk(10, sum by (service_name, http_path) (count_over_time({service_name=~\"$service\", environment=~\"$environment\"} | json | http_path != \"\" [$__range])))",
           "refId": "A"
         }
       ],
@@ -271,26 +271,52 @@
   "tags": [
     "iicpc",
     "logs",
-    "submission-api"
+    "service-logs"
   ],
   "templating": {
     "list": [
       {
         "current": {
           "selected": false,
+          "text": "submission-api",
+          "value": "submission-api"
+        },
+        "allValue": ".*",
+        "hide": 0,
+        "includeAll": true,
+        "label": "Service",
+        "multi": true,
+        "name": "service",
+        "options": [],
+        "query": {
+          "label": "service_name",
+          "refId": "LokiVariableQueryEditor-Service",
+          "stream": "{}",
+          "type": 1
+        },
+        "refresh": 1,
+        "regex": "",
+        "skipUrlSync": false,
+        "sort": 1,
+        "type": "query"
+      },
+      {
+        "current": {
+          "selected": false,
           "text": "local",
           "value": "local"
         },
+        "allValue": ".*",
         "hide": 0,
-        "includeAll": false,
+        "includeAll": true,
         "label": "Environment",
-        "multi": false,
+        "multi": true,
         "name": "environment",
         "options": [],
         "query": {
           "label": "environment",
           "refId": "LokiVariableQueryEditor-Environment",
-          "stream": "{service_name=\"submission-api\"}",
+          "stream": "{service_name=~\"$service\"}",
           "type": 1
         },
         "refresh": 1,
@@ -313,6 +339,7 @@
             "ERROR"
           ]
         },
+        "allValue": ".*",
         "hide": 0,
         "includeAll": true,
         "label": "Level",
@@ -351,8 +378,8 @@
     "to": "now"
   },
   "timezone": "browser",
-  "title": "Submission API Logs",
-  "uid": "submission-api-logs",
+  "title": "Service Logs",
+  "uid": "service-logs",
   "version": 1,
   "weekStart": ""
 }

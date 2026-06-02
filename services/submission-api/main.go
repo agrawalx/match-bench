@@ -12,6 +12,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/iicpc/libs/logger"
+	"github.com/iicpc/libs/metrics"
 	"github.com/iicpc/submission-api/internal/consumer"
 	"github.com/iicpc/submission-api/internal/handler"
 	"github.com/iicpc/submission-api/internal/publisher"
@@ -64,6 +65,18 @@ func main() {
 		os.Exit(1)
 	}
 	defer pgStore.Close()
+	go func() {
+		ticker := time.NewTicker(15 * time.Second)
+		defer ticker.Stop()
+		for {
+			pgStore.RecordPoolStats()
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+			}
+		}
+	}()
 
 	// Seed the canonical load-test scenarios (constant, spike, ramp) into the
 	// scenarios table. The seeder uses INSERT ... ON CONFLICT (name) DO NOTHING,
@@ -112,6 +125,7 @@ func main() {
 	r.Use(middleware.RequestID)
 	r.Use(middleware.RealIP)
 	r.Use(requestLogger(log))
+	r.Use(metrics.HTTPMiddleware("submission-api", chiRoutePattern))
 	r.Use(middleware.Recoverer)
 
 	healthHandler, err := handler.Health(log)
@@ -122,6 +136,7 @@ func main() {
 
 	r.Get("/health", healthHandler) // liveness: static, no dependencies
 	r.Get("/ready", handler.Readiness(pgStore.Ping, log))
+	r.Handle("/metrics", metrics.Handler())
 	r.Post("/submit", handler.Submit(minioStore, pgStore, kafkaPub, log))
 	// Route param MUST match handler.GetSubmission's chi.URLParam("submission_id").
 	r.Get("/submissions/{submission_id}", handler.GetSubmission(pgStore, log))
@@ -158,6 +173,13 @@ func main() {
 		log.Error("shutdown error", "error", err)
 	}
 	log.Info("server stopped")
+}
+
+func chiRoutePattern(r *http.Request) string {
+	if routeCtx := chi.RouteContext(r.Context()); routeCtx != nil {
+		return routeCtx.RoutePattern()
+	}
+	return ""
 }
 
 func requestLogger(log *slog.Logger) func(http.Handler) http.Handler {

@@ -7,6 +7,10 @@ spec:
   selector:
     app: postgres
   ports:
-    - port: 5432
+    - name: postgres
+      port: 5432
       targetPort: 5432
+    - name: metrics
+      port: 9187
+      targetPort: 9187
   clusterIP: None   # headless — direct pod DNS: postgres-0.postgres.data.svc.cluster.local

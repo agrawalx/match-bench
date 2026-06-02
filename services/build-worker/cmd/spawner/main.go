@@ -9,12 +9,14 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/iicpc/build-worker/internal/consumer"
 	k8sspawner "github.com/iicpc/build-worker/internal/k8s"
 	"github.com/iicpc/build-worker/internal/publisher"
 	"github.com/iicpc/build-worker/internal/store"
 	"github.com/iicpc/libs/logger"
+	"github.com/iicpc/libs/metrics"
 )
 
 func main() {
@@ -26,6 +28,15 @@ func main() {
 	if lokiClient != nil {
 		defer lokiClient.Close()
 	}
+
+	metricsPort := envOr("METRICS_PORT", "9090")
+	metricsSrv, err := metrics.StartServer(":" + metricsPort)
+	if err != nil {
+		log.Error("metrics server start failed", "port", metricsPort, "error", err)
+		os.Exit(1)
+	}
+	defer metricsSrv.Close()
+	log.Info("metrics server started", "port", metricsPort)
 
 	dbURL := mustEnv("DATABASE_URL")
 	minioEndpoint := mustEnv("MINIO_ENDPOINT")
@@ -45,6 +56,18 @@ func main() {
 		os.Exit(1)
 	}
 	defer pgStore.Close()
+	go func() {
+		ticker := time.NewTicker(15 * time.Second)
+		defer ticker.Stop()
+		for {
+			pgStore.RecordPoolStats()
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+			}
+		}
+	}()
 
 	minioStore, err := store.NewMinioStore(minioEndpoint, minioAccess, minioSecret, minioBucket, minioSSL)
 	if err != nil {

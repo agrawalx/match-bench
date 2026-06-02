@@ -29,6 +29,7 @@ import (
 	"github.com/iicpc/bot-fleet-controller/internal/orchestrator"
 	"github.com/iicpc/bot-fleet-controller/internal/store"
 	"github.com/iicpc/libs/logger"
+	"github.com/iicpc/libs/metrics"
 )
 
 func main() {
@@ -59,6 +60,18 @@ func main() {
 		os.Exit(1)
 	}
 	defer st.Close()
+	go func() {
+		ticker := time.NewTicker(15 * time.Second)
+		defer ticker.Stop()
+		for {
+			st.RecordPoolStats()
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+			}
+		}
+	}()
 
 	producer := controller.NewProducer(kafkaBrokers, log)
 	defer producer.Close()
@@ -97,9 +110,14 @@ func main() {
 	r.Use(middleware.RequestID)
 	r.Use(middleware.RealIP)
 	r.Use(requestLogger(log))
+	// Problem: the single-replica controller is operationally critical, but
+	// only exposed health probes. Fix: export RED metrics and controller domain
+	// gauges/counters so alerts can detect stalled or unhealthy coordination.
+	r.Use(metrics.HTTPMiddleware("bot-fleet-controller", chiRoutePattern))
 	r.Use(middleware.Recoverer)
 	r.Get("/healthz", handler.Healthz(sessions))
 	r.Get("/readyz", handler.Readyz(ready))
+	r.Handle("/metrics", metrics.Handler())
 
 	srv := &http.Server{
 		Addr:         ":" + port,
@@ -132,6 +150,13 @@ func main() {
 		log.Error("shutdown error", "error", err)
 	}
 	log.Info("controller stopped")
+}
+
+func chiRoutePattern(r *http.Request) string {
+	if routeCtx := chi.RouteContext(r.Context()); routeCtx != nil {
+		return routeCtx.RoutePattern()
+	}
+	return ""
 }
 
 // runConfigFromEnv loads the deployment-wide operational knobs. The

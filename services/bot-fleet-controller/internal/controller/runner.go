@@ -9,6 +9,7 @@ import (
 
 	"github.com/iicpc/bot-fleet-controller/internal/orchestrator"
 	"github.com/iicpc/bot-fleet-controller/internal/store"
+	"github.com/iicpc/libs/metrics"
 	"github.com/iicpc/schemas/topics"
 )
 
@@ -148,6 +149,7 @@ func (r *Runner) Run(parent context.Context, req topics.BenchmarkRequested) {
 
 	workerCount := computeWorkerCount(len(scenario.TaskSpecs))
 	log = log.With("scenario_name", scenario.Name, "total_tasks", len(scenario.TaskSpecs), "worker_count", workerCount)
+	metrics.Counter("sessions_started_total", "Benchmark sessions started by scenario.", metrics.Labels("scenario_name", scenario.Name), 1)
 
 	sess := &Session{
 		SessionID:     req.SessionID,
@@ -181,8 +183,17 @@ func (r *Runner) runSession(
 	workerCount uint32,
 	log *slog.Logger,
 ) {
+	sessionStart := time.Now()
+	result := "failed"
+	defer func() {
+		labels := metrics.Labels("scenario_name", scenario.Name, "result", result)
+		metrics.Counter("sessions_completed_total", "Benchmark sessions completed by scenario and result.", labels, 1)
+		metrics.Histogram("session_duration_seconds", "Benchmark session duration in seconds.", labels, metrics.SinceSeconds(sessionStart))
+	}()
 	// Step 1 — look up submission.
+	stageStart := time.Now()
 	sub, err := r.store.GetSubmission(ctx, sess.SubmissionID)
+	recordSessionStage("load_submission", stageStart, err)
 	if err != nil {
 		r.fail(ctx, sess, "lookup submission: "+err.Error(), log)
 		return
@@ -195,13 +206,18 @@ func (r *Runner) runSession(
 	// Step 2 — allocate sandbox slot.
 	r.transition(ctx, sess, topics.RunStatusDeploying, "allocating sandbox slot", log)
 	image := r.harbor.ImageRef(sess.SubmissionID)
+	stageStart = time.Now()
 	if _, err := r.orch.CreateSlot(ctx, sess.SessionID, sess.ContestantID, image, sub.Port); err != nil {
+		recordSessionStage("create_slot", stageStart, err)
 		r.fail(ctx, sess, "create slot: "+err.Error(), log)
 		return
 	}
+	recordSessionStage("create_slot", stageStart, nil)
 	sess.SlotID = sess.SessionID
 
+	stageStart = time.Now()
 	slot, err := r.orch.WaitForReady(ctx, sess.SessionID, r.runConfig.DeployDeadline, 500*time.Millisecond)
+	recordSessionStage("wait_slot_ready", stageStart, err)
 	if err != nil || slot.State != orchestrator.StateReady {
 		msg := "slot did not become ready"
 		if err != nil {
@@ -227,30 +243,39 @@ func (r *Runner) runSession(
 	// wait_for_barrier always uses BarrierEvent.target_epoch_unix_nanos.
 	// Now we compute the epoch AFTER fan-in (step 5) so it stays fresh.
 	specs := r.buildWorkloadSpecs(sess, sub, scenario, workerCount)
+	stageStart = time.Now()
 	if err := r.producer.PublishWorkloadSpec(ctx, specs); err != nil {
+		recordSessionStage("publish_workload", stageStart, err)
 		r.fail(ctx, sess, "publish workload specs: "+err.Error(), log)
 		r.releaseSlot(sess, log)
 		return
 	}
+	recordSessionStage("publish_workload", stageStart, nil)
 	r.transition(ctx, sess, topics.RunStatusWaitingReady, "fanning in ready signals", log)
 
 	// Step 4 — fan-in ready signals.
+	stageStart = time.Now()
 	if err := r.awaitReady(ctx, sess, log); err != nil {
+		recordSessionStage("await_ready", stageStart, err)
 		r.fail(ctx, sess, err.Error(), log)
 		r.releaseSlot(sess, log)
 		return
 	}
+	recordSessionStage("await_ready", stageStart, nil)
 
 	// Step 5 — compute barrier epoch and publish BarrierEvent.
 	// BarrierSafetyGap of 500ms is comfortable here because fan-in is done
 	// and all workers are blocked on wait_for_barrier; the only variance
 	// left is Kafka delivery time of the BarrierEvent itself (~ms).
 	barrierEpochNs := uint64(time.Now().Add(r.runConfig.BarrierSafetyGap).UnixNano())
+	stageStart = time.Now()
 	if err := r.producer.PublishBarrier(ctx, sess.SessionID, barrierEpochNs); err != nil {
+		recordSessionStage("publish_barrier", stageStart, err)
 		r.fail(ctx, sess, "publish barrier: "+err.Error(), log)
 		r.releaseSlot(sess, log)
 		return
 	}
+	recordSessionStage("publish_barrier", stageStart, nil)
 	r.transition(ctx, sess, topics.RunStatusBarrierFired, "barrier published", log)
 	r.transition(ctx, sess, topics.RunStatusRunning, "bots firing", log)
 
@@ -279,8 +304,11 @@ func (r *Runner) runSession(
 	}
 
 	// Step 7 — cleanup + complete.
+	stageStart = time.Now()
 	r.releaseSlot(sess, log)
+	recordSessionStage("release_slot", stageStart, nil)
 	r.transition(ctx, sess, topics.RunStatusCompleted, "run completed", log)
+	result = "completed"
 }
 
 // computeWorkerCount = ceil(totalTasks / MaxTasksPerWorker), clamped to >= 1.
@@ -312,6 +340,7 @@ func (r *Runner) transition(ctx context.Context, sess *Session, status, message 
 	if err := r.producer.PublishStatus(ctx, evt); err != nil {
 		log.Error("publish status failed", "status", status, "error", err)
 	} else {
+		metrics.Counter("session_transitions_total", "Session transitions published by status.", metrics.Labels("status", status), 1)
 		log.Info("session transition", "status", status, "message", message)
 	}
 }
@@ -384,8 +413,10 @@ func (r *Runner) awaitReady(ctx context.Context, sess *Session, log *slog.Logger
 			)
 		case <-deadline.C:
 			if len(sess.ReadyReceived) == 0 {
+				metrics.Counter("ready_none_total", "Sessions with no ready signals before deadline.", nil, 1)
 				return errors.New("no ready signals before deadline")
 			}
+			metrics.Counter("ready_partial_total", "Sessions with partial ready fan-in.", nil, 1)
 			log.Warn("ready deadline expired with partial fan-in",
 				"received", len(sess.ReadyReceived),
 				"expected", sess.WorkerCount,
@@ -395,6 +426,7 @@ func (r *Runner) awaitReady(ctx context.Context, sess *Session, log *slog.Logger
 			return ctx.Err()
 		}
 	}
+	metrics.Counter("ready_signals_total", "Ready fan-in completions by result.", metrics.Labels("result", "full"), 1)
 	return nil
 }
 
@@ -438,4 +470,15 @@ func (r *Runner) buildWorkloadSpecs(
 		})
 	}
 	return specs
+}
+
+// recordSessionStage exposes blocking controller lifecycle stages.
+func recordSessionStage(stage string, start time.Time, err error) {
+	result := "ok"
+	if err != nil {
+		result = "error"
+	}
+	labels := metrics.Labels("stage", stage, "result", result)
+	metrics.Counter("session_stage_total", "Benchmark session stages by result.", labels, 1)
+	metrics.Histogram("session_stage_duration_seconds", "Benchmark session stage duration in seconds.", labels, metrics.SinceSeconds(start))
 }

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/iicpc/libs/metrics"
 	cerrs "github.com/iicpc/sandbox-orchestrator/internal/errors"
 	"github.com/iicpc/sandbox-orchestrator/internal/k8s"
 	"github.com/iicpc/sandbox-orchestrator/internal/store"
@@ -65,6 +66,7 @@ func CreateSlot(mgr *k8s.Manager, slots *store.SlotStore, log *slog.Logger) http
 			// Refresh the cached state so the controller sees current pod status.
 			state, msg, err := mgr.Refresh(ctx, req.SlotID)
 			if err != nil && !errors.Is(err, cerrs.ErrSlotNotFound) {
+				recordSlot("refresh", "error", "")
 				log.ErrorContext(ctx, "refresh slot", "slot_id", req.SlotID, "error", err)
 				writeError(w, http.StatusInternalServerError, "refresh slot: "+err.Error())
 				return
@@ -76,22 +78,28 @@ func CreateSlot(mgr *k8s.Manager, slots *store.SlotStore, log *slog.Logger) http
 				existing.Message = msg
 				slots.Put(existing)
 			}
+			recordSlot("create_idempotent", "ok", string(existing.State))
 			writeJSON(w, http.StatusOK, toResponse(existing))
 			return
 		}
 
+		start := time.Now()
 		if err := mgr.CreateSlot(ctx, req.SlotID, req.ContestantID, req.Image, req.Port); err != nil {
+			metrics.Histogram("slot_create_duration_seconds", "Sandbox slot create duration in seconds.", metrics.Labels("result", "error"), metrics.SinceSeconds(start))
 			switch {
 			case errors.Is(err, cerrs.ErrSlotImageMismatch):
+				recordSlot("create", "conflict", "")
 				writeError(w, http.StatusConflict, err.Error())
 			case errors.Is(err, cerrs.ErrInvalidRequest):
 				writeError(w, http.StatusBadRequest, err.Error())
 			default:
+				recordSlot("create", "error", "")
 				log.ErrorContext(ctx, "create slot", "slot_id", req.SlotID, "error", err)
 				writeError(w, http.StatusInternalServerError, "create slot: "+err.Error())
 			}
 			return
 		}
+		metrics.Histogram("slot_create_duration_seconds", "Sandbox slot create duration in seconds.", metrics.Labels("result", "ok"), metrics.SinceSeconds(start))
 
 		state, msg, _ := mgr.Refresh(ctx, req.SlotID) // newly created pod is in Pending
 		slot := &store.Slot{
@@ -104,6 +112,7 @@ func CreateSlot(mgr *k8s.Manager, slots *store.SlotStore, log *slog.Logger) http
 			CreatedAt: time.Now().UTC(),
 		}
 		slots.Put(slot)
+		recordSlot("create", "ok", string(state))
 		log.InfoContext(ctx, "slot created", "slot_id", req.SlotID, "image", req.Image, "port", req.Port)
 		writeJSON(w, http.StatusCreated, toResponse(slot))
 	}
@@ -130,10 +139,12 @@ func GetSlot(mgr *k8s.Manager, slots *store.SlotStore, log *slog.Logger) http.Ha
 		if errors.Is(err, cerrs.ErrSlotNotFound) {
 			// Pod was deleted externally; drop the stale entry and 404.
 			slots.Delete(slotID)
+			recordSlot("refresh", "not_found", "")
 			writeError(w, http.StatusNotFound, "slot not found")
 			return
 		}
 		if err != nil {
+			recordSlot("refresh", "error", "")
 			log.ErrorContext(ctx, "refresh slot", "slot_id", slotID, "error", err)
 			writeError(w, http.StatusInternalServerError, "refresh slot: "+err.Error())
 			return
@@ -142,6 +153,7 @@ func GetSlot(mgr *k8s.Manager, slots *store.SlotStore, log *slog.Logger) http.Ha
 		slot.State = state
 		slot.Message = msg
 		slots.Put(slot)
+		recordSlot("refresh", "ok", string(state))
 		writeJSON(w, http.StatusOK, toResponse(slot))
 	}
 }
@@ -165,13 +177,23 @@ func DeleteSlot(mgr *k8s.Manager, slots *store.SlotStore, log *slog.Logger) http
 			slots.Put(slot)
 		}
 		if err := mgr.DeleteSlot(ctx, slotID); err != nil {
+			recordSlot("delete", "error", "")
 			log.ErrorContext(ctx, "delete slot", "slot_id", slotID, "error", err)
 			writeError(w, http.StatusInternalServerError, "delete slot: "+err.Error())
 			return
 		}
 		slots.Delete(slotID)
+		recordSlot("delete", "ok", "")
 		log.InfoContext(ctx, "slot released", "slot_id", slotID)
 		w.WriteHeader(http.StatusNoContent)
+	}
+}
+
+// recordSlot turns slot lifecycle state into Prometheus counters.
+func recordSlot(operation, result, state string) {
+	metrics.Counter("slots_operations_total", "Sandbox slot operations by operation and result.", metrics.Labels("operation", operation, "result", result), 1)
+	if state != "" {
+		metrics.Counter("slot_refresh_total", "Sandbox slot refreshes by state and result.", metrics.Labels("state", state, "result", result), 1)
 	}
 }
 

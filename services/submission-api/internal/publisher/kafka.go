@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/iicpc/libs/metrics"
 	"github.com/iicpc/schemas/topics"
 	cerrs "github.com/iicpc/submission-api/internal/errors"
 	"github.com/iicpc/submission-api/internal/utils"
@@ -116,6 +117,7 @@ func (p *KafkaPublisher) PublishBuildRequested(ctx context.Context, meta Publish
 	if p.noop {
 		return nil
 	}
+	start := time.Now()
 
 	msg := topics.SubmissionBuildRequested{
 		SubmissionID: meta.SubmissionID,
@@ -133,22 +135,26 @@ func (p *KafkaPublisher) PublishBuildRequested(ctx context.Context, meta Publish
 
 	payload, err := json.Marshal(msg)
 	if err != nil {
+		recordProduce(topics.TopicSubmissionBuildRequested, start, err)
 		return fmt.Errorf("%w: marshal kafka message: %v", cerrs.ErrInternal, err)
 	}
 
 	writeCtx, cancel := context.WithTimeout(ctx, writerTimeout)
 	defer cancel()
 
-	return p.buildWriter.WriteMessages(writeCtx, kafka.Message{
+	err = p.buildWriter.WriteMessages(writeCtx, kafka.Message{
 		Key:   []byte(meta.SubmissionID),
 		Value: payload,
 	})
+	recordProduce(topics.TopicSubmissionBuildRequested, start, err)
+	return err
 }
 
 func (p *KafkaPublisher) PublishBenchmarkRequested(ctx context.Context, meta BenchmarkMeta) error {
 	if p.noop {
 		return nil
 	}
+	start := time.Now()
 
 	msg := topics.BenchmarkRequested{
 		SessionID:    meta.SessionID,
@@ -161,16 +167,19 @@ func (p *KafkaPublisher) PublishBenchmarkRequested(ctx context.Context, meta Ben
 
 	payload, err := json.Marshal(msg)
 	if err != nil {
+		recordProduce(topics.TopicBenchmarkRequested, start, err)
 		return fmt.Errorf("%w: marshal benchmark request: %v", cerrs.ErrInternal, err)
 	}
 
 	writeCtx, cancel := context.WithTimeout(ctx, writerTimeout)
 	defer cancel()
 
-	return p.benchmarkWriter.WriteMessages(writeCtx, kafka.Message{
+	err = p.benchmarkWriter.WriteMessages(writeCtx, kafka.Message{
 		Key:   []byte(meta.SessionID),
 		Value: payload,
 	})
+	recordProduce(topics.TopicBenchmarkRequested, start, err)
+	return err
 }
 
 func (p *KafkaPublisher) Close() error {
@@ -191,4 +200,15 @@ func (p *KafkaPublisher) Close() error {
 		}
 	}
 	return firstErr
+}
+
+// recordProduce exposes publish durability for submission-api topics.
+func recordProduce(topic string, start time.Time, err error) {
+	result := "ok"
+	if err != nil {
+		result = "error"
+	}
+	labels := metrics.Labels("service", "submission-api", "topic", topic, "result", result)
+	metrics.Counter("kafka_messages_produced_total", "Kafka messages produced by topic and result.", labels, 1)
+	metrics.Histogram("kafka_produce_duration_seconds", "Kafka produce duration in seconds.", labels, metrics.SinceSeconds(start))
 }

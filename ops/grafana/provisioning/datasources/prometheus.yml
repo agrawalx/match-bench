@@ -1,0 +1,9 @@
+apiVersion: 1
+
+datasources:
+  - name: IICPC Prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    uid: iicpc-prometheus
+    isDefault: false

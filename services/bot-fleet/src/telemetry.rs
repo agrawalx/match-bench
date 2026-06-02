@@ -14,7 +14,10 @@ use tracing::{error, warn};
 
 use iicpc_schemas_rust::OrderSentEvent;
 
-use crate::kafka::{self, KafkaProducer};
+use crate::{
+    kafka::{self, KafkaProducer},
+    metrics,
+};
 
 /// TelemetrySink accepts per-order telemetry from bot tasks and forwards it to
 /// one background aggregator for batched Kafka publishing.
@@ -58,9 +61,11 @@ impl TelemetrySink {
         match self.tx.try_send(event) {
             Ok(()) => {}
             Err(TrySendError::Full(_)) => {
+                metrics::telemetry_dropped();
                 warn!("dropping telemetry event because channel is full");
             }
             Err(TrySendError::Closed(_)) => {
+                metrics::telemetry_dropped();
                 error!("dropping telemetry event because aggregator channel is closed");
             }
         }
@@ -168,6 +173,7 @@ async fn flush(
         };
         let payload = rmp_serde::to_vec_named(&batch).context("encode orders.sent messagepack")?;
         kafka::publish_bytes(producer, topic, session_id, &payload).await?;
+        metrics::telemetry_flushed(n);
         events.drain(0..n);
     }
     Ok(())

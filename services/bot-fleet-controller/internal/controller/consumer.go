@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/iicpc/libs/metrics"
 	"github.com/iicpc/schemas/topics"
 	kafka "github.com/segmentio/kafka-go"
 )
@@ -83,22 +84,29 @@ func (c *Consumer) StartBenchmarkRequested(ctx context.Context) {
 			if ctx.Err() != nil {
 				return
 			}
+			recordConsumer(topics.TopicBenchmarkRequested, "fetch_error", 0)
 			c.log.Error("fetch benchmark.requested", "error", err)
 			continue
 		}
+		start := time.Now()
 
 		var req topics.BenchmarkRequested
 		if err := json.Unmarshal(m.Value, &req); err != nil {
+			recordConsumer(topics.TopicBenchmarkRequested, "decode_error", metrics.SinceSeconds(start))
 			c.log.Error("unmarshal benchmark.requested", "error", err, "key", string(m.Key))
-			_ = c.benchmarkReader.CommitMessages(ctx, m)
+			recordControllerCommit(topics.TopicBenchmarkRequested, c.benchmarkReader.CommitMessages(ctx, m))
 			continue
 		}
 
 		// Synchronous: blocks until the session reaches a terminal state.
 		c.runner.Run(ctx, req)
+		recordConsumer(topics.TopicBenchmarkRequested, "ok", metrics.SinceSeconds(start))
 
 		if err := c.benchmarkReader.CommitMessages(ctx, m); err != nil {
+			recordControllerCommit(topics.TopicBenchmarkRequested, err)
 			c.log.Warn("commit benchmark.requested", "session_id", req.SessionID, "error", err)
+		} else {
+			recordControllerCommit(topics.TopicBenchmarkRequested, nil)
 		}
 	}
 }
@@ -115,27 +123,53 @@ func (c *Consumer) StartBotReady(ctx context.Context) {
 			if ctx.Err() != nil {
 				return
 			}
+			recordConsumer(topics.TopicBotReady, "fetch_error", 0)
 			c.log.Error("fetch bot.ready", "error", err)
 			continue
 		}
+		start := time.Now()
 
 		var sig topics.ReadySignal
 		if err := json.Unmarshal(m.Value, &sig); err != nil {
+			recordConsumer(topics.TopicBotReady, "decode_error", metrics.SinceSeconds(start))
 			c.log.Error("unmarshal bot.ready", "error", err, "key", string(m.Key))
-			_ = c.botReadyReader.CommitMessages(ctx, m)
+			recordControllerCommit(topics.TopicBotReady, c.botReadyReader.CommitMessages(ctx, m))
 			continue
 		}
 
 		if ok := c.sessions.DispatchReady(sig); !ok {
+			metrics.Counter("controller_unknown_ready_signal_total", "Ready signals for unknown sessions.", nil, 1)
 			c.log.Warn("ready signal for unknown session",
 				"session_id", sig.SessionID,
 				"worker_id", sig.WorkerID,
 				"worker_index", sig.WorkerIndex,
 			)
 		}
+		recordConsumer(topics.TopicBotReady, "ok", metrics.SinceSeconds(start))
 
 		if err := c.botReadyReader.CommitMessages(ctx, m); err != nil {
+			recordControllerCommit(topics.TopicBotReady, err)
 			c.log.Warn("commit bot.ready", "session_id", sig.SessionID, "error", err)
+		} else {
+			recordControllerCommit(topics.TopicBotReady, nil)
 		}
 	}
+}
+
+// recordConsumer/recordControllerCommit expose the controller's inbound
+// control topics.
+func recordConsumer(topic, result string, durationSeconds float64) {
+	labels := metrics.Labels("service", "bot-fleet-controller", "topic", topic, "result", result)
+	metrics.Counter("kafka_messages_consumed_total", "Kafka messages consumed by topic and result.", labels, 1)
+	if durationSeconds > 0 {
+		metrics.Histogram("kafka_message_process_duration_seconds", "Kafka message processing duration in seconds.", labels, durationSeconds)
+	}
+}
+
+func recordControllerCommit(topic string, err error) {
+	result := "ok"
+	if err != nil {
+		result = "error"
+	}
+	metrics.Counter("kafka_consumer_commit_total", "Kafka consumer commits by topic and result.", metrics.Labels("service", "bot-fleet-controller", "topic", topic, "result", result), 1)
 }

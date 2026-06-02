@@ -30,6 +30,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/iicpc/libs/logger"
+	"github.com/iicpc/libs/metrics"
 	"github.com/iicpc/sandbox-orchestrator/internal/handler"
 	"github.com/iicpc/sandbox-orchestrator/internal/k8s"
 	"github.com/iicpc/sandbox-orchestrator/internal/store"
@@ -128,10 +129,14 @@ func main() {
 	r.Use(middleware.RequestID)
 	r.Use(middleware.RealIP)
 	r.Use(requestLogger(log))
+	// Problem: operators could see slot API calls only by tailing logs. Fix:
+	// expose RED metrics for each stable route template on /metrics.
+	r.Use(metrics.HTTPMiddleware("sandbox-orchestrator", chiRoutePattern))
 	r.Use(middleware.Recoverer)
 
 	r.Get("/healthz", handler.Healthz)
 	r.Get("/readyz", handler.Readyz(ready))
+	r.Handle("/metrics", metrics.Handler())
 	r.Post("/slots", handler.CreateSlot(mgr, slots, log))
 	r.Get("/slots/{slot_id}", handler.GetSlot(mgr, slots, log))
 	r.Delete("/slots/{slot_id}", handler.DeleteSlot(mgr, slots, log))
@@ -167,6 +172,13 @@ func main() {
 		log.Error("shutdown error", "error", err)
 	}
 	log.Info("server stopped")
+}
+
+func chiRoutePattern(r *http.Request) string {
+	if routeCtx := chi.RouteContext(r.Context()); routeCtx != nil {
+		return routeCtx.RoutePattern()
+	}
+	return ""
 }
 
 func requestLogger(log *slog.Logger) func(http.Handler) http.Handler {

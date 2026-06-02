@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/iicpc/libs/metrics"
 	"github.com/iicpc/schemas/topics"
 	kafka "github.com/segmentio/kafka-go"
 )
@@ -77,10 +78,12 @@ func (p *Producer) PublishWorkloadSpec(ctx context.Context, specs []topics.Workl
 	if p.noop {
 		return nil
 	}
+	start := time.Now()
 	msgs := make([]kafka.Message, 0, len(specs))
 	for _, spec := range specs {
 		payload, err := json.Marshal(spec)
 		if err != nil {
+			recordProduce(topics.TopicWorkloadAssignments, start, err)
 			return fmt.Errorf("marshal workload spec: %w", err)
 		}
 		msgs = append(msgs, kafka.Message{
@@ -91,7 +94,9 @@ func (p *Producer) PublishWorkloadSpec(ctx context.Context, specs []topics.Workl
 	writeCtx, cancel := context.WithTimeout(ctx, writerTimeout)
 	defer cancel()
 
-	return p.workloadWriter.WriteMessages(writeCtx, msgs...)
+	err := p.workloadWriter.WriteMessages(writeCtx, msgs...)
+	recordProduce(topics.TopicWorkloadAssignments, start, err)
+	return err
 }
 
 // PublishBarrier publishes one BarrierEvent. Keyed by session_id so all
@@ -101,20 +106,24 @@ func (p *Producer) PublishBarrier(ctx context.Context, sessionID string, targetE
 	if p.noop {
 		return nil
 	}
+	start := time.Now()
 	payload, err := json.Marshal(topics.BarrierEvent{
 		SessionID:            sessionID,
 		TargetEpochUnixNanos: targetEpochNS,
 	})
 	if err != nil {
+		recordProduce(topics.TopicBarrier, start, err)
 		return fmt.Errorf("marshal barrier: %w", err)
 	}
 	writeCtx, cancel := context.WithTimeout(ctx, writerTimeout)
 	defer cancel()
 
-	return p.barrierWriter.WriteMessages(writeCtx, kafka.Message{
+	err = p.barrierWriter.WriteMessages(writeCtx, kafka.Message{
 		Key:   []byte(sessionID),
 		Value: payload,
 	})
+	recordProduce(topics.TopicBarrier, start, err)
+	return err
 }
 
 // PublishStatus publishes one benchmark.status.updated event. submission-api
@@ -130,17 +139,21 @@ func (p *Producer) PublishStatus(ctx context.Context, evt topics.BenchmarkStatus
 	if p.noop {
 		return nil
 	}
+	start := time.Now()
 	payload, err := json.Marshal(evt)
 	if err != nil {
+		recordProduce(topics.TopicBenchmarkStatusUpdated, start, err)
 		return fmt.Errorf("marshal status: %w", err)
 	}
 	writeCtx, cancel := context.WithTimeout(ctx, writerTimeout)
 	defer cancel()
 
-	return p.statusWriter.WriteMessages(writeCtx, kafka.Message{
+	err = p.statusWriter.WriteMessages(writeCtx, kafka.Message{
 		Key:   []byte(evt.SessionID),
 		Value: payload,
 	})
+	recordProduce(topics.TopicBenchmarkStatusUpdated, start, err)
+	return err
 }
 
 func parseBrokers(brokers string) []string {
@@ -152,4 +165,15 @@ func parseBrokers(brokers string) []string {
 		}
 	}
 	return out
+}
+
+// recordProduce measures controller-owned control-plane topics.
+func recordProduce(topic string, start time.Time, err error) {
+	result := "ok"
+	if err != nil {
+		result = "error"
+	}
+	labels := metrics.Labels("service", "bot-fleet-controller", "topic", topic, "result", result)
+	metrics.Counter("kafka_messages_produced_total", "Kafka messages produced by topic and result.", labels, 1)
+	metrics.Histogram("kafka_produce_duration_seconds", "Kafka produce duration in seconds.", labels, metrics.SinceSeconds(start))
 }

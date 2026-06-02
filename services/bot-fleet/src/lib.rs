@@ -11,6 +11,7 @@ pub mod content;
 pub mod errors;
 pub mod fix;
 pub mod kafka;
+pub mod metrics;
 pub mod telemetry;
 pub mod time;
 pub mod worker;

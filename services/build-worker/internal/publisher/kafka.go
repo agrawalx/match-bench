@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/iicpc/libs/metrics"
 	"github.com/iicpc/schemas/topics"
 	kafka "github.com/segmentio/kafka-go"
 )
@@ -48,6 +49,7 @@ func (p *Publisher) PublishStatus(ctx context.Context, submissionID, status, mes
 	if p.noop {
 		return nil
 	}
+	start := time.Now()
 
 	payload, err := json.Marshal(topics.SubmissionStatusUpdated{
 		SubmissionID: submissionID,
@@ -56,16 +58,19 @@ func (p *Publisher) PublishStatus(ctx context.Context, submissionID, status, mes
 		UpdatedAt:    time.Now().UTC(),
 	})
 	if err != nil {
+		recordProduce(start, err)
 		return fmt.Errorf("marshal status update: %w", err)
 	}
 
 	writeCtx, cancel := context.WithTimeout(ctx, writerTimeout)
 	defer cancel()
 
-	return p.writer.WriteMessages(writeCtx, kafka.Message{
+	err = p.writer.WriteMessages(writeCtx, kafka.Message{
 		Key:   []byte(submissionID),
 		Value: payload,
 	})
+	recordProduce(start, err)
+	return err
 }
 
 func (p *Publisher) Close() error {
@@ -73,6 +78,17 @@ func (p *Publisher) Close() error {
 		return nil
 	}
 	return p.writer.Close()
+}
+
+// recordProduce makes submission.status.updated delivery observable.
+func recordProduce(start time.Time, err error) {
+	result := "ok"
+	if err != nil {
+		result = "error"
+	}
+	labels := metrics.Labels("service", "build-worker", "topic", topics.TopicSubmissionStatusUpdated, "result", result)
+	metrics.Counter("kafka_messages_produced_total", "Kafka messages produced by topic and result.", labels, 1)
+	metrics.Histogram("kafka_produce_duration_seconds", "Kafka produce duration in seconds.", labels, metrics.SinceSeconds(start))
 }
 
 func parseBrokers(brokers string) []string {

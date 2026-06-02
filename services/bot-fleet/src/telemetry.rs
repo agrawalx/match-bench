@@ -155,13 +155,24 @@ async fn flush(
         events: &'a [OrderSentEvent],
     }
 
-    let batch = OrderSentBatchRef {
-        session_id,
-        worker_id,
-        events,
-    };
-    let payload = rmp_serde::to_vec_named(&batch).context("encode orders.sent messagepack")?;
-    kafka::publish_bytes(producer, topic, session_id, &payload).await?;
-    events.clear();
+    // Publish in size-bounded chunks so a large accumulated batch cannot exceed the
+    // topic's max.message.bytes (msgpack-named events repeat field names, ~300+ B
+    // each; a few thousand overflow 1 MiB and the broker rejects the whole message).
+    // Drain only what was accepted so a failure retains the tail for the next flush.
+    while !events.is_empty() {
+        let n = events.len().min(MAX_EVENTS_PER_BATCH);
+        let batch = OrderSentBatchRef {
+            session_id,
+            worker_id,
+            events: &events[..n],
+        };
+        let payload = rmp_serde::to_vec_named(&batch).context("encode orders.sent messagepack")?;
+        kafka::publish_bytes(producer, topic, session_id, &payload).await?;
+        events.drain(0..n);
+    }
     Ok(())
 }
+
+/// Max events per published orders.sent Kafka message — keeps each message well
+/// under the 1 MiB topic max.message.bytes regardless of how many accumulated.
+const MAX_EVENTS_PER_BATCH: usize = 1000;

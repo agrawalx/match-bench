@@ -39,11 +39,24 @@ spec:
                   key: minio-secret-key
             - name: MINIO_BUCKET
               value: submissions
+            # Create the submissions bucket on startup if MinIO doesn't have it yet,
+            # so a fresh cluster doesn't 500 every upload with "bucket does not exist".
+            - name: MINIO_CREATE_BUCKET_IF_MISSING
+              value: "true"
             - name: KAFKA_BROKERS
               value: kafka.data.svc.cluster.local:9092
-          readinessProbe:
+          # Liveness: static /health (no deps) — restart only on a hung process.
+          livenessProbe:
             httpGet:
               path: /health
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          # Readiness: /ready pings Postgres, so a replica whose DB connection
+          # died is pulled from the Service endpoints instead of serving errors.
+          readinessProbe:
+            httpGet:
+              path: /ready
               port: 8080
             initialDelaySeconds: 5
             periodSeconds: 10

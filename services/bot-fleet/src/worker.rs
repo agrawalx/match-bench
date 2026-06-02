@@ -910,7 +910,12 @@ async fn fix_watchdog_loop(
                 } else {
                     now_ns.saturating_sub(p.send_ts_ns)
                 };
-                let expired = age_ns >= RESPONSE_TIMEOUT_NS || (last_tick && p.send_ts_ns > 0);
+                // L40: on the FINAL tick evict every remaining entry — including one
+                // whose write was still in flight (send_ts_ns == 0). The old guard
+                // (`&& p.send_ts_ns > 0`) dropped such an order entirely (counted as
+                // neither matched nor timed_out) before the loop broke; recording it
+                // as timed_out is the correct offered-order accounting.
+                let expired = age_ns >= RESPONSE_TIMEOUT_NS || last_tick;
                 if expired {
                     evicted.push(p.clone());
                     false

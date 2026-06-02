@@ -45,6 +45,7 @@ func RecoverInFlightRuns(ctx context.Context, st *store.Store, producer *Produce
 	log.Warn("startup recovery: marking in-flight runs failed", "count", len(runs))
 	const message = "controller restart — re-trigger benchmark"
 
+	failedGroups := make(map[string]struct{})
 	for _, r := range runs {
 		if err := st.MarkRunFailed(ctx, r.SessionID, message); err != nil {
 			// Log but keep going — partial recovery is better than none.
@@ -52,11 +53,28 @@ func RecoverInFlightRuns(ctx context.Context, st *store.Store, producer *Produce
 			continue
 		}
 
-		// Best-effort downstream notification. Failures here do not block
-		// recovery — the authoritative state is already in PostgreSQL.
+		// CRITICAL: the "one active benchmark per submission" unique index lives
+		// on run_groups, NOT runs. Marking child runs failed does not release it,
+		// so the parent group must be set terminal directly here — otherwise a
+		// re-trigger for this submission is permanently rejected after a crash
+		// (the dead group keeps occupying the index). Done once per distinct group.
+		if r.RunGroupID != "" {
+			if _, done := failedGroups[r.RunGroupID]; !done {
+				failedGroups[r.RunGroupID] = struct{}{}
+				if err := st.MarkRunGroupFailed(ctx, r.RunGroupID); err != nil {
+					log.Error("recovery: mark run-group failed", "run_group_id", r.RunGroupID, "error", err)
+				}
+			}
+		}
+
+		// Best-effort downstream notification. RunGroupID MUST be populated so the
+		// submission-api consumer runs its run-group rollup (it skips the rollup
+		// when RunGroupID is empty), keeping the denormalized group status
+		// consistent with what we just wrote directly.
 		if perr := producer.PublishStatus(ctx, topics.BenchmarkStatusUpdated{
 			SessionID:    r.SessionID,
 			SubmissionID: r.SubmissionID,
+			RunGroupID:   r.RunGroupID,
 			Status:       topics.RunStatusFailed,
 			Message:      message,
 			UpdatedAt:    time.Now().UTC(),

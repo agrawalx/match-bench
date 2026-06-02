@@ -177,8 +177,12 @@ impl Aggregator {
             w.contestant_id = e.contestant_id.clone();
         }
 
-        // First response of an order = the scored service-time sample.
-        if self.first_response.observe(&e.order_id, t3) {
+        // First response of an order = the scored service-time sample. Track idle
+        // by the response's ARRIVAL time (t7), not the fixed request t3 — otherwise
+        // the idle clock never advances across an order's stream of fills, so a
+        // resting order whose fills span >5 s gets evicted mid-stream and its next
+        // fill is re-scored as a fresh first response, corrupting service_time/tps.
+        if self.first_response.observe(&e.order_id, e.t7_xdp_egress_ns) {
             record(&mut w.service_time, e.pod_service_time_ns);
             w.responded += 1;
             if is_reject(&e.exec_type) {
@@ -208,24 +212,38 @@ impl Aggregator {
             if !w.interval_active() {
                 continue;
             }
-            let error_rate = if w.offered > 0 {
-                (w.timed_out + w.rejected) as f64 / w.offered as f64
-            } else {
-                0.0
-            };
-            out.push(Snapshot {
-                time_ns: now_ns,
-                session_id: session_id.clone(),
-                contestant_id: w.contestant_id.clone(),
-                wave_index: *wave,
-                p50_ns: w.service_time.value_at_quantile(0.50),
-                p90_ns: w.service_time.value_at_quantile(0.90),
-                p99_ns: w.service_time.value_at_quantile(0.99),
-                p999_ns: w.service_time.value_at_quantile(0.999),
-                tps_1s: w.responded as f64 / interval,
-                error_rate,
-                hdr_encoded: serialize_hist(&w.service_time),
-            });
+            // M34: backfill contestant_id for a sent-first window from the session
+            // map (observe_sent defaults it to "" until the first ack arrives).
+            if w.contestant_id.is_empty() {
+                if let Some(c) = self.session_contestant.get(session_id) {
+                    w.contestant_id = c.clone();
+                }
+            }
+            // M33/M34: only emit a latency row once a scored service-time sample
+            // exists AND the contestant is known. A sent-only window (e.g. a wave
+            // whose orders all timed out) has an empty histogram, so emitting it
+            // would write misleading 0-latency, unattributable rows that drag down
+            // the metrics_10s p99 average. Counters still reset below regardless.
+            if !w.service_time.is_empty() && !w.contestant_id.is_empty() {
+                let error_rate = if w.offered > 0 {
+                    (w.timed_out + w.rejected) as f64 / w.offered as f64
+                } else {
+                    0.0
+                };
+                out.push(Snapshot {
+                    time_ns: now_ns,
+                    session_id: session_id.clone(),
+                    contestant_id: w.contestant_id.clone(),
+                    wave_index: *wave,
+                    p50_ns: w.service_time.value_at_quantile(0.50),
+                    p90_ns: w.service_time.value_at_quantile(0.90),
+                    p99_ns: w.service_time.value_at_quantile(0.99),
+                    p999_ns: w.service_time.value_at_quantile(0.999),
+                    tps_1s: w.responded as f64 / interval,
+                    error_rate,
+                    hdr_encoded: serialize_hist(&w.service_time),
+                });
+            }
             w.offered = 0;
             w.responded = 0;
             w.accepted = 0;
@@ -236,6 +254,13 @@ impl Aggregator {
 
         self.windows
             .retain(|_, w| now_ns.saturating_sub(w.last_update_ns) < WINDOW_IDLE_NS);
+        // M29: prune per-session state once no window for that session remains, so
+        // session_start/session_contestant grow with IN-FLIGHT sessions rather than
+        // every session ever seen (this is a single, long-lived replica).
+        let live: std::collections::HashSet<&str> =
+            self.windows.keys().map(|(s, _)| s.as_str()).collect();
+        self.session_start.retain(|s, _| live.contains(s.as_str()));
+        self.session_contestant.retain(|s, _| live.contains(s.as_str()));
         self.first_response.evict_idle(now_ns, FIRST_RESP_IDLE_NS);
         out
     }
@@ -323,6 +348,57 @@ mod tests {
         assert_eq!(s.tps_1s, 1.0, "one order responded");
         assert_eq!(s.contestant_id, "c-1");
         assert!(!s.hdr_encoded.is_empty());
+    }
+
+    // H11: a resting order's fills stream in over several seconds. The idle clock
+    // must track each fill's arrival (t7), so the order stays deduped and a later
+    // fill is NOT re-scored as a fresh first response. With the old t3-based clock
+    // the order evicted mid-stream and the trailing fill re-counted as a response.
+    #[test]
+    fn late_streaming_fill_not_rescored() {
+        let mut a = Aggregator::new(DEFAULT_WAVE_NS);
+        a.observe_acked(&acked("S", "o1", 0, 1_000_000_000, "0", 0)); // ACK -> scored
+        let _ = a.snapshot(1_500_000_000, 1.0); // o1 idle 0.5s -> kept
+        a.observe_acked(&acked("S", "o1", 0, 4_000_000_000, "1", 5)); // fill1 advances idle clock
+        let _ = a.snapshot(6_000_000_000, 1.0); // t7-based idle 2s -> kept (t3-based would evict)
+        a.observe_acked(&acked("S", "o1", 0, 6_500_000_000, "2", 5)); // fill2: known order, not re-scored
+        let snaps = a.snapshot(7_000_000_000, 1.0);
+        let s = snaps
+            .iter()
+            .find(|s| s.session_id == "S")
+            .expect("window snapshot present");
+        assert_eq!(
+            s.tps_1s, 0.0,
+            "H11: a trailing fill of an already-scored order must not count as a new response"
+        );
+    }
+
+    // M33/M34: a window that only ever saw sent events (a wave whose orders all
+    // timed out) has an empty service-time histogram and no contestant, so it must
+    // emit NO row rather than a misleading 0-latency, unattributable one.
+    #[test]
+    fn sent_only_window_emits_no_row() {
+        let mut a = Aggregator::new(DEFAULT_WAVE_NS);
+        a.observe_sent(&sent("S2", "o1", 0, 10, 0, true)); // timed out, never acked
+        let snaps = a.snapshot(1_000_000_000, 1.0);
+        assert!(
+            snaps.iter().all(|s| s.session_id != "S2"),
+            "M33: sent-only window must not emit a latency row"
+        );
+    }
+
+    // M29: per-session maps must be pruned once a session's windows evict, so they
+    // grow with in-flight sessions rather than every session ever seen.
+    #[test]
+    fn session_state_pruned_after_window_eviction() {
+        let mut a = Aggregator::new(DEFAULT_WAVE_NS);
+        a.observe_acked(&acked("S3", "o1", 0, 1_000, "0", 0));
+        assert_eq!(a.session_start.len(), 1);
+        // Advance past WINDOW_IDLE_NS so the window (and its session state) evict.
+        let _ = a.snapshot(WINDOW_IDLE_NS + 2_000_000_000, 1.0);
+        assert_eq!(a.window_count(), 0, "window evicted");
+        assert_eq!(a.session_start.len(), 0, "M29: session_start pruned");
+        assert_eq!(a.session_contestant.len(), 0, "M29: session_contestant pruned");
     }
 
     #[test]

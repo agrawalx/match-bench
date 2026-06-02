@@ -44,8 +44,10 @@ RUN cargo build --release -p iicpc-ebpf-latency
 # Stage 3 — runtime. Runs as root (needs CAP_BPF/CAP_NET_ADMIN/CAP_SYS_ADMIN +
 # setns into the algo pod's netns); the Job's securityContext grants those.
 FROM debian:bookworm-slim
+# ethtool: the capture disables GSO/TSO/GRO/LRO on the algo veth at attach time so
+# the hooks see one MTU-sized packet per message (avoids CAPTURE_CAP truncation).
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates librdkafka1 \
+    && apt-get install -y --no-install-recommends ca-certificates librdkafka1 ethtool \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=builder /app/target/release/iicpc-ebpf-latency /usr/local/bin/iicpc-ebpf-latency
 COPY --from=bpf-builder /app/target/bpfel-unknown-none/release/libiicpc_ebpf_latency.so \

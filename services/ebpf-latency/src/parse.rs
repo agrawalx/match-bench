@@ -184,6 +184,25 @@ fn frame_http(buf: &[u8]) -> Frame {
         return Frame::Incomplete;
     };
     let body_start = hdr_end + 4;
+    // M32: a chunked response carries no Content-Length. The old code defaulted
+    // content_len to 0, framing only the headers and leaving the chunked body to be
+    // mis-parsed as a fresh message — derailing framing for the whole connection.
+    // Frame through the terminating zero-size chunk ("0\r\n\r\n") so the connection
+    // stays in sync; field extraction from a chunked body is best-effort.
+    if header_is_chunked(&buf[..hdr_end]) {
+        return match find(&buf[body_start..], b"0\r\n\r\n") {
+            Some(rel) => {
+                let total = body_start + rel + 5; // include the "0\r\n\r\n" terminator
+                if total > MAX_HTTP_MESSAGE {
+                    Frame::Resync(body_start)
+                } else {
+                    Frame::Message(total)
+                }
+            }
+            None if buf.len() > MAX_HTTP_MESSAGE => Frame::Resync(body_start),
+            None => Frame::Incomplete,
+        };
+    }
     let content_len = header_content_length(&buf[..hdr_end]).unwrap_or(0);
     let total = body_start + content_len;
     if total > MAX_HTTP_MESSAGE {
@@ -193,6 +212,20 @@ fn frame_http(buf: &[u8]) -> Frame {
         return Frame::Incomplete;
     }
     Frame::Message(total)
+}
+
+/// True when the response headers declare Transfer-Encoding: chunked (no
+/// Content-Length). Case-insensitive, mirrors header_content_length.
+fn header_is_chunked(headers: &[u8]) -> bool {
+    let lower: Vec<u8> = headers.iter().map(|b| b.to_ascii_lowercase()).collect();
+    match find(&lower, b"transfer-encoding:") {
+        Some(i) => {
+            let rest = &lower[i + b"transfer-encoding:".len()..];
+            let end = rest.iter().position(|&b| b == b'\r').unwrap_or(rest.len());
+            find(&rest[..end], b"chunked").is_some()
+        }
+        None => false,
+    }
 }
 
 fn frame_ws(direction: Direction, buf: &[u8]) -> Frame {
@@ -413,6 +446,23 @@ fn json_decimal_scaled(body: &[u8], key: &str) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // M32: a chunked HTTP response (no Content-Length) must be framed through its
+    // terminating zero chunk, not treated as a headers-only message that derails
+    // framing of everything after it.
+    #[test]
+    fn chunked_http_framed_through_terminator() {
+        let resp =
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n";
+        match frame_http(resp) {
+            Frame::Message(n) => assert_eq!(n, resp.len(), "frame whole chunked message"),
+            other => panic!("expected Message, got {:?}", other),
+        }
+        // Without the terminating "0\r\n\r\n" yet, the message is incomplete (NOT
+        // mis-framed as a 0-length-body message).
+        let partial = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhel";
+        assert_eq!(frame_http(partial), Frame::Incomplete);
+    }
 
     /// Build a wire-format FIX message: prepend 8=/9= and append 10=NNN.
     fn fix(body: &str) -> Vec<u8> {

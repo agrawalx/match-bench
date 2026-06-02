@@ -60,6 +60,11 @@ spec:
               memory: 1Gi
       securityContext:
         runAsNonRoot: true
+        # runAsNonRoot only asserts uid != 0; without an explicit numeric uid the
+        # kubelet cannot verify it before start and the container fails with
+        # CreateContainerConfigError (the minio image declares no USER).
+        runAsUser: 1000
+        runAsGroup: 1000
         fsGroup: 1000
       volumes:
         - name: tmp

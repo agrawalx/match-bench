@@ -84,6 +84,8 @@ func CreateSlot(mgr *k8s.Manager, slots *store.SlotStore, log *slog.Logger) http
 			switch {
 			case errors.Is(err, cerrs.ErrSlotImageMismatch):
 				writeError(w, http.StatusConflict, err.Error())
+			case errors.Is(err, cerrs.ErrInvalidRequest):
+				writeError(w, http.StatusBadRequest, err.Error())
 			default:
 				log.ErrorContext(ctx, "create slot", "slot_id", req.SlotID, "error", err)
 				writeError(w, http.StatusInternalServerError, "create slot: "+err.Error())

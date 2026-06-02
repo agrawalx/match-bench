@@ -253,6 +253,12 @@ type OrderSentEvent struct {
 	Side           string `json:"side" msgpack:"side"`                 // BUY | SELL
 	PayloadType    string `json:"payload_type" msgpack:"payload_type"` // NEW | CANCEL | REPLACE — lets the validator/ingester separate cancels from new orders (cancel throughput).
 	OrdType        string `json:"ord_type" msgpack:"ord_type"`         // LIMIT | MARKET (FIX tag 40) — distinguishes market from limit new orders, which share payload_type=NEW.
+	// OrigOrderID is the bot-authoritative target of a CANCEL/REPLACE (the original
+	// ClOrdID the bot is amending). The correctness-validator keys its reference
+	// matching engine off THIS value rather than the contestant's echoed tag 41 in
+	// orders.acked, so a contestant cannot steer the reference book by omitting or
+	// altering the cancel target. Empty for NEW orders.
+	OrigOrderID string `json:"orig_order_id" msgpack:"orig_order_id"`
 }
 
 // OrderAckedBatch is MessagePack-encoded on "orders.acked" by the eBPF

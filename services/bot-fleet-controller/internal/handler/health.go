@@ -28,8 +28,8 @@ func (r *ReadyState) MarkReady() { r.ready.Store(true) }
 func Healthz(sessions *controller.SessionManager) http.HandlerFunc {
 	return func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{
-			"status":    "ok",
-			"sessions":  len(sessions.Snapshot()),
+			"status":   "ok",
+			"sessions": len(sessions.Snapshot()),
 		})
 	}
 }

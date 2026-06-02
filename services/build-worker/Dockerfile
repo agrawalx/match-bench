@@ -26,4 +26,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
     rm -rf /var/lib/apt/lists/*
 COPY --from=builder /bin/spawner /usr/local/bin/spawner
 COPY --from=builder /bin/fetcher /usr/local/bin/fetcher
+# Non-root UID so deployments/Job init-containers with runAsNonRoot=true pass
+# admission. The fetcher writes only to an emptyDir, writable by any UID.
+USER 65532:65532
 ENTRYPOINT ["/usr/local/bin/spawner"]

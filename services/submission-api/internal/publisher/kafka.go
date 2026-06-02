@@ -81,9 +81,12 @@ func NewKafkaPublisher(brokers string, log *slog.Logger) *KafkaPublisher {
 	// retry model, so this path uses leader-only acks to keep upload latency
 	// lower than the benchmark control-plane path.
 	build := &kafka.Writer{
-		Addr:                   addr,
-		Topic:                  topics.TopicSubmissionBuildRequested,
-		Balancer:               &kafka.LeastBytes{},
+		Addr:  addr,
+		Topic: topics.TopicSubmissionBuildRequested,
+		// Hash (not LeastBytes) so the message Key (submission_id) deterministically
+		// selects a partition — LeastBytes ignores the key, scattering same-key
+		// messages and defeating per-key ordering / future partition sharding.
+		Balancer:               &kafka.Hash{},
 		RequiredAcks:           kafka.RequireOne,
 		Async:                  false,
 		AllowAutoTopicCreation: false,
@@ -95,9 +98,11 @@ func NewKafkaPublisher(brokers string, log *slog.Logger) *KafkaPublisher {
 	// never see it. Losing this silently strands the run in 'requested'.
 	//
 	bench := &kafka.Writer{
-		Addr:                   addr,
-		Topic:                  topics.TopicBenchmarkRequested,
-		Balancer:               &kafka.LeastBytes{},
+		Addr:  addr,
+		Topic: topics.TopicBenchmarkRequested,
+		// Hash so the Key (session_id) maps deterministically to one partition,
+		// keeping a session's events ordered on a single partition.
+		Balancer:               &kafka.Hash{},
 		RequiredAcks:           kafka.RequireAll,
 		Async:                  false,
 		AllowAutoTopicCreation: false,

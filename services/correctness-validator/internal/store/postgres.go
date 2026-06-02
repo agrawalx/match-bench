@@ -5,9 +5,11 @@ package store
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/iicpc/correctness-validator/internal/validate"
+	"github.com/iicpc/schemas/topics"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -77,18 +79,37 @@ func (s *Store) HasSummary(ctx context.Context, sessionID string) (bool, error) 
 	return exists, err
 }
 
-// Save writes the violation log + summary for a session in one transaction. The
-// summary is upserted last (it is the idempotency marker), and the session's
-// prior violations are cleared first so a re-run is consistent.
-func (s *Store) Save(ctx context.Context, rec Record) error {
+// Save atomically CLAIMS a session and writes its summary + violation log in one
+// transaction. It returns inserted=true only when THIS call created the summary
+// row; a concurrent or repeat call for an already-validated session gets
+// inserted=false and writes nothing. This claim closes the check-then-act TOCTOU
+// between the HasSummary precheck and the write, so exactly one worker publishes
+// the score for a session even with VALIDATOR_CONCURRENCY > 1.
+func (s *Store) Save(ctx context.Context, rec Record) (bool, error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
-		return fmt.Errorf("begin tx: %w", err)
+		return false, fmt.Errorf("begin tx: %w", err)
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck // no-op after commit
 
-	if _, err := tx.Exec(ctx, "DELETE FROM correctness_violations WHERE session_id=$1", rec.SessionID); err != nil {
-		return fmt.Errorf("clear violations: %w", err)
+	tag, err := tx.Exec(ctx, `
+INSERT INTO correctness_summary
+    (session_id, contestant_id, valid_fills, total_fills, correctness_score, violation_count,
+     phantom_fills, overfills, price_violations, computed_at_ns)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+ON CONFLICT (session_id) DO NOTHING`,
+		rec.SessionID, rec.ContestantID,
+		int64(rec.Report.ValidFills), int64(rec.Report.TotalFills),
+		rec.Report.CorrectnessScore(), int64(rec.Report.ViolationCount()),
+		int64(rec.Report.PhantomFills), int64(rec.Report.Overfills), int64(rec.Report.PriceViolations),
+		int64(rec.ComputedAtNS),
+	)
+	if err != nil {
+		return false, fmt.Errorf("insert summary: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		// Another worker already claimed and persisted this session.
+		return false, tx.Commit(ctx)
 	}
 
 	if len(rec.Report.Violations) > 0 {
@@ -99,35 +120,36 @@ func (s *Store) Save(ctx context.Context, rec Record) error {
 				int64(v.ReportedQty), v.ReportedPrice, v.Detail,
 			})
 		}
-		_, err := tx.CopyFrom(ctx,
+		if _, err := tx.CopyFrom(ctx,
 			pgx.Identifier{"correctness_violations"},
 			[]string{"session_id", "contestant_id", "violation_type", "order_id", "reported_qty", "reported_price", "detail"},
 			pgx.CopyFromRows(rows),
-		)
-		if err != nil {
-			return fmt.Errorf("copy violations: %w", err)
+		); err != nil {
+			return false, fmt.Errorf("copy violations: %w", err)
 		}
 	}
+	return true, tx.Commit(ctx)
+}
 
-	_, err = tx.Exec(ctx, `
-INSERT INTO correctness_summary
-    (session_id, contestant_id, valid_fills, total_fills, correctness_score, violation_count,
-     phantom_fills, overfills, price_violations, computed_at_ns)
-VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
-ON CONFLICT (session_id) DO UPDATE SET
-    contestant_id=EXCLUDED.contestant_id, valid_fills=EXCLUDED.valid_fills,
-    total_fills=EXCLUDED.total_fills, correctness_score=EXCLUDED.correctness_score,
-    violation_count=EXCLUDED.violation_count, phantom_fills=EXCLUDED.phantom_fills,
-    overfills=EXCLUDED.overfills, price_violations=EXCLUDED.price_violations,
-    computed_at_ns=EXCLUDED.computed_at_ns, created_at=now()`,
-		rec.SessionID, rec.ContestantID,
-		int64(rec.Report.ValidFills), int64(rec.Report.TotalFills),
-		rec.Report.CorrectnessScore(), int64(rec.Report.ViolationCount()),
-		int64(rec.Report.PhantomFills), int64(rec.Report.Overfills), int64(rec.Report.PriceViolations),
-		int64(rec.ComputedAtNS),
+// LoadScore rebuilds the published CorrectnessScoreEvent from a stored summary.
+// Used to re-publish at-least-once when a redelivery finds the summary already
+// persisted (e.g. the original publish failed after the summary was committed).
+func (s *Store) LoadScore(ctx context.Context, sessionID string) (topics.CorrectnessScoreEvent, bool, error) {
+	var (
+		ev                             topics.CorrectnessScoreEvent
+		valid, total, vcount, computed int64
 	)
-	if err != nil {
-		return fmt.Errorf("upsert summary: %w", err)
+	ev.SessionID = sessionID
+	err := s.pool.QueryRow(ctx, `
+SELECT contestant_id, valid_fills, total_fills, correctness_score, violation_count, computed_at_ns
+  FROM correctness_summary WHERE session_id=$1`, sessionID).
+		Scan(&ev.ContestantID, &valid, &total, &ev.CorrectnessScore, &vcount, &computed)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ev, false, nil
 	}
-	return tx.Commit(ctx)
+	if err != nil {
+		return ev, false, fmt.Errorf("load score: %w", err)
+	}
+	ev.ValidFills, ev.TotalFills, ev.ViolationCount, ev.ComputedAtNS = uint64(valid), uint64(total), uint32(vcount), uint64(computed)
+	return ev, true, nil
 }

@@ -38,15 +38,25 @@ func Assemble(sents []topics.OrderSentEvent, ackeds []topics.OrderAckedEvent) ([
 		}
 		first := acks[0]
 		o := &model.Order{
-			OrderID:     id,
-			Flow:        model.Flow{SrcIP: first.SrcIP, SrcPort: first.SrcPort},
-			TCPSeq:      first.TCPSeq,
-			T3Ns:        first.T3XDPIngressNS,
-			Side:        model.SideFrom(s.Side),
-			Price:       int64(s.Price),
-			Qty:         s.Qty,
-			Kind:        model.KindFrom(s.PayloadType, s.OrdType),
-			OrigOrderID: firstOrig(acks),
+			OrderID: id,
+			Flow:    model.Flow{SrcIP: first.SrcIP, SrcPort: first.SrcPort},
+			TCPSeq:  first.TCPSeq,
+			T3Ns:    first.T3XDPIngressNS,
+			Side:    model.SideFrom(s.Side),
+			// orders.sent.price is a raw integer (the bot writes FIX tag 44=<int>),
+			// but orders.acked.fill_price is fixed-point scaled by TelemetryPriceScale
+			// (eBPF parses the contestant's decimal ×1e9). Lift the reference order
+			// into the same scaled domain so the reference fills it produces are
+			// directly comparable to the reported fill_price; otherwise every fill is
+			// a phantom price violation and CorrectnessScore collapses to ~0.
+			Price: int64(s.Price) * int64(topics.TelemetryPriceScale),
+			Qty:   s.Qty,
+			Kind:  model.KindFrom(s.PayloadType, s.OrdType),
+			// Prefer the bot-authoritative orig_order_id from orders.sent; fall back
+			// to the contestant's echoed tag 41 (acked) only when the bot did not
+			// supply one (transitional). Keying off the sent value means a contestant
+			// cannot steer the reference engine by omitting/altering the cancel target.
+			OrigOrderID: preferOrig(s.OrigOrderID, acks),
 			Responses:   responses(acks),
 		}
 		orders = append(orders, o)
@@ -66,6 +76,17 @@ func Assemble(sents []topics.OrderSentEvent, ackeds []topics.OrderAckedEvent) ([
 		}
 	}
 	return orders, phantoms
+}
+
+// preferOrig returns the bot-authoritative orig_order_id from orders.sent when
+// present, falling back to the contestant's echoed tag 41 (orders.acked) only when
+// the bot supplied none (transitional). The reference engine must not be steerable
+// by contestant-controlled cancel targets.
+func preferOrig(sentOrig string, acks []topics.OrderAckedEvent) string {
+	if sentOrig != "" {
+		return sentOrig
+	}
+	return firstOrig(acks)
 }
 
 func firstOrig(acks []topics.OrderAckedEvent) string {

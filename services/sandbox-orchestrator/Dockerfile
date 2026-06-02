@@ -20,4 +20,6 @@ FROM debian:12-slim
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && \
     rm -rf /var/lib/apt/lists/*
 COPY --from=builder /bin/sandbox-orchestrator /usr/local/bin/sandbox-orchestrator
+# Non-root UID to satisfy securityContext.runAsNonRoot=true at admission.
+USER 65532:65532
 ENTRYPOINT ["/usr/local/bin/sandbox-orchestrator"]

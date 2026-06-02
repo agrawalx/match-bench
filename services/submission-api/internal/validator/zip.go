@@ -154,7 +154,17 @@ func readLimitedRootFile(r io.Reader) ([]byte, error) {
 
 // validateBuildTarget checks that the declared build.type is consistent with the
 // language, the required build file is present, and the target name exists in it.
+// validBuildTargetName constrains the contestant-supplied build.target to a safe
+// charset for ALL languages. The target flows unescaped through text/template into
+// the generated Dockerfile (go build -o {{.Target}}, COPY, ENTRYPOINT), so quotes,
+// whitespace, slashes, and newlines must be rejected to prevent Dockerfile/command
+// injection — the Go path previously had no validation at all.
+var validBuildTargetName = regexp.MustCompile(`^[A-Za-z0-9_.-]{1,64}$`)
+
 func validateBuildTarget(cfg *BenchmarkConfig, buildFileName string, buildFileContent []byte) error {
+	if !validBuildTargetName.MatchString(cfg.Build.Target) {
+		return cerrs.ErrInvalidBuildTarget
+	}
 	switch cfg.Language {
 	case "cpp":
 		if cfg.Build.Type != "cmake" {

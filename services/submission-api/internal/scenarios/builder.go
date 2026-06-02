@@ -63,16 +63,17 @@ const (
 // mix at a total of 10,000 RPS. Held as constants so the bot-counts below
 // fall out by simple integer division.
 const (
-	baselineTotalRPS            uint32 = 10000
-	baselineHFTRPS              uint32 = 6000  // 60% of 10k
-	baselineRetailRPS           uint32 = 2500  // 25% of 10k
-	baselineInstitutionalRPS    uint32 = 1500  // 15% of 10k
+	baselineTotalRPS         uint32 = 10000
+	baselineHFTRPS           uint32 = 6000 // 60% of 10k
+	baselineRetailRPS        uint32 = 2500 // 25% of 10k
+	baselineInstitutionalRPS uint32 = 1500 // 15% of 10k
 )
 
 // Baseline bot counts — RPS budget ÷ per-bot RPS.
-//   HFT:          6000 / 1000 = 6
-//   Retail:       2500 /    5 = 500
-//   Institutional: 1500 /  300 = 5
+//
+//	HFT:          6000 / 1000 = 6
+//	Retail:       2500 /    5 = 500
+//	Institutional: 1500 /  300 = 5
 const (
 	baselineHFTBots           uint32 = 6
 	baselineRetailBots        uint32 = 500
@@ -81,15 +82,15 @@ const (
 
 // Session durations and shape parameters.
 const (
-	constantDuration       = 60 * time.Second
-	spikeDuration          = 60 * time.Second
-	spikePreWindow         = 25 * time.Second
-	spikeBurstWindow       = 10 * time.Second
+	constantDuration            = 60 * time.Second
+	spikeDuration               = 60 * time.Second
+	spikePreWindow              = 25 * time.Second
+	spikeBurstWindow            = 10 * time.Second
 	spikeMultiplierOverBaseline = 4 // baseline + 4x baseline = 5x total during spike
 
-	rampDuration       = 180 * time.Second
-	rampWaveCount      = 9              // 9 waves on a 20s cadence; peak ≈ 90k
-	rampWaveCadence    = 20 * time.Second
+	rampDuration    = 180 * time.Second
+	rampWaveCount   = 9 // 9 waves on a 20s cadence; peak ≈ 90k
+	rampWaveCadence = 20 * time.Second
 )
 
 // BuildAll returns the three canonical scenarios. Each ScenarioRow carries

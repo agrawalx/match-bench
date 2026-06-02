@@ -13,6 +13,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -70,17 +71,15 @@ func main() {
 		settleDelay: settleDelay,
 	}
 
-	// Bounded worker pool of completed sessions to validate.
-	jobs := make(chan string, 256)
+	// `concurrency` consumer goroutines in one group. Each fetches a status
+	// message, validates synchronously, and commits the offset ONLY after the
+	// score is durably persisted + published — so a crash mid-validation
+	// re-delivers (at-least-once) rather than silently dropping the session.
+	// Partition-level parallelism across the group; the summary-row claim keeps
+	// reprocessing idempotent.
 	for i := 0; i < concurrency; i++ {
-		go func() {
-			for sessionID := range jobs {
-				v.validateSession(ctx, sessionID)
-			}
-		}()
+		go v.runStatusConsumer(ctx, brokers, statusGroup)
 	}
-
-	go runTriggerConsumer(ctx, brokers, statusGroup, jobs, log)
 
 	var ready atomic.Bool
 	ready.Store(true)
@@ -121,14 +120,29 @@ type validator struct {
 	settleDelay time.Duration
 }
 
-func (v *validator) validateSession(ctx context.Context, sessionID string) {
+// validateSession drains, replays, scores, persists, and publishes one session.
+// Returns nil only when the result is durably persisted AND (re)published, so the
+// caller can safely commit the Kafka offset. Idempotent: the summary-row claim in
+// store.Save means exactly one worker publishes the primary score for a session,
+// while a redelivery that finds the summary already present re-publishes it
+// (at-least-once) without redoing the work.
+func (v *validator) validateSession(ctx context.Context, sessionID string) error {
 	log := v.log.With("session_id", sessionID)
+
 	if done, err := v.store.HasSummary(ctx, sessionID); err != nil {
-		log.Error("idempotency check", "error", err)
-		return
+		return fmt.Errorf("idempotency check: %w", err)
 	} else if done {
-		log.Info("session already validated; skipping")
-		return
+		ev, ok, err := v.store.LoadScore(ctx, sessionID)
+		if err != nil {
+			return err
+		}
+		if ok {
+			if err := v.pub.Publish(ctx, ev); err != nil {
+				return fmt.Errorf("re-publish score: %w", err)
+			}
+		}
+		log.Info("session already validated; re-published score")
+		return nil
 	}
 
 	// Settle: let the eBPF reader flush its terminal events (> its 5s eviction)
@@ -136,13 +150,12 @@ func (v *validator) validateSession(ctx context.Context, sessionID string) {
 	select {
 	case <-time.After(v.settleDelay):
 	case <-ctx.Done():
-		return
+		return ctx.Err()
 	}
 
 	sents, ackeds, err := source.DrainSession(ctx, v.brokers, sessionID)
 	if err != nil {
-		log.Error("drain session", "error", err)
-		return
+		return fmt.Errorf("drain session: %w", err)
 	}
 	report, contestant := pipeline.Run(sents, ackeds)
 	rec := store.Record{
@@ -151,9 +164,14 @@ func (v *validator) validateSession(ctx context.Context, sessionID string) {
 		Report:       report,
 		ComputedAtNS: uint64(time.Now().UnixNano()),
 	}
-	if err := v.store.Save(ctx, rec); err != nil {
-		log.Error("save correctness", "error", err)
-		return
+	inserted, err := v.store.Save(ctx, rec)
+	if err != nil {
+		return fmt.Errorf("save correctness: %w", err)
+	}
+	if !inserted {
+		// Lost the claim race to a concurrent worker; it owns the publish.
+		log.Info("session already claimed by another worker; skipping publish")
+		return nil
 	}
 	if err := v.pub.Publish(ctx, topics.CorrectnessScoreEvent{
 		SessionID:        sessionID,
@@ -164,8 +182,9 @@ func (v *validator) validateSession(ctx context.Context, sessionID string) {
 		ViolationCount:   report.ViolationCount(),
 		ComputedAtNS:     rec.ComputedAtNS,
 	}); err != nil {
-		log.Error("publish correctness score", "error", err)
-		return
+		// Summary is persisted; leaving the offset uncommitted re-delivers and the
+		// HasSummary fast-path above re-publishes — at-least-once delivery.
+		return fmt.Errorf("publish correctness score: %w", err)
 	}
 	log.Info("session validated",
 		"contestant_id", contestant,
@@ -174,9 +193,15 @@ func (v *validator) validateSession(ctx context.Context, sessionID string) {
 		"score", report.CorrectnessScore(),
 		"violations", report.ViolationCount(),
 		"sent", len(sents), "acked", len(ackeds))
+	return nil
 }
 
-func runTriggerConsumer(ctx context.Context, brokers []string, group string, jobs chan<- string, log *slog.Logger) {
+// runStatusConsumer is one member of the benchmark.status.updated consumer group.
+// It validates each `completed` session synchronously and commits the offset ONLY
+// after validateSession succeeds, downgrading nothing: a crash or shutdown before
+// the commit re-delivers the message (at-least-once), and the per-session claim
+// makes reprocessing idempotent.
+func (v *validator) runStatusConsumer(ctx context.Context, brokers []string, group string) {
 	reader := kafka.NewReader(kafka.ReaderConfig{
 		Brokers:        brokers,
 		GroupID:        group,
@@ -187,33 +212,33 @@ func runTriggerConsumer(ctx context.Context, brokers []string, group string, job
 		CommitInterval: 0, // manual commit
 	})
 	defer reader.Close()
-	log.Info("benchmark.status.updated consumer started", "group", group)
+	v.log.Info("benchmark.status.updated consumer started", "group", group)
 	for {
 		m, err := reader.FetchMessage(ctx)
 		if err != nil {
 			if ctx.Err() != nil {
 				return
 			}
-			log.Error("fetch benchmark.status.updated", "error", err)
+			v.log.Error("fetch benchmark.status.updated", "error", err)
 			continue
 		}
 		var ev topics.BenchmarkStatusUpdated
 		if err := json.Unmarshal(m.Value, &ev); err != nil {
-			log.Error("unmarshal benchmark.status.updated", "error", err)
-			_ = reader.CommitMessages(ctx, m) // poison message — don't block
+			v.log.Error("unmarshal benchmark.status.updated", "error", err)
+			_ = reader.CommitMessages(ctx, m) // poison message — don't block the partition
 			continue
 		}
 		if ev.Status == topics.RunStatusCompleted {
-			select {
-			case jobs <- ev.SessionID:
-			case <-ctx.Done():
-				return
+			if err := v.validateSession(ctx, ev.SessionID); err != nil {
+				if ctx.Err() != nil {
+					return // shutdown: leave uncommitted for redelivery
+				}
+				v.log.Error("validate session; will retry on redelivery", "session_id", ev.SessionID, "error", err)
+				continue // do NOT commit — retry on next poll / redelivery
 			}
 		}
-		// Commit immediately: the heavy work is recomputable from Kafka and guarded
-		// by the summary-row idempotency check, so at-least-once dispatch is safe.
 		if err := reader.CommitMessages(ctx, m); err != nil {
-			log.Warn("commit benchmark.status.updated", "error", err)
+			v.log.Warn("commit benchmark.status.updated", "error", err)
 		}
 	}
 }

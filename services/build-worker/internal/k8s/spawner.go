@@ -19,6 +19,7 @@ import (
 	"github.com/iicpc/schemas/topics"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
@@ -228,6 +229,15 @@ func (s *Spawner) Run(ctx context.Context, msg topics.SubmissionBuildRequested) 
 
 func (s *Spawner) createJob(ctx context.Context, job *batchv1.Job) error {
 	_, err := s.client.BatchV1().Jobs(s.cfg.Namespace).Create(ctx, job, metav1.CreateOptions{})
+	if apierrors.IsAlreadyExists(err) {
+		// Idempotent redelivery: the build offset is committed only after the
+		// whole pipeline finishes, so a SIGTERM mid-build replays the message and
+		// the deterministic Job name still exists within its TTL window. Adopt it
+		// and wait, instead of force-failing — failing here would even overwrite a
+		// submission that already built successfully (failed is the top status rank).
+		s.log.Info("job already exists; adopting (redelivery)", "job", job.Name)
+		return nil
+	}
 	return err
 }
 
@@ -389,6 +399,12 @@ func (s *Spawner) scanJobSpec(jobName, submissionID, stagingRef string) *batchv1
 					SecurityContext: podSecurityContext(),
 					Tolerations:     s.buildTolerations(),
 					NodeSelector:    s.buildNodeSelector(),
+					// Writable scratch: the container has ReadOnlyRootFilesystem=true,
+					// but trivy must write its vulnerability DB + temp files. Without
+					// this emptyDir the scan aborts on a cold pod.
+					Volumes: []corev1.Volume{
+						{Name: "tmp", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
+					},
 					Containers: []corev1.Container{
 						{
 							Name:  "scan",
@@ -402,6 +418,10 @@ func (s *Spawner) scanJobSpec(jobName, submissionID, stagingRef string) *batchv1
 							Env: []corev1.EnvVar{
 								{Name: "TRIVY_USERNAME", ValueFrom: s.secretKeyRef("harbor-user")},
 								{Name: "TRIVY_PASSWORD", ValueFrom: s.secretKeyRef("harbor-password")},
+								{Name: "TRIVY_CACHE_DIR", Value: "/tmp/trivy-cache"},
+							},
+							VolumeMounts: []corev1.VolumeMount{
+								{Name: "tmp", MountPath: "/tmp"},
 							},
 							SecurityContext: containerSecurityContext(),
 						},
@@ -439,6 +459,11 @@ func (s *Spawner) sbomJobSpec(jobName, submissionID, stagingRef string) *batchv1
 					SecurityContext: podSecurityContext(),
 					Tolerations:     s.buildTolerations(),
 					NodeSelector:    s.buildNodeSelector(),
+					// Writable scratch: ReadOnlyRootFilesystem=true, but syft extracts
+					// image layers to a temp dir. Point TMPDIR/cache at this emptyDir.
+					Volumes: []corev1.Volume{
+						{Name: "tmp", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
+					},
 					Containers: []corev1.Container{
 						{
 							Name:  "sbom",
@@ -452,6 +477,11 @@ func (s *Spawner) sbomJobSpec(jobName, submissionID, stagingRef string) *batchv1
 								{Name: "SYFT_REGISTRY_AUTH_AUTHORITY", Value: authority},
 								{Name: "SYFT_REGISTRY_AUTH_USERNAME", ValueFrom: s.secretKeyRef("harbor-user")},
 								{Name: "SYFT_REGISTRY_AUTH_PASSWORD", ValueFrom: s.secretKeyRef("harbor-password")},
+								{Name: "TMPDIR", Value: "/tmp"},
+								{Name: "XDG_CACHE_HOME", Value: "/tmp/.cache"},
+							},
+							VolumeMounts: []corev1.VolumeMount{
+								{Name: "tmp", MountPath: "/tmp"},
 							},
 							SecurityContext: containerSecurityContext(),
 						},
@@ -485,7 +515,13 @@ func (s *Spawner) secretKeyRef(key string) *corev1.EnvVarSource {
 	}
 }
 
-func (s *Spawner) setStatus(ctx context.Context, submissionID, status, message string) {
+func (s *Spawner) setStatus(_ context.Context, submissionID, status, message string) {
+	// Status writes must survive shutdown: the request ctx is cancelled on
+	// SIGTERM, and if the terminal 'failed'/'ready' publish + DB write rode that
+	// cancelled ctx the row would be stranded non-terminal and the offset
+	// uncommitted. Detach with a fresh bounded context.
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
 	if err := s.updater.PublishStatus(ctx, submissionID, status, message); err != nil {
 		s.log.Warn("publish status failed", "error", err)
 	}
@@ -609,6 +645,12 @@ func podSecurityContext() *corev1.PodSecurityContext {
 
 func containerSecurityContext() *corev1.SecurityContext {
 	return &corev1.SecurityContext{
+		// Explicit non-root UID: the pod sets RunAsNonRoot=true, which the kubelet
+		// rejects unless a non-root UID is known. The fetch init container's image
+		// (SpawnerImage) and the trivy/syft images may default to root, so pin the
+		// UID here rather than relying on the image's USER directive.
+		RunAsNonRoot:             boolPtr(true),
+		RunAsUser:                int64Ptr(65532),
 		AllowPrivilegeEscalation: boolPtr(false),
 		ReadOnlyRootFilesystem:   boolPtr(true),
 		Capabilities: &corev1.Capabilities{

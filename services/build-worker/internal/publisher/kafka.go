@@ -30,7 +30,7 @@ func NewKafkaPublisher(brokers string, log *slog.Logger) *Publisher {
 		log.Warn("KAFKA_BROKERS contains no usable brokers — status publishing disabled")
 		return &Publisher{noop: true, log: log}
 	}
-	
+
 	w := &kafka.Writer{
 		Addr:                   kafka.TCP(brokerList...),
 		Topic:                  topics.TopicSubmissionStatusUpdated,

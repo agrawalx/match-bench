@@ -20,4 +20,8 @@ FROM debian:12-slim
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && \
     rm -rf /var/lib/apt/lists/*
 COPY --from=builder /bin/submission-api /usr/local/bin/submission-api
+# Run as non-root: the deployment sets securityContext.runAsNonRoot=true, which
+# the kubelet rejects (CreateContainerConfigError) unless the image declares a
+# non-root UID or the pod sets runAsUser.
+USER 65532:65532
 ENTRYPOINT ["/usr/local/bin/submission-api"]

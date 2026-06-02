@@ -14,6 +14,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/kubernetes"
 )
@@ -36,7 +37,20 @@ const (
 	captureContestantAnnotation = "iicpc.dev/contestant-id"
 	// captureObjectPath is where the capture image bakes the BPF object.
 	captureObjectPath = "/opt/iicpc/ebpf/libiicpc_ebpf_latency.so"
+
+	// slotActiveDeadlineSeconds bounds an algo pod's lifetime as a self-healing
+	// backstop against leaked pods (controller crash / failed DeleteSlot). Set far
+	// above any scenario run-group's wall-time.
+	slotActiveDeadlineSeconds = int64(3600)
+	// captureJobActiveDeadlineSeconds bounds the (otherwise infinite-loop) capture
+	// Job so a leaked privileged hostPID capture cannot run forever.
+	captureJobActiveDeadlineSeconds = int64(3600)
 )
+
+// capturablePorts are the TCP ports the eBPF program is compiled to match. When
+// capture is enabled a slot MUST use one of these, or it would come up Ready with
+// trading bots but produce zero t3/t7 captures (silently empty orders.acked).
+var capturablePorts = map[int]struct{}{8080: {}, 9898: {}}
 
 // captureJobName is the per-slot capture Job (and is deterministic so creation
 // is idempotent and deletion needs no lookup).
@@ -169,6 +183,15 @@ func validateConfig(cfg Config) error {
 // can remain. The operation is deliberately retryable: the next CreateSlot call
 // for the same slot/image reuses the Pod and attempts Service creation again.
 func (m *Manager) CreateSlot(ctx context.Context, slotID, contestantID, image string, port int) error {
+	// M22: when capture is on, the BPF program only matches a fixed port set, so a
+	// slot on any other port would be Ready yet capture nothing. Reject early
+	// (HTTP 400) instead of silently producing empty telemetry.
+	if m.captureEnabled {
+		if _, ok := capturablePorts[port]; !ok {
+			return fmt.Errorf("%w: port %d is not in the eBPF-capture set {8080, 9898}", cerrs.ErrInvalidRequest, port)
+		}
+	}
+
 	resourceName := podName(slotID)
 
 	existing, err := m.ensurePod(ctx, resourceName, slotID, contestantID, image, port)
@@ -392,6 +415,12 @@ func (m *Manager) podSpec(slotID, contestantID, image string, port int) *corev1.
 	// into their own memory allocation instead of contending with
 	// neighbours for node disk bandwidth.
 	readOnlyRoot := true
+	noPrivEsc := false
+	// Self-healing backstop: if the controller crashes or a DeleteSlot fails, the
+	// algo pod (Guaranteed-QoS, pinned CPUs) would otherwise survive forever and
+	// permanently remove a node from the sandbox pool. ActiveDeadlineSeconds caps
+	// its lifetime well above any scenario's run-group duration.
+	deadline := slotActiveDeadlineSeconds
 
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
@@ -402,6 +431,7 @@ func (m *Manager) podSpec(slotID, contestantID, image string, port int) *corev1.
 		},
 		Spec: corev1.PodSpec{
 			RestartPolicy:                corev1.RestartPolicyNever,
+			ActiveDeadlineSeconds:        &deadline,
 			AutomountServiceAccountToken: &autoMount,
 			// Four tmpfs (RAM-backed) emptyDirs at the paths contestant code
 			// is most likely to write to. RAM usage counts against the pod's
@@ -421,8 +451,17 @@ func (m *Manager) podSpec(slotID, contestantID, image string, port int) *corev1.
 					FailureThreshold:    30,
 				},
 				Resources: m.containerResources(),
+				// The algo image is untrusted contestant code. We cannot force
+				// RunAsNonRoot (some legitimate images run as root and there is no
+				// USER we control), so gVisor (RuntimeClassName, set in prod) is the
+				// real isolation boundary. These flags are defense-in-depth that do
+				// not break root images: no privilege escalation, all capabilities
+				// dropped, and the runtime-default seccomp profile.
 				SecurityContext: &corev1.SecurityContext{
-					ReadOnlyRootFilesystem: &readOnlyRoot,
+					ReadOnlyRootFilesystem:   &readOnlyRoot,
+					AllowPrivilegeEscalation: &noPrivEsc,
+					Capabilities:             &corev1.Capabilities{Drop: []corev1.Capability{"ALL"}},
+					SeccompProfile:           &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
 				},
 				VolumeMounts: writableMounts(),
 			}},
@@ -558,6 +597,11 @@ func (m *Manager) captureJobSpec(slotID, contestantID, nodeName, podUID, contain
 	backoffLimit := int32(0) // no retries; a failed attach is reported, not looped
 	ttl := int32(300)        // self-clean finished Jobs after 5 min
 	graceful := int64(5)
+	// The capture binary runs an infinite loop (exits only on SIGINT), so its
+	// TTLSecondsAfterFinished never fires on its own. ActiveDeadlineSeconds bounds
+	// a leaked privileged hostPID capture; the ownerReference below GC's it when
+	// the algo pod is deleted (the normal teardown path).
+	captureDeadline := captureJobActiveDeadlineSeconds
 	bpffsType := corev1.HostPathDirectoryOrCreate
 
 	var tolerations []corev1.Toleration
@@ -583,14 +627,23 @@ func (m *Manager) captureJobSpec(slotID, contestantID, nodeName, podUID, contain
 		{Name: "KAFKA_BROKERS", Value: m.kafkaBrokers},
 	}
 
+	ownerRefs := []metav1.OwnerReference{{
+		APIVersion: "v1",
+		Kind:       "Pod",
+		Name:       podName(slotID),
+		UID:        types.UID(podUID),
+	}}
+
 	return &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      captureJobName(slotID),
-			Namespace: m.namespace,
-			Labels:    labels,
+			Name:            captureJobName(slotID),
+			Namespace:       m.namespace,
+			Labels:          labels,
+			OwnerReferences: ownerRefs, // GC the capture Job when the algo pod is deleted
 		},
 		Spec: batchv1.JobSpec{
 			BackoffLimit:            &backoffLimit,
+			ActiveDeadlineSeconds:   &captureDeadline,
 			TTLSecondsAfterFinished: &ttl,
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{Labels: labels},

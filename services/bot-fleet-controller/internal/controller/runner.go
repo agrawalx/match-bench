@@ -116,6 +116,18 @@ func (r *Runner) Run(parent context.Context, req topics.BenchmarkRequested) {
 		"scenario_id", req.ScenarioID,
 	)
 
+	// Idempotency against redelivery: the benchmark.requested offset is committed
+	// only after Run returns, so a crash between the final status publish and the
+	// commit re-delivers this message. The in-memory session map is empty after a
+	// restart, so guard on the durable run status — re-running a terminal session
+	// would spawn a duplicate algo pod and duplicate orders.sent/acked telemetry.
+	if status, serr := r.store.RunStatus(parent, req.SessionID); serr != nil {
+		log.Warn("run-status precheck failed; proceeding", "error", serr)
+	} else if status == topics.RunStatusCompleted || status == topics.RunStatusFailed {
+		log.Info("benchmark.requested for an already-terminal run; skipping redelivery", "status", status)
+		return
+	}
+
 	// Load scenario before touching anything else — a missing/garbled scenario
 	// is the only error we cannot recover from, and discovering it later (after
 	// allocating a slot) leaks resources.
@@ -307,16 +319,26 @@ func (r *Runner) transition(ctx context.Context, sess *Session, status, message 
 // fail is the unified failure path. Marks the session failed via the same
 // status pipeline so submission-api writes it through and the parent
 // run-group's status rolls up to 'failed'.
-func (r *Runner) fail(ctx context.Context, sess *Session, message string, log *slog.Logger) {
+func (r *Runner) fail(_ context.Context, sess *Session, message string, log *slog.Logger) {
 	log.Error("session failed", "message", message)
-	r.transition(ctx, sess, topics.RunStatusFailed, message, log)
+	// The terminal failure MUST be published even when the session ctx was
+	// cancelled by shutdown (SIGTERM mid-step) — otherwise the run row is left
+	// non-terminal until the next recovery sweep. Detach from the cancellable
+	// session ctx, mirroring releaseSlot and the step-6 failCtx.
+	pubCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	r.transition(pubCtx, sess, topics.RunStatusFailed, message, log)
 }
 
 // publishFailure is a thin wrapper for the early-failure path where we have
 // not yet built a Session object (e.g. scenario load failed). Constructs a
 // minimal BenchmarkStatusUpdated event directly so submission-api can
 // record the failure without us going through transition().
-func (r *Runner) publishFailure(ctx context.Context, req topics.BenchmarkRequested, message string, log *slog.Logger) {
+func (r *Runner) publishFailure(_ context.Context, req topics.BenchmarkRequested, message string, log *slog.Logger) {
+	// Detached from the caller's (cancellable) ctx so the failure still publishes
+	// during shutdown — same rationale as fail().
+	pubCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
 	evt := topics.BenchmarkStatusUpdated{
 		SessionID:    req.SessionID,
 		SubmissionID: req.SubmissionID,
@@ -325,7 +347,7 @@ func (r *Runner) publishFailure(ctx context.Context, req topics.BenchmarkRequest
 		Message:      message,
 		UpdatedAt:    time.Now().UTC(),
 	}
-	if err := r.producer.PublishStatus(ctx, evt); err != nil {
+	if err := r.producer.PublishStatus(pubCtx, evt); err != nil {
 		log.Error("publish early failure status", "error", err, "message", message)
 	}
 }

@@ -24,6 +24,15 @@ spec:
         - namespaceSelector:
             matchLabels:
               name: benchmark
+    # H15: per-slot eBPF capture Jobs (sandbox namespace) publish orders.acked to
+    # Kafka. Scope them to the broker port ONLY — never postgres/redis/timescale.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              name: sandbox
+      ports:
+        - port: 9092
+          protocol: TCP
     # Intra-namespace Kafka: the 3-node KRaft quorum talks broker-to-broker on
     # 9093 (controller) and 9092 (broker), and the kafka-topic-init Job connects
     # to a broker on 9092. Without this rule those flows are default-denied by

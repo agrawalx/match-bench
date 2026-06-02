@@ -38,3 +38,38 @@ spec:
           protocol: UDP
         - port: 53
           protocol: TCP
+---
+# H15: the per-slot eBPF latency-capture Job (app=ebpf-capture) lives in the
+# sandbox namespace but must publish orders.acked to Kafka in the data namespace.
+# The base sandbox-isolation policy denies all cluster egress; NetworkPolicies are
+# ADDITIVE, so this grants the capture Job the one egress it needs (+DNS) while
+# contestant algo pods (no ebpf-capture label) stay fully isolated. Without it,
+# enabling CAPTURE_ENABLED silently drops all latency telemetry.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: ebpf-capture-egress
+  namespace: sandbox
+spec:
+  podSelector:
+    matchLabels:
+      app: ebpf-capture
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              name: data
+      ports:
+        - port: 9092
+          protocol: TCP
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP

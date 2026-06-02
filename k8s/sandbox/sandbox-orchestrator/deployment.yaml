@@ -57,6 +57,17 @@ spec:
               value: "100M"
             - name: ALGO_INGRESS_BANDWIDTH
               value: "100M"
+            # eBPF latency capture. When CAPTURE_ENABLED=true the orchestrator spawns a
+            # privileged capture Job (hostPID + CAP_BPF/NET_ADMIN/SYS_ADMIN) per slot that
+            # attaches to the algo netns and publishes orders.acked to Kafka. CAPTURE_IMAGE
+            # is required when enabled; KAFKA_BROKERS is passed through to the Job. Same
+            # toggle shape as RUNTIME_CLASS — set CAPTURE_ENABLED="" to disable.
+            - name: CAPTURE_ENABLED
+              value: "true"
+            - name: CAPTURE_IMAGE
+              value: ghcr.io/agrawalx/ebpf-latency:dev
+            - name: KAFKA_BROKERS
+              value: kafka.data.svc.cluster.local:9092
           livenessProbe:
             httpGet:
               path: /healthz

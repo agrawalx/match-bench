@@ -76,7 +76,9 @@ func TestIntegration_ValidateSession(t *testing.T) {
 		pub:         pub,
 		settleDelay: 0, // no settle wait in the test
 	}
-	v.validateSession(ctx, sessionID)
+	if err := v.validateSession(ctx, sessionID); err != nil {
+		t.Fatalf("validateSession: %v", err)
+	}
 
 	// ---- assert the Postgres summary ----
 	pool, err := pgxpool.New(ctx, dbURL)
@@ -153,36 +155,51 @@ FROM correctness_summary WHERE session_id=$1`, sessionID).
 	}
 }
 
-// TestIntegration_TriggerConsumer verifies the benchmark.status.updated consumer
-// decodes a `completed` event and dispatches its session_id to the worker pool.
+// TestIntegration_TriggerConsumer drives the real runStatusConsumer end to end:
+// a `completed` benchmark.status.updated event must trigger drain -> validate ->
+// durable persist (M21: the offset commits only after the summary lands, so the
+// session is never silently dropped). We assert the summary row appears.
+//
+// Env-gated: needs KAFKA_BROKERS + DATABASE_URL.
 func TestIntegration_TriggerConsumer(t *testing.T) {
 	brokersCSV := itEnv("KAFKA_BROKERS")
-	if brokersCSV == "" {
-		t.Skip("set KAFKA_BROKERS to run the trigger-consumer integration test")
+	dbURL := itEnv("DATABASE_URL")
+	if brokersCSV == "" || dbURL == "" {
+		t.Skip("set KAFKA_BROKERS + DATABASE_URL to run the trigger-consumer integration test")
 	}
 	brokers := parseBrokers(brokersCSV)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	sessionID := fmt.Sprintf("itest-trigger-%d", time.Now().UnixNano())
+	const contestant = "team-trigger"
 
-	// A non-completed status must be ignored; only the completed one dispatches.
-	produceStatus(ctx, t, brokers, sessionID, topics.RunStatusRunning)
+	produceSession(ctx, t, brokers, sessionID, contestant)
+	produceStatus(ctx, t, brokers, sessionID, topics.RunStatusRunning) // ignored (non-terminal)
 	produceStatus(ctx, t, brokers, sessionID, topics.RunStatusCompleted)
 
-	jobs := make(chan string, 256)
-	group := fmt.Sprintf("itest-validator-%d", time.Now().UnixNano())
-	go runTriggerConsumer(ctx, brokers, group, jobs, discardLogger())
+	st, err := store.New(ctx, dbURL)
+	if err != nil {
+		t.Fatalf("store: %v", err)
+	}
+	defer st.Close()
+	pub := publisher.New(brokersCSV)
+	defer pub.Close()
+	v := &validator{log: discardLogger(), brokers: brokers, store: st, pub: pub, settleDelay: 0}
 
-	deadline := time.After(30 * time.Second)
+	group := fmt.Sprintf("itest-validator-%d", time.Now().UnixNano())
+	go v.runStatusConsumer(ctx, brokers, group)
+
+	deadline := time.After(90 * time.Second)
+	tick := time.NewTicker(500 * time.Millisecond)
+	defer tick.Stop()
 	for {
 		select {
-		case got := <-jobs:
-			if got == sessionID {
-				return // dispatched as expected
+		case <-tick.C:
+			if done, _ := st.HasSummary(ctx, sessionID); done {
+				return // consumer triggered validation and durably persisted the score
 			}
-			// ignore sessions from other/older runs sharing the topic
 		case <-deadline:
-			t.Fatal("timed out waiting for completed session to be dispatched")
+			t.Fatal("timed out waiting for the completed session to be validated")
 		}
 	}
 }
@@ -205,13 +222,13 @@ func produceSession(ctx context.Context, t *testing.T, brokers []string, session
 		Events: []topics.OrderAckedEvent{
 			// M1 rests first (smallest t3), then reports its fill.
 			{SessionID: sessionID, ContestantID: contestant, OrderID: "M1", SrcIP: 1, SrcPort: 1000, TCPSeq: 1, T3XDPIngressNS: 1000, T7XDPEgressNS: 1500, ExecType: "0"},
-			{SessionID: sessionID, ContestantID: contestant, OrderID: "M1", SrcIP: 1, SrcPort: 1000, TCPSeq: 1, T3XDPIngressNS: 1000, T7XDPEgressNS: 1600, ExecType: "2", FillQty: 10, FillPrice: 100},
+			{SessionID: sessionID, ContestantID: contestant, OrderID: "M1", SrcIP: 1, SrcPort: 1000, TCPSeq: 1, T3XDPIngressNS: 1000, T7XDPEgressNS: 1600, ExecType: "2", FillQty: 10, FillPrice: 100 * topics.TelemetryPriceScale},
 			// T1 crosses; reports two legit fills then an over-reported third.
 			{SessionID: sessionID, ContestantID: contestant, OrderID: "T1", SrcIP: 2, SrcPort: 2000, TCPSeq: 1, T3XDPIngressNS: 2000, T7XDPEgressNS: 2500, ExecType: "0"},
-			{SessionID: sessionID, ContestantID: contestant, OrderID: "T1", SrcIP: 2, SrcPort: 2000, TCPSeq: 1, T3XDPIngressNS: 2000, T7XDPEgressNS: 2600, ExecType: "2", FillQty: 10, FillPrice: 100},
-			{SessionID: sessionID, ContestantID: contestant, OrderID: "T1", SrcIP: 2, SrcPort: 2000, TCPSeq: 1, T3XDPIngressNS: 2000, T7XDPEgressNS: 2700, ExecType: "2", FillQty: 5, FillPrice: 100},
+			{SessionID: sessionID, ContestantID: contestant, OrderID: "T1", SrcIP: 2, SrcPort: 2000, TCPSeq: 1, T3XDPIngressNS: 2000, T7XDPEgressNS: 2600, ExecType: "2", FillQty: 10, FillPrice: 100 * topics.TelemetryPriceScale},
+			{SessionID: sessionID, ContestantID: contestant, OrderID: "T1", SrcIP: 2, SrcPort: 2000, TCPSeq: 1, T3XDPIngressNS: 2000, T7XDPEgressNS: 2700, ExecType: "2", FillQty: 5, FillPrice: 100 * topics.TelemetryPriceScale},
 			// PH: a fill reported for an order that was never sent.
-			{SessionID: sessionID, ContestantID: contestant, OrderID: "PH", SrcIP: 3, SrcPort: 3000, TCPSeq: 1, T3XDPIngressNS: 3000, T7XDPEgressNS: 3100, ExecType: "2", FillQty: 3, FillPrice: 100},
+			{SessionID: sessionID, ContestantID: contestant, OrderID: "PH", SrcIP: 3, SrcPort: 3000, TCPSeq: 1, T3XDPIngressNS: 3000, T7XDPEgressNS: 3100, ExecType: "2", FillQty: 3, FillPrice: 100 * topics.TelemetryPriceScale},
 		},
 	}
 	writeMsgpack(ctx, t, brokers, topics.TopicOrdersSent, sessionID, sent)

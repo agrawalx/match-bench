@@ -64,6 +64,12 @@ spec:
               memory: 2Gi
       securityContext:
         runAsNonRoot: true
+        # runAsNonRoot only asserts uid != 0; without an explicit numeric uid the
+        # kubelet cannot verify it before start and the container fails with
+        # CreateContainerConfigError (the timescaledb image declares no USER).
+        # 70 is the postgres uid/gid the timescaledb image inherits.
+        runAsUser: 70
+        runAsGroup: 70
         fsGroup: 70
       volumes:
         - name: tmp

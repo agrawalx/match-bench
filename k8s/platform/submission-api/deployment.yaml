@@ -24,6 +24,9 @@ spec:
           ports:
             - containerPort: 8080
           env:
+            # In-cluster Loki push endpoint (logger appends /loki/api/v1/push).
+            - name: LOKI_URL
+              value: http://loki.observability.svc.cluster.local:3100
             - name: DATABASE_URL
               valueFrom:
                 secretKeyRef:

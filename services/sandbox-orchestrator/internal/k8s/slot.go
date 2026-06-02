@@ -646,7 +646,18 @@ func (m *Manager) captureJobSpec(slotID, contestantID, nodeName, podUID, contain
 			ActiveDeadlineSeconds:   &captureDeadline,
 			TTLSecondsAfterFinished: &ttl,
 			Template: corev1.PodTemplateSpec{
-				ObjectMeta: metav1.ObjectMeta{Labels: labels},
+				// Scrape annotations so Prometheus' annotation-based pod discovery
+				// picks up the per-slot capture pod's /metrics (the ebpf-latency
+				// binary's metrics server binds :9090 in the pod's own netns).
+				// Mirrors k8s/benchmark/ebpf-latency/job-template.yaml.
+				ObjectMeta: metav1.ObjectMeta{
+					Labels: labels,
+					Annotations: map[string]string{
+						"prometheus.io/scrape": "true",
+						"prometheus.io/path":   "/metrics",
+						"prometheus.io/port":   "9090",
+					},
+				},
 				Spec: corev1.PodSpec{
 					RestartPolicy:                 corev1.RestartPolicyNever,
 					NodeName:                      nodeName,

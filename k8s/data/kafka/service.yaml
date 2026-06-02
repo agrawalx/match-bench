@@ -13,6 +13,9 @@ spec:
     - name: controller
       port: 9093
       targetPort: 9093
+    - name: metrics
+      port: 9308
+      targetPort: 9308
   clusterIP: None   # headless — stable DNS: kafka-0.kafka.data.svc.cluster.local
   # KRaft brokers must resolve each other to form the controller quorum BEFORE any
   # is Ready; without this their per-pod DNS isn't published while not-ready, so the

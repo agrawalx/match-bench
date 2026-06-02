@@ -9,9 +9,12 @@ use rdkafka::message::Message;
 use tokio::time;
 use tracing::{info, warn};
 
+use std::time::Instant;
+
 use crate::aggregate::Aggregator;
 use crate::config::Config;
 use crate::kafka::build_consumer;
+use crate::metrics;
 use crate::redis_sink::RedisSink;
 use crate::store::Store;
 
@@ -54,7 +57,10 @@ pub async fn run(cfg: Config) -> Result<()> {
                             ingest(&mut agg, m.topic(), payload);
                         }
                     }
-                    Err(e) => warn!(error = %e, "kafka recv error"),
+                    Err(e) => {
+                        metrics::consume_error();
+                        warn!(error = %e, "kafka recv error");
+                    }
                 }
             }
         }
@@ -65,19 +71,27 @@ fn ingest(agg: &mut Aggregator, topic: &str, payload: &[u8]) {
     match topic {
         TOPIC_ORDERS_SENT => match rmp_serde::from_slice::<OrderSentBatch>(payload) {
             Ok(b) => {
+                metrics::events_consumed(TOPIC_ORDERS_SENT, b.events.len() as u64);
                 for e in &b.events {
                     agg.observe_sent(e);
                 }
             }
-            Err(e) => warn!(error = %e, "decode orders.sent batch"),
+            Err(e) => {
+                metrics::decode_error(TOPIC_ORDERS_SENT);
+                warn!(error = %e, "decode orders.sent batch");
+            }
         },
         TOPIC_ORDERS_ACKED => match rmp_serde::from_slice::<OrderAckedBatch>(payload) {
             Ok(b) => {
+                metrics::events_consumed(TOPIC_ORDERS_ACKED, b.events.len() as u64);
                 for e in &b.events {
                     agg.observe_acked(e);
                 }
             }
-            Err(e) => warn!(error = %e, "decode orders.acked batch"),
+            Err(e) => {
+                metrics::decode_error(TOPIC_ORDERS_ACKED);
+                warn!(error = %e, "decode orders.acked batch");
+            }
         },
         _ => {}
     }
@@ -88,14 +102,30 @@ async fn flush(agg: &mut Aggregator, store: &Store, redis: &RedisSink, last_snap
     let interval_secs = (now.saturating_sub(*last_snapshot_ns)) as f64 / 1e9;
     *last_snapshot_ns = now;
     let snaps = agg.snapshot(now, interval_secs);
+    // Surface join-buffer state every tick, even when nothing is finalized: an
+    // idle eviction (an in-flight order that never completed) happens inside the
+    // snapshot regardless of whether any window produced a row.
+    metrics::set_join_buffer_size(agg.join_buffer_size());
+    metrics::records_evicted(agg.last_evicted());
     if snaps.is_empty() {
         return;
     }
-    if let Err(e) = store.write(&snaps).await {
-        warn!(error = %e, rows = snaps.len(), "timescale write failed");
+    metrics::records_finalized(snaps.len());
+
+    let started = Instant::now();
+    match store.write(&snaps).await {
+        Ok(()) => metrics::timescale_write(started.elapsed()),
+        Err(e) => {
+            metrics::timescale_error();
+            warn!(error = %e, rows = snaps.len(), "timescale write failed");
+        }
     }
-    if let Err(e) = redis.write(&snaps).await {
-        warn!(error = %e, rows = snaps.len(), "redis write failed");
+    match redis.write(&snaps).await {
+        Ok(()) => metrics::redis_write(),
+        Err(e) => {
+            metrics::redis_error();
+            warn!(error = %e, rows = snaps.len(), "redis write failed");
+        }
     }
 }
 

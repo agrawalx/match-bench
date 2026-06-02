@@ -30,8 +30,26 @@ spec:
       ports:
         - port: 8080
           protocol: TCP
+    # Prometheus (observability namespace) scrapes the orchestrator metrics on 8080.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              name: observability
+      ports:
+        - port: 8080
+          protocol: TCP
 
   egress:
+    # Loki log shipping — the orchestrator's logger pushes to
+    # loki.observability.svc:3100 (LOKI_URL). Algo pods are NOT selected here and
+    # stay locked down by sandbox-isolation.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              name: observability
+      ports:
+        - port: 3100
+          protocol: TCP
     # k8s API server. Resolves to a ClusterIP in the default namespace
     # (kubernetes.default.svc), backed by endpoints in kube-system on the
     # control plane. Allow all cluster IPs on 443; tightening this further

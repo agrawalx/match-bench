@@ -45,6 +45,22 @@ spec:
           protocol: TCP
         - port: 9093
           protocol: TCP
+    # Prometheus (observability namespace) scrapes the exporter sidecars +
+    # native MinIO metrics: postgres/timescale-exporter 9187, redis_exporter 9121,
+    # kafka-exporter 9308, MinIO native metrics on the 9000 S3 API port.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              name: observability
+      ports:
+        - port: 9187
+          protocol: TCP
+        - port: 9121
+          protocol: TCP
+        - port: 9308
+          protocol: TCP
+        - port: 9000
+          protocol: TCP
 
   egress:
     - to:

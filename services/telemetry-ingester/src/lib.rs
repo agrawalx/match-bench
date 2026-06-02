@@ -7,5 +7,6 @@ pub mod config;
 pub mod ingester;
 pub mod join;
 pub mod kafka;
+pub mod metrics;
 pub mod redis_sink;
 pub mod store;

@@ -17,6 +17,11 @@ spec:
     metadata:
       labels:
         app: timescaledb
+      annotations:
+        # postgres-exporter sidecar (below) exposes metrics on 9187.
+        prometheus.io/scrape: "true"
+        prometheus.io/path: /metrics
+        prometheus.io/port: "9187"
     spec:
       automountServiceAccountToken: false
       containers:
@@ -62,6 +67,35 @@ spec:
             limits:
               cpu: "2"
               memory: 2Gi
+        # Mirrors the postgres-exporter sidecar (env/securityContext style).
+        # Points at the metrics DB this instance serves.
+        - name: postgres-exporter
+          image: quay.io/prometheuscommunity/postgres-exporter:v0.15.0
+          ports:
+            - name: metrics
+              containerPort: 9187
+          env:
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: timescaledb-secret
+                  key: password
+            - name: DATA_SOURCE_NAME
+              value: postgres://iicpc:$(POSTGRES_PASSWORD)@localhost:5432/metrics?sslmode=disable
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            capabilities:
+              drop:
+                - ALL
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
       securityContext:
         runAsNonRoot: true
         # runAsNonRoot only asserts uid != 0; without an explicit numeric uid the

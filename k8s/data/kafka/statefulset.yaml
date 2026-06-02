@@ -19,6 +19,12 @@ spec:
     metadata:
       labels:
         app: kafka
+      annotations:
+        # kafka-exporter sidecar (below) exposes broker/topic/consumer-group
+        # metrics on 9308.
+        prometheus.io/scrape: "true"
+        prometheus.io/path: /metrics
+        prometheus.io/port: "9308"
     spec:
       automountServiceAccountToken: false
       containers:
@@ -96,6 +102,34 @@ spec:
             limits:
               cpu: "2"
               memory: 2Gi
+        # kafka-exporter sidecar — scrapes the local broker (PLAINTEXT, no auth)
+        # for topic/partition/consumer-group lag metrics. securityContext mirrors
+        # the postgres-exporter style. Each broker pod runs its own exporter; they
+        # report the same cluster-wide view, so dashboards should aggregate/dedupe.
+        - name: kafka-exporter
+          image: danielqsj/kafka-exporter:v1.8.0
+          args:
+            - --kafka.server=localhost:9092
+            - --web.listen-address=:9308
+          ports:
+            - name: metrics
+              containerPort: 9308
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+            capabilities:
+              drop:
+                - ALL
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
       securityContext:
         runAsNonRoot: true
         # apache/kafka's user is the non-numeric "appuser"; the kubelet needs a

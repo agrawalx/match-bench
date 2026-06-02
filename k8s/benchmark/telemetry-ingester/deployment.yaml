@@ -23,12 +23,24 @@ spec:
     metadata:
       labels:
         app: telemetry-ingester
+      annotations:
+        # metrics.rs start_server binds METRICS_ADDR (default 0.0.0.0:9090); no
+        # METRICS_ADDR is set below, so it listens on 9090.
+        prometheus.io/scrape: "true"
+        prometheus.io/path: /metrics
+        prometheus.io/port: "9090"
     spec:
       automountServiceAccountToken: false
       containers:
         - name: telemetry-ingester
           image: ghcr.io/agrawalx/telemetry-ingester:dev
+          ports:
+            - name: metrics
+              containerPort: 9090
           env:
+            # In-cluster Loki push endpoint (logger appends /loki/api/v1/push).
+            - name: LOKI_URL
+              value: http://loki.observability.svc.cluster.local:3100
             - name: KAFKA_BROKERS
               valueFrom:
                 secretKeyRef:

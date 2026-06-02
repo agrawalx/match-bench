@@ -1,0 +1,24 @@
+# Grafana datasource provisioning — Prometheus (default) + Loki, both reached
+# in-cluster by Service DNS. Mounted at /etc/grafana/provisioning/datasources.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-datasources
+  namespace: observability
+data:
+  datasources.yaml: |
+    apiVersion: 1
+    datasources:
+      - name: Prometheus
+        type: prometheus
+        access: proxy
+        uid: prometheus
+        url: http://prometheus.observability.svc.cluster.local:9090
+        isDefault: true
+        editable: false
+      - name: Loki
+        type: loki
+        access: proxy
+        uid: loki
+        url: http://loki.observability.svc.cluster.local:3100
+        editable: false

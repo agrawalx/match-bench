@@ -1,0 +1,13 @@
+# observability namespace: the self-contained monitoring stack
+# (Prometheus + Loki + Grafana). Prometheus scrapes annotated pods across every
+# namespace; the application loggers push to Loki here; Grafana reads both.
+#
+# The `name: observability` label is what the per-namespace NetworkPolicies match
+# on (namespaceSelector matchLabels name: observability) to allow Prometheus
+# scrape ingress and Loki push egress — keep it in sync with those policies.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: observability
+  labels:
+    name: observability

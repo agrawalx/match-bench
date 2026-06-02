@@ -86,6 +86,10 @@ mod tests {
         let a = redis_key(&snap("c1", "S", 0));
         let b = redis_key(&snap("c1", "S", 1));
         assert_ne!(a, b, "different waves must not share a key");
-        assert_eq!(redis_key(&snap("c1", "S", 0)), a, "stable for the same window");
+        assert_eq!(
+            redis_key(&snap("c1", "S", 0)),
+            a,
+            "stable for the same window"
+        );
     }
 }

@@ -24,6 +24,16 @@ spec:
         app: ebpf-capture
         slot: <SLOT_ID>
         app.kubernetes.io/managed-by: sandbox-orchestrator
+      annotations:
+        # The capture's metrics server (src/metrics.rs start_server) binds
+        # METRICS_PORT, defaulting to 9090 — and no METRICS_PORT is set below, so
+        # it listens on 9090. REFERENCE ONLY: the orchestrator builds the real Job
+        # in Go (services/sandbox-orchestrator/internal/k8s/slot.go captureJobSpec);
+        # to actually scrape these short-lived capture pods, captureJobSpec must
+        # emit these same pod annotations + the metrics containerPort below.
+        prometheus.io/scrape: "true"
+        prometheus.io/path: /metrics
+        prometheus.io/port: "9090"
     spec:
       restartPolicy: Never
       nodeName: <ALGO_POD_NODE>    # pinned to the algo pod's node
@@ -45,6 +55,9 @@ spec:
       containers:
         - name: capture
           image: <CAPTURE_IMAGE>   # carries the baked /opt/iicpc/ebpf/libiicpc_ebpf_latency.so
+          ports:
+            - name: metrics
+              containerPort: 9090
           # Burstable QoS (request < limit) on purpose: the node CPU manager
           # never gives this an exclusive cpuset, so it runs on shared cores and
           # never steals from the algo pod's pinned cores.
@@ -65,6 +78,9 @@ spec:
           env:
             - name: RUST_LOG
               value: info
+            # In-cluster Loki push endpoint (logger appends /loki/api/v1/push).
+            - name: LOKI_URL
+              value: http://loki.observability.svc.cluster.local:3100
             - name: SESSION_ID
               value: <SLOT_ID>
             - name: CONTESTANT_ID

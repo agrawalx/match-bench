@@ -112,6 +112,7 @@ pub struct Aggregator {
     session_contestant: HashMap<String, String>,
     first_response: FirstResponseTracker,
     wave_ns: u64,
+    last_evicted: usize,
 }
 
 impl Aggregator {
@@ -122,6 +123,7 @@ impl Aggregator {
             session_contestant: HashMap::new(),
             first_response: FirstResponseTracker::new(),
             wave_ns: wave_ns.max(1),
+            last_evicted: 0,
         }
     }
 
@@ -260,13 +262,25 @@ impl Aggregator {
         let live: std::collections::HashSet<&str> =
             self.windows.keys().map(|(s, _)| s.as_str()).collect();
         self.session_start.retain(|s, _| live.contains(s.as_str()));
-        self.session_contestant.retain(|s, _| live.contains(s.as_str()));
-        self.first_response.evict_idle(now_ns, FIRST_RESP_IDLE_NS);
+        self.session_contestant
+            .retain(|s, _| live.contains(s.as_str()));
+        self.last_evicted = self.first_response.evict_idle(now_ns, FIRST_RESP_IDLE_NS);
         out
     }
 
     pub fn window_count(&self) -> usize {
         self.windows.len()
+    }
+
+    /// Current first-response join-buffer size (in-flight tracked orders).
+    pub fn join_buffer_size(&self) -> usize {
+        self.first_response.len()
+    }
+
+    /// First-response entries evicted by the most recent `snapshot` call (idle
+    /// in-flight orders that never completed a scored sample).
+    pub fn last_evicted(&self) -> usize {
+        self.last_evicted
     }
 }
 
@@ -399,7 +413,11 @@ mod tests {
         let _ = a.snapshot(WINDOW_IDLE_NS + 2_000_000_000, 1.0);
         assert_eq!(a.window_count(), 0, "window evicted");
         assert_eq!(a.session_start.len(), 0, "M29: session_start pruned");
-        assert_eq!(a.session_contestant.len(), 0, "M29: session_contestant pruned");
+        assert_eq!(
+            a.session_contestant.len(),
+            0,
+            "M29: session_contestant pruned"
+        );
     }
 
     #[test]

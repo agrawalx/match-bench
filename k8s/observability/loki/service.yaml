@@ -1,0 +1,20 @@
+# loki.observability.svc:3100 — the push endpoint every application logger
+# targets via LOKI_URL=http://loki.observability.svc.cluster.local:3100
+# (the logger appends /loki/api/v1/push). Also the Grafana Loki datasource URL.
+apiVersion: v1
+kind: Service
+metadata:
+  name: loki
+  namespace: observability
+spec:
+  selector:
+    app: loki
+  ports:
+    - name: http
+      port: 3100
+      targetPort: 3100
+      protocol: TCP
+    - name: grpc
+      port: 9095
+      targetPort: 9095
+      protocol: TCP

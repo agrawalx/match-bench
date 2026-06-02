@@ -29,7 +29,9 @@ import (
 	"github.com/iicpc/correctness-validator/internal/publisher"
 	"github.com/iicpc/correctness-validator/internal/source"
 	"github.com/iicpc/correctness-validator/internal/store"
+	"github.com/iicpc/correctness-validator/internal/validate"
 	"github.com/iicpc/libs/logger"
+	"github.com/iicpc/libs/metrics"
 	"github.com/iicpc/schemas/topics"
 	"github.com/segmentio/kafka-go"
 )
@@ -41,6 +43,17 @@ func main() {
 	slog.SetDefault(log)
 	if lokiClient != nil {
 		defer lokiClient.Close()
+	}
+
+	// Prometheus metrics endpoint. Bound on its own listener so a scrape target
+	// resolves even if the main HTTP mux is busy; bind failures are logged but
+	// non-fatal (the service's real work is Kafka-driven, not HTTP).
+	metricsSrv, err := metrics.StartServer("0.0.0.0:9090")
+	if err != nil {
+		log.Error("metrics server start failed", "addr", "0.0.0.0:9090", "error", err)
+	} else {
+		defer metricsSrv.Close()
+		log.Info("metrics server started", "addr", "0.0.0.0:9090")
 	}
 
 	port := envOr("PORT", "8080")
@@ -92,6 +105,7 @@ func main() {
 		}
 		w.WriteHeader(http.StatusServiceUnavailable)
 	})
+	r.Handle("/metrics", metrics.Handler())
 	srv := &http.Server{
 		Addr:         ":" + port,
 		Handler:      r,
@@ -118,6 +132,23 @@ type validator struct {
 	store       *store.Store
 	pub         *publisher.Publisher
 	settleDelay time.Duration
+	// inflight counts sessions concurrently held in memory; exported as the
+	// validator_inflight_sessions gauge to watch the OOM-prone concurrency.
+	inflight atomic.Int64
+}
+
+// recordViolations fans the per-session report counts out to the
+// validator_violations_total counter, one increment per violation type.
+func recordViolations(report validate.Report) {
+	if report.Overfills > 0 {
+		metrics.Counter("validator_violations_total", "Correctness violations detected by type.", metrics.Labels("type", "overfill"), float64(report.Overfills))
+	}
+	if report.PhantomFills > 0 {
+		metrics.Counter("validator_violations_total", "Correctness violations detected by type.", metrics.Labels("type", "phantom"), float64(report.PhantomFills))
+	}
+	if report.PriceViolations > 0 {
+		metrics.Counter("validator_violations_total", "Correctness violations detected by type.", metrics.Labels("type", "price"), float64(report.PriceViolations))
+	}
 }
 
 // validateSession drains, replays, scores, persists, and publishes one session.
@@ -129,18 +160,32 @@ type validator struct {
 func (v *validator) validateSession(ctx context.Context, sessionID string) error {
 	log := v.log.With("session_id", sessionID)
 
+	// In-flight gauge: how many sessions are concurrently held in memory. This
+	// service OOM'd draining large sessions, so concurrency × per-session buffer
+	// is the memory-pressure signal operators watch.
+	metrics.Gauge("validator_inflight_sessions", "Correctness-validator sessions currently being validated.", nil, float64(v.inflight.Add(1)))
+	defer func() { metrics.Gauge("validator_inflight_sessions", "Correctness-validator sessions currently being validated.", nil, float64(v.inflight.Add(-1))) }()
+
 	if done, err := v.store.HasSummary(ctx, sessionID); err != nil {
+		metrics.Counter("validator_validation_errors_total", "Correctness-validator validation errors by stage.", metrics.Labels("stage", "idempotency"), 1)
+		metrics.Counter("validator_sessions_validated_total", "Correctness-validator sessions processed by result.", metrics.Labels("result", "error"), 1)
 		return fmt.Errorf("idempotency check: %w", err)
 	} else if done {
 		ev, ok, err := v.store.LoadScore(ctx, sessionID)
 		if err != nil {
+			metrics.Counter("validator_validation_errors_total", "Correctness-validator validation errors by stage.", metrics.Labels("stage", "load_score"), 1)
+			metrics.Counter("validator_sessions_validated_total", "Correctness-validator sessions processed by result.", metrics.Labels("result", "error"), 1)
 			return err
 		}
 		if ok {
 			if err := v.pub.Publish(ctx, ev); err != nil {
+				metrics.Counter("validator_validation_errors_total", "Correctness-validator validation errors by stage.", metrics.Labels("stage", "republish"), 1)
+				metrics.Counter("validator_sessions_validated_total", "Correctness-validator sessions processed by result.", metrics.Labels("result", "error"), 1)
 				return fmt.Errorf("re-publish score: %w", err)
 			}
+			metrics.Counter("validator_scores_published_total", "Correctness scores published to scores.correctness.", nil, 1)
 		}
+		metrics.Counter("validator_sessions_validated_total", "Correctness-validator sessions processed by result.", metrics.Labels("result", "skipped_done"), 1)
 		log.Info("session already validated; re-published score")
 		return nil
 	}
@@ -153,11 +198,22 @@ func (v *validator) validateSession(ctx context.Context, sessionID string) error
 		return ctx.Err()
 	}
 
+	drainStart := time.Now()
 	sents, ackeds, err := source.DrainSession(ctx, v.brokers, sessionID)
 	if err != nil {
+		metrics.Counter("validator_validation_errors_total", "Correctness-validator validation errors by stage.", metrics.Labels("stage", "drain"), 1)
+		metrics.Counter("validator_sessions_validated_total", "Correctness-validator sessions processed by result.", metrics.Labels("result", "error"), 1)
 		return fmt.Errorf("drain session: %w", err)
 	}
+	// Drain cost + buffered volume: the memory the deterministic pipeline holds
+	// for one session is proportional to (len(sents)+len(ackeds)).
+	metrics.Histogram("validator_drain_duration_seconds", "Correctness-validator per-session Kafka drain duration in seconds.", nil, metrics.SinceSeconds(drainStart))
+	metrics.Counter("validator_events_drained_total", "Correctness-validator events drained from Kafka by topic.", metrics.Labels("topic", "orders_sent"), float64(len(sents)))
+	metrics.Counter("validator_events_drained_total", "Correctness-validator events drained from Kafka by topic.", metrics.Labels("topic", "orders_acked"), float64(len(ackeds)))
+	metrics.Histogram("validator_session_events_buffered", "Events (orders.sent + orders.acked) buffered in memory per validated session.", nil, float64(len(sents)+len(ackeds)))
+
 	report, contestant := pipeline.Run(sents, ackeds)
+	recordViolations(report)
 	rec := store.Record{
 		SessionID:    sessionID,
 		ContestantID: contestant,
@@ -166,10 +222,13 @@ func (v *validator) validateSession(ctx context.Context, sessionID string) error
 	}
 	inserted, err := v.store.Save(ctx, rec)
 	if err != nil {
+		metrics.Counter("validator_validation_errors_total", "Correctness-validator validation errors by stage.", metrics.Labels("stage", "save"), 1)
+		metrics.Counter("validator_sessions_validated_total", "Correctness-validator sessions processed by result.", metrics.Labels("result", "error"), 1)
 		return fmt.Errorf("save correctness: %w", err)
 	}
 	if !inserted {
 		// Lost the claim race to a concurrent worker; it owns the publish.
+		metrics.Counter("validator_sessions_validated_total", "Correctness-validator sessions processed by result.", metrics.Labels("result", "skipped_claimed"), 1)
 		log.Info("session already claimed by another worker; skipping publish")
 		return nil
 	}
@@ -184,8 +243,12 @@ func (v *validator) validateSession(ctx context.Context, sessionID string) error
 	}); err != nil {
 		// Summary is persisted; leaving the offset uncommitted re-delivers and the
 		// HasSummary fast-path above re-publishes — at-least-once delivery.
+		metrics.Counter("validator_validation_errors_total", "Correctness-validator validation errors by stage.", metrics.Labels("stage", "publish"), 1)
+		metrics.Counter("validator_sessions_validated_total", "Correctness-validator sessions processed by result.", metrics.Labels("result", "error"), 1)
 		return fmt.Errorf("publish correctness score: %w", err)
 	}
+	metrics.Counter("validator_scores_published_total", "Correctness scores published to scores.correctness.", nil, 1)
+	metrics.Counter("validator_sessions_validated_total", "Correctness-validator sessions processed by result.", metrics.Labels("result", "success"), 1)
 	log.Info("session validated",
 		"contestant_id", contestant,
 		"total_fills", report.TotalFills,

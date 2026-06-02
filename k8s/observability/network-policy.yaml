@@ -1,0 +1,54 @@
+# observability namespace network policy.
+#
+# Prometheus must reach every pod's metrics port across all namespaces (scrape)
+# and the Kubernetes API (pod service discovery). Loki must accept pushes from
+# application pods in every namespace. Grafana must reach Prometheus + Loki.
+#
+# The per-namespace policies (data/benchmark/platform/build/sandbox) add the
+# matching ingress (allow observability to scrape) and egress (allow push to
+# loki:3100) rules on their side — NetworkPolicies are additive and both sides
+# must permit the flow on an enforcing CNI.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: observability-default
+  namespace: observability
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress
+
+  ingress:
+    # Application pods in every namespace push logs to Loki (:3100) and Grafana
+    # is reachable in-cluster (:3000). Intra-namespace traffic (Grafana->Prom/Loki)
+    # is also covered here.
+    - {}
+
+  egress:
+    # Scrape: Prometheus opens connections to pods in every namespace on their
+    # annotated metrics ports. Kept broad on purpose — the scrape target set is
+    # annotation-driven and spans all namespaces. Also covers Grafana->Prometheus
+    # and Grafana->Loki within this namespace.
+    - to:
+        - namespaceSelector: {}
+
+    # Kubernetes API server for pod service discovery (kubernetes_sd_configs).
+    # The apiserver is reachable on the cluster IP / host network; allow 443/6443
+    # to any destination since the apiserver address is environment-specific.
+    - ports:
+        - port: 443
+          protocol: TCP
+        - port: 6443
+          protocol: TCP
+
+    # DNS
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP

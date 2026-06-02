@@ -18,8 +18,26 @@ spec:
     - ports:
         - port: 8080
           protocol: TCP
+    # Prometheus (observability namespace) scrapes submission-api metrics on 8080.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              name: observability
+      ports:
+        - port: 8080
+          protocol: TCP
 
   egress:
+    # Loki log shipping — submission-api's logger pushes to
+    # loki.observability.svc:3100 (LOKI_URL).
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              name: observability
+      ports:
+        - port: 3100
+          protocol: TCP
+
     # Data plane: postgres, kafka, minio
     - to:
         - namespaceSelector:

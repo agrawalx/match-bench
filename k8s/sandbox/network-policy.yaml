@@ -55,7 +55,19 @@ spec:
     matchLabels:
       app: ebpf-capture
   policyTypes:
+    - Ingress
     - Egress
+  # Prometheus (observability namespace) scrapes the capture pod's metrics on
+  # 9090. Algo pods (no ebpf-capture label) are NOT selected here and stay
+  # locked down by sandbox-isolation.
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              name: observability
+      ports:
+        - port: 9090
+          protocol: TCP
   egress:
     - to:
         - namespaceSelector:
@@ -63,6 +75,15 @@ spec:
               name: data
       ports:
         - port: 9092
+          protocol: TCP
+    # Loki log shipping — the capture's logger pushes to
+    # loki.observability.svc:3100 (LOKI_URL).
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              name: observability
+      ports:
+        - port: 3100
           protocol: TCP
     - to:
         - namespaceSelector:

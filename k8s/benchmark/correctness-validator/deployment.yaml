@@ -31,6 +31,12 @@ spec:
     metadata:
       labels:
         app: correctness-validator
+      annotations:
+        # The shared Go metrics server (libs/go/metrics StartServer) listens on
+        # :9090 by default; scrape that port, separate from the :8080 health API.
+        prometheus.io/scrape: "true"
+        prometheus.io/path: /metrics
+        prometheus.io/port: "9090"
     spec:
       automountServiceAccountToken: false
       containers:
@@ -40,7 +46,13 @@ spec:
             - name: http
               containerPort: 8080
               protocol: TCP
+            - name: metrics
+              containerPort: 9090
+              protocol: TCP
           env:
+            # In-cluster Loki push endpoint (logger appends /loki/api/v1/push).
+            - name: LOKI_URL
+              value: http://loki.observability.svc.cluster.local:3100
             - name: PORT
               value: "8080"
             - name: KAFKA_BROKERS

@@ -284,6 +284,14 @@ func projectMetricCatalog() []metricSpec {
 		histogramSpec("submission_upload_bytes", "Submission upload size in bytes.", nil, byteBuckets),
 		counterSpec("submission_validation_failures_total", "Submission validation failures.", []string{"reason"}),
 		counterSpec("submissions_accepted_total", "Accepted submissions by language and protocol.", []string{"language", "protocol"}),
+		counterSpec("validator_sessions_validated_total", "Correctness-validator sessions processed by result.", []string{"result"}),
+		counterSpec("validator_validation_errors_total", "Correctness-validator validation errors by stage.", []string{"stage"}),
+		counterSpec("validator_violations_total", "Correctness violations detected by type.", []string{"type"}),
+		counterSpec("validator_scores_published_total", "Correctness scores published to scores.correctness.", nil),
+		histogramSpec("validator_drain_duration_seconds", "Correctness-validator per-session Kafka drain duration in seconds.", nil, defaultBuckets),
+		counterSpec("validator_events_drained_total", "Correctness-validator events drained from Kafka by topic.", []string{"topic"}),
+		gaugeSpec("validator_inflight_sessions", "Correctness-validator sessions currently being validated.", nil),
+		histogramSpec("validator_session_events_buffered", "Events (orders.sent + orders.acked) buffered in memory per validated session.", nil, byteBuckets),
 	}
 }
 

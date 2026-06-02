@@ -16,6 +16,11 @@ spec:
     metadata:
       labels:
         app: redis
+      annotations:
+        # redis_exporter sidecar (below) exposes metrics on 9121.
+        prometheus.io/scrape: "true"
+        prometheus.io/path: /metrics
+        prometheus.io/port: "9121"
     spec:
       automountServiceAccountToken: false
       containers:
@@ -44,5 +49,31 @@ spec:
             limits:
               cpu: "1"
               memory: 512Mi
+        # redis_exporter sidecar — Redis has no auth (cache only), so the
+        # exporter connects to redis://localhost:6379. securityContext mirrors
+        # the postgres-exporter style.
+        - name: redis-exporter
+          image: oliver006/redis_exporter:v1.62.0-alpine
+          args:
+            - --redis.addr=redis://localhost:6379
+          ports:
+            - name: metrics
+              containerPort: 9121
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            runAsUser: 59000
+            runAsGroup: 59000
+            capabilities:
+              drop:
+                - ALL
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
       securityContext:
         runAsNonRoot: true

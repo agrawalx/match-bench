@@ -5,4 +5,5 @@ members = [
     "schemas/rust",
     "services/bot-fleet",
     "services/ebpf-latency",
+    "services/telemetry-ingester",
 ]

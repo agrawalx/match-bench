@@ -24,6 +24,18 @@ spec:
         - namespaceSelector:
             matchLabels:
               name: benchmark
+    # Intra-namespace Kafka: the 3-node KRaft quorum talks broker-to-broker on
+    # 9093 (controller) and 9092 (broker), and the kafka-topic-init Job connects
+    # to a broker on 9092. Without this rule those flows are default-denied by
+    # the Egress block below on a NetworkPolicy-enforcing CNI, so the cluster
+    # never forms a quorum and topic creation hangs.
+    - from:
+        - podSelector: {}
+      ports:
+        - port: 9092
+          protocol: TCP
+        - port: 9093
+          protocol: TCP
 
   egress:
     - to:
@@ -34,4 +46,13 @@ spec:
         - port: 53
           protocol: UDP
         - port: 53
+          protocol: TCP
+    # Egress side of the intra-namespace Kafka traffic above (broker-to-broker
+    # quorum + topic-init Job -> broker). Same-namespace pods only.
+    - to:
+        - podSelector: {}
+      ports:
+        - port: 9092
+          protocol: TCP
+        - port: 9093
           protocol: TCP

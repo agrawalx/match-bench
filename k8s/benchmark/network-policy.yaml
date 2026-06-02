@@ -38,7 +38,9 @@ spec:
       ports:
         - port: 9092
           protocol: TCP
-        - port: 5432
+        - port: 5432 # postgres + timescaledb (metrics)
+          protocol: TCP
+        - port: 6379 # redis (telemetry-ingester hot snapshot)
           protocol: TCP
 
     # DNS

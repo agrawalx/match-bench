@@ -1,0 +1,66 @@
+# Telemetry ingester — consumes orders.sent + orders.acked, snapshots
+# per-(session, wave) latency to TimescaleDB + Redis every second.
+#
+# SINGLE replica on purpose: it keeps per-(session, wave) HDR histograms in
+# memory and writes one metrics row per window per second. Running >1 replica
+# would shard partitions across pods, splitting a window's histogram across them
+# and producing partial rows that must be merged at query time. Horizontal
+# scaling (additive-histogram merge on read) is a follow-up; for v1 one consumer
+# reads all partitions. So no KEDA ScaledObject here.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: telemetry-ingester
+  namespace: benchmark
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate # never run two consumers in the same group during a rollout
+  selector:
+    matchLabels:
+      app: telemetry-ingester
+  template:
+    metadata:
+      labels:
+        app: telemetry-ingester
+    spec:
+      automountServiceAccountToken: false
+      containers:
+        - name: telemetry-ingester
+          image: ghcr.io/agrawalx/telemetry-ingester:dev
+          env:
+            - name: KAFKA_BROKERS
+              valueFrom:
+                secretKeyRef:
+                  name: telemetry-ingester-secrets
+                  key: KAFKA_BROKERS
+            - name: TIMESCALE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: telemetry-ingester-secrets
+                  key: TIMESCALE_URL
+            - name: REDIS_URL
+              valueFrom:
+                secretKeyRef:
+                  name: telemetry-ingester-secrets
+                  key: REDIS_URL
+            - name: KAFKA_CONSUMER_GROUP
+              value: telemetry-ingester
+            - name: RUST_LOG
+              value: info
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            capabilities:
+              drop:
+                - ALL
+          resources:
+            requests:
+              cpu: "1"
+              memory: 512Mi
+            limits:
+              cpu: "2"
+              memory: 1Gi
+      securityContext:
+        runAsNonRoot: true

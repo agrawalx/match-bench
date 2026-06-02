@@ -174,7 +174,7 @@ pub struct ReadySignal {
 /// the bot emits with recv_done_ts_ns=0 and timed_out=false immediately after
 /// the write, matching the legacy behaviour. Ingesters can distinguish by
 /// checking `recv_done_ts_ns > 0 || timed_out`.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OrderSentEvent {
     pub session_id: String,
     pub submission_id: String,
@@ -198,7 +198,7 @@ pub struct OrderSentEvent {
 
 /// OrderSentBatch is MessagePack-encoded on "orders.sent".
 /// Batching keeps Kafka traffic proportional to flush rate instead of order rate.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OrderSentBatch {
     pub session_id: String,
     pub worker_id: String,
@@ -281,7 +281,7 @@ pub struct OrderAckedBatchRef<'a> {
 }
 
 /// Side is serialized as BUY or SELL in telemetry payloads.
-#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "UPPERCASE")]
 pub enum Side {
     Buy,

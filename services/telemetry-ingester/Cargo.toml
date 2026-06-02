@@ -1,0 +1,24 @@
+[package]
+name = "iicpc-telemetry-ingester"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = "1.0"
+iicpc-logger-rust = { path = "../../libs/rust/logger" }
+iicpc-schemas-rust = { path = "../../schemas/rust" }
+# Build librdkafka from vendored source — no system librdkafka.pc needed.
+rdkafka = { version = "=0.36.0", default-features = false, features = ["cmake-build", "tokio"] }
+rmp-serde = "1.3"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokio = { version = "1.38", features = ["macros", "rt-multi-thread", "signal", "sync", "time"] }
+tracing = "0.1"
+# Telemetry-specific:
+hdrhistogram = "7.5"
+tokio-postgres = "0.7"
+deadpool-postgres = "0.14"
+redis = { version = "0.27", default-features = false, features = ["tokio-comp"] }
+
+[dev-dependencies]
+tokio = { version = "1.38", features = ["macros", "rt-multi-thread", "time", "test-util"] }

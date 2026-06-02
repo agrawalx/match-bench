@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/iicpc/libs/metrics"
 	"github.com/iicpc/schemas/topics"
 	cerrs "github.com/iicpc/submission-api/internal/errors"
 	"github.com/iicpc/submission-api/internal/utils"
@@ -64,35 +65,42 @@ func (c *BenchmarkStatusConsumer) Start(ctx context.Context) {
 			if ctx.Err() != nil {
 				return
 			}
+			recordConsume(topics.TopicBenchmarkStatusUpdated, "fetch_error", 0)
 			c.log.Error("fetch message failed", "error", err)
 			continue
 		}
+		start := time.Now()
 
 		var msg topics.BenchmarkStatusUpdated
 		if err := json.Unmarshal(m.Value, &msg); err != nil {
+			recordConsume(topics.TopicBenchmarkStatusUpdated, "decode_error", metrics.SinceSeconds(start))
 			c.log.Error("unmarshal benchmark status update", "error", err, "key", string(m.Key))
-			_ = c.reader.CommitMessages(ctx, m)
+			recordCommit(topics.TopicBenchmarkStatusUpdated, c.reader.CommitMessages(ctx, m))
 			continue
 		}
 		if !validRunStatus(msg.Status) {
+			recordConsume(topics.TopicBenchmarkStatusUpdated, "invalid_status", metrics.SinceSeconds(start))
 			c.log.Error("invalid benchmark run status", "session_id", msg.SessionID, "status", msg.Status)
-			_ = c.reader.CommitMessages(ctx, m)
+			recordCommit(topics.TopicBenchmarkStatusUpdated, c.reader.CommitMessages(ctx, m))
 			continue
 		}
 
 		if err := c.pg.UpdateRunStatus(ctx, msg.SessionID, msg.Status, msg.Message); err != nil {
 			if errors.Is(err, cerrs.ErrRunNotFound) {
+				recordConsume(topics.TopicBenchmarkStatusUpdated, "unknown_run", metrics.SinceSeconds(start))
 				// Controller is ahead of us with a status for a run we never
 				// inserted. Should not happen — log loudly and commit so we
 				// don't get stuck on it.
 				c.log.Warn("status update for unknown run", "session_id", msg.SessionID, "status", msg.Status)
-				_ = c.reader.CommitMessages(ctx, m)
+				recordCommit(topics.TopicBenchmarkStatusUpdated, c.reader.CommitMessages(ctx, m))
 				continue
 			}
+			recordConsume(topics.TopicBenchmarkStatusUpdated, "store_error", metrics.SinceSeconds(start))
 			c.log.Error("update run status failed", "session_id", msg.SessionID, "error", err)
 			// Don't commit; retry on next poll.
 			continue
 		}
+		metrics.Counter("run_status_updates_total", "Run status updates applied by submission-api.", metrics.Labels("status", msg.Status), 1)
 
 		// Roll the child's new status up into the parent run-group's denormalized
 		// status field. A failed rollup is logged but not fatal — the children
@@ -107,14 +115,35 @@ func (c *BenchmarkStatusConsumer) Start(ctx context.Context) {
 			}
 		}
 
+		recordConsume(topics.TopicBenchmarkStatusUpdated, "ok", metrics.SinceSeconds(start))
 		if err := c.reader.CommitMessages(ctx, m); err != nil {
+			recordCommit(topics.TopicBenchmarkStatusUpdated, err)
 			c.log.Warn("commit failed", "session_id", msg.SessionID, "error", err)
+		} else {
+			recordCommit(topics.TopicBenchmarkStatusUpdated, nil)
 		}
 	}
 }
 
 func (c *BenchmarkStatusConsumer) Close() error {
 	return c.reader.Close()
+}
+
+// recordConsume/recordCommit make the run-status pipeline observable.
+func recordConsume(topic, result string, durationSeconds float64) {
+	labels := metrics.Labels("service", "submission-api", "topic", topic, "result", result)
+	metrics.Counter("kafka_messages_consumed_total", "Kafka messages consumed by topic and result.", labels, 1)
+	if durationSeconds > 0 {
+		metrics.Histogram("kafka_message_process_duration_seconds", "Kafka message processing duration in seconds.", labels, durationSeconds)
+	}
+}
+
+func recordCommit(topic string, err error) {
+	result := "ok"
+	if err != nil {
+		result = "error"
+	}
+	metrics.Counter("kafka_consumer_commit_total", "Kafka consumer commits by topic and result.", metrics.Labels("service", "submission-api", "topic", topic, "result", result), 1)
 }
 
 func validRunStatus(status string) bool {

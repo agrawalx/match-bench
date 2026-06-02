@@ -12,12 +12,23 @@ spec:
     metadata:
       labels:
         app: spawner
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/path: /metrics
+        prometheus.io/port: "9090"
     spec:
       serviceAccountName: build-spawner
       containers:
         - name: spawner
           image: ghcr.io/agrawalx/spawner:dev
+          ports:
+            - name: metrics
+              containerPort: 9090
           env:
+            - name: METRICS_PORT
+              value: "9090"
+            - name: ENVIRONMENT
+              value: prod
             - name: SPAWNER_IMAGE
               value: ghcr.io/agrawalx/spawner:dev
             - name: K8S_NAMESPACE

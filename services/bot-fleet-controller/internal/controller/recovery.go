@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/iicpc/bot-fleet-controller/internal/store"
+	"github.com/iicpc/libs/metrics"
 	"github.com/iicpc/schemas/topics"
 )
 
@@ -42,6 +43,7 @@ func RecoverInFlightRuns(ctx context.Context, st *store.Store, producer *Produce
 		return nil
 	}
 
+	metrics.Counter("recovery_inflight_runs_total", "In-flight runs recovered on controller startup.", nil, float64(len(runs)))
 	log.Warn("startup recovery: marking in-flight runs failed", "count", len(runs))
 	const message = "controller restart — re-trigger benchmark"
 

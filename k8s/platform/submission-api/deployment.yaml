@@ -12,6 +12,10 @@ spec:
     metadata:
       labels:
         app: submission-api
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/path: /metrics
+        prometheus.io/port: "8080"
     spec:
       automountServiceAccountToken: false
       containers:
@@ -41,6 +45,10 @@ spec:
               value: submissions
             - name: KAFKA_BROKERS
               value: kafka.data.svc.cluster.local:9092
+            - name: ENVIRONMENT
+              value: prod
+            - name: METRICS_PORT
+              value: "8080"
           readinessProbe:
             httpGet:
               path: /health

@@ -31,6 +31,8 @@ use iicpc_schemas_rust::{OrderAckedBatchRef, OrderAckedEventRef, TOPIC_ORDERS_AC
 use tokio::time;
 use tracing::{info, warn};
 
+mod metrics;
+
 use matcher::MatchedEvent;
 use pipeline::Pipeline;
 
@@ -117,6 +119,7 @@ impl Config {
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> Result<()> {
     let _loki_guard = loki::init("ebpf-latency");
+    metrics::start_server();
 
     let config = Config::from_env()?;
     config.validate()?;
@@ -184,6 +187,7 @@ async fn drain_ringbuf(
         match capture::decode(&item) {
             Ok(cap) => pipeline.process(&cap, events),
             Err(err) => {
+                metrics::decode_error();
                 warn!(error = %err, "dropping malformed capture record");
                 continue;
             }
@@ -229,8 +233,13 @@ async fn flush(
         events: &event_refs,
     };
     let payload = rmp_serde::to_vec_named(&batch).context("encode orders.acked messagepack")?;
+    let event_count = events.len();
+    for event in events.iter() {
+        metrics::event_decoded(event.reordering_detected, event.retransmission_count);
+    }
     // Publish before clearing so a failed send doesn't silently drop the batch.
     kafka::publish_bytes(producer, &config.topic, &config.contestant_id, &payload).await?;
+    metrics::flushed(event_count);
     events.clear();
     Ok(())
 }
@@ -252,6 +261,7 @@ fn report_counter(map: &Option<PerCpuArray<MapData, u64>>, last: &mut u64, msg: 
     if let Some(map) = map {
         let total = read_counter(map);
         if total > *last {
+            metrics::ringbuf_dropped(total);
             warn!(total, delta = total - *last, "{msg}");
         }
         *last = total;
@@ -313,6 +323,7 @@ fn attach_xdp_ingress(bpf: &mut Ebpf, program_name: &str, iface: &str) -> Result
         .with_context(|| format!("load XDP program {program_name}"))?;
     match program.attach(iface, XdpFlags::DRV_MODE) {
         Ok(_) => {
+            metrics::attach_ok();
             info!(
                 iface,
                 program = program_name,
@@ -326,6 +337,7 @@ fn attach_xdp_ingress(bpf: &mut Ebpf, program_name: &str, iface: &str) -> Result
             program
                 .attach(iface, XdpFlags::SKB_MODE)
                 .with_context(|| format!("attach XDP program {program_name} to {iface}"))?;
+            metrics::attach_ok();
             Ok(())
         }
     }
@@ -348,6 +360,7 @@ fn attach_tc_egress(bpf: &mut Ebpf, program_name: &str, iface: &str) -> Result<(
     program
         .attach(iface, TcAttachType::Egress)
         .with_context(|| format!("attach tc egress program {program_name} to {iface}"))?;
+    metrics::attach_ok();
     info!(iface, program = program_name, "attached tc egress program");
     Ok(())
 }

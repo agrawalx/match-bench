@@ -35,6 +35,10 @@ spec:
         app: ebpf-latency
         iicpc.dev/session-id: ${IICPC_SESSION_ID}
         iicpc.dev/contestant-id: ${IICPC_CONTESTANT_ID}
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/path: /metrics
+        prometheus.io/port: "9090"
     spec:
       automountServiceAccountToken: false
       hostNetwork: true
@@ -49,6 +53,9 @@ spec:
         - name: ebpf-latency
           image: iicpc-ebpf-latency:latest
           imagePullPolicy: IfNotPresent
+          ports:
+            - name: metrics
+              containerPort: 9090
           securityContext:
             privileged: true
             allowPrivilegeEscalation: true
@@ -67,6 +74,10 @@ spec:
           env:
             - name: RUST_LOG
               value: info
+            - name: METRICS_PORT
+              value: "9090"
+            - name: ENVIRONMENT
+              value: prod
             - name: KAFKA_BROKERS
               value: kafka.data.svc.cluster.local:9092
             - name: SESSION_ID

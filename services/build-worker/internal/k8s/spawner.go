@@ -16,6 +16,7 @@ import (
 	"github.com/google/go-containerregistry/pkg/crane"
 	"github.com/iicpc/build-worker/internal/dockerfile"
 	"github.com/iicpc/build-worker/internal/precheck"
+	"github.com/iicpc/libs/metrics"
 	"github.com/iicpc/schemas/topics"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -100,27 +101,35 @@ func NewSpawner(cfg JobConfig, minio MinioClient, updater StatusUpdater, log *sl
 }
 
 func (s *Spawner) Run(ctx context.Context, msg topics.SubmissionBuildRequested) {
+	runStart := time.Now()
 	id := msg.SubmissionID
 	log := s.log.With("submission_id", id)
 	stagingRef := fmt.Sprintf("%s/%s/%s:latest", s.cfg.HarborStagingEndpoint, s.cfg.HarborProject, id)
 
 	// Pre-check: zip-slip scan before any Job is created
+	phaseStart := time.Now()
 	zipData, err := s.minio.DownloadObject(ctx, msg.ArtifactPath)
 	if err != nil {
+		recordBuildPhase("precheck", phaseStart, "error")
+		recordBuildRequest("error")
 		log.Error("failed to download artifact", "error", err)
 		s.setStatus(ctx, id, topics.StatusFailed, fmt.Sprintf("download artifact: %v", err))
 		return
 	}
 	if err := precheck.CheckZipSlip(zipData); err != nil {
+		recordBuildPhase("precheck", phaseStart, "error")
+		recordBuildRequest("error")
 		log.Warn("zip-slip check failed", "error", err)
 		s.setStatus(ctx, id, topics.StatusFailed, fmt.Sprintf("zip-slip: %v", err))
 		return
 	}
+	recordBuildPhase("precheck", phaseStart, "ok")
 
 	// Generate a platform-controlled Dockerfile from the submission metadata.
 	// Contestants never supply a Dockerfile — the platform controls the build environment.
 	dockerfileContent, err := dockerfile.Generate(msg.Language, msg.BuildType, msg.BuildTarget, msg.Port)
 	if err != nil {
+		recordBuildRequest("error")
 		log.Error("failed to generate dockerfile", "error", err)
 		s.setStatus(ctx, id, topics.StatusFailed, fmt.Sprintf("generate dockerfile: %v", err))
 		return
@@ -130,21 +139,29 @@ func (s *Spawner) Run(ctx context.Context, msg topics.SubmissionBuildRequested) 
 
 	// Phase 1: fetcher init container extracts ZIP → kaniko builds and pushes to Harbor staging
 	buildJobName := resourceName("build", id)
+	phaseStart = time.Now()
 	if err := s.createJob(ctx, s.buildJobSpec(buildJobName, msg, stagingRef, dockerfileB64)); err != nil {
+		recordBuildPhase("build", phaseStart, "error")
+		recordBuildRequest("error")
 		log.Error("failed to create build job", "error", err)
 		s.setStatus(ctx, id, topics.StatusFailed, fmt.Sprintf("create build job: %v", err))
 		return
 	}
+	metrics.Counter("build_jobs_created_total", "Build jobs created by mode.", metrics.Labels("mode", "build"), 1)
 	log.Info("build job created", "job", buildJobName)
 
 	buildErr := s.waitForJob(ctx, buildJobName, time.Duration(buildDeadline+60)*time.Second)
 	buildLog, _ := s.readJobLogs(ctx, buildJobName, "build")
 	_ = s.minio.UploadBytes(ctx, "submissions/"+id+"/build.log", "text/plain", buildLog)
 	if buildErr != nil {
+		recordBuildPhase("build", phaseStart, "error")
+		metrics.Counter("build_jobs_failed_total", "Build jobs failed by mode.", metrics.Labels("mode", "build"), 1)
+		recordBuildRequest("error")
 		log.Error("build job failed", "error", buildErr)
 		s.setStatus(ctx, id, topics.StatusFailed, fmt.Sprintf("build: %v", buildErr))
 		return
 	}
+	recordBuildPhase("build", phaseStart, "ok")
 	s.setStatus(ctx, id, topics.StatusBuilding, "image built and pushed to staging")
 	log.Info("phase 1 complete")
 
@@ -153,13 +170,17 @@ func (s *Spawner) Run(ctx context.Context, msg topics.SubmissionBuildRequested) 
 	sbomJobName := resourceName("sbom", id)
 
 	if err := s.createJob(ctx, s.scanJobSpec(scanJobName, id, stagingRef)); err != nil {
+		recordBuildRequest("error")
 		s.setStatus(ctx, id, topics.StatusFailed, fmt.Sprintf("create scan job: %v", err))
 		return
 	}
+	metrics.Counter("build_jobs_created_total", "Build jobs created by mode.", metrics.Labels("mode", "scan"), 1)
 	if err := s.createJob(ctx, s.sbomJobSpec(sbomJobName, id, stagingRef)); err != nil {
+		recordBuildRequest("error")
 		s.setStatus(ctx, id, topics.StatusFailed, fmt.Sprintf("create sbom job: %v", err))
 		return
 	}
+	metrics.Counter("build_jobs_created_total", "Build jobs created by mode.", metrics.Labels("mode", "sbom"), 1)
 	log.Info("scan and sbom jobs created")
 
 	var wg sync.WaitGroup
@@ -169,24 +190,32 @@ func (s *Spawner) Run(ctx context.Context, msg topics.SubmissionBuildRequested) 
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
+		phaseStart := time.Now()
 		if err := s.waitForJob(ctx, scanJobName, time.Duration(scanDeadline+60)*time.Second); err != nil {
+			recordBuildPhase("scan", phaseStart, "error")
+			metrics.Counter("build_jobs_failed_total", "Build jobs failed by mode.", metrics.Labels("mode", "scan"), 1)
 			errs <- fmt.Errorf("scan: %w", err)
 			return
 		}
 		report, _ := s.readJobLogs(ctx, scanJobName, "")
 		_ = s.minio.UploadBytes(ctx, "submissions/"+id+"/trivy-report.json", "application/json", report)
+		recordBuildPhase("scan", phaseStart, "ok")
 		statuses <- topics.StatusScanned
 	}()
 
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
+		phaseStart := time.Now()
 		if err := s.waitForJob(ctx, sbomJobName, time.Duration(sbomDeadline+60)*time.Second); err != nil {
+			recordBuildPhase("sbom", phaseStart, "error")
+			metrics.Counter("build_jobs_failed_total", "Build jobs failed by mode.", metrics.Labels("mode", "sbom"), 1)
 			errs <- fmt.Errorf("sbom: %w", err)
 			return
 		}
 		sbom, _ := s.readJobLogs(ctx, sbomJobName, "")
 		_ = s.minio.UploadBytes(ctx, "submissions/"+id+"/sbom.json", "application/json", sbom)
+		recordBuildPhase("sbom", phaseStart, "ok")
 		statuses <- topics.StatusSBOMReady
 	}()
 
@@ -203,6 +232,7 @@ func (s *Spawner) Run(ctx context.Context, msg topics.SubmissionBuildRequested) 
 	for err := range errs {
 		if err != nil {
 			log.Error("phase 2 job failed", "error", err)
+			recordBuildRequest("error")
 			s.setStatus(ctx, id, topics.StatusFailed, err.Error())
 			return
 		}
@@ -211,18 +241,26 @@ func (s *Spawner) Run(ctx context.Context, msg topics.SubmissionBuildRequested) 
 
 	// Phase 3: promote staging → production via crane.Copy (no extra Job)
 	productionRef := fmt.Sprintf("%s/%s/%s:latest", s.cfg.HarborProductionEndpoint, s.cfg.HarborProject, id)
+	phaseStart = time.Now()
 	auth := crane.WithAuth(authn.FromConfig(authn.AuthConfig{
 		Username: s.cfg.HarborUser,
 		Password: s.cfg.HarborPassword,
 	}))
 	if err := crane.Copy(stagingRef, productionRef, auth, crane.WithContext(ctx)); err != nil {
+		recordBuildPhase("promote", phaseStart, "error")
+		metrics.Counter("harbor_promote_total", "Harbor image promotions by result.", metrics.Labels("result", "error"), 1)
+		recordBuildRequest("error")
 		log.Error("harbor promote failed", "error", err)
 		s.setStatus(ctx, id, topics.StatusFailed, fmt.Sprintf("promote staging→production: %v", err))
 		return
 	}
+	recordBuildPhase("promote", phaseStart, "ok")
+	metrics.Counter("harbor_promote_total", "Harbor image promotions by result.", metrics.Labels("result", "ok"), 1)
 	log.Info("image promoted to production", "ref", productionRef)
 
 	s.setStatus(ctx, id, topics.StatusReady, "image ready")
+	recordBuildRequest("ok")
+	metrics.Histogram("build_request_duration_seconds", "End-to-end build request duration in seconds.", metrics.Labels("result", "ok"), metrics.SinceSeconds(runStart))
 	log.Info("pipeline complete")
 }
 
@@ -487,11 +525,14 @@ func (s *Spawner) secretKeyRef(key string) *corev1.EnvVarSource {
 
 func (s *Spawner) setStatus(ctx context.Context, submissionID, status, message string) {
 	if err := s.updater.PublishStatus(ctx, submissionID, status, message); err != nil {
+		metrics.Counter("submission_status_transition_total", "Submission status transitions by status/result.", metrics.Labels("status", status, "result", "publish_error"), 1)
 		s.log.Warn("publish status failed", "error", err)
 	}
 	if err := s.updater.UpdateDBStatus(ctx, submissionID, status, message); err != nil {
+		metrics.Counter("submission_status_transition_total", "Submission status transitions by status/result.", metrics.Labels("status", status, "result", "db_error"), 1)
 		s.log.Warn("db status update failed", "error", err)
 	}
+	metrics.Counter("submission_status_transition_total", "Submission status transitions by status/result.", metrics.Labels("status", status, "result", "ok"), 1)
 }
 
 func (s *Spawner) buildTolerations() []corev1.Toleration {
@@ -642,4 +683,15 @@ func boolPtr(v bool) *bool {
 
 func int64Ptr(v int64) *int64 {
 	return &v
+}
+
+// recordBuildPhase and recordBuildRequest expose build pipeline health.
+func recordBuildPhase(phase string, start time.Time, result string) {
+	labels := metrics.Labels("phase", phase, "result", result)
+	metrics.Counter("build_phase_total", "Build phases by phase and result.", labels, 1)
+	metrics.Histogram("build_phase_duration_seconds", "Build phase duration in seconds.", labels, metrics.SinceSeconds(start))
+}
+
+func recordBuildRequest(result string) {
+	metrics.Counter("build_requests_total", "Build requests by result.", metrics.Labels("result", result), 1)
 }

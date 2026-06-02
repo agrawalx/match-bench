@@ -9,6 +9,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
+	"github.com/iicpc/libs/metrics"
 	"github.com/iicpc/schemas/topics"
 	cerrs "github.com/iicpc/submission-api/internal/errors"
 	"github.com/iicpc/submission-api/internal/publisher"
@@ -134,6 +135,8 @@ func StartBenchmark(pg *store.PostgresStore, pub publisher.Publisher, log *slog.
 			writeError(w, http.StatusInternalServerError, "lookup failed")
 			return
 		} else if existing != nil {
+			metrics.Counter("benchmark_requests_total", "Benchmark requests by result.", metrics.Labels("result", "joined_existing"), 1)
+			metrics.Counter("active_run_group_conflicts_total", "Benchmark requests that joined an existing active run-group.", nil, 1)
 			respondWithGroup(ctx, w, pg, log, existing, scenarios, http.StatusOK)
 			return
 		}
@@ -188,6 +191,8 @@ func StartBenchmark(pg *store.PostgresStore, pub publisher.Publisher, log *slog.
 					writeError(w, http.StatusInternalServerError, "concurrent benchmark request conflict")
 					return
 				}
+				metrics.Counter("benchmark_requests_total", "Benchmark requests by result.", metrics.Labels("result", "race_joined_existing"), 1)
+				metrics.Counter("active_run_group_conflicts_total", "Benchmark requests that joined an existing active run-group.", nil, 1)
 				respondWithGroup(ctx, w, pg, log, existing, scenarios, http.StatusOK)
 				return
 			}
@@ -216,6 +221,8 @@ func StartBenchmark(pg *store.PostgresStore, pub publisher.Publisher, log *slog.
 				// half-published group on its next restart.
 				log.ErrorContext(ctx, "publish benchmark.requested",
 					"session_id", c.SessionID, "scenario_id", c.ScenarioID, "error", err)
+				metrics.Counter("benchmark_publish_failures_total", "Benchmark publish failures by topic.", metrics.Labels("topic", topics.TopicBenchmarkRequested), 1)
+				metrics.Counter("benchmark_requests_total", "Benchmark requests by result.", metrics.Labels("result", "publish_failed"), 1)
 				writeError(w, http.StatusInternalServerError, "failed to publish benchmark request")
 				return
 			}
@@ -225,6 +232,11 @@ func StartBenchmark(pg *store.PostgresStore, pub publisher.Publisher, log *slog.
 			"submission_id", submissionID,
 			"run_group_id", runGroupID,
 			"scenarios", len(children))
+		metrics.Counter("benchmark_requests_total", "Benchmark requests by result.", metrics.Labels("result", "started"), 1)
+		metrics.Counter("run_groups_created_total", "Run-groups created by submission-api.", nil, 1)
+		for _, sc := range scenarios {
+			metrics.Counter("run_group_children_created_total", "Child runs created by scenario.", metrics.Labels("scenario_name", sc.Name), 1)
+		}
 		respondWithGroup(ctx, w, pg, log, &group, scenarios, http.StatusAccepted)
 	}
 }

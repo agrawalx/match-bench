@@ -28,6 +28,7 @@ use crate::{
     content::{self, TaskGenerator},
     fix::{self, OrderFrame},
     kafka::{self, KafkaProducer},
+    metrics,
     telemetry::TelemetrySink,
     time::unix_nanos,
 };
@@ -105,6 +106,7 @@ pub async fn run(config: Config) -> Result<()> {
                 if let Err(err) =
                     run_workload(&config, &control_producer, &telemetry_producer, spec).await
                 {
+                    metrics::workload_error();
                     // Log + continue rather than process::exit(1). The
                     // previous behaviour killed the pod on the first bad
                     // workload, forcing a restart and a KEDA reschedule
@@ -114,6 +116,8 @@ pub async fn run(config: Config) -> Result<()> {
                     // ReadyDeadline + degraded fan-in, so dropping this one
                     // workload is harmless at the fleet level.
                     error!(error = %err, "workload failed; dropping and continuing");
+                } else {
+                    metrics::workload_ok();
                 }
                 kafka::commit_message(&workload_consumer, &message)
                     .context("commit handled workload assignment")?;
@@ -161,9 +165,11 @@ async fn run_workload(
         task_count = spec.tasks.len(),
         "preparing workload"
     );
+    metrics::tasks_assigned(spec.tasks.len());
 
     let connected = connect_tasks(&spec).await?;
     let connected_count = connected.len() as u32;
+    metrics::tasks_connected(connected.len());
 
     let ready = ReadySignal {
         session_id: spec.session_id.clone(),
@@ -325,6 +331,7 @@ async fn connect_tasks(spec: &WorkloadSpec) -> Result<Vec<ConnectedTask>> {
                 // Connection failure for one task does not fail the workload —
                 // log + drop and continue. The dropped task contributes to
                 // the error-rate metric visible in Grafana via the slog stream.
+                metrics::connect_failure();
                 warn!(error = %err, "task connect failed; dropping");
             }
         }
@@ -719,6 +726,7 @@ async fn fix_write_loop(
         match time::timeout(write_timeout, write_half.write_all(&frame.fix)).await {
             Ok(Ok(())) => {
                 let send_ts_ns = unix_nanos();
+                metrics::order_sent();
                 // Patch send_ts_ns. Skipping the patch on a fast-arrived
                 // response is acceptable — the response branch only reads
                 // send_ts_ns which was 0; an r9 < t1 anomaly in the rare
@@ -739,6 +747,7 @@ async fn fix_write_loop(
                     .lock()
                     .expect("pending map poisoned")
                     .remove(&frame.order_id);
+                metrics::order_write_error();
                 warn!(
                     task_id = task.task_id,
                     seq, error = %err, "FIX write failed; task writer exiting"
@@ -750,6 +759,7 @@ async fn fix_write_loop(
                     .lock()
                     .expect("pending map poisoned")
                     .remove(&frame.order_id);
+                metrics::order_write_error();
                 warn!(
                     task_id = task.task_id,
                     seq, "FIX write timeout; task writer exiting"

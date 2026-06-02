@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/iicpc/bot-fleet-controller/internal/orchestrator"
+	"github.com/iicpc/libs/metrics"
 	"github.com/iicpc/schemas/topics"
 )
 
@@ -71,9 +72,11 @@ func (m *SessionManager) Add(sess *Session) (*Session, bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if existing, ok := m.sessions[sess.SessionID]; ok {
+		metrics.Counter("controller_duplicate_benchmark_requested_total", "Duplicate benchmark.requested messages ignored by controller.", nil, 1)
 		return existing, true
 	}
 	m.sessions[sess.SessionID] = sess
+	metrics.Gauge("controller_active_sessions", "Active sessions tracked by the controller.", nil, float64(len(m.sessions)))
 	return sess, false
 }
 
@@ -88,6 +91,7 @@ func (m *SessionManager) Drop(sessionID string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	delete(m.sessions, sessionID)
+	metrics.Gauge("controller_active_sessions", "Active sessions tracked by the controller.", nil, float64(len(m.sessions)))
 }
 
 // Snapshot returns a slice of currently tracked session_ids. Used by

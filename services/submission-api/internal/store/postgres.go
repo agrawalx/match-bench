@@ -7,8 +7,9 @@ import (
 	"fmt"
 	"time"
 
-	cerrs "github.com/iicpc/submission-api/internal/errors"
+	"github.com/iicpc/libs/metrics"
 	"github.com/iicpc/schemas/topics"
+	cerrs "github.com/iicpc/submission-api/internal/errors"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -137,14 +138,18 @@ type PostgresStore struct {
 }
 
 func NewPostgresStore(ctx context.Context, dsn string) (*PostgresStore, error) {
+	start := time.Now()
 	pool, err := pgxpool.New(ctx, dsn)
 	if err != nil {
+		recordDB("submission-api", "connect", start, err)
 		return nil, fmt.Errorf("pgx pool: %w", err)
 	}
 
 	if _, err := pool.Exec(ctx, createTableSQL); err != nil {
+		recordDB("submission-api", "startup_schema_migration", start, err)
 		return nil, fmt.Errorf("create tables: %w", err)
 	}
+	recordDB("submission-api", "startup_schema_migration", start, nil)
 
 	return &PostgresStore{pool: pool}, nil
 }
@@ -188,6 +193,7 @@ type ScenarioRow struct {
 // this for idempotency: if an active group already exists, return it with
 // HTTP 200 instead of creating a new one.
 func (s *PostgresStore) FindActiveRunGroup(ctx context.Context, submissionID string) (*RunGroupMeta, error) {
+	start := time.Now()
 	row := s.pool.QueryRow(ctx,
 		`SELECT run_group_id, submission_id, contestant_id, status, created_at, updated_at
 		   FROM run_groups
@@ -200,15 +206,19 @@ func (s *PostgresStore) FindActiveRunGroup(ctx context.Context, submissionID str
 	err := row.Scan(&g.RunGroupID, &g.SubmissionID, &g.ContestantID, &g.Status, &g.CreatedAt, &g.UpdatedAt)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
+			recordDB("submission-api", "find_active_run_group", start, nil)
 			return nil, nil
 		}
+		recordDB("submission-api", "find_active_run_group", start, err)
 		return nil, fmt.Errorf("%w: find active run-group: %v", cerrs.ErrStoreDatabaseFailed, err)
 	}
+	recordDB("submission-api", "find_active_run_group", start, nil)
 	return &g, nil
 }
 
 // GetRunGroup fetches one run-group by id. Returns (nil, nil) when not found.
 func (s *PostgresStore) GetRunGroup(ctx context.Context, runGroupID string) (*RunGroupMeta, error) {
+	start := time.Now()
 	row := s.pool.QueryRow(ctx,
 		`SELECT run_group_id, submission_id, contestant_id, status, created_at, updated_at
 		   FROM run_groups WHERE run_group_id = $1`,
@@ -218,15 +228,19 @@ func (s *PostgresStore) GetRunGroup(ctx context.Context, runGroupID string) (*Ru
 	err := row.Scan(&g.RunGroupID, &g.SubmissionID, &g.ContestantID, &g.Status, &g.CreatedAt, &g.UpdatedAt)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
+			recordDB("submission-api", "get_run_group", start, nil)
 			return nil, nil
 		}
+		recordDB("submission-api", "get_run_group", start, err)
 		return nil, fmt.Errorf("%w: get run-group: %v", cerrs.ErrStoreDatabaseFailed, err)
 	}
+	recordDB("submission-api", "get_run_group", start, nil)
 	return &g, nil
 }
 
 // GetRun fetches one run by session_id. Returns (nil, nil) when not found.
 func (s *PostgresStore) GetRun(ctx context.Context, sessionID string) (*RunMeta, error) {
+	start := time.Now()
 	row := s.pool.QueryRow(ctx,
 		`SELECT session_id, submission_id, contestant_id,
 		        COALESCE(run_group_id, ''), COALESCE(scenario_id, ''),
@@ -239,10 +253,13 @@ func (s *PostgresStore) GetRun(ctx context.Context, sessionID string) (*RunMeta,
 		&r.RunGroupID, &r.ScenarioID, &r.Status, &r.Message, &r.CreatedAt, &r.UpdatedAt)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
+			recordDB("submission-api", "get_run", start, nil)
 			return nil, nil
 		}
+		recordDB("submission-api", "get_run", start, err)
 		return nil, fmt.Errorf("%w: get run: %v", cerrs.ErrStoreDatabaseFailed, err)
 	}
+	recordDB("submission-api", "get_run", start, nil)
 	return &r, nil
 }
 
@@ -251,6 +268,7 @@ func (s *PostgresStore) GetRun(ctx context.Context, sessionID string) (*RunMeta,
 // populated by SeedScenarios. Name tiebreak keeps the query deterministic if
 // two scenarios end up with the same sort_order (shouldn't happen but cheap).
 func (s *PostgresStore) ListRunsByGroup(ctx context.Context, runGroupID string) ([]RunMeta, error) {
+	start := time.Now()
 	rows, err := s.pool.Query(ctx,
 		`SELECT r.session_id, r.submission_id, r.contestant_id,
 		        COALESCE(r.run_group_id, ''), COALESCE(r.scenario_id, ''),
@@ -262,6 +280,7 @@ func (s *PostgresStore) ListRunsByGroup(ctx context.Context, runGroupID string) 
 		runGroupID,
 	)
 	if err != nil {
+		recordDB("submission-api", "list_runs_by_group", start, err)
 		return nil, fmt.Errorf("%w: list runs by group: %v", cerrs.ErrStoreDatabaseFailed, err)
 	}
 	defer rows.Close()
@@ -275,7 +294,12 @@ func (s *PostgresStore) ListRunsByGroup(ctx context.Context, runGroupID string) 
 		}
 		out = append(out, r)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		recordDB("submission-api", "list_runs_by_group", start, err)
+		return out, err
+	}
+	recordDB("submission-api", "list_runs_by_group", start, nil)
+	return out, nil
 }
 
 // InsertRunGroupWithChildren atomically creates a run-group and N child runs.
@@ -288,8 +312,10 @@ func (s *PostgresStore) ListRunsByGroup(ctx context.Context, runGroupID string) 
 // half-inserted state (run-group exists but a child row failed) would leave
 // the controller confused about how many sessions to expect.
 func (s *PostgresStore) InsertRunGroupWithChildren(ctx context.Context, g RunGroupMeta, children []RunMeta) error {
+	start := time.Now()
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
+		recordDB("submission-api", "insert_run_group_with_children", start, err)
 		return fmt.Errorf("%w: begin tx: %v", cerrs.ErrStoreDatabaseFailed, err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
@@ -302,8 +328,10 @@ func (s *PostgresStore) InsertRunGroupWithChildren(ctx context.Context, g RunGro
 	); err != nil {
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+			recordDB("submission-api", "insert_run_group_with_children", start, err)
 			return cerrs.ErrActiveRunGroupExists
 		}
+		recordDB("submission-api", "insert_run_group_with_children", start, err)
 		return fmt.Errorf("%w: insert run-group: %v", cerrs.ErrStoreDatabaseFailed, err)
 	}
 
@@ -316,13 +344,16 @@ func (s *PostgresStore) InsertRunGroupWithChildren(ctx context.Context, g RunGro
 			r.SessionID, r.SubmissionID, r.ContestantID, r.RunGroupID, r.ScenarioID,
 			r.Status, r.Message, r.CreatedAt, r.UpdatedAt,
 		); err != nil {
+			recordDB("submission-api", "insert_run_group_with_children", start, err)
 			return fmt.Errorf("%w: insert child run: %v", cerrs.ErrStoreDatabaseFailed, err)
 		}
 	}
 
 	if err := tx.Commit(ctx); err != nil {
+		recordDB("submission-api", "insert_run_group_with_children", start, err)
 		return fmt.Errorf("%w: commit run-group tx: %v", cerrs.ErrStoreDatabaseFailed, err)
 	}
+	recordDB("submission-api", "insert_run_group_with_children", start, nil)
 	return nil
 }
 
@@ -353,6 +384,7 @@ func (s *PostgresStore) InsertRunGroupWithChildren(ctx context.Context, g RunGro
 // group state we should never observe in practice but want to handle without
 // crashing if we do.
 func (s *PostgresStore) RecomputeRunGroupStatus(ctx context.Context, runGroupID string) error {
+	start := time.Now()
 	row := s.pool.QueryRow(ctx, `
 		SELECT
 			SUM(CASE WHEN status = 'failed'    THEN 1 ELSE 0 END) AS failed_count,
@@ -364,9 +396,11 @@ func (s *PostgresStore) RecomputeRunGroupStatus(ctx context.Context, runGroupID 
 	`, runGroupID)
 	var failed, completed, requested, total int
 	if err := row.Scan(&failed, &completed, &requested, &total); err != nil {
+		recordDB("submission-api", "recompute_run_group_status", start, err)
 		return fmt.Errorf("%w: recompute run-group status: %v", cerrs.ErrStoreDatabaseFailed, err)
 	}
 	if total == 0 {
+		recordDB("submission-api", "recompute_run_group_status", start, nil)
 		return nil
 	}
 	var newStatus string
@@ -384,12 +418,15 @@ func (s *PostgresStore) RecomputeRunGroupStatus(ctx context.Context, runGroupID 
 		`UPDATE run_groups SET status = $2, updated_at = now() WHERE run_group_id = $1`,
 		runGroupID, newStatus,
 	); err != nil {
+		recordDB("submission-api", "recompute_run_group_status", start, err)
 		return fmt.Errorf("%w: update run-group status: %v", cerrs.ErrStoreDatabaseFailed, err)
 	}
+	recordDB("submission-api", "recompute_run_group_status", start, nil)
 	return nil
 }
 
 func (s *PostgresStore) UpdateRunStatus(ctx context.Context, sessionID, status, message string) error {
+	start := time.Now()
 	// Guard against terminal-state overwrite. Kafka delivers at-least-once,
 	// so a 'running' message can be redelivered AFTER the 'completed' message
 	// has already been committed. Without this guard, the run would be
@@ -404,6 +441,7 @@ func (s *PostgresStore) UpdateRunStatus(ctx context.Context, sessionID, status, 
 		sessionID, status, message,
 	)
 	if err != nil {
+		recordDB("submission-api", "update_run_status", start, err)
 		return fmt.Errorf("%w: update run status: %v", cerrs.ErrStoreDatabaseFailed, err)
 	}
 	if tag.RowsAffected() == 0 {
@@ -416,15 +454,19 @@ func (s *PostgresStore) UpdateRunStatus(ctx context.Context, sessionID, status, 
 		).Scan(&currentStatus)
 		if err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
+				recordDB("submission-api", "update_run_status", start, err)
 				return cerrs.ErrRunNotFound
 			}
+			recordDB("submission-api", "update_run_status", start, err)
 			return fmt.Errorf("%w: check run status: %v", cerrs.ErrStoreDatabaseFailed, err)
 		}
 		// Row exists in terminal state — guarded redelivery. Treat as
 		// successfully ignored so the consumer commits the Kafka offset
 		// instead of retrying forever.
+		recordDB("submission-api", "update_run_status", start, nil)
 		return nil
 	}
+	recordDB("submission-api", "update_run_status", start, nil)
 	return nil
 }
 
@@ -432,12 +474,14 @@ func (s *PostgresStore) UpdateRunStatus(ctx context.Context, sessionID, status, 
 // submission-api calls this on the benchmark trigger to know how many child
 // runs to mint and which scenario_id each one points at.
 func (s *PostgresStore) ListScenarios(ctx context.Context) ([]ScenarioRow, error) {
+	start := time.Now()
 	rows, err := s.pool.Query(ctx,
 		`SELECT scenario_id, name, sort_order, duration_ns, task_specs, created_at
 		   FROM scenarios
 		  ORDER BY sort_order, name`,
 	)
 	if err != nil {
+		recordDB("submission-api", "list_scenarios", start, err)
 		return nil, fmt.Errorf("%w: list scenarios: %v", cerrs.ErrStoreDatabaseFailed, err)
 	}
 	defer rows.Close()
@@ -454,7 +498,12 @@ func (s *PostgresStore) ListScenarios(ctx context.Context) ([]ScenarioRow, error
 		}
 		out = append(out, sc)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		recordDB("submission-api", "list_scenarios", start, err)
+		return out, err
+	}
+	recordDB("submission-api", "list_scenarios", start, nil)
+	return out, nil
 }
 
 // SeedScenarios inserts the 3 canonical scenarios (constant, spike, ramp) if
@@ -470,9 +519,11 @@ func (s *PostgresStore) ListScenarios(ctx context.Context) ([]ScenarioRow, error
 // upgrading from an older deployment whose scenarios table didn't have the
 // column populates the field for existing rows.
 func (s *PostgresStore) SeedScenarios(ctx context.Context, scenarios []ScenarioRow) error {
+	start := time.Now()
 	for _, sc := range scenarios {
 		taskSpecsJSON, err := json.Marshal(sc.TaskSpecs)
 		if err != nil {
+			recordDB("submission-api", "seed_scenarios", start, err)
 			return fmt.Errorf("%w: marshal task_specs for %q: %v", cerrs.ErrStoreDatabaseFailed, sc.Name, err)
 		}
 		if _, err := s.pool.Exec(ctx,
@@ -481,6 +532,7 @@ func (s *PostgresStore) SeedScenarios(ctx context.Context, scenarios []ScenarioR
 			 ON CONFLICT (name) DO NOTHING`,
 			sc.ScenarioID, sc.Name, sc.SortOrder, sc.DurationNs, taskSpecsJSON,
 		); err != nil {
+			recordDB("submission-api", "seed_scenarios", start, err)
 			return fmt.Errorf("%w: seed scenario %q: %v", cerrs.ErrStoreDatabaseFailed, sc.Name, err)
 		}
 		// Backfill sort_order for an existing row that pre-dates this column.
@@ -489,9 +541,11 @@ func (s *PostgresStore) SeedScenarios(ctx context.Context, scenarios []ScenarioR
 			  WHERE name = $1 AND sort_order = 0`,
 			sc.Name, sc.SortOrder,
 		); err != nil {
+			recordDB("submission-api", "seed_scenarios", start, err)
 			return fmt.Errorf("%w: backfill sort_order for %q: %v", cerrs.ErrStoreDatabaseFailed, sc.Name, err)
 		}
 	}
+	recordDB("submission-api", "seed_scenarios", start, nil)
 	return nil
 }
 
@@ -499,8 +553,20 @@ func (s *PostgresStore) Close() {
 	s.pool.Close()
 }
 
+func (s *PostgresStore) RecordPoolStats() {
+	stats := s.pool.Stat()
+	labels := metrics.Labels("service", "submission-api")
+	metrics.Gauge("pgxpool_acquired_conns", "Acquired pgxpool connections.", labels, float64(stats.AcquiredConns()))
+	metrics.Gauge("pgxpool_idle_conns", "Idle pgxpool connections.", labels, float64(stats.IdleConns()))
+	metrics.Gauge("pgxpool_total_conns", "Total pgxpool connections.", labels, float64(stats.TotalConns()))
+	metrics.Gauge("pgxpool_max_conns", "Maximum pgxpool connections.", labels, float64(stats.MaxConns()))
+	metrics.Gauge("pgxpool_empty_acquire_total", "pgxpool empty acquire count.", labels, float64(stats.EmptyAcquireCount()))
+	metrics.Gauge("pgxpool_canceled_acquire_total", "pgxpool canceled acquire count.", labels, float64(stats.CanceledAcquireCount()))
+}
+
 // FindBySHA256 returns the existing submission_id if a duplicate artifact is detected.
 func (s *PostgresStore) FindBySHA256(ctx context.Context, sha256hex string) (submissionID string, found bool, err error) {
+	start := time.Now()
 	row := s.pool.QueryRow(ctx,
 		`SELECT submission_id FROM submissions WHERE sha256 = $1 LIMIT 1`,
 		sha256hex,
@@ -508,15 +574,19 @@ func (s *PostgresStore) FindBySHA256(ctx context.Context, sha256hex string) (sub
 	err = row.Scan(&submissionID)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
+			recordDB("submission-api", "find_submission_by_sha256", start, nil)
 			return "", false, nil
 		}
+		recordDB("submission-api", "find_submission_by_sha256", start, err)
 		return "", false, fmt.Errorf("sha256 lookup: %w", err)
 	}
+	recordDB("submission-api", "find_submission_by_sha256", start, nil)
 	return submissionID, true, nil
 }
 
 // GetByID fetches a submission by its ID. Returns (nil, nil) if not found.
 func (s *PostgresStore) GetByID(ctx context.Context, submissionID string) (*SubmissionMeta, error) {
+	start := time.Now()
 	row := s.pool.QueryRow(ctx,
 		`SELECT submission_id, contestant_id, sha256, language, protocol, port,
 		        team_name, artifact_path, status, created_at
@@ -532,15 +602,19 @@ func (s *PostgresStore) GetByID(ctx context.Context, submissionID string) (*Subm
 	)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
+			recordDB("submission-api", "get_submission_by_id", start, nil)
 			return nil, nil
 		}
+		recordDB("submission-api", "get_submission_by_id", start, err)
 		return nil, fmt.Errorf("%w: get submission: %v", cerrs.ErrStoreDatabaseFailed, err)
 	}
+	recordDB("submission-api", "get_submission_by_id", start, nil)
 	return &m, nil
 }
 
 // Insert writes a new submission record.
 func (s *PostgresStore) Insert(ctx context.Context, m SubmissionMeta) error {
+	start := time.Now()
 	_, err := s.pool.Exec(ctx,
 		`INSERT INTO submissions
 			(submission_id, contestant_id, sha256, language, protocol, port,
@@ -553,9 +627,23 @@ func (s *PostgresStore) Insert(ctx context.Context, m SubmissionMeta) error {
 	if err != nil {
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+			recordDB("submission-api", "insert_submission", start, err)
 			return cerrs.ErrDuplicateSubmission
 		}
+		recordDB("submission-api", "insert_submission", start, err)
 		return fmt.Errorf("%w: insert submission: %v", cerrs.ErrStoreDatabaseFailed, err)
 	}
+	recordDB("submission-api", "insert_submission", start, nil)
 	return nil
+}
+
+// recordDB emits low-cardinality DB metrics for store methods.
+func recordDB(service, operation string, start time.Time, err error) {
+	labels := metrics.Labels("service", service, "operation", operation)
+	metrics.Histogram("db_query_duration_seconds", "PostgreSQL query duration in seconds.", labels, metrics.SinceSeconds(start))
+	result := "ok"
+	if err != nil {
+		result = "error"
+	}
+	metrics.Counter("db_query_total", "PostgreSQL queries by operation and result.", metrics.Labels("service", service, "operation", operation, "result", result), 1)
 }

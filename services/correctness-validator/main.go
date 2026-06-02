@@ -149,6 +149,12 @@ func recordViolations(report validate.Report) {
 	if report.PriceViolations > 0 {
 		metrics.Counter("validator_violations_total", "Correctness violations detected by type.", metrics.Labels("type", "price"), float64(report.PriceViolations))
 	}
+	if report.TimeViolations > 0 {
+		metrics.Counter("validator_violations_total", "Correctness violations detected by type.", metrics.Labels("type", "time"), float64(report.TimeViolations))
+	}
+	if report.SelfTrades > 0 {
+		metrics.Counter("validator_violations_total", "Correctness violations detected by type.", metrics.Labels("type", "self_trade"), float64(report.SelfTrades))
+	}
 }
 
 // validateSession drains, replays, scores, persists, and publishes one session.

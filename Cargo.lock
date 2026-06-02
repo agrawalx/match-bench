@@ -1000,6 +1000,7 @@ dependencies = [
  "hdrhistogram",
  "iicpc-logger-rust",
  "iicpc-schemas-rust",
+ "prometheus-client",
  "rdkafka",
  "redis",
  "rmp-serde",

@@ -87,6 +87,7 @@ fn sent(session: &str, order: &str, t0: u64, t1: u64, r9: u64, timed_out: bool) 
         side: Side::Buy,
         payload_type: PayloadType::New,
         ord_type: OrdType::Limit,
+        orig_order_id: String::new(),
     }
 }
 

@@ -194,6 +194,13 @@ pub struct OrderSentEvent {
     /// LIMIT | MARKET (FIX tag 40). Distinguishes market from limit new orders,
     /// which share payload_type=NEW, so the validator can replay them correctly.
     pub ord_type: OrdType,
+    /// Bot-authoritative target of a CANCEL/REPLACE: the original ClOrdID the
+    /// bot is amending. The correctness-validator keys its reference matching
+    /// engine off THIS value rather than the contestant's echoed tag 41 in
+    /// orders.acked, so a contestant cannot steer the reference book by
+    /// omitting or altering the cancel target. Empty for NEW orders.
+    #[serde(default)]
+    pub orig_order_id: String,
 }
 
 /// OrderSentBatch is MessagePack-encoded on "orders.sent".

@@ -331,6 +331,7 @@ mod tests {
             side: Side::Buy,
             payload_type: PayloadType::New,
             ord_type: OrdType::Limit,
+            orig_order_id: String::new(),
         }
     }
 

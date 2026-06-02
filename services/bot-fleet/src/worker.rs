@@ -15,6 +15,7 @@ use rand::{rngs::SmallRng, Rng};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt, ReadHalf, WriteHalf},
     net::{lookup_host, TcpStream},
+    sync::watch,
     task::JoinSet,
     time::{self, Instant},
 };
@@ -47,8 +48,70 @@ const MAX_TASKS_PER_WORKER: usize = 1000;
 /// or lengthen for higher tolerance.
 const RESPONSE_TIMEOUT_NS: u64 = 5_000_000_000;
 
+/// BARRIER_WAIT bounds how long run_workload blocks on the barrier before
+/// firing. It is part of the worst-case wall time the L39 poll-interval guard
+/// accounts for, so it is a named constant shared between the guard and the
+/// wait_for_barrier call.
+const BARRIER_WAIT: Duration = Duration::from_secs(120);
+
+/// CancelToken is a clonable shutdown signal threaded into the send loops.
+/// A SIGTERM/SIGINT handler cancels it so in-flight workloads stop sending and
+/// TelemetrySink::close runs to flush the final batch before the pod exits
+/// (L43). Built on tokio::sync::watch so every loop can both poll it
+/// (`is_cancelled`) and await it (`cancelled`) without an extra dependency.
+#[derive(Clone)]
+struct CancelToken {
+    tx: Arc<watch::Sender<bool>>,
+    rx: watch::Receiver<bool>,
+}
+
+impl CancelToken {
+    fn new() -> Self {
+        let (tx, rx) = watch::channel(false);
+        Self {
+            tx: Arc::new(tx),
+            rx,
+        }
+    }
+
+    /// cancel flips the token; idempotent across repeated signals.
+    fn cancel(&self) {
+        let _ = self.tx.send(true);
+    }
+
+    /// is_cancelled is the cheap poll the send loops check each iteration.
+    fn is_cancelled(&self) -> bool {
+        *self.rx.borrow()
+    }
+
+    /// cancelled resolves once the token is cancelled. Resolves immediately if
+    /// it is already cancelled, so a loop racing it against a sleep cannot hang
+    /// past shutdown.
+    async fn cancelled(&self) {
+        let mut rx = self.rx.clone();
+        if *rx.borrow() {
+            return;
+        }
+        // changed() errors only if the sender dropped; the Arc keeps it alive
+        // for the token's lifetime, so a wait-then-recheck loop is sufficient.
+        while rx.changed().await.is_ok() {
+            if *rx.borrow() {
+                return;
+            }
+        }
+    }
+}
+
+/// should_stop_sending is the send-loop guard: stop when the token is cancelled
+/// (graceful shutdown) or the task's wall-clock deadline has passed. Factored
+/// out so the cancellation plumbing is unit-testable without a live socket.
+fn should_stop_sending(cancel: &CancelToken, task_end_ns: u64) -> bool {
+    cancel.is_cancelled() || unix_nanos() >= task_end_ns
+}
+
 /// run starts the bot-fleet worker loop.
-/// It consumes workload assignments, executes each one, and exits on Ctrl-C.
+/// It consumes workload assignments, executes each one, and exits on a
+/// shutdown signal (SIGINT/Ctrl-C or SIGTERM from kubelet).
 pub async fn run(config: Config) -> Result<()> {
     kafka::ensure_topics(
         &config.kafka_brokers,
@@ -79,9 +142,35 @@ pub async fn run(config: Config) -> Result<()> {
         "bot worker started"
     );
 
+    // L43: handle SIGTERM (kubelet's graceful-stop signal) as well as
+    // SIGINT/Ctrl-C. As PID 1 with no SIGTERM handler the worker would ignore
+    // the signal and be SIGKILLed at the grace deadline, truncating the final
+    // telemetry batch. A background task watches both signals and cancels the
+    // shared token; in-flight send loops observe it and stop, after which
+    // TelemetrySink::close flushes the last batch.
+    let cancel = CancelToken::new();
+    {
+        let cancel = cancel.clone();
+        tokio::spawn(async move {
+            let mut sigterm =
+                match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+                    Ok(s) => s,
+                    Err(err) => {
+                        error!(error = %err, "failed to install SIGTERM handler");
+                        return;
+                    }
+                };
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => info!("SIGINT received; shutting down"),
+                _ = sigterm.recv() => info!("SIGTERM received; shutting down"),
+            }
+            cancel.cancel();
+        });
+    }
+
     loop {
         tokio::select! {
-            _ = tokio::signal::ctrl_c() => {
+            _ = cancel.cancelled() => {
                 info!("shutdown requested");
                 return Ok(());
             }
@@ -102,8 +191,14 @@ pub async fn run(config: Config) -> Result<()> {
                     }
                 };
 
-                if let Err(err) =
-                    run_workload(&config, &control_producer, &telemetry_producer, spec).await
+                if let Err(err) = run_workload(
+                    &config,
+                    &control_producer,
+                    &telemetry_producer,
+                    spec,
+                    cancel.clone(),
+                )
+                .await
                 {
                     // Log + continue rather than process::exit(1). The
                     // previous behaviour killed the pod on the first bad
@@ -142,13 +237,15 @@ async fn run_workload(
     control_producer: &KafkaProducer,
     telemetry_producer: &KafkaProducer,
     spec: WorkloadSpec,
+    cancel: CancelToken,
 ) -> Result<()> {
     validate_spec(config, &spec)?;
 
-    let barrier_group = format!(
-        "{}-barrier-{}-{}",
-        config.consumer_group, spec.session_id, config.worker_id
-    );
+    // L41: a stable per-worker barrier group. wait_for_barrier already filters
+    // by session_id, so the group need not be unique per session — a per-session
+    // group would be created fresh every run and never deleted, leaking consumer
+    // groups on the broker.
+    let barrier_group = barrier_group(&config.consumer_group, &spec.session_id, &config.worker_id);
     let barrier_consumer = kafka::consumer(
         &config.kafka_brokers,
         &barrier_group,
@@ -187,12 +284,8 @@ async fn run_workload(
     .await?;
     info!(session_id = %spec.session_id, connected_count, "published ready signal");
 
-    let barrier = kafka::wait_for_barrier(
-        &barrier_consumer,
-        &spec.session_id,
-        Duration::from_secs(120),
-    )
-    .await?;
+    let barrier =
+        kafka::wait_for_barrier(&barrier_consumer, &spec.session_id, BARRIER_WAIT).await?;
     let barrier_epoch_ns = barrier.target_epoch_unix_nanos;
 
     // TelemetrySink uses the acks=1 producer — orders.sent is high-volume
@@ -214,8 +307,11 @@ async fn run_workload(
         connected,
         barrier_epoch_ns,
         telemetry.clone(),
+        cancel,
     )
     .await;
+    // Always close the sink — even on a cancelled run — so the final telemetry
+    // batch is flushed before the worker exits (L43).
     telemetry.close().await?;
     result
 }
@@ -266,10 +362,53 @@ fn validate_spec(config: &Config, spec: &WorkloadSpec) -> Result<()> {
         )
         .into());
     }
+    // L39: the workload-assignment offset is committed only after run_workload
+    // returns. If the worst-case wall time (barrier wait + last task's
+    // offset+duration + response drain) exceeds the consumer's
+    // max.poll.interval.ms, Kafka rebalances the partition mid-run and
+    // re-delivers the assignment — duplicate execution. Reject such a spec up
+    // front rather than committing before the work (which would drop
+    // at-least-once delivery).
+    let worst_case_ns = worst_case_wall_time_ns(spec);
+    let poll_ceiling_ns = config.max_poll_interval.as_nanos() as u64;
+    if worst_case_ns >= poll_ceiling_ns {
+        return Err(crate::errors::BotFleetError::ValidationError(format!(
+            "worst-case wall time {worst_case_ns}ns (barrier wait + offset + duration + drain) \
+             would meet or exceed max.poll.interval.ms ceiling {poll_ceiling_ns}ns; the \
+             assignment offset commits only after the run, so Kafka would rebalance and \
+             re-deliver mid-run (duplicate execution)"
+        ))
+        .into());
+    }
     validate_identifier("session_id", &spec.session_id)?;
     validate_identifier("submission_id", &spec.submission_id)?;
     validate_identifier("fix_version", &spec.fix_version)?;
     Ok(())
+}
+
+/// barrier_group builds the barrier consumer group id. It is intentionally
+/// per-worker (not per-session): wait_for_barrier filters by session_id, so a
+/// session-scoped group would only leak a fresh, never-deleted consumer group
+/// on the broker for every run (L41). `_session_id` is accepted to keep the
+/// call site explicit about what is deliberately excluded.
+fn barrier_group(consumer_group: &str, _session_id: &str, worker_id: &str) -> String {
+    format!("{consumer_group}-barrier-{worker_id}")
+}
+
+/// worst_case_wall_time_ns is the longest run_workload can block before its
+/// Kafka offset is committed: the barrier wait, plus the latest-finishing
+/// task's (start_offset + duration), plus the post-deadline response drain.
+/// The L39 guard compares this against the consumer's max.poll.interval.ms.
+fn worst_case_wall_time_ns(spec: &WorkloadSpec) -> u64 {
+    let max_task_span_ns = spec
+        .tasks
+        .iter()
+        .map(|t| t.start_offset_ns.saturating_add(t.duration_ns))
+        .max()
+        .unwrap_or(0);
+    (BARRIER_WAIT.as_nanos() as u64)
+        .saturating_add(max_task_span_ns)
+        .saturating_add(RESPONSE_TIMEOUT_NS)
 }
 
 /// validate_identifier allows only simple stable tokens in wire-format fields.
@@ -357,6 +496,7 @@ async fn fire_workload(
     tasks: Vec<ConnectedTask>,
     barrier_epoch_ns: u64,
     telemetry: TelemetrySink,
+    cancel: CancelToken,
 ) -> Result<()> {
     let mut set = JoinSet::new();
     let write_timeout = Duration::from_millis(spec.write_timeout_ms);
@@ -368,6 +508,7 @@ async fn fire_workload(
         let fix_version = spec.fix_version.clone();
         let global_seed = spec.global_seed;
         let telemetry = telemetry.clone();
+        let cancel = cancel.clone();
         set.spawn(async move {
             ct.run(
                 &session_id,
@@ -378,6 +519,7 @@ async fn fire_workload(
                 barrier_epoch_ns,
                 write_timeout,
                 telemetry,
+                cancel,
             )
             .await
         });
@@ -419,6 +561,10 @@ struct ConnectedTask {
 #[derive(Clone)]
 struct PendingOrder {
     order_id: String,
+    /// Bot-authoritative cancel/replace target (the original ClOrdID), empty
+    /// for new/market orders. Carried so the reader/watchdog can stamp it onto
+    /// the emitted OrderSentEvent without round-tripping back to the writer.
+    orig_order_id: String,
     target_send_ts_ns: u64,
     send_ts_ns: u64,
     price: u64,
@@ -450,6 +596,7 @@ impl ConnectedTask {
         barrier_epoch_ns: u64,
         write_timeout: Duration,
         telemetry: TelemetrySink,
+        cancel: CancelToken,
     ) -> Result<u64> {
         let ctx = TaskContext {
             session_id: session_id.to_string(),
@@ -461,6 +608,7 @@ impl ConnectedTask {
             barrier_epoch_ns,
             write_timeout,
             telemetry,
+            cancel,
         };
 
         match self.client {
@@ -485,6 +633,7 @@ struct TaskContext {
     barrier_epoch_ns: u64,
     write_timeout: Duration,
     telemetry: TelemetrySink,
+    cancel: CancelToken,
 }
 
 /// FixConnection holds the two halves of a split TcpStream so writer and
@@ -518,6 +667,7 @@ async fn run_fix_task(task: TaskSpec, fix: FixConnection, ctx: TaskContext) -> R
         task_start_ns,
         task_end_ns,
         ctx.write_timeout,
+        ctx.cancel.clone(),
     ));
     set.spawn(fix_read_loop(
         fix.read_half,
@@ -653,6 +803,7 @@ async fn fix_write_loop(
     task_start_ns: u64,
     task_end_ns: u64,
     write_timeout: Duration,
+    cancel: CancelToken,
 ) -> Result<u64> {
     time::sleep_until(instant_from_unix_nanos(task_start_ns)).await;
 
@@ -668,7 +819,10 @@ async fn fix_write_loop(
     let mut sent: u64 = 0;
 
     loop {
-        if unix_nanos() >= task_end_ns {
+        // Stop at the task deadline or on a shutdown signal (L43). Breaking
+        // here lets the writer exit so the reader/watchdog can drain and
+        // TelemetrySink::close can flush the final batch.
+        if should_stop_sending(&cancel, task_end_ns) {
             break;
         }
 
@@ -678,7 +832,12 @@ async fn fix_write_loop(
         // grows monotonically; that gap is the CO signal.
         let target_send_ts_ns = next_send_ns;
 
-        time::sleep_until(instant_from_unix_nanos(next_send_ns)).await;
+        // Race the inter-send sleep against cancellation so a SIGTERM during a
+        // low-rps pacing gap stops the loop promptly instead of after the gap.
+        tokio::select! {
+            _ = time::sleep_until(instant_from_unix_nanos(next_send_ns)) => {}
+            _ = cancel.cancelled() => break,
+        }
 
         let action = generator.next();
         let seq = action.seq();
@@ -705,6 +864,7 @@ async fn fix_write_loop(
                 frame.order_id.clone(),
                 PendingOrder {
                     order_id: frame.order_id.clone(),
+                    orig_order_id: frame.orig_order_id.clone(),
                     target_send_ts_ns,
                     send_ts_ns: 0, // patched on successful write
                     price: frame.price,
@@ -849,6 +1009,7 @@ async fn fix_read_loop(
                     side: p.side,
                     payload_type: p.payload_type,
                     ord_type: p.ord_type,
+                    orig_order_id: p.orig_order_id,
                 })
                 .await;
         }
@@ -943,6 +1104,7 @@ async fn fix_watchdog_loop(
                     side: p.side,
                     payload_type: p.payload_type,
                     ord_type: p.ord_type,
+                    orig_order_id: p.orig_order_id,
                 })
                 .await;
         }
@@ -1003,12 +1165,16 @@ async fn run_writeonly_task(
     let mut sent: u64 = 0;
 
     loop {
-        if unix_nanos() >= task_end_ns {
+        // Stop at the task deadline or on a shutdown signal (L43).
+        if should_stop_sending(&ctx.cancel, task_end_ns) {
             break;
         }
         let target_send_ts_ns = next_send_ns;
 
-        time::sleep_until(instant_from_unix_nanos(next_send_ns)).await;
+        tokio::select! {
+            _ = time::sleep_until(instant_from_unix_nanos(next_send_ns)) => {}
+            _ = ctx.cancel.cancelled() => break,
+        }
 
         let action = generator.next();
         let seq = action.seq();
@@ -1041,6 +1207,7 @@ async fn run_writeonly_task(
                         side: frame.side,
                         payload_type: frame.payload_type,
                         ord_type: frame.ord_type,
+                        orig_order_id: frame.orig_order_id,
                     })
                     .await;
                 sent += 1;
@@ -1266,6 +1433,153 @@ mod tests {
 
         let err = validate_spec(&Config::default(), &spec).expect_err("spec should be rejected");
         assert!(err.to_string().contains("submission_id"));
+    }
+
+    // Repro for **H13** (producer side): a cancel/replace must carry the
+    // targeted resting order's ClOrdID through to OrderSentEvent.orig_order_id
+    // so the validator can key its reference engine off the bot-authoritative
+    // target. A new/market order must emit an empty orig_order_id.
+    #[test]
+    fn cancel_replace_frames_carry_orig_order_id_new_orders_empty() {
+        use content::Action;
+
+        let new = Action::NewLimit {
+            seq: 1,
+            price: 10_000,
+            qty: 5,
+            side: Side::Buy,
+        };
+        let frame = render_frame("FIX.4.2", "sess1", "host", 7, &new);
+        assert_eq!(frame.orig_order_id, "", "new limit must have empty orig");
+
+        let market = Action::NewMarket {
+            seq: 2,
+            qty: 5,
+            side: Side::Buy,
+        };
+        let frame = render_frame("FIX.4.2", "sess1", "host", 7, &market);
+        assert_eq!(frame.orig_order_id, "", "market must have empty orig");
+
+        let cancel = Action::Cancel {
+            seq: 3,
+            orig_order_id: "sess1_7_1_O".into(),
+            price: 10_000,
+            qty: 5,
+            side: Side::Buy,
+        };
+        let frame = render_frame("FIX.4.2", "sess1", "host", 7, &cancel);
+        assert_eq!(frame.orig_order_id, "sess1_7_1_O");
+
+        let replace = Action::Replace {
+            seq: 4,
+            orig_order_id: "sess1_7_1_O".into(),
+            price: 10_001,
+            qty: 5,
+            side: Side::Buy,
+        };
+        let frame = render_frame("FIX.4.2", "sess1", "host", 7, &replace);
+        assert_eq!(frame.orig_order_id, "sess1_7_1_O");
+
+        // The PendingOrder the writer hands off (and thus the emitted
+        // OrderSentEvent) copies orig_order_id verbatim from the frame.
+        let pending = PendingOrder {
+            order_id: frame.order_id.clone(),
+            orig_order_id: frame.orig_order_id.clone(),
+            target_send_ts_ns: 0,
+            send_ts_ns: 0,
+            price: frame.price,
+            qty: frame.qty,
+            side: frame.side,
+            payload_type: frame.payload_type,
+            ord_type: frame.ord_type,
+        };
+        assert_eq!(pending.orig_order_id, "sess1_7_1_O");
+    }
+
+    // Repro for **L41**: the barrier consumer group must be stable per worker,
+    // not per session. A per-session group `{group}-barrier-{session}-{worker}`
+    // is created fresh for every run and never deleted, leaking consumer groups
+    // on the broker. wait_for_barrier already filters by session_id, so a stable
+    // per-worker group is sufficient.
+    #[test]
+    fn barrier_group_is_per_worker_not_per_session() {
+        let a = barrier_group("bot-fleet", "sess-1", "worker-7");
+        let b = barrier_group("bot-fleet", "sess-2", "worker-7");
+
+        assert!(
+            !a.contains("sess-1"),
+            "barrier group must not embed session_id, got {a}"
+        );
+        assert_eq!(
+            a, b,
+            "barrier group must be stable across sessions for one worker"
+        );
+        assert_eq!(a, "bot-fleet-barrier-worker-7");
+    }
+
+    // Repro for **L43**: a SIGTERM-driven shutdown must be able to stop the
+    // send loops promptly so TelemetrySink::close can flush the final batch
+    // before the pod exits. The send loops gate on a CancelToken; an
+    // already-cancelled token must make the loop guard return "stop" without
+    // performing another send. (A full async fire path needs live TCP, so we
+    // unit-test the cancellation plumbing the loops actually consult.)
+    #[tokio::test]
+    async fn cancelled_token_stops_send_loop() {
+        let cancel = CancelToken::new();
+        assert!(!cancel.is_cancelled(), "fresh token is not cancelled");
+
+        cancel.cancel();
+        assert!(cancel.is_cancelled(), "cancelled token reports cancelled");
+
+        // The send loops break when the token is cancelled; assert the guard.
+        assert!(
+            should_stop_sending(&cancel, u64::MAX),
+            "cancelled token must stop the send loop before the deadline"
+        );
+        // An un-cancelled token before the deadline keeps sending.
+        let live = CancelToken::new();
+        assert!(!should_stop_sending(&live, u64::MAX));
+        // A passed deadline stops regardless of cancellation.
+        assert!(should_stop_sending(&live, 0));
+
+        // cancelled() resolves immediately on an already-cancelled token, so a
+        // loop awaiting it does not hang past shutdown.
+        tokio::time::timeout(Duration::from_secs(1), cancel.cancelled())
+            .await
+            .expect("cancelled() must resolve promptly on a cancelled token");
+    }
+
+    // Repro for **L39**: the workload-assignment offset is committed only after
+    // run_workload returns (barrier wait + scenario duration + drain). If that
+    // worst-case wall time exceeds the consumer's max.poll.interval.ms, Kafka
+    // rebalances the partition mid-run and re-delivers the assignment to another
+    // worker — duplicate execution. validate_spec must reject a spec whose
+    // worst-case wall time would breach the configured poll bound, and accept
+    // one that fits.
+    #[test]
+    fn validate_spec_rejects_duration_that_would_breach_poll_interval() {
+        let config = Config::default();
+
+        // In-bounds: short duration fits comfortably under the poll ceiling.
+        let mut ok = valid_spec();
+        ok.tasks[0].duration_ns = 1_000_000_000; // 1s
+        validate_spec(&config, &ok).expect("short workload must be accepted");
+
+        // Over-ceiling: a duration so long that barrier-wait + duration + drain
+        // exceeds max.poll.interval.ms must be rejected before it runs.
+        let mut over = valid_spec();
+        over.tasks[0].duration_ns = config.max_poll_interval.as_nanos() as u64;
+        let err =
+            validate_spec(&config, &over).expect_err("over-ceiling workload must be rejected");
+        assert!(
+            err.to_string().contains("max.poll.interval.ms")
+                || err.to_string().contains("poll interval"),
+            "error should reference the poll-interval ceiling, got: {err}"
+        );
+
+        // The worst-case wall time accounts for barrier wait + offset + duration
+        // + drain, so it strictly exceeds the raw duration.
+        assert!(worst_case_wall_time_ns(&over) > over.tasks[0].duration_ns);
     }
 
     #[test]

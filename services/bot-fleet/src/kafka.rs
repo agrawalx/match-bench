@@ -192,7 +192,14 @@ pub fn consumer(brokers: &str, group: &str, topics: &[&str]) -> Result<KafkaCons
         .set("auto.offset.reset", "earliest")
         .set("fetch.min.bytes", "1")
         .set("fetch.wait.max.ms", "100")
-        .set("max.poll.interval.ms", "300000")
+        // Kept in sync with Config::max_poll_interval (DEFAULT_MAX_POLL_INTERVAL)
+        // so the L39 wall-time guard in validate_spec matches the broker bound.
+        .set(
+            "max.poll.interval.ms",
+            crate::config::DEFAULT_MAX_POLL_INTERVAL
+                .as_millis()
+                .to_string(),
+        )
         .set("session.timeout.ms", "10000")
         .create()
         .context("create kafka consumer")?;

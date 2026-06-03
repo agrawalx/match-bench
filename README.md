@@ -279,9 +279,6 @@ mermaids/        architecture diagrams (the two referenced at the top)
 testing/         end-to-end and integration test harness
 ```
 
-Design docs: `MEASUREMENT_AND_FAIRNESS.md` (timestamp catalog, fairness controls),
-`TELEMETRY_ENGINE.md` and `VALIDATION_ENGINE.md` (the two measurement consumers, self-contained),
-`DEPLOYMENT.md` / `DEPLOYMENT_EKS.md` (install), `TESTING.md` (verification).
 
 ---
 
@@ -303,5 +300,3 @@ cd services/bot-fleet && cargo run
 # 5. Submit a test bundle: a .zip with submission.yaml or benchmark.yaml at the root
 ```
 
-For a full cluster bring-up and an end-to-end benchmark walkthrough, see `DEPLOYMENT.md` and
-`TESTING.md`.

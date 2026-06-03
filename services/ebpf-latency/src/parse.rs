@@ -452,8 +452,7 @@ mod tests {
     // framing of everything after it.
     #[test]
     fn chunked_http_framed_through_terminator() {
-        let resp =
-            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n";
+        let resp = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n";
         match frame_http(resp) {
             Frame::Message(n) => assert_eq!(n, resp.len(), "frame whole chunked message"),
             other => panic!("expected Message, got {:?}", other),

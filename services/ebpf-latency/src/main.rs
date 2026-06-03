@@ -267,7 +267,10 @@ async fn flush(
                 if events.len() > MAX_PENDING_EVENTS {
                     let drop = events.len() - MAX_PENDING_EVENTS;
                     events.drain(0..drop);
-                    warn!(dropped = drop, "dropped oldest pending orders.acked events (publish backlog)");
+                    warn!(
+                        dropped = drop,
+                        "dropped oldest pending orders.acked events (publish backlog)"
+                    );
                 }
                 break; // stop this flush; retry the tail next tick
             }

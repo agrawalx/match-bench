@@ -35,6 +35,11 @@ pub fn replace_order_id(session_id: &str, bot_id: u64, seq: u64) -> String {
 #[derive(Debug, Clone)]
 pub struct OrderFrame {
     pub order_id: String,
+    /// Bot-authoritative target of a cancel/replace (the full ClOrdID of the
+    /// resting order being amended). Empty for new/market orders. Threaded into
+    /// OrderSentEvent.orig_order_id so the validator keys its reference engine
+    /// off the bot's intent, not the contestant's echoed tag 41 (see H13).
+    pub orig_order_id: String,
     pub price: u64,
     pub qty: u64,
     pub side: Side,
@@ -167,25 +172,32 @@ fn build_fix_body(
         Side::Sell => "2",
     };
 
+    // M25: the wire MsgSeqNum (tag 34) is decoupled from the per-task `seq`.
+    // Logon consumes MsgSeqNum 1, so the first application order (seq=1) must
+    // be 34=2, the second (seq=2) 34=3, … — monotonic per connection. `seq`
+    // still drives the ClOrdID (tag 11) via `kind.order_id`, so the
+    // `{session}_{bot}_{seq}_O` matching format is unchanged.
+    let msg_seq_num = seq + 1;
+
     match kind {
         FrameKind::New => format!(
-            "35=D\x0149=IICPC-BOT\x0156=CONTESTANT\x0134={seq}\x0152=19700101-00:00:00.000\x0111={order_id}\x0121=1\x0155=IICPC\x0154={side_tag}\x0138={qty}\x0140=2\x0144={price}\x0159=0\x01"
+            "35=D\x0149=IICPC-BOT\x0156=CONTESTANT\x0134={msg_seq_num}\x0152=19700101-00:00:00.000\x0111={order_id}\x0121=1\x0155=IICPC\x0154={side_tag}\x0138={qty}\x0140=2\x0144={price}\x0159=0\x01"
         ),
         // Market order: OrdType=1, no Price (44). Executes immediately against
         // the book rather than resting, so it is never a cancel/replace target.
         FrameKind::Market => format!(
-            "35=D\x0149=IICPC-BOT\x0156=CONTESTANT\x0134={seq}\x0152=19700101-00:00:00.000\x0111={order_id}\x0121=1\x0155=IICPC\x0154={side_tag}\x0138={qty}\x0140=1\x0159=0\x01"
+            "35=D\x0149=IICPC-BOT\x0156=CONTESTANT\x0134={msg_seq_num}\x0152=19700101-00:00:00.000\x0111={order_id}\x0121=1\x0155=IICPC\x0154={side_tag}\x0138={qty}\x0140=1\x0159=0\x01"
         ),
         FrameKind::Cancel => {
             let orig_order_id = orig_order_id.expect("cancel requires orig_order_id");
             format!(
-                "35=F\x0149=IICPC-BOT\x0156=CONTESTANT\x0134={seq}\x0152=19700101-00:00:00.000\x0111={order_id}\x0141={orig_order_id}\x0155=IICPC\x0154={side_tag}\x0138={qty}\x01"
+                "35=F\x0149=IICPC-BOT\x0156=CONTESTANT\x0134={msg_seq_num}\x0152=19700101-00:00:00.000\x0111={order_id}\x0141={orig_order_id}\x0155=IICPC\x0154={side_tag}\x0138={qty}\x01"
             )
         }
         FrameKind::Replace => {
             let orig_order_id = orig_order_id.expect("replace requires orig_order_id");
             format!(
-                "35=G\x0149=IICPC-BOT\x0156=CONTESTANT\x0134={seq}\x0152=19700101-00:00:00.000\x0111={order_id}\x0141={orig_order_id}\x0121=1\x0155=IICPC\x0154={side_tag}\x0138={qty}\x0140=2\x0144={price}\x01"
+                "35=G\x0149=IICPC-BOT\x0156=CONTESTANT\x0134={msg_seq_num}\x0152=19700101-00:00:00.000\x0111={order_id}\x0141={orig_order_id}\x0121=1\x0155=IICPC\x0154={side_tag}\x0138={qty}\x0140=2\x0144={price}\x01"
             )
         }
     }
@@ -274,6 +286,7 @@ fn build_frame(
 
     OrderFrame {
         order_id,
+        orig_order_id: orig_order_id.unwrap_or("").to_string(),
         price,
         qty,
         side,
@@ -556,6 +569,35 @@ pub fn execution_report_frame(fix_version: &str, seq: u64, clord_id: &str) -> Ve
 mod tests {
     use super::*;
 
+    /// Repro for **M25**: the FIX Logon consumes MsgSeqNum 1, so the first
+    /// application order must carry tag 34=2 (then 3, …), monotonic per
+    /// connection. The order's per-task `seq` (which also forms the ClOrdID)
+    /// starts at 1 and must NOT be reused verbatim as tag 34, or the Logon and
+    /// the first order collide on MsgSeqNum=1 and a strict FIX engine rejects
+    /// the order. The ClOrdID format (`{session}_{bot}_{seq}_O`) must stay
+    /// unchanged because cross-stream matching depends on it.
+    #[test]
+    fn logon_and_first_orders_have_monotonic_seq_nums() {
+        let logon = logon_frame("FIX.4.2", 1);
+        assert_eq!(extract_tag(&logon, b"34"), Some(b"1".as_ref()));
+
+        // First two application orders use per-task seq 1 and 2.
+        let first = order_frame("FIX.4.2", "sess1", "host", 7, 1, 10_000, 5, Side::Buy);
+        let second = order_frame("FIX.4.2", "sess1", "host", 7, 2, 10_000, 5, Side::Buy);
+
+        // Tag 34 must continue the Logon's sequence: 2, then 3.
+        assert_eq!(extract_tag(&first.fix, b"34"), Some(b"2".as_ref()));
+        assert_eq!(extract_tag(&second.fix, b"34"), Some(b"3".as_ref()));
+
+        // The ClOrdID (tag 11) must keep the seq-based format, unchanged.
+        assert_eq!(first.order_id, "sess1_7_1_O");
+        assert_eq!(
+            extract_tag(&first.fix, b"11"),
+            Some(b"sess1_7_1_O".as_ref())
+        );
+        assert_eq!(second.order_id, "sess1_7_2_O");
+    }
+
     #[test]
     fn parses_one_complete_message() {
         let msg = execution_report_frame("FIX.4.2", 1, "ORD_42");
@@ -648,5 +690,61 @@ mod tests {
 
         // The delta-checksum rewrite kept the trailer consistent.
         assert!(embedded_checksum_is_valid(&frame.fix));
+    }
+
+    /// Repro for **BF-PARSE-1** (deferred fix — see SESSION_REPORT.md): the echo's
+    /// read loop must answer every order regardless of how TCP chunks the byte
+    /// stream. `parse_messages` currently DROPS a frame whose `8=FIX` start marker
+    /// straddles a read boundary — the no-match arm consumes the partial prefix
+    /// instead of carrying it over (the "carry-over scan" its comment promises is
+    /// unimplemented). Impact is read-size dependent: ~0% at the echo's 4096-byte
+    /// reads, but rising at smaller reads (6.5% @ 64 B, 100% @ 1 B).
+    ///
+    /// `#[ignore]` until the carry-over is implemented; then this must pass for
+    /// ALL chunk sizes. To observe the current loss: `cargo test -- --ignored`.
+    #[test]
+    #[ignore = "BF-PARSE-1: parse_messages drops a frame split across the 8=FIX marker; fix deferred"]
+    fn echo_read_loop_answers_every_order_under_arbitrary_chunking() {
+        const N: u64 = 200;
+        let mut wire: Vec<u8> = Vec::new();
+        let mut expected: Vec<String> = Vec::new();
+        for seq in 1..=N {
+            // Real NewOrderSingle frames (full tag set, real ClOrdID format).
+            let f = order_frame(
+                "FIX.4.2",
+                "sess1",
+                "host",
+                7,
+                seq,
+                10_000 + seq,
+                5,
+                Side::Buy,
+            );
+            expected.push(f.order_id.clone());
+            wire.extend_from_slice(&f.fix);
+        }
+
+        for &chunk in &[1usize, 64, 256, 512, 1024, 4096, wire.len()] {
+            let mut buf: Vec<u8> = Vec::new();
+            let mut answered: Vec<String> = Vec::new();
+            for piece in wire.chunks(chunk) {
+                buf.extend_from_slice(piece);
+                let (messages, consumed) = parse_messages(&buf);
+                for msg in &messages {
+                    if msg.msg_type == b"D" {
+                        if let Some(c) = msg.clord_id {
+                            answered.push(String::from_utf8(c.to_vec()).unwrap());
+                        }
+                    }
+                }
+                if consumed > 0 {
+                    buf.drain(..consumed);
+                }
+            }
+            assert_eq!(
+                answered, expected,
+                "chunk={chunk}: every order must be answered exactly once (BF-PARSE-1)"
+            );
+        }
     }
 }

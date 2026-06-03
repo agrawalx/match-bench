@@ -1,0 +1,67 @@
+# Prometheus scrape configuration.
+#
+# Annotation-based pod discovery (the de-facto standard relabel pattern): a single
+# kubernetes_sd_configs(role: pod) job discovers EVERY pod in the cluster, then
+# relabel_configs keep only those carrying prometheus.io/scrape: "true" and honor
+# prometheus.io/path and prometheus.io/port. Every workload that wants scraping
+# just adds those three pod annotations (see the service Deployments/StatefulSets)
+# — no per-service Prometheus config edit is ever needed.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus-config
+  namespace: observability
+data:
+  prometheus.yml: |
+    global:
+      scrape_interval: 15s
+      evaluation_interval: 15s
+      external_labels:
+        cluster: iicpc
+
+    scrape_configs:
+      # Prometheus scrapes itself.
+      - job_name: prometheus
+        static_configs:
+          - targets: ["localhost:9090"]
+
+      # Annotation-based discovery of every pod in the cluster.
+      - job_name: kubernetes-pods
+        kubernetes_sd_configs:
+          - role: pod
+        relabel_configs:
+          # Keep only pods explicitly opted in with prometheus.io/scrape: "true".
+          - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape]
+            action: keep
+            regex: "true"
+          # Honor a custom metrics path (prometheus.io/path), default /metrics.
+          - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_path]
+            action: replace
+            target_label: __metrics_path__
+            regex: (.+)
+          # Honor prometheus.io/port: rewrite the scrape address to <podIP>:<port>.
+          # Matches both IPv4 and (bracketed) IPv6 pod IPs.
+          - source_labels: [__address__, __meta_kubernetes_pod_annotation_prometheus_io_port]
+            action: replace
+            regex: (.+?)(?::\d+)?;(\d+)
+            replacement: $1:$2
+            target_label: __address__
+          # Surface useful target labels (namespace, pod, app, node) for querying
+          # and dashboard templating.
+          - source_labels: [__meta_kubernetes_namespace]
+            action: replace
+            target_label: namespace
+          - source_labels: [__meta_kubernetes_pod_name]
+            action: replace
+            target_label: pod
+          - source_labels: [__meta_kubernetes_pod_label_app]
+            action: replace
+            target_label: app
+          - source_labels: [__meta_kubernetes_pod_node_name]
+            action: replace
+            target_label: node
+          # Drop pods that are not running (e.g. completed/terminated) to avoid
+          # noisy "connection refused" scrape errors.
+          - source_labels: [__meta_kubernetes_pod_phase]
+            action: drop
+            regex: (Pending|Succeeded|Failed|Unknown)

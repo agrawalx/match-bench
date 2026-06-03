@@ -405,13 +405,19 @@ func (s *PostgresStore) RecomputeRunGroupStatus(ctx context.Context, runGroupID 
 	}
 	var newStatus string
 	switch {
-	case failed > 0:
-		newStatus = "failed"
 	case completed == total:
 		newStatus = "completed"
+	case failed > 0 && failed+completed == total:
+		// All children are terminal and at least one failed. Only NOW is the
+		// group terminal-failed. Going 'failed' on the FIRST child failure (the
+		// previous behaviour) flipped the group terminal while sibling sessions
+		// (spike/ramp) were still live, dropping it from the one-active-per-
+		// submission index and letting a re-trigger spawn a second active group.
+		newStatus = "failed"
 	case requested == total:
 		newStatus = "requested"
 	default:
+		// At least one child is still in flight (requested/deploying/running).
 		newStatus = "running"
 	}
 	if _, err := s.pool.Exec(ctx,
@@ -551,6 +557,13 @@ func (s *PostgresStore) SeedScenarios(ctx context.Context, scenarios []ScenarioR
 
 func (s *PostgresStore) Close() {
 	s.pool.Close()
+}
+
+// Ping verifies the database connection is alive — used by the readiness probe so
+// a replica whose datastore connection died post-startup is removed from the
+// Service endpoints instead of serving errors.
+func (s *PostgresStore) Ping(ctx context.Context) error {
+	return s.pool.Ping(ctx)
 }
 
 func (s *PostgresStore) RecordPoolStats() {

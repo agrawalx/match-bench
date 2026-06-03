@@ -28,4 +28,8 @@ spec:
         consumerGroup: bot-fleet
         topic: workload.assignments
         lagThreshold: "1"            # any pending assignment triggers scale-up
-        offsetResetPolicy: latest
+        # Must match the worker's auto.offset.reset=earliest. With `latest`, KEDA
+        # treats the unconsumed backlog on a fresh group (first run / after offset
+        # retention) as zero lag and never scales up — exactly when a large
+        # worker_count is needed. `earliest` counts pre-existing backlog as lag.
+        offsetResetPolicy: earliest

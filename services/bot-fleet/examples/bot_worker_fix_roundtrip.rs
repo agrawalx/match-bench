@@ -152,6 +152,7 @@ async fn main() -> Result<()> {
         telemetry_batch_size: 64,
         telemetry_channel_capacity: 4096,
         max_bots_per_worker: 1000,
+        ..Config::default()
     };
     let worker_handle: JoinHandle<()> = tokio::spawn(async move {
         if let Err(err) = worker::run(config).await {

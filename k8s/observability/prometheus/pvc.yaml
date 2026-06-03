@@ -1,0 +1,13 @@
+# TSDB persistent volume — survives Prometheus pod restarts so historical
+# samples are not lost on a rollout. Uses the cluster default StorageClass
+# (no storageClassName), matching the data-tier volumeClaimTemplates.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: prometheus-data
+  namespace: observability
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 20Gi

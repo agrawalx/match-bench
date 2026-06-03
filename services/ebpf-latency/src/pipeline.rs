@@ -47,24 +47,33 @@ impl Pipeline {
 
         // Stage 1: reassemble + frame whole messages (reassembler borrow only).
         let mut framed: Vec<(u64, u32, bool, parse::ParsedMessage)> = Vec::new();
+        // H14: the on-wire payload exceeded the capture cap, so `cap.payload` is a
+        // truncated prefix. Feeding it to the reassembler would advance next_seq by
+        // the short length and desync (then stall) the flow. Reset to re-anchor at
+        // the next contiguous segment instead of corrupting the stream.
+        let truncated = cap.payload_len as usize > cap.payload.len();
         {
             let re = self
                 .reassemblers
                 .entry((cap.flow, cap.direction))
                 .or_default();
-            let reordered = re.push(cap.tcp_seq, ts, cap.payload).reordered;
-            loop {
-                match parse::frame(cap.transport, cap.direction, re.available()) {
-                    Frame::Message(n) => {
-                        let msg_ts = re.timestamp_at(0);
-                        let msg_seq = re.seq_at(0);
-                        let parsed =
-                            parse::parse(cap.transport, cap.direction, &re.available()[..n]);
-                        re.consume(n);
-                        framed.push((msg_ts, msg_seq, reordered, parsed));
+            if truncated {
+                re.reset_for_truncation();
+            } else {
+                let reordered = re.push(cap.tcp_seq, ts, cap.payload).reordered;
+                loop {
+                    match parse::frame(cap.transport, cap.direction, re.available()) {
+                        Frame::Message(n) => {
+                            let msg_ts = re.timestamp_at(0);
+                            let msg_seq = re.seq_at(0);
+                            let parsed =
+                                parse::parse(cap.transport, cap.direction, &re.available()[..n]);
+                            re.consume(n);
+                            framed.push((msg_ts, msg_seq, reordered, parsed));
+                        }
+                        Frame::Incomplete => break,
+                        Frame::Resync(skip) => re.consume(skip.max(1)),
                     }
-                    Frame::Incomplete => break,
-                    Frame::Resync(skip) => re.consume(skip.max(1)),
                 }
             }
         }

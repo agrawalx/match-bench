@@ -38,3 +38,59 @@ spec:
           protocol: UDP
         - port: 53
           protocol: TCP
+---
+# H15: the per-slot eBPF latency-capture Job (app=ebpf-capture) lives in the
+# sandbox namespace but must publish orders.acked to Kafka in the data namespace.
+# The base sandbox-isolation policy denies all cluster egress; NetworkPolicies are
+# ADDITIVE, so this grants the capture Job the one egress it needs (+DNS) while
+# contestant algo pods (no ebpf-capture label) stay fully isolated. Without it,
+# enabling CAPTURE_ENABLED silently drops all latency telemetry.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: ebpf-capture-egress
+  namespace: sandbox
+spec:
+  podSelector:
+    matchLabels:
+      app: ebpf-capture
+  policyTypes:
+    - Ingress
+    - Egress
+  # Prometheus (observability namespace) scrapes the capture pod's metrics on
+  # 9090. Algo pods (no ebpf-capture label) are NOT selected here and stay
+  # locked down by sandbox-isolation.
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              name: observability
+      ports:
+        - port: 9090
+          protocol: TCP
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              name: data
+      ports:
+        - port: 9092
+          protocol: TCP
+    # Loki log shipping — the capture's logger pushes to
+    # loki.observability.svc:3100 (LOKI_URL).
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              name: observability
+      ports:
+        - port: 3100
+          protocol: TCP
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP

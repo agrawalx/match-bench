@@ -21,8 +21,30 @@ spec:
         - namespaceSelector:
             matchLabels:
               name: platform
+    # Prometheus (observability namespace) scrapes the metrics endpoints:
+    # bot-fleet-controller :8080, and bot-fleet-worker / telemetry-ingester /
+    # correctness-validator :9090.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              name: observability
+      ports:
+        - port: 8080
+          protocol: TCP
+        - port: 9090
+          protocol: TCP
 
   egress:
+    # Loki log shipping — every benchmark service's logger pushes to
+    # loki.observability.svc:3100 (LOKI_URL).
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              name: observability
+      ports:
+        - port: 3100
+          protocol: TCP
+
     # Sandbox: contestant pods on the contestant's port (bot orders) and the
     # sandbox-orchestrator HTTP API on :8080 (controller).
     - to:
@@ -38,7 +60,9 @@ spec:
       ports:
         - port: 9092
           protocol: TCP
-        - port: 5432
+        - port: 5432 # postgres + timescaledb (metrics)
+          protocol: TCP
+        - port: 6379 # redis (telemetry-ingester hot snapshot)
           protocol: TCP
 
     # DNS

@@ -1,9 +1,10 @@
 // Package orchestrator is the HTTP client for sandbox-orchestrator.
 //
 // Wire contract (defined in services/sandbox-orchestrator):
-//   POST   /slots             create a slot for {slot_id, image, port}
-//   GET    /slots/{slot_id}   poll current state
-//   DELETE /slots/{slot_id}   release Pod + Service
+//
+//	POST   /slots             create a slot for {slot_id, image, port}
+//	GET    /slots/{slot_id}   poll current state
+//	DELETE /slots/{slot_id}   release Pod + Service
 //
 // The controller treats the orchestrator as a black box: each slot is one
 // Pod and one Service (both named algo-{slot_id}), created together on

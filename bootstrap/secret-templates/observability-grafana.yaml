@@ -1,0 +1,13 @@
+# Placeholder secret shape only. Create the real secret outside Git, e.g.:
+#   kubectl -n observability create secret generic grafana-admin \
+#     --from-literal=admin-user=admin \
+#     --from-literal=admin-password='<strong-password>'
+apiVersion: v1
+kind: Secret
+metadata:
+  name: grafana-admin
+  namespace: observability
+type: Opaque
+stringData:
+  admin-user: admin
+  admin-password: changeme

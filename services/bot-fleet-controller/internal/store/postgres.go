@@ -68,6 +68,7 @@ func (s *Store) GetSubmission(ctx context.Context, submissionID string) (*Submis
 type InFlightRun struct {
 	SessionID    string
 	SubmissionID string
+	RunGroupID   string // empty for legacy single-session runs (run_group_id IS NULL)
 	Status       string
 }
 
@@ -81,7 +82,7 @@ type InFlightRun struct {
 func (s *Store) ListInFlightRuns(ctx context.Context) ([]InFlightRun, error) {
 	start := time.Now()
 	rows, err := s.pool.Query(ctx,
-		`SELECT session_id, submission_id, status
+		`SELECT session_id, submission_id, COALESCE(run_group_id, ''), status
 		   FROM runs
 		  WHERE status NOT IN ($1, $2)`,
 		topics.RunStatusCompleted, topics.RunStatusFailed,
@@ -95,7 +96,7 @@ func (s *Store) ListInFlightRuns(ctx context.Context) ([]InFlightRun, error) {
 	var out []InFlightRun
 	for rows.Next() {
 		var r InFlightRun
-		if err := rows.Scan(&r.SessionID, &r.SubmissionID, &r.Status); err != nil {
+		if err := rows.Scan(&r.SessionID, &r.SubmissionID, &r.RunGroupID, &r.Status); err != nil {
 			return nil, fmt.Errorf("scan in-flight run: %w", err)
 		}
 		out = append(out, r)
@@ -141,6 +142,46 @@ func (s *Store) MarkRunFailed(ctx context.Context, sessionID, message string) er
 	_ = tag
 	recordDB("mark_run_failed", start, nil)
 	return nil
+}
+
+// MarkRunGroupFailed directly marks a run_group terminal-failed. This is the
+// run_groups counterpart of MarkRunFailed and the SAME recovery-only exception:
+// the "one active benchmark per submission" unique index lives on RUN_GROUPS
+// (idx_run_groups_one_active_per_submission), not runs, so marking child runs
+// failed does NOT release it — the group row must be set terminal too, or a
+// re-trigger after a controller crash is permanently rejected. Called only by
+// the startup recovery sweep, before benchmark.requested consumption begins.
+func (s *Store) MarkRunGroupFailed(ctx context.Context, runGroupID string) error {
+	if runGroupID == "" {
+		return nil // legacy single-session run with no parent group
+	}
+	if _, err := s.pool.Exec(ctx,
+		`UPDATE run_groups
+		    SET status = $2, updated_at = now()
+		  WHERE run_group_id = $1
+		    AND status NOT IN ('completed', 'failed')`,
+		runGroupID, topics.RunStatusFailed,
+	); err != nil {
+		return fmt.Errorf("mark run-group failed: %w", err)
+	}
+	return nil
+}
+
+// RunStatus returns the current status of a run, or ("", nil) if no such run.
+// Used by the benchmark.requested consumer to short-circuit a redelivered
+// message for a session that already reached a terminal state (crash between
+// the final status publish and the Kafka offset commit re-delivers it).
+func (s *Store) RunStatus(ctx context.Context, sessionID string) (string, error) {
+	var status string
+	err := s.pool.QueryRow(ctx,
+		`SELECT status FROM runs WHERE session_id = $1`, sessionID).Scan(&status)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("query run status: %w", err)
+	}
+	return status, nil
 }
 
 // LoadScenario reads one row of the scenarios table. The controller calls

@@ -24,6 +24,7 @@ var (
 	ErrInvalidProtocol       = errors.New("invalid protocol: must be FIX, REST, or WS")
 	ErrInvalidLanguage       = errors.New("invalid language: must be cpp, rust, or go")
 	ErrMissingBuildTarget    = errors.New("build.target is required in benchmark.yaml")
+	ErrInvalidBuildTarget    = errors.New("build.target contains invalid characters (allowed: A-Za-z0-9 _ . -, max 64)")
 	ErrInvalidPortRange      = errors.New("port out of allowed range (1024–65535)")
 	ErrRootConfigTooLarge    = errors.New("root config/build file exceeds 1 MiB after decompression")
 	ErrMissingCMakeLists     = errors.New("cpp project must include CMakeLists.txt at zip root")

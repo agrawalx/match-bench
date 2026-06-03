@@ -3,8 +3,9 @@ go 1.25.0
 use (
 	./libs/go
 	./schemas/go
-	./services/submission-api
-	./services/build-worker
-	./services/sandbox-orchestrator
 	./services/bot-fleet-controller
+	./services/build-worker
+	./services/correctness-validator
+	./services/sandbox-orchestrator
+	./services/submission-api
 )

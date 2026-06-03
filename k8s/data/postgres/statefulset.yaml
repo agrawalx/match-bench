@@ -13,6 +13,11 @@ spec:
     metadata:
       labels:
         app: postgres
+      annotations:
+        # postgres-exporter sidecar (below) exposes metrics on 9187.
+        prometheus.io/scrape: "true"
+        prometheus.io/path: /metrics
+        prometheus.io/port: "9187"
     spec:
       automountServiceAccountToken: false
       containers:
@@ -87,6 +92,12 @@ spec:
               memory: 128Mi
       securityContext:
         runAsNonRoot: true
+        # runAsNonRoot only asserts uid != 0; without an explicit numeric uid the
+        # kubelet cannot verify it before start and the container fails with
+        # CreateContainerConfigError (the official postgres image declares no USER).
+        # 70 is the postgres uid/gid in that image.
+        runAsUser: 70
+        runAsGroup: 70
         fsGroup: 70
       volumes:
         - name: tmp

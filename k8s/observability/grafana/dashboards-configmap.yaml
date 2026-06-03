@@ -1,0 +1,453 @@
+# Provisioned Grafana dashboards, mounted at /var/lib/grafana/dashboards.
+# Two dashboards:
+#   platform-overview     — HTTP rate/latency/errors per Go service
+#                           (iicpc_http_requests_total + iicpc_http_request_duration_seconds)
+#   measurement-pipeline  — bot-fleet workload/telemetry-flush, eBPF flushes/drops/
+#                           retransmissions, telemetry-ingester iicpc_telemetry_*,
+#                           validator iicpc_validator_*
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-dashboards
+  namespace: observability
+data:
+  platform-overview.json: |
+    {
+      "uid": "iicpc-platform-overview",
+      "title": "IICPC Platform Overview",
+      "tags": ["iicpc", "platform"],
+      "timezone": "browser",
+      "schemaVersion": 39,
+      "version": 1,
+      "refresh": "30s",
+      "time": { "from": "now-1h", "to": "now" },
+      "templating": {
+        "list": [
+          {
+            "name": "service",
+            "label": "Service",
+            "type": "query",
+            "datasource": { "type": "prometheus", "uid": "prometheus" },
+            "query": "label_values(iicpc_http_requests_total, service)",
+            "refresh": 2,
+            "includeAll": true,
+            "multi": true,
+            "current": { "text": "All", "value": "$__all" }
+          }
+        ]
+      },
+      "panels": [
+        {
+          "id": 1,
+          "title": "HTTP request rate (req/s) by service",
+          "type": "timeseries",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+          "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] },
+          "targets": [
+            {
+              "refId": "A",
+              "datasource": { "type": "prometheus", "uid": "prometheus" },
+              "expr": "sum by (service) (rate(iicpc_http_requests_total{service=~\"$service\"}[5m]))",
+              "legendFormat": "{{service}}"
+            }
+          ]
+        },
+        {
+          "id": 2,
+          "title": "HTTP error rate (5xx, req/s) by service",
+          "type": "timeseries",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+          "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] },
+          "targets": [
+            {
+              "refId": "A",
+              "datasource": { "type": "prometheus", "uid": "prometheus" },
+              "expr": "sum by (service) (rate(iicpc_http_requests_total{service=~\"$service\", status=~\"5..\"}[5m]))",
+              "legendFormat": "{{service}}"
+            }
+          ]
+        },
+        {
+          "id": 3,
+          "title": "HTTP error ratio (% 5xx) by service",
+          "type": "timeseries",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+          "fieldConfig": { "defaults": { "unit": "percentunit" }, "overrides": [] },
+          "targets": [
+            {
+              "refId": "A",
+              "datasource": { "type": "prometheus", "uid": "prometheus" },
+              "expr": "sum by (service) (rate(iicpc_http_requests_total{service=~\"$service\", status=~\"5..\"}[5m])) / clamp_min(sum by (service) (rate(iicpc_http_requests_total{service=~\"$service\"}[5m])), 1e-9)",
+              "legendFormat": "{{service}}"
+            }
+          ]
+        },
+        {
+          "id": 4,
+          "title": "HTTP p95 latency by service",
+          "type": "timeseries",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+          "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+          "targets": [
+            {
+              "refId": "A",
+              "datasource": { "type": "prometheus", "uid": "prometheus" },
+              "expr": "histogram_quantile(0.95, sum by (service, le) (rate(iicpc_http_request_duration_seconds_bucket{service=~\"$service\"}[5m])))",
+              "legendFormat": "{{service}}"
+            }
+          ]
+        },
+        {
+          "id": 5,
+          "title": "HTTP p99 latency by service",
+          "type": "timeseries",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
+          "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+          "targets": [
+            {
+              "refId": "A",
+              "datasource": { "type": "prometheus", "uid": "prometheus" },
+              "expr": "histogram_quantile(0.99, sum by (service, le) (rate(iicpc_http_request_duration_seconds_bucket{service=~\"$service\"}[5m])))",
+              "legendFormat": "{{service}}"
+            }
+          ]
+        },
+        {
+          "id": 6,
+          "title": "Request rate by status class",
+          "type": "timeseries",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 },
+          "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] },
+          "targets": [
+            {
+              "refId": "A",
+              "datasource": { "type": "prometheus", "uid": "prometheus" },
+              "expr": "sum by (status) (rate(iicpc_http_requests_total{service=~\"$service\"}[5m]))",
+              "legendFormat": "{{status}}"
+            }
+          ]
+        },
+        {
+          "id": 7,
+          "title": "Recent logs (Loki)",
+          "type": "logs",
+          "datasource": { "type": "loki", "uid": "loki" },
+          "gridPos": { "h": 8, "w": 24, "x": 0, "y": 24 },
+          "options": { "showTime": true, "wrapLogMessage": true, "sortOrder": "Descending" },
+          "targets": [
+            {
+              "refId": "A",
+              "datasource": { "type": "loki", "uid": "loki" },
+              "expr": "{service_name=~\".+\"} | json | level=~\"ERROR|WARN\""
+            }
+          ]
+        }
+      ]
+    }
+  measurement-pipeline.json: |
+    {
+      "uid": "iicpc-measurement-pipeline",
+      "title": "IICPC Measurement Pipeline",
+      "tags": ["iicpc", "measurement"],
+      "timezone": "browser",
+      "schemaVersion": 39,
+      "version": 1,
+      "refresh": "30s",
+      "time": { "from": "now-1h", "to": "now" },
+      "panels": [
+        {
+          "id": 1,
+          "title": "bot-fleet: workloads (ok/error, /s)",
+          "type": "timeseries",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+          "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] },
+          "targets": [
+            {
+              "refId": "A",
+              "datasource": { "type": "prometheus", "uid": "prometheus" },
+              "expr": "sum by (result) (rate(iicpc_bot_workloads_total[5m]))",
+              "legendFormat": "{{result}}"
+            }
+          ]
+        },
+        {
+          "id": 2,
+          "title": "bot-fleet: orders sent vs write errors (/s)",
+          "type": "timeseries",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+          "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] },
+          "targets": [
+            {
+              "refId": "A",
+              "datasource": { "type": "prometheus", "uid": "prometheus" },
+              "expr": "sum(rate(iicpc_bot_orders_sent_total[5m]))",
+              "legendFormat": "orders sent"
+            },
+            {
+              "refId": "B",
+              "datasource": { "type": "prometheus", "uid": "prometheus" },
+              "expr": "sum(rate(iicpc_bot_order_write_errors_total[5m]))",
+              "legendFormat": "write errors"
+            },
+            {
+              "refId": "C",
+              "datasource": { "type": "prometheus", "uid": "prometheus" },
+              "expr": "sum(rate(iicpc_bot_connect_failures_total[5m]))",
+              "legendFormat": "connect failures"
+            }
+          ]
+        },
+        {
+          "id": 3,
+          "title": "bot-fleet: telemetry flush (batches + events/s, drops)",
+          "type": "timeseries",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+          "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] },
+          "targets": [
+            {
+              "refId": "A",
+              "datasource": { "type": "prometheus", "uid": "prometheus" },
+              "expr": "sum(rate(iicpc_bot_telemetry_batches_total[5m]))",
+              "legendFormat": "batches flushed"
+            },
+            {
+              "refId": "B",
+              "datasource": { "type": "prometheus", "uid": "prometheus" },
+              "expr": "sum(rate(iicpc_bot_telemetry_events_flushed_total[5m]))",
+              "legendFormat": "events flushed"
+            },
+            {
+              "refId": "C",
+              "datasource": { "type": "prometheus", "uid": "prometheus" },
+              "expr": "sum(rate(iicpc_bot_telemetry_events_dropped_total[5m]))",
+              "legendFormat": "events dropped"
+            }
+          ]
+        },
+        {
+          "id": 4,
+          "title": "eBPF: flushes + events flushed (/s)",
+          "type": "timeseries",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+          "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] },
+          "targets": [
+            {
+              "refId": "A",
+              "datasource": { "type": "prometheus", "uid": "prometheus" },
+              "expr": "sum(rate(iicpc_ebpf_flushes_total[5m]))",
+              "legendFormat": "flushes"
+            },
+            {
+              "refId": "B",
+              "datasource": { "type": "prometheus", "uid": "prometheus" },
+              "expr": "sum(rate(iicpc_ebpf_events_flushed_total[5m]))",
+              "legendFormat": "events flushed"
+            }
+          ]
+        },
+        {
+          "id": 5,
+          "title": "eBPF: drops + retransmissions + reordering (/s)",
+          "type": "timeseries",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
+          "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] },
+          "targets": [
+            {
+              "refId": "A",
+              "datasource": { "type": "prometheus", "uid": "prometheus" },
+              "expr": "sum(rate(iicpc_ebpf_ringbuf_dropped_total[5m]))",
+              "legendFormat": "ringbuf dropped"
+            },
+            {
+              "refId": "B",
+              "datasource": { "type": "prometheus", "uid": "prometheus" },
+              "expr": "sum(rate(iicpc_ebpf_retransmissions_total[5m]))",
+              "legendFormat": "retransmissions"
+            },
+            {
+              "refId": "C",
+              "datasource": { "type": "prometheus", "uid": "prometheus" },
+              "expr": "sum(rate(iicpc_ebpf_reordering_detected_total[5m]))",
+              "legendFormat": "reordering detected"
+            },
+            {
+              "refId": "D",
+              "datasource": { "type": "prometheus", "uid": "prometheus" },
+              "expr": "sum(rate(iicpc_ebpf_events_decode_errors_total[5m]))",
+              "legendFormat": "decode errors"
+            }
+          ]
+        },
+        {
+          "id": 6,
+          "title": "telemetry-ingester: events consumed by topic (/s)",
+          "type": "timeseries",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 },
+          "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] },
+          "targets": [
+            {
+              "refId": "A",
+              "datasource": { "type": "prometheus", "uid": "prometheus" },
+              "expr": "sum by (topic) (rate(iicpc_telemetry_events_consumed_total[5m]))",
+              "legendFormat": "{{topic}}"
+            }
+          ]
+        },
+        {
+          "id": 7,
+          "title": "telemetry-ingester: records finalized vs evicted (/s)",
+          "type": "timeseries",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 24 },
+          "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] },
+          "targets": [
+            {
+              "refId": "A",
+              "datasource": { "type": "prometheus", "uid": "prometheus" },
+              "expr": "sum(rate(iicpc_telemetry_records_finalized_total[5m]))",
+              "legendFormat": "finalized"
+            },
+            {
+              "refId": "B",
+              "datasource": { "type": "prometheus", "uid": "prometheus" },
+              "expr": "sum(rate(iicpc_telemetry_records_evicted_total[5m]))",
+              "legendFormat": "evicted"
+            }
+          ]
+        },
+        {
+          "id": 8,
+          "title": "telemetry-ingester: join buffer size",
+          "type": "timeseries",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "gridPos": { "h": 8, "w": 6, "x": 12, "y": 24 },
+          "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+          "targets": [
+            {
+              "refId": "A",
+              "datasource": { "type": "prometheus", "uid": "prometheus" },
+              "expr": "sum(iicpc_telemetry_join_buffer_size)",
+              "legendFormat": "in-flight orders"
+            }
+          ]
+        },
+        {
+          "id": 9,
+          "title": "telemetry-ingester: sink writes/errors + TimescaleDB p95 (/s)",
+          "type": "timeseries",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "gridPos": { "h": 8, "w": 6, "x": 18, "y": 24 },
+          "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] },
+          "targets": [
+            {
+              "refId": "A",
+              "datasource": { "type": "prometheus", "uid": "prometheus" },
+              "expr": "sum(rate(iicpc_telemetry_timescale_writes_total[5m]))",
+              "legendFormat": "timescale writes"
+            },
+            {
+              "refId": "B",
+              "datasource": { "type": "prometheus", "uid": "prometheus" },
+              "expr": "sum(rate(iicpc_telemetry_timescale_errors_total[5m]))",
+              "legendFormat": "timescale errors"
+            },
+            {
+              "refId": "C",
+              "datasource": { "type": "prometheus", "uid": "prometheus" },
+              "expr": "sum(rate(iicpc_telemetry_redis_writes_total[5m]))",
+              "legendFormat": "redis writes"
+            },
+            {
+              "refId": "D",
+              "datasource": { "type": "prometheus", "uid": "prometheus" },
+              "expr": "sum(rate(iicpc_telemetry_redis_errors_total[5m]))",
+              "legendFormat": "redis errors"
+            },
+            {
+              "refId": "E",
+              "datasource": { "type": "prometheus", "uid": "prometheus" },
+              "expr": "histogram_quantile(0.95, sum by (le) (rate(iicpc_telemetry_timescale_write_seconds_bucket[5m])))",
+              "legendFormat": "timescale write p95 (s)"
+            }
+          ]
+        },
+        {
+          "id": 10,
+          "title": "validator: sessions validated by result (/s)",
+          "type": "timeseries",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 32 },
+          "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] },
+          "targets": [
+            {
+              "refId": "A",
+              "datasource": { "type": "prometheus", "uid": "prometheus" },
+              "expr": "sum by (result) (rate(iicpc_validator_sessions_validated_total[5m]))",
+              "legendFormat": "{{result}}"
+            }
+          ]
+        },
+        {
+          "id": 11,
+          "title": "validator: violations by type + errors + scores (/s)",
+          "type": "timeseries",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 32 },
+          "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] },
+          "targets": [
+            {
+              "refId": "A",
+              "datasource": { "type": "prometheus", "uid": "prometheus" },
+              "expr": "sum by (type) (rate(iicpc_validator_violations_total[5m]))",
+              "legendFormat": "violation {{type}}"
+            },
+            {
+              "refId": "B",
+              "datasource": { "type": "prometheus", "uid": "prometheus" },
+              "expr": "sum by (stage) (rate(iicpc_validator_validation_errors_total[5m]))",
+              "legendFormat": "error {{stage}}"
+            },
+            {
+              "refId": "C",
+              "datasource": { "type": "prometheus", "uid": "prometheus" },
+              "expr": "sum(rate(iicpc_validator_scores_published_total[5m]))",
+              "legendFormat": "scores published"
+            }
+          ]
+        },
+        {
+          "id": 12,
+          "title": "validator: in-flight sessions + drain p95",
+          "type": "timeseries",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "gridPos": { "h": 8, "w": 24, "x": 0, "y": 40 },
+          "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+          "targets": [
+            {
+              "refId": "A",
+              "datasource": { "type": "prometheus", "uid": "prometheus" },
+              "expr": "sum(iicpc_validator_inflight_sessions)",
+              "legendFormat": "in-flight sessions"
+            },
+            {
+              "refId": "B",
+              "datasource": { "type": "prometheus", "uid": "prometheus" },
+              "expr": "histogram_quantile(0.95, sum by (le) (rate(iicpc_validator_drain_duration_seconds_bucket[5m])))",
+              "legendFormat": "drain p95 (s)"
+            }
+          ]
+        }
+      ]
+    }

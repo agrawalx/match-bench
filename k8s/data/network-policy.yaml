@@ -24,6 +24,43 @@ spec:
         - namespaceSelector:
             matchLabels:
               name: benchmark
+    # H15: per-slot eBPF capture Jobs (sandbox namespace) publish orders.acked to
+    # Kafka. Scope them to the broker port ONLY — never postgres/redis/timescale.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              name: sandbox
+      ports:
+        - port: 9092
+          protocol: TCP
+    # Intra-namespace Kafka: the 3-node KRaft quorum talks broker-to-broker on
+    # 9093 (controller) and 9092 (broker), and the kafka-topic-init Job connects
+    # to a broker on 9092. Without this rule those flows are default-denied by
+    # the Egress block below on a NetworkPolicy-enforcing CNI, so the cluster
+    # never forms a quorum and topic creation hangs.
+    - from:
+        - podSelector: {}
+      ports:
+        - port: 9092
+          protocol: TCP
+        - port: 9093
+          protocol: TCP
+    # Prometheus (observability namespace) scrapes the exporter sidecars +
+    # native MinIO metrics: postgres/timescale-exporter 9187, redis_exporter 9121,
+    # kafka-exporter 9308, MinIO native metrics on the 9000 S3 API port.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              name: observability
+      ports:
+        - port: 9187
+          protocol: TCP
+        - port: 9121
+          protocol: TCP
+        - port: 9308
+          protocol: TCP
+        - port: 9000
+          protocol: TCP
 
   egress:
     - to:
@@ -34,4 +71,13 @@ spec:
         - port: 53
           protocol: UDP
         - port: 53
+          protocol: TCP
+    # Egress side of the intra-namespace Kafka traffic above (broker-to-broker
+    # quorum + topic-init Job -> broker). Same-namespace pods only.
+    - to:
+        - podSelector: {}
+      ports:
+        - port: 9092
+          protocol: TCP
+        - port: 9093
           protocol: TCP

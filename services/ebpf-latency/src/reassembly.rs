@@ -80,10 +80,32 @@ impl Reassembler {
         self.next_seq = self.next_seq.wrapping_add(data.len() as u32);
     }
 
-    /// Drain any held segments that are now contiguous.
+    /// Drain any held segments that are now contiguous OR overlap the front.
     fn drain_hold(&mut self) {
-        while let Some((_, (ts, data))) = self.hold.remove_entry(&self.next_seq) {
-            self.append_contiguous(ts, &data);
+        // A held segment is deliverable when its start is at/before next_seq and
+        // its end is strictly after it. The exact-match case (start == next_seq)
+        // delivers the whole segment; the overlap case (start < next_seq < end) —
+        // which happens when a later segment advanced next_seq into the MIDDLE of
+        // an already-held segment — delivers only the undelivered tail. The old
+        // code matched start == next_seq ONLY, so an overlapping held segment's
+        // tail was never delivered and the contiguous stream stalled until a reset.
+        loop {
+            let key = self.hold.iter().find_map(|(&seq, (_, d))| {
+                let end = seq.wrapping_add(d.len() as u32);
+                if seq_le(seq, self.next_seq) && seq_lt(self.next_seq, end) {
+                    Some(seq)
+                } else {
+                    None
+                }
+            });
+            match key {
+                Some(seq) => {
+                    let (ts, data) = self.hold.remove(&seq).expect("key just found");
+                    let skip = self.next_seq.wrapping_sub(seq) as usize; // already-delivered prefix
+                    self.append_contiguous(ts, &data[skip..]);
+                }
+                None => break,
+            }
         }
         // Discard stale held segments fully behind next_seq (already delivered).
         let next = self.next_seq;
@@ -106,10 +128,19 @@ impl Reassembler {
             return stats;
         }
 
+        // M31: if segments are currently held, the bytes this push makes contiguous
+        // were delivered out of order. The push that FRAMES those bytes (the gap
+        // filler) must report reordered=true — not just the earlier push that held a
+        // segment and framed nothing. Propagate the hold state onto the delivering
+        // push so the framed messages are correctly tagged reordering_detected.
+        let had_hold = !self.hold.is_empty();
         let gap = seq.wrapping_sub(self.next_seq) as i32;
         if gap == 0 {
             self.append_contiguous(ts, data);
             self.drain_hold();
+            if had_hold {
+                stats.reordered = true;
+            }
         } else if gap < 0 {
             // Overlaps already-delivered data (retransmission, possibly with new tail).
             let overlap = (-(gap as i64)) as usize;
@@ -119,6 +150,9 @@ impl Reassembler {
                 stats.retransmitted_bytes = overlap;
                 self.append_contiguous(ts, &data[overlap..]);
                 self.drain_hold();
+                if had_hold {
+                    stats.reordered = true;
+                }
             }
         } else {
             // Future segment — hold until the gap fills.
@@ -141,6 +175,21 @@ impl Reassembler {
         // Keep `next_seq` so future contiguous data still lines up; drop buffered
         // bytes and marks that the parser failed to consume.
         self.front_abs = self.delivered_abs();
+        self.buf.clear();
+        self.marks.clear();
+        self.hold.clear();
+    }
+
+    /// H14: a captured segment was TRUNCATED (its on-wire payload exceeded the
+    /// capture cap — a GSO/TSO super-frame). Its missing tail is unrecoverable, and
+    /// advancing `next_seq` by the short captured length would make every later
+    /// segment look like a permanent forward gap and stall the flow. Drop all state
+    /// and re-anchor at the NEXT segment instead: the truncated message is lost, but
+    /// subsequent messages on the flow stay measurable. (Disabling GSO/TSO on the
+    /// algo veth — see deployment — prevents truncation entirely.)
+    pub fn reset_for_truncation(&mut self) {
+        self.initialized = false;
+        self.front_abs = 0;
         self.buf.clear();
         self.marks.clear();
         self.hold.clear();
@@ -209,6 +258,16 @@ fn seq_ge(a: u32, b: u32) -> bool {
     (a.wrapping_sub(b) as i32) >= 0
 }
 
+/// Sequence-space `<=` (handles wrap).
+fn seq_le(a: u32, b: u32) -> bool {
+    (a.wrapping_sub(b) as i32) <= 0
+}
+
+/// Sequence-space `<` (handles wrap).
+fn seq_lt(a: u32, b: u32) -> bool {
+    (a.wrapping_sub(b) as i32) < 0
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -262,6 +321,55 @@ mod tests {
         assert_eq!(r.timestamp_at(0), 10);
         assert_eq!(r.timestamp_at(3), 20);
         assert_eq!(r.timestamp_at(6), 30);
+    }
+
+    // H10: a held out-of-order segment whose start later falls BEHIND next_seq but
+    // whose tail extends beyond it (a gap-filling segment with a new tail arrives
+    // overlapping the held one) must have its tail delivered — otherwise the stream
+    // stalls forever and all subsequent messages on the flow are silently dropped.
+    #[test]
+    fn overlapping_held_segment_tail_is_drained() {
+        let mut r = Reassembler::new();
+        r.push(0, 10, b"AAA"); // next_seq = 3
+                               // Hold a future segment at seq 5 ("XYZZ", covers 5..9), leaving a gap 3..5.
+        r.push(5, 30, b"XYZZ");
+        assert_eq!(r.available(), b"AAA");
+        // A segment fills 3..7 ("BBCC"), advancing next_seq to 7 — into the MIDDLE
+        // of the held [5,9) segment. Its tail (bytes 7..9 = "ZZ") must still drain.
+        r.push(3, 20, b"BBCC");
+        assert_eq!(
+            r.available(),
+            b"AAABBCCZZ",
+            "H10: overlapping held segment's tail must be delivered, not stranded"
+        );
+    }
+
+    // M31: the push that DELIVERS previously-held (out-of-order) bytes must report
+    // reordered=true, because it is the push from which those messages get framed.
+    #[test]
+    fn gap_fill_push_reports_reorder() {
+        let mut r = Reassembler::new();
+        r.push(0, 10, b"AAA"); // next_seq = 3
+        let held = r.push(6, 30, b"CCC"); // gap 3..6 -> held, frames nothing
+        assert!(held.reordered, "the holding push flags reorder");
+        let fill = r.push(3, 20, b"BBB"); // fills gap and drains CCC
+        assert!(
+            fill.reordered,
+            "M31: the gap-filling push that delivers held bytes must flag reorder"
+        );
+        assert_eq!(r.available(), b"AAABBBCCC");
+    }
+
+    // H14: a truncated capture must reset the flow so it re-anchors at the next
+    // segment instead of advancing next_seq by the short length and stalling.
+    #[test]
+    fn truncation_reset_resyncs_without_stall() {
+        let mut r = Reassembler::new();
+        r.push(0, 10, b"AAA");
+        r.reset_for_truncation(); // a GSO/TSO super-frame was truncated and dropped
+        r.push(100, 20, b"BBB"); // far-ahead segment re-anchors cleanly (no gap stall)
+        assert_eq!(r.available(), b"BBB");
+        assert_eq!(r.timestamp_at(0), 20);
     }
 
     #[test]

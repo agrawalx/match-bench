@@ -13,6 +13,13 @@ spec:
     metadata:
       labels:
         app: minio
+      annotations:
+        # MinIO serves native Prometheus metrics on the S3 API port (9000) at
+        # /minio/v2/metrics/cluster. MINIO_PROMETHEUS_AUTH_TYPE=public (below)
+        # makes the endpoint scrapeable without a bearer token.
+        prometheus.io/scrape: "true"
+        prometheus.io/path: /minio/v2/metrics/cluster
+        prometheus.io/port: "9000"
     spec:
       automountServiceAccountToken: false
       containers:
@@ -33,6 +40,10 @@ spec:
                 secretKeyRef:
                   name: minio-secret
                   key: secret-key
+            # Allow Prometheus to scrape /minio/v2/metrics/cluster without a
+            # signed bearer token (in-cluster scrape only; not internet-exposed).
+            - name: MINIO_PROMETHEUS_AUTH_TYPE
+              value: public
           volumeMounts:
             - name: data
               mountPath: /data
@@ -60,6 +71,11 @@ spec:
               memory: 1Gi
       securityContext:
         runAsNonRoot: true
+        # runAsNonRoot only asserts uid != 0; without an explicit numeric uid the
+        # kubelet cannot verify it before start and the container fails with
+        # CreateContainerConfigError (the minio image declares no USER).
+        runAsUser: 1000
+        runAsGroup: 1000
         fsGroup: 1000
       volumes:
         - name: tmp

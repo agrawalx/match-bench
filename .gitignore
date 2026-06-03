@@ -25,3 +25,6 @@ target/
 
 # OS
 .DS_Store
+
+# Real secret values (bootstrap) — never commit
+bootstrap/secrets-live/

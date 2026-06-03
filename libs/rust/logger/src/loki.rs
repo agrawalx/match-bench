@@ -610,8 +610,25 @@ fn run_worker(
                     eprintln!("loki final push failed for Rust logs: {err}");
                 }
             }
-            if queue_drops.load(Ordering::Relaxed) > 0 {
-                break;
+            // L46: entries enqueued concurrently with shutdown (after the drain loop
+            // above but before `rx` is dropped) would otherwise be discarded silently
+            // and counted in neither queue_drops nor send_drops. Tally them so the
+            // bounded shutdown-time loss is VISIBLE in the completeness counters
+            // operators rely on. (The TOCTOU window cannot be fully closed without
+            // ordering the closed-check against worker exit.)
+            let mut residual = 0u64;
+            while let Ok(WorkerMessage::Entry(_)) = rx.try_recv() {
+                residual += 1;
+            }
+            if residual > 0 {
+                send_drops.fetch_add(residual, Ordering::Relaxed);
+            }
+            // Surface the completeness counters on shutdown so any dropped logs are
+            // visible to operators rather than silently lost.
+            let qd = queue_drops.load(Ordering::Relaxed);
+            let sd = send_drops.load(Ordering::Relaxed);
+            if qd > 0 || sd > 0 {
+                eprintln!("loki logger shutdown: {qd} queue drops, {sd} send drops");
             }
             break;
         }

@@ -3,8 +3,16 @@ package dockerfile
 import (
 	"bytes"
 	"fmt"
+	"regexp"
 	"text/template"
 )
+
+// validTarget constrains the build target to a safe charset. submission-api
+// validates this at upload, but build-worker re-validates here as defense in
+// depth: the value arrives over Kafka and is interpolated unescaped into the
+// generated Dockerfile (RUN/COPY/ENTRYPOINT), so a bad value is a Dockerfile-
+// injection vector regardless of where it originated.
+var validTarget = regexp.MustCompile(`^[A-Za-z0-9_.-]{1,64}$`)
 
 type templateVars struct {
 	Target string
@@ -62,6 +70,9 @@ ENTRYPOINT ["/app/{{.Target}}"]
 // language must be one of: cpp, rust, go.
 // buildType is currently unused but reserved for future multi-toolchain support.
 func Generate(language, _ /*buildType*/, target string, port int) (string, error) {
+	if !validTarget.MatchString(target) {
+		return "", fmt.Errorf("invalid build target %q: must match %s", target, validTarget.String())
+	}
 	vars := templateVars{Target: target, Port: port}
 	var tmpl *template.Template
 	switch language {

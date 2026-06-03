@@ -45,6 +45,13 @@ const DEFAULT_FLUSH_INTERVAL: Duration = Duration::from_millis(5);
 const DEFAULT_BATCH_SIZE: usize = 4096;
 /// How often to sweep idle in-flight orders / reassemblers (cheap; bounds memory).
 const EVICT_INTERVAL: Duration = Duration::from_secs(1);
+/// Cap on orders.acked events retained across publish failures (H16). Beyond this
+/// the oldest are dropped so a prolonged broker outage cannot OOM the capture pod.
+const MAX_PENDING_EVENTS: usize = 100_000;
+/// Max events per published orders.acked Kafka message. A msgpack-named event is
+/// ~300+ bytes (repeated field names), so this keeps each message well under the
+/// 1 MiB topic max.message.bytes; larger backlogs are split across messages.
+const MAX_EVENTS_PER_BATCH: usize = 1000;
 
 #[derive(Debug, Clone)]
 struct Config {
@@ -207,40 +214,68 @@ async fn flush(
     if events.is_empty() {
         return Ok(());
     }
-    let event_refs = events
-        .iter()
-        .map(|e| OrderAckedEventRef {
+    // Publish in size-bounded CHUNKS. A single msgpack-named OrderAckedBatch of the
+    // whole backlog can exceed the topic's max.message.bytes — each named event is
+    // ~300+ bytes (field names are repeated per event), so a few thousand events
+    // blow past 1 MiB and the broker rejects the whole message (MessageSizeTooLarge).
+    // Cap each Kafka message at MAX_EVENTS_PER_BATCH, draining only what was accepted
+    // so the unsent tail is retried next flush rather than wedging the buffer.
+    while !events.is_empty() {
+        let n = events.len().min(MAX_EVENTS_PER_BATCH);
+        let event_refs = events[..n]
+            .iter()
+            .map(|e| OrderAckedEventRef {
+                session_id: &config.session_id,
+                contestant_id: &config.contestant_id,
+                order_id: &e.order_id,
+                src_ip: e.src_ip,
+                src_port: e.src_port,
+                tcp_seq: e.tcp_seq,
+                t3_xdp_ingress_ns: e.t3_ns,
+                t7_xdp_egress_ns: e.t7_ns,
+                pod_service_time_ns: e.pod_service_time_ns,
+                exec_type: &e.exec_type,
+                fill_qty: e.fill_qty,
+                fill_price: e.fill_price,
+                orig_order_id: &e.orig_order_id,
+                reordering_detected: e.reordering_detected,
+                retransmission_count: e.retransmission_count,
+            })
+            .collect::<Vec<_>>();
+        let batch = OrderAckedBatchRef {
             session_id: &config.session_id,
             contestant_id: &config.contestant_id,
-            order_id: &e.order_id,
-            src_ip: e.src_ip,
-            src_port: e.src_port,
-            tcp_seq: e.tcp_seq,
-            t3_xdp_ingress_ns: e.t3_ns,
-            t7_xdp_egress_ns: e.t7_ns,
-            pod_service_time_ns: e.pod_service_time_ns,
-            exec_type: &e.exec_type,
-            fill_qty: e.fill_qty,
-            fill_price: e.fill_price,
-            orig_order_id: &e.orig_order_id,
-            reordering_detected: e.reordering_detected,
-            retransmission_count: e.retransmission_count,
-        })
-        .collect::<Vec<_>>();
-    let batch = OrderAckedBatchRef {
-        session_id: &config.session_id,
-        contestant_id: &config.contestant_id,
-        events: &event_refs,
-    };
-    let payload = rmp_serde::to_vec_named(&batch).context("encode orders.acked messagepack")?;
-    let event_count = events.len();
-    for event in events.iter() {
-        metrics::event_decoded(event.reordering_detected, event.retransmission_count);
+            events: &event_refs,
+        };
+        let payload = rmp_serde::to_vec_named(&batch).context("encode orders.acked messagepack")?;
+        // H16: a transient publish failure must NOT kill the capture (the per-slot
+        // Job is backoffLimit=0/RestartPolicy=Never). Retain the unsent tail for the
+        // next flush; bound memory by dropping the OLDEST events past the cap.
+        match kafka::publish_bytes(producer, &config.topic, &config.contestant_id, &payload).await {
+            Ok(()) => {
+                // Record metrics only for the events Kafka actually accepted in
+                // this chunk (not the whole pending buffer), so the counters stay
+                // consistent with the H16 retain-on-failure semantics.
+                for event in events[..n].iter() {
+                    metrics::event_decoded(event.reordering_detected, event.retransmission_count);
+                }
+                metrics::flushed(n);
+                events.drain(0..n);
+            }
+            Err(err) => {
+                warn!(error = %err, pending = events.len(), "publish orders.acked failed; retaining for retry");
+                if events.len() > MAX_PENDING_EVENTS {
+                    let drop = events.len() - MAX_PENDING_EVENTS;
+                    events.drain(0..drop);
+                    warn!(
+                        dropped = drop,
+                        "dropped oldest pending orders.acked events (publish backlog)"
+                    );
+                }
+                break; // stop this flush; retry the tail next tick
+            }
+        }
     }
-    // Publish before clearing so a failed send doesn't silently drop the batch.
-    kafka::publish_bytes(producer, &config.topic, &config.contestant_id, &payload).await?;
-    metrics::flushed(event_count);
-    events.clear();
     Ok(())
 }
 
@@ -272,6 +307,9 @@ fn report_counter(map: &Option<PerCpuArray<MapData, u64>>, last: &mut u64, msg: 
 
 fn attach_programs(bpf: &mut Ebpf, config: &Config) -> Result<()> {
     let mut attach = || -> Result<()> {
+        // Runs inside the algo netns (when netns_path is set), so this disables
+        // offloads on the algo pod's interface before the hooks attach.
+        disable_offloads(&config.iface);
         attach_xdp_ingress(bpf, &config.xdp_ingress_program, &config.iface)?;
         attach_tc_egress(bpf, &config.tc_egress_program, &config.iface)
     };
@@ -279,6 +317,41 @@ fn attach_programs(bpf: &mut Ebpf, config: &Config) -> Result<()> {
         return with_network_namespace(netns_path, attach);
     }
     attach()
+}
+
+/// disable_offloads turns off segmentation/receive offloads on the capture
+/// interface so the tc/XDP hooks observe one MTU-sized packet per message instead
+/// of coalesced super-frames. A super-frame larger than CAPTURE_CAP is truncated
+/// in the kernel and forces a lossy flow reset in the reassembler (TRUNCATED_CAPTURES),
+/// which is what capped orders.acked delivery under high load. The platform's
+/// measurement contract requires these offloads off on the sandbox veth for
+/// one-packet-per-order/response semantics.
+///
+/// Best-effort by design: a veth reports some features "fixed" (unchangeable), and
+/// the binary image may lack ethtool — neither should abort the capture, since a
+/// degraded-but-running measurement beats none. Per-feature failures are logged.
+fn disable_offloads(iface: &str) {
+    for feature in ["tso", "gso", "gro", "lro"] {
+        match std::process::Command::new("ethtool")
+            .args(["-K", iface, feature, "off"])
+            .output()
+        {
+            Ok(out) if out.status.success() => {
+                info!(iface, feature, "disabled network offload");
+            }
+            Ok(out) => {
+                warn!(
+                    iface,
+                    feature,
+                    detail = %String::from_utf8_lossy(&out.stderr).trim(),
+                    "could not disable offload (likely fixed on this device); continuing"
+                );
+            }
+            Err(err) => {
+                warn!(iface, feature, error = %err, "failed to run ethtool; continuing without offload disable");
+            }
+        }
+    }
 }
 
 fn with_network_namespace<T>(netns_path: &PathBuf, f: impl FnOnce() -> Result<T>) -> Result<T> {

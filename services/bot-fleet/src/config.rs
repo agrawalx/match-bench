@@ -21,7 +21,20 @@ pub struct Config {
     pub telemetry_batch_size: usize,
     pub telemetry_channel_capacity: usize,
     pub max_bots_per_worker: usize,
+    /// max_poll_interval is the consumer's `max.poll.interval.ms` bound. The
+    /// workload-assignment offset is committed only after the whole workload
+    /// finishes (barrier wait + scenario duration + drain); if that wall time
+    /// exceeds this bound Kafka rebalances mid-run and re-delivers the
+    /// assignment, causing duplicate execution. validate_spec rejects a spec
+    /// whose worst-case wall time would breach it (L39). Kept in sync with the
+    /// value passed to the rdkafka consumer in kafka.rs.
+    pub max_poll_interval: Duration,
 }
+
+/// DEFAULT_MAX_POLL_INTERVAL is the consumer's `max.poll.interval.ms` default.
+/// Shared between the Config default and the rdkafka consumer so the L39 guard
+/// and the broker bound never drift apart.
+pub const DEFAULT_MAX_POLL_INTERVAL: Duration = Duration::from_secs(300);
 
 impl Default for Config {
     fn default() -> Self {
@@ -44,6 +57,7 @@ impl Default for Config {
             // dropping the workload so the controller's bot.ready fan-in times
             // out.
             max_bots_per_worker: 1000,
+            max_poll_interval: DEFAULT_MAX_POLL_INTERVAL,
         }
     }
 }
@@ -82,6 +96,11 @@ impl Config {
                 .ok()
                 .and_then(|v| v.parse::<usize>().ok())
                 .unwrap_or(default.max_bots_per_worker),
+            max_poll_interval: env::var("MAX_POLL_INTERVAL_MS")
+                .ok()
+                .and_then(|v| v.parse::<u64>().ok())
+                .map(Duration::from_millis)
+                .unwrap_or(default.max_poll_interval),
         }
     }
 

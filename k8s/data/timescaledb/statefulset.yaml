@@ -1,0 +1,120 @@
+# TimescaleDB — metrics time-series for the telemetry-ingester. A SEPARATE
+# instance from the metadata postgres (per architecture_v2). The image ships the
+# timescaledb extension preloaded; the ingester creates the hypertable +
+# continuous aggregate on startup.
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: timescaledb
+  namespace: data
+spec:
+  serviceName: timescaledb
+  replicas: 1
+  selector:
+    matchLabels:
+      app: timescaledb
+  template:
+    metadata:
+      labels:
+        app: timescaledb
+      annotations:
+        # postgres-exporter sidecar (below) exposes metrics on 9187.
+        prometheus.io/scrape: "true"
+        prometheus.io/path: /metrics
+        prometheus.io/port: "9187"
+    spec:
+      automountServiceAccountToken: false
+      containers:
+        - name: timescaledb
+          image: timescale/timescaledb:2.17.2-pg16
+          ports:
+            - containerPort: 5432
+          env:
+            - name: POSTGRES_USER
+              value: iicpc
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: timescaledb-secret
+                  key: password
+            - name: POSTGRES_DB
+              value: metrics
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+            - name: tmp
+              mountPath: /tmp
+            - name: run
+              mountPath: /var/run/postgresql
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "iicpc", "-d", "metrics"]
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            capabilities:
+              drop:
+                - ALL
+          resources:
+            requests:
+              cpu: 500m
+              memory: 1Gi
+            limits:
+              cpu: "2"
+              memory: 2Gi
+        # Mirrors the postgres-exporter sidecar (env/securityContext style).
+        # Points at the metrics DB this instance serves.
+        - name: postgres-exporter
+          image: quay.io/prometheuscommunity/postgres-exporter:v0.15.0
+          ports:
+            - name: metrics
+              containerPort: 9187
+          env:
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: timescaledb-secret
+                  key: password
+            - name: DATA_SOURCE_NAME
+              value: postgres://iicpc:$(POSTGRES_PASSWORD)@localhost:5432/metrics?sslmode=disable
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            capabilities:
+              drop:
+                - ALL
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+      securityContext:
+        runAsNonRoot: true
+        # runAsNonRoot only asserts uid != 0; without an explicit numeric uid the
+        # kubelet cannot verify it before start and the container fails with
+        # CreateContainerConfigError (the timescaledb image declares no USER).
+        # 70 is the postgres uid/gid the timescaledb image inherits.
+        runAsUser: 70
+        runAsGroup: 70
+        fsGroup: 70
+      volumes:
+        - name: tmp
+          emptyDir: {}
+        - name: run
+          emptyDir: {}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 20Gi

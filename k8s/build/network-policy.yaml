@@ -80,7 +80,15 @@ spec:
     - Ingress
     - Egress
 
-  ingress: []
+  # Prometheus (observability namespace) scrapes the spawner metrics on 9090.
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              name: observability
+      ports:
+        - port: 9090
+          protocol: TCP
 
   egress:
     # Data plane: postgres, kafka, minio
@@ -94,6 +102,16 @@ spec:
         - port: 9092
           protocol: TCP
         - port: 9000
+          protocol: TCP
+
+    # Loki log shipping — the spawner's logger pushes to
+    # loki.observability.svc:3100 (LOKI_URL).
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              name: observability
+      ports:
+        - port: 3100
           protocol: TCP
 
     # Harbor staging + production (crane.Copy promotion)

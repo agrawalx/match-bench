@@ -134,10 +134,12 @@ func main() {
 		os.Exit(1)
 	}
 
-	r.Get("/health", healthHandler)
+	r.Get("/health", healthHandler) // liveness: static, no dependencies
+	r.Get("/ready", handler.Readiness(pgStore.Ping, log))
 	r.Handle("/metrics", metrics.Handler())
 	r.Post("/submit", handler.Submit(minioStore, pgStore, kafkaPub, log))
-	r.Get("/submissions/{id}", handler.GetSubmission(pgStore, log))
+	// Route param MUST match handler.GetSubmission's chi.URLParam("submission_id").
+	r.Get("/submissions/{submission_id}", handler.GetSubmission(pgStore, log))
 	// POST /submissions/{id}/benchmark mints one run-group and N child runs
 	// (one per row in the scenarios table). The legacy POST /benchmarks/{id}
 	// path is kept as an alias so older frontends do not break.

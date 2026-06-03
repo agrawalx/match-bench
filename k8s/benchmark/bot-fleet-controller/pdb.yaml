@@ -1,19 +1,19 @@
-# PodDisruptionBudget — required because bot-fleet-controller runs at exactly
-# one replica (architecturally locked; no horizontal scale-out).
+# PodDisruptionBudget — bot-fleet-controller runs at exactly one replica
+# (architecturally locked; no horizontal scale-out).
 #
-# minAvailable=1 means cluster operations that drain nodes (e.g. a rolling
-# kubelet upgrade) must wait for a replacement pod to come up on another
-# node before the current pod can be evicted. Without this, a drain
-# evicts the controller mid-run and every in-flight session ends up
-# marked failed by the next startup's recovery sweep — the user has to
-# re-trigger every benchmark that was in flight.
+# Use maxUnavailable=1, NOT minAvailable=1. With a single replica, minAvailable=1
+# yields disruptionsAllowed=0: the Eviction API refuses to evict the only pod and
+# `kubectl drain` HANGS indefinitely, blocking routine node maintenance — strictly
+# worse than no PDB. maxUnavailable=1 lets the pod be evicted and rescheduled (the
+# brief in-flight gap is marked failed by recovery and the user re-triggers — the
+# accepted v1 trade-off for a single-replica controller).
 apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:
   name: bot-fleet-controller
   namespace: benchmark
 spec:
-  minAvailable: 1
+  maxUnavailable: 1
   selector:
     matchLabels:
       app: bot-fleet-controller

@@ -102,6 +102,19 @@ type BenchmarkStatusUpdated struct {
 	UpdatedAt    time.Time `json:"updated_at"`
 }
 
+// CorrectnessScoreEvent is published to "scores.correctness" (JSON) by the
+// correctness-validator after the post-run order-book replay. Consumed by the
+// scoring service for the hard correctness gate. Key: session_id.
+type CorrectnessScoreEvent struct {
+	SessionID        string  `json:"session_id"`
+	ContestantID     string  `json:"contestant_id"`
+	ValidFills       uint64  `json:"valid_fills"`
+	TotalFills       uint64  `json:"total_fills"`
+	CorrectnessScore float64 `json:"correctness_score"` // valid_fills / total_fills
+	ViolationCount   uint32  `json:"violation_count"`
+	ComputedAtNS     uint64  `json:"computed_at_ns"`
+}
+
 // SubmissionStatusUpdated is published to "submission.status.updated"
 // by the build-worker on every state transition. Consumed by: submission-api (status queries).
 type SubmissionStatusUpdated struct {
@@ -240,6 +253,12 @@ type OrderSentEvent struct {
 	Side           string `json:"side" msgpack:"side"`                 // BUY | SELL
 	PayloadType    string `json:"payload_type" msgpack:"payload_type"` // NEW | CANCEL | REPLACE — lets the validator/ingester separate cancels from new orders (cancel throughput).
 	OrdType        string `json:"ord_type" msgpack:"ord_type"`         // LIMIT | MARKET (FIX tag 40) — distinguishes market from limit new orders, which share payload_type=NEW.
+	// OrigOrderID is the bot-authoritative target of a CANCEL/REPLACE (the original
+	// ClOrdID the bot is amending). The correctness-validator keys its reference
+	// matching engine off THIS value rather than the contestant's echoed tag 41 in
+	// orders.acked, so a contestant cannot steer the reference book by omitting or
+	// altering the cancel target. Empty for NEW orders.
+	OrigOrderID string `json:"orig_order_id" msgpack:"orig_order_id"`
 }
 
 // OrderAckedBatch is MessagePack-encoded on "orders.acked" by the eBPF

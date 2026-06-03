@@ -238,9 +238,19 @@ func (e *Engine) replace(o *model.Order) {
 		ro.remaining = o.Qty // qty-only decrease: keep position
 		// re-key the index under the new order id (the replace carries a new ClOrdID)
 		if o.OrderID != "" && o.OrderID != ro.orderID {
-			delete(e.index, ro.orderID)
+			oldID := ro.orderID
+			delete(e.index, oldID)
 			ro.orderID = o.OrderID
 			e.index[o.OrderID] = ro
+			// A qty-decrease replace KEEPS queue position, so the new ClOrdID must
+			// inherit the original FIFO arrival rank — otherwise SeqOf(newID) misses
+			// and queueJump can't classify a later violation involving this order as
+			// time-priority / cancel-replace-loss (it would fall through to the wrong
+			// violation type; the fill stays flagged, only the label is wrong).
+			if s, ok := e.seqByOrder[oldID]; ok {
+				e.seqByOrder[o.OrderID] = s
+				delete(e.seqByOrder, oldID)
+			}
 		}
 		return
 	}

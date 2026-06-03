@@ -154,3 +154,34 @@ func TestReplaceQtyDecreaseKeepsPriority(t *testing.T) {
 		t.Fatalf("qty-decrease must keep front priority: %v", f)
 	}
 }
+
+// A qty-decrease replace re-keys the order to its new ClOrdID but KEEPS queue
+// position, so the new id must inherit the original FIFO arrival rank. Without
+// that, SeqOf(new id) misses and queueJump can't classify a later violation
+// involving this order as time-priority / cancel-replace-loss (the fill stays
+// flagged, but with the wrong violation type). The fill-order test above passes
+// regardless (the FIFO slice is intact) — this guards the seqByOrder map.
+func TestReplaceQtyDecreaseCarriesFIFORank(t *testing.T) {
+	e := NewEngine()
+	e.Process(limit("A", model.Sell, 100, 10)) // rests first
+	e.Process(limit("B", model.Sell, 100, 10)) // same level, behind A
+	seqA, ok := e.SeqOf("A")
+	if !ok {
+		t.Fatal("A must have a FIFO rank after resting")
+	}
+	e.Process(replace("A_R", "A", model.Sell, 100, 8)) // qty 10->8, keeps front
+
+	got, ok := e.SeqOf("A_R")
+	if !ok {
+		t.Fatal("after qty-decrease replace, SeqOf(new id) must resolve (regression: seqByOrder not re-keyed)")
+	}
+	if got != seqA {
+		t.Errorf("re-keyed order rank = %d, want %d (must keep queue position)", got, seqA)
+	}
+	if _, stale := e.SeqOf("A"); stale {
+		t.Error("old id must no longer carry a FIFO rank after re-key")
+	}
+	if seqB, _ := e.SeqOf("B"); !(got < seqB) {
+		t.Errorf("re-keyed order rank %d must stay ahead of B's %d (time priority preserved)", got, seqB)
+	}
+}

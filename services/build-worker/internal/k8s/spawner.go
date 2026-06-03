@@ -264,6 +264,27 @@ func (s *Spawner) Run(ctx context.Context, msg topics.SubmissionBuildRequested) 
 	log.Info("pipeline complete")
 }
 
+// phase2Outcome collects the results of the parallel scan + SBOM jobs. Both
+// channels must already be closed (the waiter goroutine closes them after
+// wg.Wait). It returns the per-step success statuses to publish ONLY when no
+// job failed — a partial failure returns the first error and NO statuses, so
+// the caller never publishes a sibling's forward-progress status (e.g.
+// sbom_ready) for a submission that is actually failing. Draining statuses
+// before checking errs is safe because both channels are closed; the success
+// statuses are discarded on any error rather than emitted ahead of `failed`.
+func phase2Outcome(statuses <-chan string, errs <-chan error) ([]string, error) {
+	var oks []string
+	for st := range statuses {
+		oks = append(oks, st)
+	}
+	for err := range errs {
+		if err != nil {
+			return nil, err
+		}
+	}
+	return oks, nil
+}
+
 func (s *Spawner) createJob(ctx context.Context, job *batchv1.Job) error {
 	_, err := s.client.BatchV1().Jobs(s.cfg.Namespace).Create(ctx, job, metav1.CreateOptions{})
 	if apierrors.IsAlreadyExists(err) {

@@ -407,6 +407,13 @@ where
         event.record(&mut visitor);
 
         let meta = event.metadata();
+        // Emit an in-line RFC3339Nano UTC `time` field matching the Go slog
+        // JSONHandler, so cross-language Loki/Grafana dashboards can parse one
+        // timestamp field for both Go and Rust services. (Loki ingest uses the
+        // stream timestamp below; this is the human/queryable copy.)
+        visitor
+            .fields
+            .insert("time".to_string(), Value::String(rfc3339_nanos(now)));
         visitor.fields.insert(
             "level".to_string(),
             Value::String(level_str(meta.level()).to_string()),
@@ -831,6 +838,43 @@ fn unix_nanos(time: SystemTime) -> u128 {
         .unwrap_or(0)
 }
 
+/// rfc3339_nanos formats a SystemTime as RFC3339 in UTC with fractional seconds,
+/// trailing zeros trimmed (e.g. `2026-06-04T12:34:56.123Z`, or `...:56Z` when the
+/// nanos are zero) — the same shape Go's slog JSONHandler emits for its `time`
+/// field. std-only (no chrono/time dep): civil date via Howard Hinnant's
+/// days-from-epoch algorithm.
+fn rfc3339_nanos(now: SystemTime) -> String {
+    let total = now.duration_since(UNIX_EPOCH).unwrap_or_default();
+    let secs = total.as_secs() as i64;
+    let nanos = total.subsec_nanos();
+    let days = secs.div_euclid(86_400);
+    let tod = secs.rem_euclid(86_400);
+    let (hour, min, sec) = (tod / 3600, (tod % 3600) / 60, tod % 60);
+    let (y, m, d) = civil_from_days(days);
+    if nanos == 0 {
+        format!("{y:04}-{m:02}-{d:02}T{hour:02}:{min:02}:{sec:02}Z")
+    } else {
+        let frac = format!("{nanos:09}");
+        let frac = frac.trim_end_matches('0');
+        format!("{y:04}-{m:02}-{d:02}T{hour:02}:{min:02}:{sec:02}.{frac}Z")
+    }
+}
+
+/// civil_from_days converts a count of days since 1970-01-01 into (year, month,
+/// day) for the proleptic Gregorian calendar (Howard Hinnant, public domain).
+fn civil_from_days(days: i64) -> (i64, u32, u32) {
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097; // [0, 146096]
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365; // [0, 399]
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // [0, 365]
+    let mp = (5 * doy + 2) / 153; // [0, 11]
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32; // [1, 31]
+    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32; // [1, 12]
+    (if m <= 2 { y + 1 } else { y }, m, d)
+}
+
 fn env_or(key: &str, fallback: impl Into<String>) -> String {
     env::var(key)
         .ok()
@@ -849,4 +893,29 @@ fn cached_hostname() -> String {
                 .filter(|value| !value.is_empty())
         })
         .unwrap_or_else(|| "local".to_string())
+}
+
+#[cfg(test)]
+mod time_tests {
+    use super::rfc3339_nanos;
+    use std::time::{Duration, UNIX_EPOCH};
+
+    #[test]
+    fn formats_rfc3339_nanos_utc_matching_go_slog() {
+        // Unix billennium: 1_000_000_000s after epoch = 2001-09-09T01:46:40Z.
+        let t = UNIX_EPOCH + Duration::new(1_000_000_000, 123_000_000);
+        assert_eq!(rfc3339_nanos(t), "2001-09-09T01:46:40.123Z");
+    }
+
+    #[test]
+    fn zero_nanos_has_no_fraction() {
+        assert_eq!(rfc3339_nanos(UNIX_EPOCH), "1970-01-01T00:00:00Z");
+    }
+
+    #[test]
+    fn full_nanosecond_precision_preserved() {
+        let t = UNIX_EPOCH + Duration::new(1_700_000_000, 987_654_321);
+        // 1_700_000_000s = 2023-11-14T22:13:20Z
+        assert_eq!(rfc3339_nanos(t), "2023-11-14T22:13:20.987654321Z");
+    }
 }

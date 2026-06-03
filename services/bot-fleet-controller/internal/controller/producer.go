@@ -38,9 +38,15 @@ func NewProducer(brokers string, log *slog.Logger) *Producer {
 	addr := kafka.TCP(list...)
 	mk := func(topic string) *kafka.Writer {
 		return &kafka.Writer{
-			Addr:                   addr,
-			Topic:                  topic,
-			Balancer:               &kafka.LeastBytes{},
+			Addr:  addr,
+			Topic: topic,
+			// Hash the message Key (session_id / session_id:worker_index) so a
+			// session deterministically maps to one partition and its events stay
+			// ordered. LeastBytes ignores the Key and scatters a session across
+			// partitions — fine at 1 partition, but it breaks per-session ordering
+			// (e.g. status walk applied out of order) the moment these topics are
+			// created with >1 partition. Matches submission-api's keyed writer.
+			Balancer:               &kafka.Hash{},
 			RequiredAcks:           kafka.RequireAll,
 			Async:                  false,
 			AllowAutoTopicCreation: false,

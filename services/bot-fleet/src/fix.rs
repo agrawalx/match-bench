@@ -478,10 +478,12 @@ pub fn parse_messages(buf: &[u8]) -> (Vec<MessageRef<'_>>, usize) {
         // the cursor onward, we're done — everything past the cursor is
         // either junk (which we drop) or a partial start (carry-over).
         let Some(start_off) = find_subslice(&buf[cursor..], b"8=FIX") else {
-            // No more messages and no partial start; consume the whole tail.
-            // (If a partial "8=F" appeared near the end the carry-over scan
-            // below catches it.)
-            cursor = buf.len();
+            // No complete "8=FIX" start marker remains. A read boundary can
+            // split the 5-byte marker, leaving a partial prefix ("8", "8=",
+            // "8=F", "8=FI") at the tail — carry those bytes over so the next
+            // chunk can complete them (BF-PARSE-1). Junk before such a prefix
+            // is dropped; if there's no partial prefix the whole tail is junk.
+            cursor += partial_marker_start(&buf[cursor..]);
             break;
         };
         let abs_start = cursor + start_off;
@@ -542,6 +544,25 @@ fn extract_tag<'a>(msg: &'a [u8], tag: &[u8]) -> Option<&'a [u8]> {
     let value_start = pos + needle.len();
     let value_end = msg[value_start..].iter().position(|&b| b == SOH)?;
     Some(&msg[value_start..value_start + value_end])
+}
+
+/// partial_marker_start returns the offset of a trailing partial "8=FIX" start
+/// marker in `buf` — the rightmost position from which `buf` is a non-empty
+/// strict prefix of "8=FIX" (length 1..=4; a full 5-byte match would have been
+/// found by find_subslice). A read boundary can split the marker, so the caller
+/// carries those bytes over instead of dropping them (BF-PARSE-1). Returns
+/// `buf.len()` when no such partial prefix is present (the tail is pure junk).
+fn partial_marker_start(buf: &[u8]) -> usize {
+    let marker = b"8=FIX";
+    // Check the longest candidate suffix first (length 4), then shorter ones;
+    // the first that is a prefix of the marker is the carry-over point.
+    let lo = buf.len().saturating_sub(marker.len() - 1);
+    for p in lo..buf.len() {
+        if marker.starts_with(&buf[p..]) {
+            return p;
+        }
+    }
+    buf.len()
 }
 
 /// find_subslice is a naive substring search. FIX messages are small
@@ -700,10 +721,10 @@ mod tests {
     /// unimplemented). Impact is read-size dependent: ~0% at the echo's 4096-byte
     /// reads, but rising at smaller reads (6.5% @ 64 B, 100% @ 1 B).
     ///
-    /// `#[ignore]` until the carry-over is implemented; then this must pass for
-    /// ALL chunk sizes. To observe the current loss: `cargo test -- --ignored`.
+    /// BF-PARSE-1 fixed: parse_messages now carries over a partial "8=FIX" start
+    /// marker split across a read boundary, so this passes for ALL chunk sizes
+    /// (including 1 byte, the worst case that was previously 100% loss).
     #[test]
-    #[ignore = "BF-PARSE-1: parse_messages drops a frame split across the 8=FIX marker; fix deferred"]
     fn echo_read_loop_answers_every_order_under_arbitrary_chunking() {
         const N: u64 = 200;
         let mut wire: Vec<u8> = Vec::new();

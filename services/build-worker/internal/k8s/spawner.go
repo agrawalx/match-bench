@@ -226,17 +226,16 @@ func (s *Spawner) Run(ctx context.Context, msg topics.SubmissionBuildRequested) 
 		close(errs)
 	}()
 
-	for st := range statuses {
+	oks, err := phase2Outcome(statuses, errs)
+	if err != nil {
+		log.Error("phase 2 job failed", "error", err)
+		recordBuildRequest("error")
+		s.setStatus(ctx, id, topics.StatusFailed, err.Error())
+		return
+	}
+	for _, st := range oks {
 		s.setStatus(ctx, id, st, st+" complete")
 		log.Info("phase 2 step complete", "status", st)
-	}
-	for err := range errs {
-		if err != nil {
-			log.Error("phase 2 job failed", "error", err)
-			recordBuildRequest("error")
-			s.setStatus(ctx, id, topics.StatusFailed, err.Error())
-			return
-		}
 	}
 	log.Info("phase 2 complete")
 

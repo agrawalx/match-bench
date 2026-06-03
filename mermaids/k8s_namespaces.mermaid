@@ -1,0 +1,72 @@
+%% IICPC Kubernetes layout — namespaces and what lives in each.
+%% High-level only (no ports/policies); the technical run flow is in
+%% end_to_end_pipeline.mermaid. Each namespace folder under k8s/ is a deployable
+%% tier: `kubectl apply -f k8s/<namespace>/` brings the tier up.
+flowchart TB
+    subgraph platform["platform ns"]
+        SA["submission-api<br/>uploads, run triggers"]
+    end
+
+    subgraph build["build ns"]
+        BW["build-worker (spawner)<br/>spawns Kaniko + Trivy + Syft Jobs"]
+    end
+
+    subgraph sandbox["sandbox ns — untrusted code lives here"]
+        SO["sandbox-orchestrator"]
+        ALGO["algo pods<br/>one per run · gVisor · hardened"]
+        CAP["eBPF capture Jobs<br/>one per run · privileged, GC'd with the pod"]
+    end
+
+    subgraph benchmark["benchmark ns"]
+        CTL["bot-fleet-controller<br/>1 replica, serial runs"]
+        BF["bot-fleet workers<br/>KEDA-scaled 2..50"]
+        TI["telemetry-ingester"]
+        CV["correctness-validator"]
+    end
+
+    subgraph data["data ns — stateful"]
+        K[("Kafka — KRaft")]
+        PG[("PostgreSQL")]
+        TS[("TimescaleDB")]
+        RD[("Redis")]
+        MIN[("MinIO")]
+    end
+
+    subgraph obs["observability ns"]
+        PROM["Prometheus"]
+        GRAF["Grafana"]
+        LOKI["Loki"]
+    end
+
+    %% control plane
+    SA --> BW
+    BW --> SO
+    SO --> ALGO
+    SO --> CAP
+    CTL --> SO
+    BF --> ALGO
+
+    %% everything async goes through Kafka; stores are read/written per tier
+    SA --- K
+    CTL --- K
+    BF --- K
+    CAP --- K
+    TI --- K
+    CV --- K
+    SA --- PG
+    SA --- MIN
+    BW --- MIN
+    TI --- TS
+    TI --- RD
+    CV --- PG
+
+    %% observability scrapes /metrics and ingests logs from every tier
+    PROM -. scrape /metrics .-> benchmark
+    PROM -. scrape /metrics .-> platform
+    PROM -. scrape /metrics .-> data
+    LOKI -. logs .-> benchmark
+    GRAF --- PROM
+    GRAF --- LOKI
+
+    classDef untrusted fill:#fce9e9,stroke:#a33;
+    class ALGO,CAP untrusted;

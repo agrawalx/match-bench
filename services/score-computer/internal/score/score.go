@@ -142,6 +142,8 @@ func Compute(in Input) (Result, error) {
 		return res, nil
 	}
 
+	res.SpikeRecoveryNS = spikeRecoveryNS(in.Sessions, cfg.WaveDurationNS)
+
 	schedule := WaveSchedule(ramp.TaskSpecs, cfg.WaveDurationNS)
 	metrics := summarizeMetrics(ramp.Metrics)
 	for _, wave := range schedule {
@@ -263,6 +265,64 @@ func summarizeMetrics(rows []MetricRow) map[int]MetricSummary {
 		out[row.WaveIndex] = m
 	}
 	return out
+}
+
+// spikeRecoveryNS estimates the Session-2 (spike) p99 recovery time: the elapsed
+// time from the spike's peak-p99 wave until p99 returns within 10% of the
+// pre-spike baseline (the first wave's p99). It is a secondary tiebreaker only.
+//
+// Resolution is one wave (WaveDurationNS, ~20s) because the metrics store
+// aggregates per wave, not per second — this is a coarse proxy, not a precise
+// recovery time. Returns 0 when there is no spike session, no metrics, or p99
+// never rose meaningfully above baseline; returns the full observed post-peak
+// span when it rose but never recovered.
+func spikeRecoveryNS(sessions []Session, waveDurationNS uint64) uint64 {
+	if waveDurationNS == 0 {
+		waveDurationNS = DefaultWaveDurationNS
+	}
+	var spike *Session
+	for i := range sessions {
+		if sessions[i].Scenario == "spike" {
+			spike = &sessions[i]
+			break
+		}
+	}
+	if spike == nil {
+		return 0
+	}
+	sum := summarizeMetrics(spike.Metrics)
+	if len(sum) == 0 {
+		return 0
+	}
+	waves := make([]int, 0, len(sum))
+	for w := range sum {
+		waves = append(waves, w)
+	}
+	sort.Ints(waves)
+
+	baseline := sum[waves[0]].MaxP99NS
+	if baseline == 0 {
+		return 0
+	}
+	threshold := uint64(float64(baseline) * 1.10)
+
+	peakWave, peakP99 := waves[0], sum[waves[0]].MaxP99NS
+	for _, w := range waves {
+		if sum[w].MaxP99NS > peakP99 {
+			peakP99, peakWave = sum[w].MaxP99NS, w
+		}
+	}
+	if peakP99 <= threshold {
+		return 0 // never rose meaningfully above baseline
+	}
+	for _, w := range waves {
+		if w > peakWave && sum[w].MaxP99NS <= threshold {
+			return uint64(w-peakWave) * waveDurationNS
+		}
+	}
+	// rose above baseline but never recovered within the observed window
+	last := waves[len(waves)-1]
+	return uint64(last-peakWave+1) * waveDurationNS
 }
 
 func SortResults(results []Result) {

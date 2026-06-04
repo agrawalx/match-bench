@@ -226,6 +226,41 @@ HAVING COUNT(DISTINCT p.session_id) = (SELECT COUNT(DISTINCT session_id) FROM ru
 	return out, rows.Err()
 }
 
+// PendingRunGroups returns every run-group that is complete (all sessions
+// terminal with correctness recorded) but has no scores row yet. It is called
+// once on startup to re-drive run-groups that became ready while the process was
+// down: the readiness signal from RecordStatus/RecordCorrectness lives only in an
+// in-memory channel, so a crash between the Kafka offset commit and the worker
+// scoring would otherwise strand a complete-but-unscored run-group forever (no
+// further event re-triggers it). Idempotent — already-scored groups are excluded
+// by the LEFT JOIN, and SaveScore's ON CONFLICT keeps re-enqueues harmless.
+func (s *Store) PendingRunGroups(ctx context.Context) ([]string, error) {
+	rows, err := s.meta.Query(ctx, `
+SELECT p.run_group_id
+  FROM score_progress p
+  JOIN runs r ON r.session_id=p.session_id
+  LEFT JOIN scores sc ON sc.run_group_id=p.run_group_id
+ WHERE sc.run_group_id IS NULL
+ GROUP BY p.run_group_id
+HAVING COUNT(DISTINCT p.session_id) = (SELECT COUNT(DISTINCT session_id) FROM runs WHERE run_group_id=p.run_group_id)
+   AND COUNT(DISTINCT p.session_id) >= 3
+   AND BOOL_AND(p.terminal_status IN ('completed','failed'))
+   AND BOOL_AND(p.total_fills IS NOT NULL)`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		out = append(out, id)
+	}
+	return out, rows.Err()
+}
+
 func (s *Store) LoadInput(ctx context.Context, runGroupID string) (score.Input, error) {
 	cfg, err := s.Config(ctx)
 	if err != nil {

@@ -92,6 +92,15 @@ func (s *Store) Leaderboard(ctx context.Context, q LeaderboardQuery) (Leaderboar
 	if err != nil {
 		return LeaderboardResponse{}, err
 	}
+	// team_id is an alias for contestant_id in v1 (there is no separate team table;
+	// the scores row keys on contestant_id). Collapsing here avoids the prior bug
+	// where team_id was bound to a SECOND contestant_id predicate, so setting both
+	// contestant_id and team_id (or team_id alone, expecting team semantics)
+	// produced a self-conflicting WHERE that returned no rows.
+	contestantFilter := q.ContestantID
+	if contestantFilter == "" {
+		contestantFilter = q.TeamID
+	}
 	orderBy := leaderboardOrderBy(q.Sort, q.Order)
 	rows, err := s.meta.Query(ctx, `
 SELECT rank, run_group_id, submission_id, contestant_id, team_name, peak_sustained_tps,
@@ -110,10 +119,9 @@ SELECT rank, run_group_id, submission_id, contestant_id, team_name, peak_sustain
  WHERE ($1='' OR run_group_id=$1)
    AND ($2='' OR submission_id=$2)
    AND ($3='' OR contestant_id=$3)
-   AND ($4='' OR contestant_id=$4)
-   AND ($5='' OR team_name ILIKE '%' || $5 || '%')
+   AND ($4='' OR team_name ILIKE '%' || $4 || '%')
  ORDER BY `+orderBy+`
- LIMIT $6 OFFSET $7`, q.RunGroupID, q.SubmissionID, q.ContestantID, q.TeamID, q.TeamName, limit+1, offset)
+ LIMIT $5 OFFSET $6`, q.RunGroupID, q.SubmissionID, contestantFilter, q.TeamName, limit+1, offset)
 	if err != nil {
 		return LeaderboardResponse{}, err
 	}

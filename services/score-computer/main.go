@@ -62,6 +62,29 @@ func main() {
 		go w.Run(ctx, ready)
 	}
 
+	// Startup recovery: re-drive run-groups that became complete while this
+	// process was down. The readiness signal only lives in the in-memory `ready`
+	// channel, so without this a crash between a Kafka commit and the worker
+	// scoring would strand a complete-but-unscored run-group. Runs in the
+	// background (blocking sends, bounded by ctx) so it never delays readiness.
+	go func() {
+		pending, err := st.PendingRunGroups(ctx)
+		if err != nil {
+			log.Error("startup recovery scan failed", "error", err)
+			return
+		}
+		for _, id := range pending {
+			select {
+			case ready <- id:
+			case <-ctx.Done():
+				return
+			}
+		}
+		if len(pending) > 0 {
+			log.Info("startup recovery enqueued pending run-groups", "count", len(pending))
+		}
+	}()
+
 	var isReady atomic.Bool
 	isReady.Store(true)
 	r := chi.NewRouter()

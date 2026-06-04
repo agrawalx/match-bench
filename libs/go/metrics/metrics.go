@@ -267,6 +267,8 @@ func projectMetricCatalog() []metricSpec {
 		counterSpec("ready_partial_total", "Sessions with partial ready fan-in.", nil),
 		counterSpec("ready_signals_total", "Ready fan-in completions by result.", []string{"result"}),
 		counterSpec("recovery_inflight_runs_total", "In-flight runs recovered on controller startup.", nil),
+		counterSpec("leaderboard_api_cache_reads_total", "Leaderboard API cache reads by result.", []string{"result"}),
+		counterSpec("leaderboard_api_cache_writes_total", "Leaderboard API cache writes by result.", []string{"result"}),
 		counterSpec("leaderboard_api_events_consumed_total", "Leaderboard update events consumed by result.", []string{"result"}),
 		gaugeSpec("leaderboard_api_sse_clients", "Connected leaderboard SSE clients.", nil),
 		counterSpec("leaderboard_api_sse_dropped_clients_total", "Leaderboard SSE clients dropped because they could not keep up.", nil),

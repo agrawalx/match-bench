@@ -17,6 +17,13 @@ spec:
         prometheus.io/port: "9090"
         prometheus.io/path: /metrics
     spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: score-computer
           image: score-computer:local
@@ -48,7 +55,7 @@ spec:
                   name: score-computer-secret
                   key: redis-addr
             - name: LOKI_URL
-              value: http://loki.observability.svc:3100
+              value: http://loki.observability.svc.cluster.local:3100
             - name: SCORER_CONCURRENCY
               value: "4"
           readinessProbe:
@@ -63,6 +70,13 @@ spec:
               port: http
             initialDelaySeconds: 10
             periodSeconds: 20
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            capabilities:
+              drop:
+                - ALL
           resources:
             requests:
               cpu: 100m

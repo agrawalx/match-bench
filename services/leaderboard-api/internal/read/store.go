@@ -3,6 +3,7 @@ package read
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -11,8 +12,11 @@ import (
 )
 
 const (
-	maxChartPoints   = 20000
-	maxViolationRows = 1000
+	maxChartPoints         = 20000
+	maxViolationRows       = 1000
+	maxLeaderboardRows     = 500
+	defaultLeaderboardRows = 100
+	maxLeaderboardOffset   = 100000
 )
 
 type Store struct {
@@ -46,14 +50,21 @@ func (s *Store) Healthcheck(ctx context.Context) error {
 }
 
 type LeaderboardResponse struct {
-	Source string           `json:"source"`
-	Rows   []LeaderboardRow `json:"rows"`
+	Source     string           `json:"source"`
+	Rows       []LeaderboardRow `json:"rows"`
+	NextCursor string           `json:"next_cursor,omitempty"`
 }
 
 type LeaderboardQuery struct {
-	Limit int
-	Sort  string
-	Order string
+	Limit        int
+	Sort         string
+	Order        string
+	Cursor       string
+	RunGroupID   string
+	SubmissionID string
+	ContestantID string
+	TeamID       string
+	TeamName     string
 }
 
 type LeaderboardRow struct {
@@ -74,8 +85,12 @@ type LeaderboardRow struct {
 
 func (s *Store) Leaderboard(ctx context.Context, q LeaderboardQuery) (LeaderboardResponse, error) {
 	limit := q.Limit
-	if limit <= 0 || limit > 500 {
-		limit = 100
+	if limit <= 0 || limit > maxLeaderboardRows {
+		limit = defaultLeaderboardRows
+	}
+	offset, err := decodeLeaderboardCursor(q.Cursor)
+	if err != nil {
+		return LeaderboardResponse{}, err
 	}
 	orderBy := leaderboardOrderBy(q.Sort, q.Order)
 	rows, err := s.meta.Query(ctx, `
@@ -92,13 +107,19 @@ SELECT rank, run_group_id, submission_id, contestant_id, team_name, peak_sustain
 	       disqualification_code, rank_delta, computed_at
 	  FROM scores
   ) ranked
+ WHERE ($1='' OR run_group_id=$1)
+   AND ($2='' OR submission_id=$2)
+   AND ($3='' OR contestant_id=$3)
+   AND ($4='' OR contestant_id=$4)
+   AND ($5='' OR team_name ILIKE '%' || $5 || '%')
  ORDER BY `+orderBy+`
- LIMIT $1`, limit)
+ LIMIT $6 OFFSET $7`, q.RunGroupID, q.SubmissionID, q.ContestantID, q.TeamID, q.TeamName, limit+1, offset)
 	if err != nil {
 		return LeaderboardResponse{}, err
 	}
 	defer rows.Close()
 	resp := LeaderboardResponse{Source: "frozen", Rows: []LeaderboardRow{}}
+	hasMore := false
 	for rows.Next() {
 		var r LeaderboardRow
 		var peak, p99, recovery int64
@@ -111,9 +132,23 @@ SELECT rank, run_group_id, submission_id, contestant_id, team_name, peak_sustain
 		r.P99NSAtPeakTPS = nonNegativeUint64(p99)
 		r.SpikeRecoveryNS = nonNegativeUint64(recovery)
 		r.ComputedAtUnixNS = computed.UnixNano()
-		resp.Rows = append(resp.Rows, r)
+		if len(resp.Rows) < limit {
+			resp.Rows = append(resp.Rows, r)
+		} else {
+			hasMore = true
+		}
 	}
-	return resp, rows.Err()
+	if err := rows.Err(); err != nil {
+		return resp, err
+	}
+	if hasMore {
+		resp.NextCursor = encodeLeaderboardCursor(offset + limit)
+	}
+	return resp, nil
+}
+
+type leaderboardCursor struct {
+	Offset int `json:"offset"`
 }
 
 type RunDetail struct {
@@ -330,4 +365,27 @@ func leaderboardOrderBy(sortField, order string) string {
 		dir = "DESC"
 	}
 	return spec.column + " " + dir + ", " + spec.tiebreak
+}
+
+func encodeLeaderboardCursor(offset int) string {
+	payload, _ := json.Marshal(leaderboardCursor{Offset: offset})
+	return base64.RawURLEncoding.EncodeToString(payload)
+}
+
+func decodeLeaderboardCursor(cursor string) (int, error) {
+	if strings.TrimSpace(cursor) == "" {
+		return 0, nil
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(cursor)
+	if err != nil {
+		return 0, fmt.Errorf("invalid cursor")
+	}
+	var decoded leaderboardCursor
+	if err := json.Unmarshal(payload, &decoded); err != nil {
+		return 0, fmt.Errorf("invalid cursor")
+	}
+	if decoded.Offset < 0 || decoded.Offset > maxLeaderboardOffset {
+		return 0, fmt.Errorf("invalid cursor")
+	}
+	return decoded.Offset, nil
 }

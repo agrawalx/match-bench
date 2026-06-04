@@ -28,9 +28,15 @@ func New(reader Reader, prometheusURL string) *Handler {
 func (h *Handler) Leaderboard(w http.ResponseWriter, r *http.Request) {
 	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
 	resp, err := h.reader.Leaderboard(r.Context(), read.LeaderboardQuery{
-		Limit: limit,
-		Sort:  r.URL.Query().Get("sort"),
-		Order: r.URL.Query().Get("order"),
+		Limit:        limit,
+		Sort:         r.URL.Query().Get("sort"),
+		Order:        r.URL.Query().Get("order"),
+		Cursor:       r.URL.Query().Get("cursor"),
+		RunGroupID:   r.URL.Query().Get("run_group_id"),
+		SubmissionID: r.URL.Query().Get("submission_id"),
+		ContestantID: r.URL.Query().Get("contestant_id"),
+		TeamID:       r.URL.Query().Get("team_id"),
+		TeamName:     r.URL.Query().Get("team_name"),
 	})
 	writeJSON(w, resp, err)
 }

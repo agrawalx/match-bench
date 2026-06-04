@@ -49,12 +49,13 @@ func main() {
 		defer metricsSrv.Close()
 	}
 
+	cachedReader := read.NewCached(reader, redisClient, 2*time.Second)
 	broker := sse.New(func(ctx context.Context) (any, error) {
 		return reader.Leaderboard(ctx, read.LeaderboardQuery{Limit: 100})
 	})
 	go consumer.New(cfg.KafkaBrokers, cfg.KafkaGroup, broker, log).Run(ctx)
 
-	h := handler.New(reader, cfg.PrometheusURL)
+	h := handler.New(cachedReader, cfg.PrometheusURL)
 	var isReady atomic.Bool
 	isReady.Store(true)
 

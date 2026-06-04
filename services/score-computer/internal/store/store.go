@@ -62,6 +62,8 @@ CREATE TABLE IF NOT EXISTS scores (
 );
 CREATE INDEX IF NOT EXISTS idx_scores_sort_v2 ON scores
 	(peak_sustained_tps DESC, p99_at_peak_ns ASC, spike_recovery_ns ASC, total_correctness DESC, run_group_id ASC);
+CREATE INDEX IF NOT EXISTS idx_scores_contestant ON scores(contestant_id, computed_at DESC);
+CREATE INDEX IF NOT EXISTS idx_scores_submission ON scores(submission_id, computed_at DESC);
 `
 
 type Store struct {

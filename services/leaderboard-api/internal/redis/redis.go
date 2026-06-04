@@ -2,6 +2,7 @@ package redis
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	goredis "github.com/redis/go-redis/v9"
@@ -28,4 +29,19 @@ func (c *Client) Close() error {
 
 func (c *Client) Ping(ctx context.Context) error {
 	return c.client.Ping(ctx).Err()
+}
+
+func (c *Client) Get(ctx context.Context, key string) ([]byte, bool, error) {
+	value, err := c.client.Get(ctx, key).Bytes()
+	if err != nil {
+		if errors.Is(err, goredis.Nil) {
+			return nil, false, nil
+		}
+		return nil, false, err
+	}
+	return value, true, nil
+}
+
+func (c *Client) Set(ctx context.Context, key string, value []byte, ttl time.Duration) error {
+	return c.client.Set(ctx, key, value, ttl).Err()
 }

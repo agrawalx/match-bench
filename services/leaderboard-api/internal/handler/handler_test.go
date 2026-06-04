@@ -53,15 +53,23 @@ func TestWriteJSONEscapesErrors(t *testing.T) {
 	}
 }
 
-func TestLeaderboardHandlerPassesSortOptions(t *testing.T) {
+func TestLeaderboardHandlerPassesQueryOptions(t *testing.T) {
 	reader := &captureReader{}
 	h := New(reader, "http://prom")
 	rec := httptest.NewRecorder()
-	h.Leaderboard(rec, httptest.NewRequest("GET", "/api/leaderboard?limit=25&sort=p99&order=desc", nil))
+	h.Leaderboard(rec, httptest.NewRequest("GET", "/api/leaderboard?limit=25&sort=p99&order=desc&cursor=abc&contestant_id=c1&team_id=t1&submission_id=s1&run_group_id=rg1&team_name=Alpha", nil))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("bad response: %d %s", rec.Code, rec.Body.String())
 	}
-	if reader.query.Limit != 25 || reader.query.Sort != "p99" || reader.query.Order != "desc" {
+	if reader.query.Limit != 25 ||
+		reader.query.Sort != "p99" ||
+		reader.query.Order != "desc" ||
+		reader.query.Cursor != "abc" ||
+		reader.query.ContestantID != "c1" ||
+		reader.query.TeamID != "t1" ||
+		reader.query.SubmissionID != "s1" ||
+		reader.query.RunGroupID != "rg1" ||
+		reader.query.TeamName != "Alpha" {
 		t.Fatalf("query = %#v", reader.query)
 	}
 }

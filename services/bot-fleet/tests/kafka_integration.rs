@@ -24,8 +24,13 @@ async fn kafka_integration_round_trips_control_and_telemetry_records() -> Result
         .await
         .context("ensure real Kafka contract topics")?;
 
-    let consumer = kafka::consumer(&brokers, &group, &[TOPIC_BOT_READY, TOPIC_ORDERS_SENT])
-        .context("create consumer")?;
+    let consumer = kafka::consumer(
+        &brokers,
+        &group,
+        &[TOPIC_BOT_READY, TOPIC_ORDERS_SENT],
+        std::time::Duration::from_secs(300),
+    )
+    .context("create consumer")?;
     let control = kafka::control_producer(&brokers).context("create control producer")?;
     let telemetry = kafka::telemetry_producer(&brokers).context("create telemetry producer")?;
 

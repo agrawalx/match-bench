@@ -61,6 +61,12 @@ spec:
                   key: harbor-production-endpoint
             - name: HARBOR_PROJECT
               value: agrawalx
+            # Per-pod fan-out: WorkerCount = ceil(scenario_tasks / this). Raise it
+            # ABOVE a scenario's task count to pin ALL load on ONE pod (single-pod
+            # capacity testing); lower it to spread load across more pods. MUST be
+            # <= the bot-fleet replica count, and <= the worker's MAX_BOTS_PER_WORKER.
+            - name: MAX_TASKS_PER_WORKER
+              value: "1000"
           livenessProbe:
             httpGet:
               path: /healthz

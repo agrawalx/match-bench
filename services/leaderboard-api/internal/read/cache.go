@@ -62,6 +62,11 @@ func (r *CachedReader) Chart(ctx context.Context, sessionID string) ([]MetricPoi
 	return r.base.Chart(ctx, sessionID)
 }
 
+// ActiveRuns is never cached — it reflects in-progress runs and must be live.
+func (r *CachedReader) ActiveRuns(ctx context.Context) ([]ActiveRun, error) {
+	return r.base.ActiveRuns(ctx)
+}
+
 func cacheableLeaderboard(q LeaderboardQuery) bool {
 	sortField := strings.ToLower(strings.TrimSpace(q.Sort))
 	order := strings.ToLower(strings.TrimSpace(q.Order))

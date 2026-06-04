@@ -56,6 +56,31 @@ spec:
               value: prod
             - name: METRICS_PORT
               value: "8080"
+            # ── Load-shape knobs (scenario builder) ──────────────────────────
+            # Durations (whole seconds) and aggregate-RPS budgets for the three
+            # canonical scenarios. The participant mix (HFT/Retail/Inst) and
+            # per-bot rates are fixed; bot counts derive from (budget / per-bot).
+            # See .env.example "workload recipes" for tuned profiles + the
+            # spike-shape knobs (SPIKE_PREWINDOW_S, SPIKE_BURST_S).
+            - name: CONSTANT_DURATION_S
+              value: "60"
+            - name: SPIKE_DURATION_S
+              value: "60"
+            - name: RAMP_DURATION_S
+              value: "180"
+            - name: CONSTANT_TOTAL_RPS
+              value: "10000"
+            - name: SPIKE_PEAK_RPS
+              value: "50000"
+            - name: RAMP_PEAK_RPS
+              value: "90000"
+            # Seeding is INSERT ... ON CONFLICT DO NOTHING by default, so changing
+            # the values above does NOT touch an already-seeded scenarios table on
+            # restart. Flip this to "true" to upsert (rewrite duration + task_specs
+            # from the env above, preserving scenario_id), then restart this
+            # Deployment to apply. Leave "false" in steady state.
+            - name: RESEED_SCENARIOS
+              value: "false"
           # Liveness: static /health (no deps) — restart only on a hung process.
           livenessProbe:
             httpGet:

@@ -512,19 +512,23 @@ func (s *PostgresStore) ListScenarios(ctx context.Context) ([]ScenarioRow, error
 	return out, nil
 }
 
-// SeedScenarios inserts the 3 canonical scenarios (constant, spike, ramp) if
-// they don't already exist. ON CONFLICT DO NOTHING means rerunning is a
-// no-op — judges who hand-edit a row in the scenarios table will not have
-// their changes overwritten on the next service restart.
+// SeedScenarios inserts the 3 canonical scenarios (constant, spike, ramp).
 //
-// Re-tuning a scenario after the fact requires either editing the row
-// directly in PostgreSQL or wiping it first (DELETE FROM scenarios WHERE
-// name = 'spike'; restart service to re-seed).
+// With reseed=false (the default) it uses ON CONFLICT DO NOTHING: rerunning is
+// a no-op, so judges who hand-edit a row in the scenarios table are not
+// overwritten on the next service restart, and first boot of a fresh database
+// populates all three.
+//
+// With reseed=true (RESEED_SCENARIOS=true) it upserts: an existing row's
+// duration_ns/task_specs/sort_order are overwritten from the builder's current
+// (env-configured) output, while the existing scenario_id is PRESERVED (the SET
+// clause omits scenario_id), so foreign keys from runs/run_groups stay valid.
+// This is how a changed duration or RPS budget is applied to a seeded database.
 //
 // sort_order is backfilled UNCONDITIONALLY (not gated on conflict) so that
 // upgrading from an older deployment whose scenarios table didn't have the
 // column populates the field for existing rows.
-func (s *PostgresStore) SeedScenarios(ctx context.Context, scenarios []ScenarioRow) error {
+func (s *PostgresStore) SeedScenarios(ctx context.Context, scenarios []ScenarioRow, reseed bool) error {
 	start := time.Now()
 	for _, sc := range scenarios {
 		taskSpecsJSON, err := json.Marshal(sc.TaskSpecs)
@@ -532,10 +536,16 @@ func (s *PostgresStore) SeedScenarios(ctx context.Context, scenarios []ScenarioR
 			recordDB("submission-api", "seed_scenarios", start, err)
 			return fmt.Errorf("%w: marshal task_specs for %q: %v", cerrs.ErrStoreDatabaseFailed, sc.Name, err)
 		}
+		conflict := `ON CONFLICT (name) DO NOTHING`
+		if reseed {
+			conflict = `ON CONFLICT (name) DO UPDATE SET
+			               duration_ns = EXCLUDED.duration_ns,
+			               task_specs  = EXCLUDED.task_specs,
+			               sort_order  = EXCLUDED.sort_order`
+		}
 		if _, err := s.pool.Exec(ctx,
 			`INSERT INTO scenarios (scenario_id, name, sort_order, duration_ns, task_specs)
-			 VALUES ($1, $2, $3, $4, $5)
-			 ON CONFLICT (name) DO NOTHING`,
+			 VALUES ($1, $2, $3, $4, $5) `+conflict,
 			sc.ScenarioID, sc.Name, sc.SortOrder, sc.DurationNs, taskSpecsJSON,
 		); err != nil {
 			recordDB("submission-api", "seed_scenarios", start, err)

@@ -1,0 +1,46 @@
+# The platform namespace is default-deny. The frontend is a static SPA + nginx
+# proxy: it only needs to (1) be reachable on 8080 (from the ingress controller
+# and, for the proxy hop, intra-namespace), and (2) reach leaderboard-api in the
+# same namespace plus DNS. It touches no database, Kafka, or Redis directly.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: frontend
+  namespace: platform
+spec:
+  podSelector:
+    matchLabels:
+      app: frontend
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # Public traffic arrives via the ingress controller. Adjust the namespace
+    # label to match your ingress controller's namespace if it is not labelled
+    # `name: ingress-nginx`.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              name: ingress-nginx
+      ports:
+        - port: 8080
+          protocol: TCP
+  egress:
+    # Proxy hop to leaderboard-api (same namespace, port 8080).
+    - to:
+        - podSelector:
+            matchLabels:
+              app: leaderboard-api
+      ports:
+        - port: 8080
+          protocol: TCP
+    # DNS resolution.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP

@@ -14,6 +14,7 @@ type Reader interface {
 	Leaderboard(context.Context, read.LeaderboardQuery) (read.LeaderboardResponse, error)
 	RunDetail(context.Context, string) (read.RunDetail, error)
 	Chart(context.Context, string) ([]read.MetricPoint, error)
+	ActiveRuns(context.Context) ([]read.ActiveRun, error)
 }
 
 type Handler struct {
@@ -59,6 +60,14 @@ func (h *Handler) Chart(w http.ResponseWriter, r *http.Request) {
 	}
 	resp, err := h.reader.Chart(r.Context(), id)
 	writeJSON(w, map[string]any{"session_id": id, "points": resp}, err)
+}
+
+func (h *Handler) LiveRuns(w http.ResponseWriter, r *http.Request) {
+	runs, err := h.reader.ActiveRuns(r.Context())
+	if runs == nil {
+		runs = []read.ActiveRun{}
+	}
+	writeJSON(w, map[string]any{"runs": runs}, err)
 }
 
 func (h *Handler) HealthPanel(w http.ResponseWriter, _ *http.Request) {

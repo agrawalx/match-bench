@@ -82,6 +82,7 @@ func main() {
 	})
 	r.Handle("/metrics", metrics.Handler())
 	r.Get("/api/leaderboard", h.Leaderboard)
+	r.Get("/api/live", h.LiveRuns)
 	r.Get("/api/runs/{run_group_id}", h.RunDetail)
 	r.Get("/api/charts/{session_id}", h.Chart)
 	r.Get("/api/health-panel", h.HealthPanel)

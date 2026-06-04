@@ -79,11 +79,18 @@ func main() {
 	}()
 
 	// Seed the canonical load-test scenarios (constant, spike, ramp) into the
-	// scenarios table. The seeder uses INSERT ... ON CONFLICT (name) DO NOTHING,
-	// so a judge who tweaked a row by hand will not have their changes
-	// overwritten on the next service restart. First boot of a fresh database
-	// populates all three; subsequent boots are a no-op.
-	scenarioRows, err := scenarios.BuildAll()
+	// scenarios table. Durations and total/peak RPS are operator knobs read from
+	// the environment (scenarios.ConfigFromEnv: CONSTANT_DURATION_S,
+	// CONSTANT_TOTAL_RPS, SPIKE_PEAK_RPS, RAMP_PEAK_RPS, ...).
+	//
+	// By default the seeder uses INSERT ... ON CONFLICT (name) DO NOTHING, so a
+	// judge who tweaked a row by hand is not overwritten on restart. Setting
+	// RESEED_SCENARIOS=true switches to an upsert that rewrites duration/task
+	// specs from the current env config (preserving the existing scenario_id) —
+	// the way to apply a changed duration/RPS to an already-seeded database.
+	scenarioCfg := scenarios.ConfigFromEnv()
+	reseed := envBool("RESEED_SCENARIOS", false)
+	scenarioRows, err := scenarios.BuildAll(scenarioCfg)
 	if err != nil {
 		log.Error("build scenarios failed", "error", err)
 		os.Exit(1)
@@ -98,11 +105,13 @@ func main() {
 			TaskSpecs:  sr.TaskSpecs,
 		}
 	}
-	if err := pgStore.SeedScenarios(ctx, storeRows); err != nil {
+	if err := pgStore.SeedScenarios(ctx, storeRows, reseed); err != nil {
 		log.Error("seed scenarios failed", "error", err)
 		os.Exit(1)
 	}
-	log.Info("scenarios seeded", "count", len(storeRows))
+	log.Info("scenarios seeded", "count", len(storeRows), "reseed", reseed,
+		"constant_rps", scenarioCfg.ConstantTotalRPS, "spike_peak_rps", scenarioCfg.SpikePeakRPS,
+		"constant_duration", scenarioCfg.ConstantDuration.String())
 
 	kafkaPub := publisher.NewKafkaPublisher(kafkaBrokers, log)
 	defer kafkaPub.Close()
@@ -213,6 +222,19 @@ func envOr(key, def string) string {
 		return v
 	}
 	return def
+}
+
+// envBool reads a boolean env var ("true"/"1" => true). Unset or anything else
+// yields def.
+func envBool(key string, def bool) bool {
+	switch os.Getenv(key) {
+	case "true", "1", "TRUE", "True":
+		return true
+	case "false", "0", "FALSE", "False":
+		return false
+	default:
+		return def
+	}
 }
 
 func mustEnv(key string) string {

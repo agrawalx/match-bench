@@ -34,10 +34,10 @@ use crate::{
     time::unix_nanos,
 };
 
-/// MAX_TASKS_PER_WORKER caps the number of TCP connections one worker pod
-/// holds for a single session. Matches the controller's MaxTasksPerWorker
-/// constant (services/bot-fleet-controller/internal/controller/runner.go).
-const MAX_TASKS_PER_WORKER: usize = 1000;
+// The per-pod task ceiling (TCP connections one worker holds for a session) is
+// config.max_bots_per_worker, set from MAX_BOTS_PER_WORKER. It must be >= the
+// controller's MAX_TASKS_PER_WORKER so a sharded spec is never rejected; raise
+// both together to pin more load onto one pod for capacity testing.
 
 /// RESPONSE_TIMEOUT_NS bounds how long a FIX task waits for a response
 /// before the watchdog evicts the pending entry and emits OrderSentEvent
@@ -135,6 +135,7 @@ pub async fn run(config: Config) -> Result<()> {
         &config.kafka_brokers,
         &config.consumer_group,
         &[&config.workload_topic],
+        config.max_poll_interval,
     )?;
 
     info!(
@@ -254,6 +255,7 @@ async fn run_workload(
         &config.kafka_brokers,
         &barrier_group,
         &[&config.barrier_topic],
+        config.max_poll_interval,
     )?;
 
     info!(
@@ -329,14 +331,6 @@ fn validate_spec(config: &Config, spec: &WorkloadSpec) -> Result<()> {
         return Err(
             crate::errors::BotFleetError::ValidationError("tasks list is empty".into()).into(),
         );
-    }
-    if spec.tasks.len() > MAX_TASKS_PER_WORKER {
-        return Err(crate::errors::BotFleetError::ValidationError(format!(
-            "task count {} exceeds MAX_TASKS_PER_WORKER {}",
-            spec.tasks.len(),
-            MAX_TASKS_PER_WORKER
-        ))
-        .into());
     }
     if spec.tasks.len() > config.max_bots_per_worker {
         return Err(crate::errors::BotFleetError::ValidationError(format!(

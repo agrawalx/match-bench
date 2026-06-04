@@ -62,11 +62,19 @@ spec:
               value: kafka.data.svc.cluster.local:9092
             - name: KAFKA_CONSUMER_GROUP
               value: bot-fleet
-            # Per-pod task ceiling. Must be >= the controller's MaxTasksPerWorker
-            # (1000); the worker also hard-caps at 1000 internally. Lower it only
-            # to deliberately reduce per-pod load (never above 1000).
+            # Per-pod task ceiling (= max TCP connections one pod holds). The sole
+            # per-pod cap (the old hard-coded 1000 was removed). MUST be >= the
+            # controller's MAX_TASKS_PER_WORKER; raise both together to pin a large,
+            # high-RPS scenario onto a single pod for capacity testing.
             - name: MAX_BOTS_PER_WORKER
               value: "1000"
+            # Kafka max.poll.interval.ms AND the L39 wall-time guard (kept equal).
+            # The worker doesn't poll while a workload runs (barrier + duration +
+            # drain), so this must exceed that whole wall time or Kafka rebalances
+            # mid-run and re-delivers the assignment. 1800000 = 30 min covers long
+            # (5-min+) and high-RPS runs; background heartbeat still proves liveness.
+            - name: MAX_POLL_INTERVAL_MS
+              value: "1800000"
           # No HTTP server (the worker is a Kafka consumer), so no httpGet
           # probes. KEDA scales on consumer lag; liveness is process-level.
           securityContext:

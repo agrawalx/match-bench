@@ -22,10 +22,22 @@ CREATE TABLE IF NOT EXISTS metrics (
     p90_ns        BIGINT,
     p99_ns        BIGINT,
     p999_ns       BIGINT,
+    rt_p50_ns     BIGINT,
+    rt_p90_ns     BIGINT,
+    rt_p99_ns     BIGINT,
     tps_1s        DOUBLE PRECISION,
     error_rate    DOUBLE PRECISION,
     hdr_encoded   BYTEA
 );";
+
+/// Adds the response-time (r9 - t0, the coordinated-omission-aware round trip)
+/// percentile columns to an EXISTING metrics table. CREATE TABLE IF NOT EXISTS
+/// above only covers fresh clusters; this backfills the columns where the table
+/// already exists. Idempotent (ADD COLUMN IF NOT EXISTS).
+const ADD_RT_COLUMNS: &str = "\
+ALTER TABLE metrics ADD COLUMN IF NOT EXISTS rt_p50_ns BIGINT;
+ALTER TABLE metrics ADD COLUMN IF NOT EXISTS rt_p90_ns BIGINT;
+ALTER TABLE metrics ADD COLUMN IF NOT EXISTS rt_p99_ns BIGINT;";
 
 /// Best-effort, idempotent TimescaleDB setup. Each runs independently; failures
 /// (e.g. continuous-aggregate policy already exists) are logged, not fatal.
@@ -44,8 +56,8 @@ const TIMESCALE_SETUP: &[&str] = &[
 
 const INSERT_SQL: &str = "\
 INSERT INTO metrics
-    (time, session_id, contestant_id, wave_index, p50_ns, p90_ns, p99_ns, p999_ns, tps_1s, error_rate, hdr_encoded)
-VALUES (to_timestamp($1::double precision / 1e9), $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)";
+    (time, session_id, contestant_id, wave_index, p50_ns, p90_ns, p99_ns, p999_ns, rt_p50_ns, rt_p90_ns, rt_p99_ns, tps_1s, error_rate, hdr_encoded)
+VALUES (to_timestamp($1::double precision / 1e9), $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)";
 
 pub struct Store {
     pool: Pool,
@@ -77,6 +89,10 @@ impl Store {
             .batch_execute(METRICS_TABLE)
             .await
             .context("create metrics table")?;
+        client
+            .batch_execute(ADD_RT_COLUMNS)
+            .await
+            .context("add response-time columns")?;
         for stmt in TIMESCALE_SETUP {
             if let Err(e) = client.batch_execute(stmt).await {
                 warn!(error = %e, stmt = %stmt.split_whitespace().take(3).collect::<Vec<_>>().join(" "),
@@ -108,6 +124,9 @@ impl Store {
                         &(s.p90_ns as i64),
                         &(s.p99_ns as i64),
                         &(s.p999_ns as i64),
+                        &(s.rt_p50_ns as i64),
+                        &(s.rt_p90_ns as i64),
+                        &(s.rt_p99_ns as i64),
                         &s.tps_1s,
                         &s.error_rate,
                         &s.hdr_encoded,

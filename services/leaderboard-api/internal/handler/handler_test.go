@@ -27,6 +27,9 @@ func (fakeReader) RunDetail(context.Context, string) (read.RunDetail, error) {
 func (fakeReader) Chart(context.Context, string) ([]read.MetricPoint, error) {
 	return []read.MetricPoint{{WaveIndex: 1}}, nil
 }
+func (fakeReader) ActiveRuns(context.Context) ([]read.ActiveRun, error) {
+	return []read.ActiveRun{{RunGroupID: "rg1", TeamName: "T", Sessions: []read.ActiveSession{{SessionID: "s1", Scenario: "constant", Status: "running"}}}}, nil
+}
 func (errorReader) Leaderboard(context.Context, read.LeaderboardQuery) (read.LeaderboardResponse, error) {
 	return read.LeaderboardResponse{}, errors.New(`bad "quoted" error`)
 }

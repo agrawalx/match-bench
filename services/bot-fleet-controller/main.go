@@ -173,6 +173,8 @@ func runConfigFromEnv() controller.RunConfig {
 		DeployDeadline:   envOrDuration("DEPLOY_DEADLINE", 60*time.Second),
 		ReadyDeadline:    envOrDuration("READY_DEADLINE", 30*time.Second),
 		BarrierSafetyGap: envOrDuration("BARRIER_SAFETY_GAP", 500*time.Millisecond),
+
+		MaxTasksPerWorker: envOrInt("MAX_TASKS_PER_WORKER", controller.DefaultMaxTasksPerWorker),
 	}
 }
 

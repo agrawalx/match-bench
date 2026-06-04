@@ -13,13 +13,20 @@ import (
 	"github.com/iicpc/schemas/topics"
 )
 
-// MaxTasksPerWorker is the per-pod ceiling that drives WorkerCount.
-// Locked at 1,000 per the load-scenarios design (architecture_v2.md
-// §"Load Scenarios" → Service-by-service touchpoints).
+// DefaultMaxTasksPerWorker is the per-pod task ceiling that drives WorkerCount
+// when MAX_TASKS_PER_WORKER is unset. 1,000 per the load-scenarios design
+// (architecture_v2.md §"Load Scenarios" → Service-by-service touchpoints).
 //
 // WorkerCount for a session is ceil(total_tasks_in_scenario / MaxTasksPerWorker).
 // Tasks are sharded round-robin by task_id across the WorkerCount worker pods.
-const MaxTasksPerWorker = 1000
+//
+// This is the operator's per-pod-concentration knob: raise it (e.g. above a
+// scenario's total task count) to pin ALL load on a single bot pod and measure
+// that pod's raw generation ceiling; lower it to fan the load across more pods.
+// Note the hard coupling: WorkerCount must be <= the bot-fleet replica count,
+// because each pod runs assignments serially — if WorkerCount exceeds the number
+// of pods, some pod is handed two assignments and the second misses its barrier.
+const DefaultMaxTasksPerWorker = 1000
 
 // RunConfig holds the deployment-wide operational deadlines that are not part
 // of any one scenario. They tune the controller's lifecycle (slot-deploy
@@ -34,6 +41,12 @@ type RunConfig struct {
 	DeployDeadline   time.Duration
 	ReadyDeadline    time.Duration
 	BarrierSafetyGap time.Duration
+
+	// MaxTasksPerWorker is the per-pod task ceiling that drives WorkerCount
+	// (ceil(total_tasks / MaxTasksPerWorker)). Read from MAX_TASKS_PER_WORKER;
+	// defaults to DefaultMaxTasksPerWorker. See DefaultMaxTasksPerWorker for the
+	// WorkerCount<=replicas coupling.
+	MaxTasksPerWorker int
 }
 
 // HarborConfig produces the production image ref for a submission.
@@ -147,7 +160,7 @@ func (r *Runner) Run(parent context.Context, req topics.BenchmarkRequested) {
 		return
 	}
 
-	workerCount := computeWorkerCount(len(scenario.TaskSpecs))
+	workerCount := computeWorkerCount(len(scenario.TaskSpecs), r.runConfig.MaxTasksPerWorker)
 	log = log.With("scenario_name", scenario.Name, "total_tasks", len(scenario.TaskSpecs), "worker_count", workerCount)
 	metrics.Counter("sessions_started_total", "Benchmark sessions started by scenario.", metrics.Labels("scenario_name", scenario.Name), 1)
 
@@ -311,14 +324,18 @@ func (r *Runner) runSession(
 	result = "completed"
 }
 
-// computeWorkerCount = ceil(totalTasks / MaxTasksPerWorker), clamped to >= 1.
+// computeWorkerCount = ceil(totalTasks / maxTasksPerWorker), clamped to >= 1.
 // Used at session start to determine how many bot-worker pods need to be in
-// the consumer group for this session.
-func computeWorkerCount(totalTasks int) uint32 {
+// the consumer group for this session. A non-positive maxTasksPerWorker falls
+// back to DefaultMaxTasksPerWorker.
+func computeWorkerCount(totalTasks, maxTasksPerWorker int) uint32 {
 	if totalTasks <= 0 {
 		return 1
 	}
-	count := (totalTasks + MaxTasksPerWorker - 1) / MaxTasksPerWorker
+	if maxTasksPerWorker <= 0 {
+		maxTasksPerWorker = DefaultMaxTasksPerWorker
+	}
+	count := (totalTasks + maxTasksPerWorker - 1) / maxTasksPerWorker
 	return uint32(count)
 }
 

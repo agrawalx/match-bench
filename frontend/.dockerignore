@@ -1,0 +1,5 @@
+node_modules
+dist
+.vite
+verify.mjs
+*.log

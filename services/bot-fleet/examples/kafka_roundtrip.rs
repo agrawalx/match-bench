@@ -23,7 +23,13 @@ async fn main() -> Result<()> {
     // Without this, "auto.offset.reset=earliest" still works because the
     // commit_message path advances offsets, but ordering this way matches
     // how production callers (worker.rs) do it.
-    let consumer = kafka::consumer(&brokers, GROUP, &[TOPIC]).context("create consumer")?;
+    let consumer = kafka::consumer(
+        &brokers,
+        GROUP,
+        &[TOPIC],
+        std::time::Duration::from_secs(300),
+    )
+    .context("create consumer")?;
     let producer = kafka::producer(&brokers).context("create producer")?;
 
     println!("Publishing {COUNT} messages to {TOPIC}");

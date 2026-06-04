@@ -546,8 +546,13 @@ mod tests {
         let session_id = format!("itest-ebpf-session-{suffix}");
         let contestant_id = format!("itest-contestant-{suffix}");
         let consumer_group = format!("itest-ebpf-acked-{suffix}");
-        let consumer = kafka::consumer(&brokers, &consumer_group, &[TOPIC_ORDERS_ACKED])
-            .expect("create orders.acked consumer");
+        let consumer = kafka::consumer(
+            &brokers,
+            &consumer_group,
+            &[TOPIC_ORDERS_ACKED],
+            std::time::Duration::from_secs(300),
+        )
+        .expect("create orders.acked consumer");
         let producer = kafka::telemetry_producer(&brokers).expect("create telemetry producer");
         let config = Config {
             kafka_brokers: brokers,

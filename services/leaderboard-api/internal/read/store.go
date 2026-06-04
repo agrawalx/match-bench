@@ -179,6 +179,11 @@ type MetricPoint struct {
 	P50NS      uint64  `json:"p50_ns"`
 	P90NS      uint64  `json:"p90_ns"`
 	P99NS      uint64  `json:"p99_ns"`
+	// response_time = r9 - t0: the bot-side round trip including coordinated-
+	// omission delay (vs service_time = t7 - t3, the algo-side processing only).
+	RTP50NS    uint64  `json:"rt_p50_ns"`
+	RTP90NS    uint64  `json:"rt_p90_ns"`
+	RTP99NS    uint64  `json:"rt_p99_ns"`
 	TPS1S      float64 `json:"tps_1s"`
 	ErrorRate  float64 `json:"error_rate"`
 	HDREncoded string  `json:"hdr_encoded,omitempty"`
@@ -220,12 +225,22 @@ SELECT r.session_id, sc.name, r.status
 		if err != nil {
 			return d, err
 		}
+		if sd.Timeline == nil {
+			sd.Timeline = []MetricPoint{}
+		}
 		d.Sessions = append(d.Sessions, sd)
 	}
 	if err := rows.Err(); err != nil {
 		return d, err
 	}
+	if d.Sessions == nil {
+		d.Sessions = []SessionDetail{}
+	}
 	d.Violations, err = s.Violations(ctx, runGroupID)
+	// Always marshal arrays (not JSON null) so the dashboard can read .length.
+	if d.Violations == nil {
+		d.Violations = []ViolationEntry{}
+	}
 	return d, err
 }
 
@@ -233,6 +248,7 @@ func (s *Store) Chart(ctx context.Context, sessionID string) ([]MetricPoint, err
 	rows, err := s.timescale.Query(ctx, `
 SELECT EXTRACT(EPOCH FROM time) * 1000000000, wave_index,
        COALESCE(p50_ns,0), COALESCE(p90_ns,0), COALESCE(p99_ns,0),
+       COALESCE(rt_p50_ns,0), COALESCE(rt_p90_ns,0), COALESCE(rt_p99_ns,0),
        COALESCE(tps_1s,0), COALESCE(error_rate,0), hdr_encoded
   FROM metrics
  WHERE session_id=$1
@@ -245,14 +261,15 @@ SELECT EXTRACT(EPOCH FROM time) * 1000000000, wave_index,
 	var out []MetricPoint
 	for rows.Next() {
 		var p MetricPoint
-		var p50, p90, p99 int64
+		var p50, p90, p99, rt50, rt90, rt99 int64
 		var nsFloat float64
 		var hdr []byte
-		if err := rows.Scan(&nsFloat, &p.WaveIndex, &p50, &p90, &p99, &p.TPS1S, &p.ErrorRate, &hdr); err != nil {
+		if err := rows.Scan(&nsFloat, &p.WaveIndex, &p50, &p90, &p99, &rt50, &rt90, &rt99, &p.TPS1S, &p.ErrorRate, &hdr); err != nil {
 			return nil, err
 		}
 		p.TimeUnixNS = int64(nsFloat)
 		p.P50NS, p.P90NS, p.P99NS = nonNegativeUint64(p50), nonNegativeUint64(p90), nonNegativeUint64(p99)
+		p.RTP50NS, p.RTP90NS, p.RTP99NS = nonNegativeUint64(rt50), nonNegativeUint64(rt90), nonNegativeUint64(rt99)
 		if len(hdr) > 0 {
 			p.HDREncoded = base64.StdEncoding.EncodeToString(hdr)
 		}
@@ -283,6 +300,58 @@ SELECT v.session_id, v.contestant_id, v.violation_type, v.order_id,
 		}
 		v.DetectedAtNS = detected.UnixNano()
 		out = append(out, v)
+	}
+	return out, rows.Err()
+}
+
+type ActiveSession struct {
+	SessionID string `json:"session_id"`
+	Scenario  string `json:"scenario"`
+	Status    string `json:"status"`
+}
+
+type ActiveRun struct {
+	RunGroupID string          `json:"run_group_id"`
+	TeamName   string          `json:"team_name"`
+	Sessions   []ActiveSession `json:"sessions"`
+}
+
+// ActiveRuns lists every run-group that still has a non-terminal session (a test
+// in progress), with all its sessions ordered by scenario. The frontend polls
+// this to discover live runs, then polls /api/charts/{session} for each session's
+// real-time p99/tps timeline. Reads metadata only (cheap); the heavy per-second
+// metrics stay on the charts endpoint.
+func (s *Store) ActiveRuns(ctx context.Context) ([]ActiveRun, error) {
+	rows, err := s.meta.Query(ctx, `
+SELECT rg.run_group_id, COALESCE(sub.team_name,''), r.session_id, sc.name, r.status
+  FROM run_groups rg
+  JOIN runs r ON r.run_group_id = rg.run_group_id
+  JOIN scenarios sc ON sc.scenario_id = r.scenario_id
+  LEFT JOIN submissions sub ON sub.submission_id = rg.submission_id
+ WHERE rg.run_group_id IN (
+   SELECT run_group_id FROM runs WHERE status NOT IN ('completed','failed')
+ )
+ ORDER BY rg.created_at DESC, sc.sort_order, sc.name
+ LIMIT 500`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	idx := map[string]int{}
+	var out []ActiveRun
+	for rows.Next() {
+		var rgID, team string
+		var sess ActiveSession
+		if err := rows.Scan(&rgID, &team, &sess.SessionID, &sess.Scenario, &sess.Status); err != nil {
+			return nil, err
+		}
+		i, ok := idx[rgID]
+		if !ok {
+			i = len(out)
+			idx[rgID] = i
+			out = append(out, ActiveRun{RunGroupID: rgID, TeamName: team})
+		}
+		out[i].Sessions = append(out[i].Sessions, sess)
 	}
 	return out, rows.Err()
 }

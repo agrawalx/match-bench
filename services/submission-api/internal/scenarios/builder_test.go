@@ -23,22 +23,23 @@ func sumRPSAt(specs []topics.TaskSpec, t time.Duration) uint64 {
 }
 
 func TestConstantScenario_FlatBaseline(t *testing.T) {
-	rows, err := BuildAll()
+	rows, err := BuildAll(DefaultConfig())
 	if err != nil {
 		t.Fatalf("BuildAll: %v", err)
 	}
 	c := find(t, rows, "constant")
 
+	want := uint64(DefaultConfig().ConstantTotalRPS)
 	for _, at := range []time.Duration{0, 30 * time.Second, 59 * time.Second} {
 		got := sumRPSAt(c.TaskSpecs, at)
-		if got != uint64(baselineTotalRPS) {
-			t.Errorf("constant: RPS at t=%v = %d, want %d", at, got, baselineTotalRPS)
+		if got != want {
+			t.Errorf("constant: RPS at t=%v = %d, want %d", at, got, want)
 		}
 	}
 }
 
 func TestSpikeScenario_Shape(t *testing.T) {
-	rows, err := BuildAll()
+	rows, err := BuildAll(DefaultConfig())
 	if err != nil {
 		t.Fatalf("BuildAll: %v", err)
 	}
@@ -65,18 +66,19 @@ func TestSpikeScenario_Shape(t *testing.T) {
 }
 
 func TestRampScenario_Staircase(t *testing.T) {
-	rows, err := BuildAll()
+	rows, err := BuildAll(DefaultConfig())
 	if err != nil {
 		t.Fatalf("BuildAll: %v", err)
 	}
 	r := find(t, rows, "ramp")
 
+	perWave := uint64(DefaultConfig().RampPeakRPS / rampWaveCount)
 	// Probe one second past each wave boundary so assertions are not
 	// sensitive to whether a wave starts at exactly the boundary or one
 	// nanosecond later.
 	for wave := 0; wave < rampWaveCount; wave++ {
 		at := time.Duration(wave)*rampWaveCadence + 1*time.Second
-		expected := uint64(baselineTotalRPS) * uint64(wave+1)
+		expected := perWave * uint64(wave+1)
 		got := sumRPSAt(r.TaskSpecs, at)
 		if got != expected {
 			t.Errorf("ramp: RPS at t=%v (after wave %d) = %d, want %d",
@@ -85,10 +87,60 @@ func TestRampScenario_Staircase(t *testing.T) {
 	}
 
 	// Peak holds until the end of the ramp duration.
-	peak := uint64(baselineTotalRPS) * uint64(rampWaveCount)
+	peak := perWave * uint64(rampWaveCount)
 	got := sumRPSAt(r.TaskSpecs, 179*time.Second)
 	if got != peak {
 		t.Errorf("ramp: RPS at t=179s = %d, want peak %d", got, peak)
+	}
+}
+
+// TestConfig_CustomDurationAndRPS verifies the operator knobs flow through:
+// a 300s constant at 50k RPS produces a 300s scenario whose tasks all run the
+// full window and sum to 50k, with the 60/25/15 mix preserved.
+func TestConfig_CustomDurationAndRPS(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.ConstantDuration = 300 * time.Second
+	cfg.ConstantTotalRPS = 50000
+	cfg.SpikePeakRPS = 200000
+
+	rows, err := BuildAll(cfg)
+	if err != nil {
+		t.Fatalf("BuildAll: %v", err)
+	}
+	c := find(t, rows, "constant")
+
+	if c.DurationNs != uint64((300 * time.Second).Nanoseconds()) {
+		t.Errorf("constant duration = %d ns, want 300s", c.DurationNs)
+	}
+	// At t=0 and near the end the full baseline must be active.
+	for _, at := range []time.Duration{0, 150 * time.Second, 299 * time.Second} {
+		if got := sumRPSAt(c.TaskSpecs, at); got != 50000 {
+			t.Errorf("constant@50k: RPS at t=%v = %d, want 50000", at, got)
+		}
+	}
+
+	// Spike peak knob: burst window reaches 200k, baseline stays 50k.
+	s := find(t, rows, "spike")
+	pre := cfg.SpikePreWindow
+	if got := sumRPSAt(s.TaskSpecs, pre-time.Second); got != 50000 {
+		t.Errorf("spike pre-burst RPS = %d, want 50000", got)
+	}
+	if got := sumRPSAt(s.TaskSpecs, pre+time.Second); got != 200000 {
+		t.Errorf("spike burst RPS = %d, want 200000", got)
+	}
+}
+
+// TestConfig_Validation rejects nonsense configs.
+func TestConfig_Validation(t *testing.T) {
+	bad := []Config{
+		func() Config { c := DefaultConfig(); c.ConstantDuration = 0; return c }(),
+		func() Config { c := DefaultConfig(); c.ConstantTotalRPS = 0; return c }(),
+		func() Config { c := DefaultConfig(); c.SpikePeakRPS = 1000; return c }(), // < baseline
+	}
+	for i, c := range bad {
+		if _, err := BuildAll(c); err == nil {
+			t.Errorf("case %d: expected validation error, got nil", i)
+		}
 	}
 }
 

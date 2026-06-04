@@ -23,10 +23,22 @@ func TestComputeWorkerCount(t *testing.T) {
 		{2555, 3}, // spike total — 511 baseline + 2044 spike
 	}
 	for _, c := range cases {
-		got := computeWorkerCount(c.totalTasks)
+		got := computeWorkerCount(c.totalTasks, DefaultMaxTasksPerWorker)
 		if got != c.want {
 			t.Errorf("computeWorkerCount(%d) = %d, want %d", c.totalTasks, got, c.want)
 		}
+	}
+
+	// A custom MAX_TASKS_PER_WORKER changes fan-out: pin everything to one pod
+	// (huge ceiling) or spread thinly (small ceiling).
+	if got := computeWorkerCount(2555, 100000); got != 1 {
+		t.Errorf("pin-to-one-pod: computeWorkerCount(2555, 100000) = %d, want 1", got)
+	}
+	if got := computeWorkerCount(2555, 511); got != 5 {
+		t.Errorf("fan-out: computeWorkerCount(2555, 511) = %d, want 5", got)
+	}
+	if got := computeWorkerCount(500, 0); got != 1 { // 0 falls back to default 1000
+		t.Errorf("zero ceiling falls back to default: got %d, want 1", got)
 	}
 }
 

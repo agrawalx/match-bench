@@ -41,6 +41,11 @@ pub struct Snapshot {
     pub p90_ns: u64,
     pub p99_ns: u64,
     pub p999_ns: u64,
+    // response_time = r9 - t0 (the bot-side round trip including coordinated-
+    // omission/queueing delay). 0 when no order in this window got a response.
+    pub rt_p50_ns: u64,
+    pub rt_p90_ns: u64,
+    pub rt_p99_ns: u64,
     pub tps_1s: f64,
     pub error_rate: f64,
     /// V2-deflate-serialized cumulative service-time histogram (offline analysis).
@@ -241,6 +246,9 @@ impl Aggregator {
                     p90_ns: w.service_time.value_at_quantile(0.90),
                     p99_ns: w.service_time.value_at_quantile(0.99),
                     p999_ns: w.service_time.value_at_quantile(0.999),
+                    rt_p50_ns: w.response_time.value_at_quantile(0.50),
+                    rt_p90_ns: w.response_time.value_at_quantile(0.90),
+                    rt_p99_ns: w.response_time.value_at_quantile(0.99),
                     tps_1s: w.responded as f64 / interval,
                     error_rate,
                     hdr_encoded: serialize_hist(&w.service_time),

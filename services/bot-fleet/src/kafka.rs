@@ -184,7 +184,12 @@ pub fn producer(brokers: &str) -> Result<KafkaProducer> {
 ///     attached.
 ///   - `session.timeout.ms=10000` keeps rebalances tight when KEDA scales
 ///     the worker pool.
-pub fn consumer(brokers: &str, group: &str, topics: &[&str]) -> Result<KafkaConsumer> {
+pub fn consumer(
+    brokers: &str,
+    group: &str,
+    topics: &[&str],
+    max_poll_interval: Duration,
+) -> Result<KafkaConsumer> {
     let inner: StreamConsumer = ClientConfig::new()
         .set("bootstrap.servers", brokers)
         .set("group.id", group)
@@ -192,13 +197,16 @@ pub fn consumer(brokers: &str, group: &str, topics: &[&str]) -> Result<KafkaCons
         .set("auto.offset.reset", "earliest")
         .set("fetch.min.bytes", "1")
         .set("fetch.wait.max.ms", "100")
-        // Kept in sync with Config::max_poll_interval (DEFAULT_MAX_POLL_INTERVAL)
-        // so the L39 wall-time guard in validate_spec matches the broker bound.
+        // Driven by Config::max_poll_interval (MAX_POLL_INTERVAL_MS) so the
+        // broker bound and the L39 wall-time guard in validate_spec are always
+        // the same value — raising the env knob lifts BOTH, which is what lets a
+        // long high-RPS run complete without a mid-run rebalance. The worker
+        // blocks (does not poll) for the whole run, but librdkafka's background
+        // heartbeat (session.timeout.ms) still proves liveness, so only the
+        // allowed processing-between-polls window grows.
         .set(
             "max.poll.interval.ms",
-            crate::config::DEFAULT_MAX_POLL_INTERVAL
-                .as_millis()
-                .to_string(),
+            max_poll_interval.as_millis().to_string(),
         )
         .set("session.timeout.ms", "10000")
         .create()

@@ -103,6 +103,88 @@ export const getChart = (sessionID: string) =>
     `/api/charts/${encodeURIComponent(sessionID)}`,
   );
 
+// ---- submission-api (submit code → build → trigger → track) --------------
+// Served same-origin behind nginx at /sapi/* (see frontend/nginx.conf). Field
+// names match the submission-api Go JSON tags (internal/handler/{submit,
+// submission,benchmark}.go).
+
+const SAPI_BASE = (import.meta.env.VITE_SAPI_BASE as string | undefined) ?? "/sapi";
+
+// Submission status lifecycle (schemas/go/topics/topics.go):
+//   uploaded -> building -> scanned -> sbom_ready -> ready   (or -> failed)
+export type SubmissionStatus =
+  | "uploaded"
+  | "building"
+  | "scanned"
+  | "sbom_ready"
+  | "ready"
+  | "failed";
+
+export interface Submission {
+  submission_id: string;
+  status: SubmissionStatus;
+  language: string;
+  protocol: string;
+  port: number;
+  team_name: string;
+  sha256: string;
+  created_at: string;
+}
+
+// One child session of a benchmark run-group (one per scenario).
+export interface RunChild {
+  session_id: string;
+  scenario_id?: string;
+  scenario_name?: string;
+  status: string;
+  message?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface RunGroup {
+  run_group_id: string;
+  submission_id: string;
+  status: string; // requested | running | completed | failed
+  created_at: string;
+  runs: RunChild[];
+}
+
+async function sapi<T>(path: string, init?: RequestInit): Promise<T> {
+  const res = await fetch(`${SAPI_BASE}${path}`, init);
+  const text = await res.text();
+  let body: unknown;
+  try {
+    body = text ? JSON.parse(text) : {};
+  } catch {
+    body = { error: text };
+  }
+  if (!res.ok) {
+    const msg = (body as { error?: string })?.error || `HTTP ${res.status}`;
+    throw new Error(msg);
+  }
+  return body as T;
+}
+
+// submitCode uploads a .zip (containing benchmark.yaml + source) as multipart
+// form field "file". Returns the freshly minted submission (status "uploaded").
+export function submitCode(file: File): Promise<Submission> {
+  const form = new FormData();
+  form.append("file", file);
+  return sapi<Submission>(`/submit`, { method: "POST", body: form });
+}
+
+export const getSubmission = (id: string) =>
+  sapi<Submission>(`/submissions/${encodeURIComponent(id)}`);
+
+// triggerBenchmark starts a run-group (one session per scenario). 202 = new,
+// 200 = joined an already-active run-group for this submission.
+export const triggerBenchmark = (id: string) =>
+  sapi<RunGroup>(`/submissions/${encodeURIComponent(id)}/benchmark`, { method: "POST" });
+
+export const getRunGroupStatus = (runGroupID: string) =>
+  sapi<RunGroup>(`/run-groups/${encodeURIComponent(runGroupID)}`);
+
 // subscribeLeaderboard streams live leaderboard snapshots over SSE (the browser
 // EventSource auto-reconnects). The broker pushes either a full snapshot
 // ({rows}) or a single update; on any event we ensure a fresh full snapshot.

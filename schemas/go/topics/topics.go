@@ -115,6 +115,27 @@ type CorrectnessScoreEvent struct {
 	ComputedAtNS     uint64  `json:"computed_at_ns"`
 }
 
+// LeaderboardUpdateEvent is published to "leaderboard.updates" (JSON) by
+// score-computer after a run_group has been durably scored. Consumed by:
+// leaderboard-api, which fans updates out to SSE clients.
+//
+// Key: run_group_id.
+type LeaderboardUpdateEvent struct {
+	RunGroupID           string  `json:"run_group_id"`
+	SubmissionID         string  `json:"submission_id"`
+	ContestantID         string  `json:"contestant_id"`
+	TeamName             string  `json:"team_name"`
+	Rank                 int64   `json:"rank"`
+	RankDelta            int64   `json:"rank_delta"`
+	PeakSustainedTPS     uint64  `json:"peak_sustained_tps"`
+	P99NSAtPeakTPS       uint64  `json:"p99_ns_at_peak_tps"`
+	SpikeRecoveryNS      uint64  `json:"spike_recovery_ns"`
+	TotalCorrectness     float64 `json:"total_correctness"`
+	Disqualified         bool    `json:"disqualified"`
+	DisqualificationCode string  `json:"disqualification_code,omitempty"`
+	UpdatedAtNS          uint64  `json:"updated_at_ns"`
+}
+
 // SubmissionStatusUpdated is published to "submission.status.updated"
 // by the build-worker on every state transition. Consumed by: submission-api (status queries).
 type SubmissionStatusUpdated struct {

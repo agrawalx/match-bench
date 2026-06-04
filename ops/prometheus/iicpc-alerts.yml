@@ -1,0 +1,42 @@
+groups:
+  - name: iicpc-scoreboard
+    rules:
+      - alert: IICPCScoreComputerScoringErrors
+        expr: increase(iicpc_scorer_run_groups_scored_total{result="error"}[5m]) > 0
+        for: 2m
+        labels:
+          severity: warning
+          service: score-computer
+        annotations:
+          summary: Score-computer is failing run-group scoring
+          description: One or more run-groups failed scoring in the last 5 minutes.
+
+      - alert: IICPCScoreComputerNoSuccessfulScores
+        expr: absent_over_time(iicpc_scorer_run_groups_scored_total{result="ok"}[30m])
+        for: 5m
+        labels:
+          severity: warning
+          service: score-computer
+        annotations:
+          summary: Score-computer has not produced successful scores
+          description: No successful score-computer scoring events were observed for 30 minutes.
+
+      - alert: IICPCLeaderboardSSEDroppedClients
+        expr: increase(iicpc_leaderboard_api_sse_dropped_clients_total[5m]) > 0
+        for: 1m
+        labels:
+          severity: warning
+          service: leaderboard-api
+        annotations:
+          summary: Leaderboard API is dropping SSE clients
+          description: One or more SSE clients could not keep up with leaderboard updates.
+
+      - alert: IICPCLeaderboardCacheErrors
+        expr: increase(iicpc_leaderboard_api_cache_reads_total{result="error"}[5m]) + increase(iicpc_leaderboard_api_cache_writes_total{result="error"}[5m]) > 0
+        for: 2m
+        labels:
+          severity: warning
+          service: leaderboard-api
+        annotations:
+          summary: Leaderboard API cache operations are failing
+          description: Redis-backed leaderboard cache reads or writes failed recently.

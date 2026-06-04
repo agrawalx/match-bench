@@ -1,0 +1,11 @@
+apiVersion: v1
+kind: Secret
+metadata:
+  name: leaderboard-api-secret
+  namespace: platform
+type: Opaque
+stringData:
+  database-url: ""
+  timescale-url: ""
+  kafka-brokers: ""
+  redis-addr: ""

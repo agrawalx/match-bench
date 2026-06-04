@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: leaderboard-api
+  namespace: platform
+spec:
+  selector:
+    app: leaderboard-api
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+    - name: metrics
+      port: 9090
+      targetPort: metrics

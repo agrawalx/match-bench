@@ -1,0 +1,47 @@
+package redis
+
+import (
+	"context"
+	"errors"
+	"time"
+
+	goredis "github.com/redis/go-redis/v9"
+)
+
+type Client struct {
+	client *goredis.Client
+}
+
+func New(addr string) *Client {
+	return &Client{client: goredis.NewClient(&goredis.Options{
+		Addr:         addr,
+		DialTimeout:  2 * time.Second,
+		ReadTimeout:  2 * time.Second,
+		WriteTimeout: 2 * time.Second,
+		PoolSize:     16,
+		MinIdleConns: 2,
+	})}
+}
+
+func (c *Client) Close() error {
+	return c.client.Close()
+}
+
+func (c *Client) Ping(ctx context.Context) error {
+	return c.client.Ping(ctx).Err()
+}
+
+func (c *Client) Get(ctx context.Context, key string) ([]byte, bool, error) {
+	value, err := c.client.Get(ctx, key).Bytes()
+	if err != nil {
+		if errors.Is(err, goredis.Nil) {
+			return nil, false, nil
+		}
+		return nil, false, err
+	}
+	return value, true, nil
+}
+
+func (c *Client) Set(ctx context.Context, key string, value []byte, ttl time.Duration) error {
+	return c.client.Set(ctx, key, value, ttl).Err()
+}

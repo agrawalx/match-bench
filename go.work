@@ -6,6 +6,8 @@ use (
 	./services/bot-fleet-controller
 	./services/build-worker
 	./services/correctness-validator
+	./services/leaderboard-api
 	./services/sandbox-orchestrator
+	./services/score-computer
 	./services/submission-api
 )

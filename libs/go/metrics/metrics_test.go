@@ -185,6 +185,32 @@ func TestHTTPMiddlewareRecordsImplicitOKAfterWrite(t *testing.T) {
 	}
 }
 
+func TestHTTPMiddlewarePreservesFlusher(t *testing.T) {
+	resetGlobalForTest()
+
+	handler := HTTPMiddleware("svc", nil)(
+		http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			flusher, ok := w.(http.Flusher)
+			if !ok {
+				http.Error(w, "streaming unsupported", http.StatusInternalServerError)
+				return
+			}
+			_, _ = w.Write([]byte("event: ok\n\n"))
+			flusher.Flush()
+		}),
+	)
+
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/events", nil))
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("response status = %d, want %d; body=%q", rr.Code, http.StatusOK, rr.Body.String())
+	}
+	if !rr.Flushed {
+		t.Fatal("response was not flushed")
+	}
+}
+
 func resetGlobalForTest() {
 	global = newRegistry()
 }

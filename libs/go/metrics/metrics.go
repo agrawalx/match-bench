@@ -186,7 +186,7 @@ func (r *registry) metric(name, help string, kind metricKind, buckets []float64,
 		}
 		return existing, labelValues
 	}
-	
+
 	r.recordErrorLocked("unregistered_metric")
 	return nil, nil
 }
@@ -267,8 +267,14 @@ func projectMetricCatalog() []metricSpec {
 		counterSpec("ready_partial_total", "Sessions with partial ready fan-in.", nil),
 		counterSpec("ready_signals_total", "Ready fan-in completions by result.", []string{"result"}),
 		counterSpec("recovery_inflight_runs_total", "In-flight runs recovered on controller startup.", nil),
+		counterSpec("leaderboard_api_events_consumed_total", "Leaderboard update events consumed by result.", []string{"result"}),
+		gaugeSpec("leaderboard_api_sse_clients", "Connected leaderboard SSE clients.", nil),
+		counterSpec("leaderboard_api_sse_dropped_clients_total", "Leaderboard SSE clients dropped because they could not keep up.", nil),
 		counterSpec("run_group_children_created_total", "Child runs created by scenario.", []string{"scenario_name"}),
 		counterSpec("run_groups_created_total", "Run-groups created by submission-api.", nil),
+		counterSpec("scorer_progress_events_total", "Scorer progress events persisted by source and result.", []string{"result", "source"}),
+		counterSpec("scorer_run_groups_scored_total", "Run-groups scored by result.", []string{"result"}),
+		histogramSpec("scorer_run_group_score_duration_seconds", "Score-computer run-group scoring duration in seconds.", []string{"result"}, defaultBuckets),
 		counterSpec("run_status_updates_total", "Run status updates applied by submission-api.", []string{"status"}),
 		histogramSpec("session_duration_seconds", "Benchmark session duration in seconds.", []string{"result", "scenario_name"}, defaultBuckets),
 		histogramSpec("session_stage_duration_seconds", "Benchmark session stage duration in seconds.", []string{"result", "stage"}, defaultBuckets),

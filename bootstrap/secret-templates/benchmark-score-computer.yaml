@@ -1,0 +1,11 @@
+apiVersion: v1
+kind: Secret
+metadata:
+  name: score-computer-secret
+  namespace: benchmark
+type: Opaque
+stringData:
+  database-url: ""
+  timescale-url: ""
+  kafka-brokers: ""
+  redis-addr: ""

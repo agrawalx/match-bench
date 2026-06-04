@@ -57,3 +57,21 @@ scrape_configs:
       - source_labels: [__name__]
         regex: "iicpc_.*"
         action: keep
+
+  - job_name: score-computer
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["host.docker.internal:9095"]
+    metric_relabel_configs:
+      - source_labels: [__name__]
+        regex: "iicpc_.*"
+        action: keep
+
+  - job_name: leaderboard-api
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["host.docker.internal:9096"]
+    metric_relabel_configs:
+      - source_labels: [__name__]
+        regex: "iicpc_.*"
+        action: keep

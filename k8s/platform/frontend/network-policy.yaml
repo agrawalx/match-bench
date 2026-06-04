@@ -1,7 +1,8 @@
 # The platform namespace is default-deny. The frontend is a static SPA + nginx
 # proxy: it only needs to (1) be reachable on 8080 (from the ingress controller
-# and, for the proxy hop, intra-namespace), and (2) reach leaderboard-api in the
-# same namespace plus DNS. It touches no database, Kafka, or Redis directly.
+# and, for the proxy hop, intra-namespace), and (2) reach leaderboard-api (/api)
+# AND submission-api (/sapi) in the same namespace, plus DNS. It touches no
+# database, Kafka, or Redis directly — the APIs it proxies to do that.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -26,11 +27,15 @@ spec:
         - port: 8080
           protocol: TCP
   egress:
-    # Proxy hop to leaderboard-api (same namespace, port 8080).
+    # Proxy hops to the two platform APIs (same namespace, port 8080):
+    #   /api/*  -> leaderboard-api,  /sapi/* -> submission-api.
     - to:
         - podSelector:
             matchLabels:
               app: leaderboard-api
+        - podSelector:
+            matchLabels:
+              app: submission-api
       ports:
         - port: 8080
           protocol: TCP

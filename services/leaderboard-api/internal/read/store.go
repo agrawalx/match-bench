@@ -98,7 +98,7 @@ SELECT rank, run_group_id, submission_id, contestant_id, team_name, peak_sustain
 		return LeaderboardResponse{}, err
 	}
 	defer rows.Close()
-	resp := LeaderboardResponse{Source: "frozen"}
+	resp := LeaderboardResponse{Source: "frozen", Rows: []LeaderboardRow{}}
 	for rows.Next() {
 		var r LeaderboardRow
 		var peak, p99, recovery int64

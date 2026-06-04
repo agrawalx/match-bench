@@ -30,6 +30,12 @@ func (r *statusRecorder) Unwrap() http.ResponseWriter {
 	return r.ResponseWriter
 }
 
+func (r *statusRecorder) Flush() {
+	if flusher, ok := r.ResponseWriter.(http.Flusher); ok {
+		flusher.Flush()
+	}
+}
+
 // HTTPMiddleware records RED metrics for HTTP services.
 func HTTPMiddleware(service string, route func(*http.Request) string) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {

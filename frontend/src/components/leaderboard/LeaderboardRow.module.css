@@ -1,0 +1,102 @@
+.row {
+  height: 52px;
+  border-bottom: 1px solid var(--color-surface-1);
+  animation: fade-in 120ms var(--ease-std) both;
+}
+
+.row:hover {
+  background: #0f0f0f;
+}
+
+.own {
+  background: rgba(0, 229, 255, 0.03);
+  box-shadow: inset 2px 0 0 var(--color-accent);
+}
+
+.flash {
+  box-shadow: inset 0 0 0 1px var(--color-accent);
+}
+
+.rank,
+.number {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+.rank {
+  text-align: center;
+  font-size: 14px;
+}
+
+.first {
+  color: var(--color-accent);
+}
+
+.podium {
+  color: var(--color-text-primary);
+}
+
+.top {
+  color: var(--color-text-secondary);
+}
+
+.rest {
+  color: #444444;
+}
+
+.name {
+  color: var(--color-text-primary);
+  font-size: 13px;
+}
+
+.id {
+  margin-top: 3px;
+  color: #444444;
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+
+.number {
+  color: var(--color-text-secondary);
+  text-align: right;
+  font-size: 13px;
+}
+
+.scoreHot {
+  color: var(--color-accent);
+  font-size: 15px;
+}
+
+.track {
+  height: 4px;
+  background: var(--color-surface-3);
+  border-radius: var(--radius-sm);
+}
+
+.fill {
+  height: 100%;
+  background: var(--color-accent);
+  border-radius: var(--radius-sm);
+}
+
+.correctLabel {
+  margin-top: 4px;
+  color: #666666;
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+
+.spark,
+.status {
+  text-align: center;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .row {
+    animation: none;
+  }
+
+  .flash {
+    box-shadow: none;
+  }
+}

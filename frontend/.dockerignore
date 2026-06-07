@@ -1,5 +1,7 @@
 node_modules
-dist
-.vite
-verify.mjs
-*.log
+.next
+out
+coverage
+.env.local
+*.tsbuildinfo
+npm-debug.log*

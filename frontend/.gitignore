@@ -1,5 +1,8 @@
-node_modules
-dist
+node_modules/
+.next/
+out/
+dist/
+coverage/
+.env.local
 *.tsbuildinfo
-.vite
-*.log
+npm-debug.log*

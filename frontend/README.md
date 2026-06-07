@@ -1,61 +1,38 @@
 # IICPC Frontend
 
-Real-time leaderboard + per-run analytics dashboard for the IICPC HFT benchmark.
-Vite + React + TypeScript, TanStack Table (sortable leaderboard), uPlot (canvas
-latency/throughput charts), and the browser `EventSource` for live SSE updates.
+Next.js 14 App Router frontend for the IICPC algorithm benchmarking platform.
 
-It is a pure projection of `leaderboard-api` — no business logic; it renders what
-the scorer decided.
+## Development
 
-## Views
-
-- **Leaderboard** — sortable table (rank, team, peak sustained TPS, p99 @ peak,
-  correctness, rank delta, DQ), live-updating via SSE with rank-delta arrows;
-  click a row to open the run detail.
-- **Run detail** — the three sessions (constant / spike / ramp), each with
-  latency-percentile and throughput/error uPlot timelines, KPI cards, and the
-  violation log. Only `p99 service_time` is labelled *scored*; everything else is
-  *diagnostic*.
-- **Platform health** — the Prometheus-backed self-observation panels.
-
-## Data source
-
-- **Offline (default):** with no `VITE_API_BASE` set, the app serves built-in
-  fixtures and simulates live movement. It runs and is fully clickable with no
-  backend — used for local development and verification.
-- **Live:** set `VITE_API_BASE` to a reachable `leaderboard-api`, e.g.
-
-  ```sh
-  kubectl -n platform port-forward svc/leaderboard-api 8080:8080
-  VITE_API_BASE=http://localhost:8080 npm run dev
-  ```
-
-  In production the app is built with same-origin `/api` and nginx
-  (`nginx.conf`) proxies `/api/*` (including the `/api/events` SSE stream) to
-  `leaderboard-api`.
-
-## Develop
-
-```sh
+```bash
 npm install
-npm run dev          # http://localhost:5173 (fixtures)
-npm run build        # typecheck + static build to dist/
+npm run dev
 ```
 
-## Verify (headless)
+The dev server proxies `/api/leaderboard/v1/*`, `/api/submission/v1/*`, and `/api/auth/*`
+to the local backend services configured in `.env.local`.
 
-`node verify.mjs` drives the built app with headless Chromium (Playwright):
-navigates every view, sorts, opens a clean run and a DQ run, switches tabs,
-captures live SSE movement, and asserts there are no console errors. Screenshots
-land in `/tmp/fe-shots`.
+## Authentication
 
-## Deploy
+Google OAuth uses Authorization Code + PKCE. The browser stores only temporary PKCE
+material in `sessionStorage`; platform tokens remain in React memory, and refresh
+tokens are handled by the auth API as `HttpOnly` cookies.
 
-```sh
-docker build -t frontend:local .          # static SPA behind unprivileged nginx
-kubectl apply -f ../k8s/platform/frontend/
+Frontend `.env.local` needs only public OAuth values:
+
+```bash
+NEXT_PUBLIC_GOOGLE_CLIENT_ID=<google-web-client-id>
+NEXT_PUBLIC_GOOGLE_REDIRECT_URI=http://localhost:3000/auth/callback
+AUTH_API_URL=http://localhost:8083
 ```
 
-Deploys to the `platform` namespace (Deployment + Service + NetworkPolicy). The
-netpol allows ingress from the ingress controller and egress to `leaderboard-api`
-+ DNS only.
+The Google client secret belongs only to `services/auth-api`. From the repo root:
+
+```bash
+PORT=8083 \
+GOOGLE_CLIENT_ID=<google-web-client-id> \
+GOOGLE_CLIENT_SECRET=<google-web-client-secret> \
+GOOGLE_ALLOWED_REDIRECT_URIS=http://localhost:3000/auth/callback \
+AUTH_COOKIE_SECURE=false \
+go run ./services/auth-api
+```

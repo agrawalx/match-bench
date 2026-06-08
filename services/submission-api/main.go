@@ -154,6 +154,7 @@ func main() {
 	// path is kept as an alias so older frontends do not break.
 	r.Post("/submissions/{submission_id}/benchmark", handler.StartBenchmark(pgStore, kafkaPub, log))
 	r.Post("/benchmarks/{submission_id}", handler.StartBenchmark(pgStore, kafkaPub, log))
+	r.Get("/run-groups", handler.ListRunGroups(pgStore, log))
 	r.Get("/run-groups/{run_group_id}", handler.GetRunGroup(pgStore, log))
 	r.Get("/runs/{session_id}", handler.GetRun(pgStore, log))
 

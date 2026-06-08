@@ -154,6 +154,20 @@ func TestPodSpecRuntimeClassOptional(t *testing.T) {
 	}
 }
 
+func TestPodSpecImagePullSecretOptional(t *testing.T) {
+	mgr := &Manager{namespace: "sandbox", cpu: "2", memory: "1Gi"}
+	pod := mgr.podSpec("s1", "", "ghcr.io/iicpc/submission:latest", 8080)
+	if len(pod.Spec.ImagePullSecrets) != 0 {
+		t.Fatalf("expected no imagePullSecrets when env unset, got %v", pod.Spec.ImagePullSecrets)
+	}
+
+	mgr.imagePullSecretName = "registry-credentials"
+	pod = mgr.podSpec("s1", "", "ghcr.io/iicpc/submission:latest", 8080)
+	if got := pod.Spec.ImagePullSecrets; len(got) != 1 || got[0].Name != "registry-credentials" {
+		t.Fatalf("imagePullSecrets = %v, want registry-credentials", got)
+	}
+}
+
 func TestPodSpecLabels(t *testing.T) {
 	mgr := &Manager{namespace: "sandbox", cpu: "2", memory: "1Gi"}
 	pod := mgr.podSpec("sess-AAA", "", "img:tag", 8080)

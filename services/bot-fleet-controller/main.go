@@ -13,7 +13,6 @@ package main
 
 import (
 	"context"
-	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -47,8 +46,6 @@ func main() {
 	benchmarkGroup := envOr("KAFKA_BENCHMARK_GROUP", "bot-fleet-controller")
 	botReadyGroup := envOr("KAFKA_BOT_READY_GROUP", "bot-fleet-controller-ready")
 	orchURL := mustEnv("SANDBOX_ORCHESTRATOR_URL")
-	harborEndpoint := mustEnv("HARBOR_PRODUCTION_ENDPOINT")
-	harborProject := envOr("HARBOR_PROJECT", "iicpc")
 	runConfig := runConfigFromEnv()
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
@@ -95,8 +92,7 @@ func main() {
 
 	orchClient := orchestrator.NewClient(orchURL)
 	sessions := controller.NewSessionManager()
-	harbor := controller.HarborConfig{Endpoint: harborEndpoint, Project: harborProject}
-	runner := controller.NewRunner(sessions, st, orchClient, producer, runConfig, harbor, log)
+	runner := controller.NewRunner(sessions, st, orchClient, producer, runConfig, log)
 	consumer := controller.NewConsumer(kafkaBrokers, benchmarkGroup, botReadyGroup, runner, sessions, log)
 	defer consumer.Close()
 
@@ -131,7 +127,6 @@ func main() {
 		log.Info("bot-fleet-controller started",
 			"port", port,
 			"orchestrator", orchURL,
-			"harbor", fmt.Sprintf("%s/%s", harborEndpoint, harborProject),
 			"deploy_deadline", runConfig.DeployDeadline,
 			"ready_deadline", runConfig.ReadyDeadline,
 			"barrier_safety_gap", runConfig.BarrierSafetyGap,

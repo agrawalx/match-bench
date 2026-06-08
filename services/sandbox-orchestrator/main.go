@@ -70,6 +70,7 @@ func main() {
 	captureEnabled := envOr("CAPTURE_ENABLED", "false") == "true"
 	captureImage := os.Getenv("CAPTURE_IMAGE")
 	kafkaBrokers := os.Getenv("KAFKA_BROKERS")
+	imagePullSecretName := os.Getenv("ALGO_IMAGE_PULL_SECRET")
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
@@ -81,16 +82,17 @@ func main() {
 	}
 
 	mgr, err := k8s.NewManager(k8sClient, k8s.Config{
-		Namespace:        namespace,
-		RuntimeClass:     runtimeClass,
-		CPU:              algoCPU,
-		Memory:           algoMemory,
-		NodePool:         nodePool,
-		EgressBandwidth:  egressBw,
-		IngressBandwidth: ingressBw,
-		CaptureEnabled:   captureEnabled,
-		CaptureImage:     captureImage,
-		KafkaBrokers:     kafkaBrokers,
+		Namespace:           namespace,
+		RuntimeClass:        runtimeClass,
+		CPU:                 algoCPU,
+		Memory:              algoMemory,
+		NodePool:            nodePool,
+		EgressBandwidth:     egressBw,
+		IngressBandwidth:    ingressBw,
+		CaptureEnabled:      captureEnabled,
+		CaptureImage:        captureImage,
+		KafkaBrokers:        kafkaBrokers,
+		ImagePullSecretName: imagePullSecretName,
 	})
 	if err != nil {
 		log.Error("k8s manager init failed", "error", err)
@@ -156,6 +158,7 @@ func main() {
 			"algo_cpu", algoCPU,
 			"algo_memory", algoMemory,
 			"node_pool", nodePoolOrNone(nodePool),
+			"algo_image_pull_secret", secretOrNone(imagePullSecretName),
 		)
 		ready.MarkReady()
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
@@ -221,6 +224,13 @@ func runtimeClassOrNone(v string) string {
 func nodePoolOrNone(v string) string {
 	if v == "" {
 		return "(unset — algo pods schedule on any node)"
+	}
+	return v
+}
+
+func secretOrNone(v string) string {
+	if v == "" {
+		return "(unset)"
 	}
 	return v
 }

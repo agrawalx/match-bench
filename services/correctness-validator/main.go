@@ -13,6 +13,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -61,6 +62,7 @@ func main() {
 	kafkaBrokers := mustEnv("KAFKA_BROKERS", log)
 	statusGroup := envOr("KAFKA_STATUS_GROUP", "correctness-validator")
 	settleDelay := time.Duration(envInt("SETTLE_DELAY_MS", 10000)) * time.Millisecond
+	validationTimeout := time.Duration(envInt("VALIDATION_TIMEOUT_MS", 60000)) * time.Millisecond
 	concurrency := envInt("VALIDATOR_CONCURRENCY", 4)
 	brokers := parseBrokers(kafkaBrokers)
 
@@ -77,11 +79,12 @@ func main() {
 	defer pub.Close()
 
 	v := &validator{
-		log:         log,
-		brokers:     brokers,
-		store:       st,
-		pub:         pub,
-		settleDelay: settleDelay,
+		log:               log,
+		brokers:           brokers,
+		store:             st,
+		pub:               pub,
+		settleDelay:       settleDelay,
+		validationTimeout: validationTimeout,
 	}
 
 	// `concurrency` consumer goroutines in one group. Each fetches a status
@@ -118,7 +121,7 @@ func main() {
 			log.Error("http server", "error", err)
 		}
 	}()
-	log.Info("correctness-validator started", "status_group", statusGroup, "settle_ms", settleDelay.Milliseconds(), "concurrency", concurrency)
+	log.Info("correctness-validator started", "status_group", statusGroup, "settle_ms", settleDelay.Milliseconds(), "validation_timeout_ms", validationTimeout.Milliseconds(), "concurrency", concurrency)
 
 	<-ctx.Done()
 	shutCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -127,11 +130,12 @@ func main() {
 }
 
 type validator struct {
-	log         *slog.Logger
-	brokers     []string
-	store       *store.Store
-	pub         *publisher.Publisher
-	settleDelay time.Duration
+	log               *slog.Logger
+	brokers           []string
+	store             *store.Store
+	pub               *publisher.Publisher
+	settleDelay       time.Duration
+	validationTimeout time.Duration
 	// inflight counts sessions concurrently held in memory; exported as the
 	// validator_inflight_sessions gauge to watch the OOM-prone concurrency.
 	inflight atomic.Int64
@@ -170,7 +174,9 @@ func (v *validator) validateSession(ctx context.Context, sessionID string) error
 	// service OOM'd draining large sessions, so concurrency × per-session buffer
 	// is the memory-pressure signal operators watch.
 	metrics.Gauge("validator_inflight_sessions", "Correctness-validator sessions currently being validated.", nil, float64(v.inflight.Add(1)))
-	defer func() { metrics.Gauge("validator_inflight_sessions", "Correctness-validator sessions currently being validated.", nil, float64(v.inflight.Add(-1))) }()
+	defer func() {
+		metrics.Gauge("validator_inflight_sessions", "Correctness-validator sessions currently being validated.", nil, float64(v.inflight.Add(-1)))
+	}()
 
 	if done, err := v.store.HasSummary(ctx, sessionID); err != nil {
 		metrics.Counter("validator_validation_errors_total", "Correctness-validator validation errors by stage.", metrics.Labels("stage", "idempotency"), 1)
@@ -265,6 +271,55 @@ func (v *validator) validateSession(ctx context.Context, sessionID string) error
 	return nil
 }
 
+func (v *validator) recordValidationTimeout(ctx context.Context, sessionID string) error {
+	if done, err := v.store.HasSummary(ctx, sessionID); err != nil {
+		return fmt.Errorf("idempotency check: %w", err)
+	} else if done {
+		ev, ok, err := v.store.LoadScore(ctx, sessionID)
+		if err != nil {
+			return err
+		}
+		if ok {
+			return v.pub.Publish(ctx, ev)
+		}
+		return nil
+	}
+
+	report := validate.Report{
+		TotalFills:   1,
+		PhantomFills: 1,
+	}
+	rec := store.Record{
+		SessionID:    sessionID,
+		ContestantID: "",
+		Report:       report,
+		ComputedAtNS: uint64(time.Now().UnixNano()),
+	}
+	inserted, err := v.store.Save(ctx, rec)
+	if err != nil {
+		return fmt.Errorf("save timeout correctness: %w", err)
+	}
+	if !inserted {
+		ev, ok, err := v.store.LoadScore(ctx, sessionID)
+		if err != nil {
+			return err
+		}
+		if ok {
+			return v.pub.Publish(ctx, ev)
+		}
+		return nil
+	}
+	return v.pub.Publish(ctx, topics.CorrectnessScoreEvent{
+		SessionID:        sessionID,
+		ContestantID:     "",
+		ValidFills:       report.ValidFills,
+		TotalFills:       report.TotalFills,
+		CorrectnessScore: report.CorrectnessScore(),
+		ViolationCount:   report.ViolationCount(),
+		ComputedAtNS:     rec.ComputedAtNS,
+	})
+}
+
 // runStatusConsumer is one member of the benchmark.status.updated consumer group.
 // It validates each `completed` session synchronously and commits the offset ONLY
 // after validateSession succeeds, downgrading nothing: a crash or shutdown before
@@ -298,10 +353,27 @@ func (v *validator) runStatusConsumer(ctx context.Context, brokers []string, gro
 			continue
 		}
 		if ev.Status == topics.RunStatusCompleted {
-			if err := v.validateSession(ctx, ev.SessionID); err != nil {
+			validateCtx, cancel := context.WithTimeout(ctx, v.validationTimeout)
+			err := v.validateSession(validateCtx, ev.SessionID)
+			cancel()
+			if err != nil {
 				if ctx.Err() != nil {
 					return // shutdown: leave uncommitted for redelivery
 				}
+				if errors.Is(err, context.DeadlineExceeded) {
+					fallbackCtx, fallbackCancel := context.WithTimeout(context.Background(), 10*time.Second)
+					fallbackErr := v.recordValidationTimeout(fallbackCtx, ev.SessionID)
+					fallbackCancel()
+					if fallbackErr == nil {
+						v.log.Warn("validation timed out; recorded zero-correctness fallback", "session_id", ev.SessionID, "timeout_ms", v.validationTimeout.Milliseconds())
+						err = nil
+					} else {
+						v.log.Error("record validation timeout fallback", "session_id", ev.SessionID, "error", fallbackErr)
+						err = fallbackErr
+					}
+				}
+			}
+			if err != nil {
 				v.log.Error("validate session; will retry on redelivery", "session_id", ev.SessionID, "error", err)
 				continue // do NOT commit — retry on next poll / redelivery
 			}

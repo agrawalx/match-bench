@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -109,8 +110,29 @@ func StartBenchmark(pg *store.PostgresStore, pub publisher.Publisher, log *slog.
 			writeError(w, http.StatusNotFound, "submission not found")
 			return
 		}
+		contestantID := contestantIDFromRequest(r)
+		if contestantID == "" {
+			writeError(w, http.StatusUnauthorized, "benchmark requires an authenticated contestant")
+			return
+		}
+		if sub.ContestantID == "" && contestantID != "" {
+			if err := pg.ClaimSubmissionContestantIfEmpty(ctx, submissionID, contestantID); err != nil {
+				log.ErrorContext(ctx, "claim submission contestant", "submission_id", submissionID, "error", err)
+				writeError(w, http.StatusInternalServerError, "failed to bind submission")
+				return
+			}
+			sub.ContestantID = contestantID
+		}
+		if sub.ContestantID != contestantID {
+			writeError(w, http.StatusNotFound, "submission not found")
+			return
+		}
 		if sub.Status != topics.StatusReady {
 			writeError(w, http.StatusBadRequest, "submission is not in 'ready' status (current: "+sub.Status+")")
+			return
+		}
+		if sub.ImageRef == "" {
+			writeError(w, http.StatusBadRequest, "submission is ready but has no built image ref")
 			return
 		}
 
@@ -241,6 +263,48 @@ func StartBenchmark(pg *store.PostgresStore, pub publisher.Publisher, log *slog.
 	}
 }
 
+func ListRunGroups(pg *store.PostgresStore, log *slog.Logger) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		limit, _ := strconv.Atoi(q.Get("limit"))
+		contestantID := contestantIDFromRequest(r)
+		if contestantID == "" {
+			writeError(w, http.StatusUnauthorized, "authentication required")
+			return
+		}
+		filter := store.RunGroupListFilter{
+			ContestantID:  contestantID,
+			SubmissionIDs: q["submission_id"],
+			Limit:         limit,
+		}
+		groups, err := pg.ListRunGroups(r.Context(), filter)
+		if err != nil {
+			log.ErrorContext(r.Context(), "list run-groups", "error", err)
+			writeError(w, http.StatusInternalServerError, "failed to list run-groups")
+			return
+		}
+		scenarios, err := pg.ListScenarios(r.Context())
+		if err != nil {
+			log.ErrorContext(r.Context(), "list scenarios", "error", err)
+			writeError(w, http.StatusInternalServerError, "scenario lookup failed")
+			return
+		}
+		out := make([]benchmarkResponse, 0, len(groups))
+		for _, group := range groups {
+			resp, err := groupResponse(r.Context(), pg, &group, scenarios)
+			if err != nil {
+				log.ErrorContext(r.Context(), "list runs by group", "run_group_id", group.RunGroupID, "error", err)
+				writeError(w, http.StatusInternalServerError, "failed to load child runs")
+				return
+			}
+			out = append(out, resp)
+		}
+		writeJSON(w, http.StatusOK, struct {
+			RunGroups []benchmarkResponse `json:"run_groups"`
+		}{RunGroups: out})
+	}
+}
+
 // GetRunGroup handles GET /run-groups/{run_group_id}.
 // Returns the group's metadata plus all child runs in scenario-name order.
 func GetRunGroup(pg *store.PostgresStore, log *slog.Logger) http.HandlerFunc {
@@ -258,6 +322,13 @@ func GetRunGroup(pg *store.PostgresStore, log *slog.Logger) http.HandlerFunc {
 			return
 		}
 		if group == nil {
+			writeError(w, http.StatusNotFound, "run-group not found")
+			return
+		}
+		if contestantID := contestantIDFromRequest(r); contestantID == "" {
+			writeError(w, http.StatusUnauthorized, "authentication required")
+			return
+		} else if group.ContestantID != contestantID {
 			writeError(w, http.StatusNotFound, "run-group not found")
 			return
 		}
@@ -290,6 +361,13 @@ func GetRun(pg *store.PostgresStore, log *slog.Logger) http.HandlerFunc {
 			writeError(w, http.StatusNotFound, "run not found")
 			return
 		}
+		if contestantID := contestantIDFromRequest(r); contestantID == "" {
+			writeError(w, http.StatusUnauthorized, "authentication required")
+			return
+		} else if run.ContestantID != contestantID {
+			writeError(w, http.StatusNotFound, "run not found")
+			return
+		}
 		writeJSON(w, http.StatusOK, runResponse{
 			SessionID:    run.SessionID,
 			SubmissionID: run.SubmissionID,
@@ -316,6 +394,21 @@ func respondWithGroup(
 	scenarios []store.ScenarioRow,
 	httpStatus int,
 ) {
+	resp, err := groupResponse(ctx, pg, group, scenarios)
+	if err != nil {
+		log.ErrorContext(ctx, "list runs by group", "run_group_id", group.RunGroupID, "error", err)
+		writeError(w, http.StatusInternalServerError, "failed to load child runs")
+		return
+	}
+	writeJSON(w, httpStatus, resp)
+}
+
+func groupResponse(
+	ctx context.Context,
+	pg *store.PostgresStore,
+	group *store.RunGroupMeta,
+	scenarios []store.ScenarioRow,
+) (benchmarkResponse, error) {
 	scenarioName := make(map[string]string, len(scenarios))
 	for _, sc := range scenarios {
 		scenarioName[sc.ScenarioID] = sc.Name
@@ -323,9 +416,7 @@ func respondWithGroup(
 
 	runs, err := pg.ListRunsByGroup(ctx, group.RunGroupID)
 	if err != nil {
-		log.ErrorContext(ctx, "list runs by group", "run_group_id", group.RunGroupID, "error", err)
-		writeError(w, http.StatusInternalServerError, "failed to load child runs")
-		return
+		return benchmarkResponse{}, err
 	}
 	children := make([]runGroupChild, 0, len(runs))
 	for _, r := range runs {
@@ -339,13 +430,13 @@ func respondWithGroup(
 			UpdatedAt:    r.UpdatedAt,
 		})
 	}
-	writeJSON(w, httpStatus, benchmarkResponse{
+	return benchmarkResponse{
 		RunGroupID:   group.RunGroupID,
 		SubmissionID: group.SubmissionID,
 		Status:       group.Status,
 		CreatedAt:    group.CreatedAt,
 		Runs:         children,
-	})
+	}, nil
 }
 
 func newUUIDv7() (string, error) {

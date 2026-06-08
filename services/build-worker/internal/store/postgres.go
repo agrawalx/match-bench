@@ -77,6 +77,27 @@ func (s *PostgresStore) UpdateStatus(ctx context.Context, submissionID, status, 
 	return nil
 }
 
+func (s *PostgresStore) UpdateImageRef(ctx context.Context, submissionID, imageRef string) error {
+	start := time.Now()
+	if imageRef == "" {
+		err := fmt.Errorf("empty image ref")
+		recordDB("update_submission_image_ref", start, err)
+		return err
+	}
+	_, err := s.pool.Exec(ctx,
+		`UPDATE submissions
+		    SET image_ref = $2
+		  WHERE submission_id = $1`,
+		submissionID, imageRef,
+	)
+	if err != nil {
+		recordDB("update_submission_image_ref", start, err)
+		return fmt.Errorf("update image ref: %w", err)
+	}
+	recordDB("update_submission_image_ref", start, nil)
+	return nil
+}
+
 func (s *PostgresStore) RecordPoolStats() {
 	stats := s.pool.Stat()
 	labels := metrics.Labels("service", "build-worker")

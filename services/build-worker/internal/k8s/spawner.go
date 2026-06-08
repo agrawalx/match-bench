@@ -40,6 +40,7 @@ const (
 type StatusUpdater interface {
 	PublishStatus(ctx context.Context, submissionID, status, message string) error
 	UpdateDBStatus(ctx context.Context, submissionID, status, message string) error
+	UpdateImageRef(ctx context.Context, submissionID, imageRef string) error
 }
 
 // MinioClient provides artifact IO for per-submission build jobs.
@@ -141,6 +142,7 @@ func (s *Spawner) Run(ctx context.Context, msg topics.SubmissionBuildRequested) 
 	// Phase 1: fetcher init container extracts ZIP → kaniko builds and pushes to Harbor staging
 	buildJobName := resourceName("build", id)
 	phaseStart = time.Now()
+	s.setStatus(ctx, id, topics.StatusBuilding, "building image")
 	if err := s.createJob(ctx, s.buildJobSpec(buildJobName, msg, stagingRef, dockerfileB64)); err != nil {
 		recordBuildPhase("build", phaseStart, "error")
 		recordBuildRequest("error")
@@ -163,7 +165,6 @@ func (s *Spawner) Run(ctx context.Context, msg topics.SubmissionBuildRequested) 
 		return
 	}
 	recordBuildPhase("build", phaseStart, "ok")
-	s.setStatus(ctx, id, topics.StatusBuilding, "image built and pushed to staging")
 	log.Info("phase 1 complete")
 
 	// Phase 2: Trivy scan + Syft SBOM run in parallel against the staging registry image
@@ -246,7 +247,11 @@ func (s *Spawner) Run(ctx context.Context, msg topics.SubmissionBuildRequested) 
 		Username: s.cfg.HarborUser,
 		Password: s.cfg.HarborPassword,
 	}))
-	if err := crane.Copy(stagingRef, productionRef, auth, crane.WithContext(ctx)); err != nil {
+	copyOptions := []crane.Option{auth, crane.WithContext(ctx)}
+	if isInsecureRegistry(s.cfg.HarborStagingEndpoint) || isInsecureRegistry(s.cfg.HarborProductionEndpoint) {
+		copyOptions = append(copyOptions, crane.Insecure)
+	}
+	if err := crane.Copy(stagingRef, productionRef, copyOptions...); err != nil {
 		recordBuildPhase("promote", phaseStart, "error")
 		metrics.Counter("harbor_promote_total", "Harbor image promotions by result.", metrics.Labels("result", "error"), 1)
 		recordBuildRequest("error")
@@ -257,6 +262,13 @@ func (s *Spawner) Run(ctx context.Context, msg topics.SubmissionBuildRequested) 
 	recordBuildPhase("promote", phaseStart, "ok")
 	metrics.Counter("harbor_promote_total", "Harbor image promotions by result.", metrics.Labels("result", "ok"), 1)
 	log.Info("image promoted to production", "ref", productionRef)
+
+	if err := s.updater.UpdateImageRef(ctx, id, productionRef); err != nil {
+		recordBuildRequest("error")
+		log.Error("persist image ref failed", "error", err)
+		s.setStatus(ctx, id, topics.StatusFailed, fmt.Sprintf("persist image ref: %v", err))
+		return
+	}
 
 	s.setStatus(ctx, id, topics.StatusReady, "image ready")
 	recordBuildRequest("ok")
@@ -358,6 +370,19 @@ func (s *Spawner) buildJobSpec(jobName string, msg topics.SubmissionBuildRequest
 	ttl := jobTTL
 	deadline := buildDeadline
 	backoff := int32(0)
+	kanikoArgs := []string{
+		"--context=dir:///workspace",
+		"--dockerfile=/workspace/Dockerfile",
+		"--destination=" + stagingRef,
+		// Some Kubernetes/containerd nodes expose /product_uuid inside the
+		// executor rootfs. Kaniko can compile successfully, then fail cleaning
+		// a multi-stage build with "device or resource busy" unless this host
+		// path is excluded from snapshots and stage cleanup.
+		"--ignore-path=/product_uuid",
+	}
+	if isInsecureRegistry(s.cfg.HarborStagingEndpoint) {
+		kanikoArgs = append(kanikoArgs, "--insecure-registry="+s.cfg.HarborStagingEndpoint)
+	}
 
 	return &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{
@@ -411,13 +436,9 @@ func (s *Spawner) buildJobSpec(jobName string, msg topics.SubmissionBuildRequest
 					},
 					Containers: []corev1.Container{
 						{
-							Name:  "build",
-							Image: s.cfg.KanikoImage,
-							Args: []string{
-								"--context=dir:///workspace",
-								"--dockerfile=/workspace/Dockerfile",
-								"--destination=" + stagingRef,
-							},
+							Name:            "build",
+							Image:           s.cfg.KanikoImage,
+							Args:            kanikoArgs,
 							SecurityContext: kanikoSecurityContext(),
 							VolumeMounts: []corev1.VolumeMount{
 								{Name: "workspace", MountPath: "/workspace"},
@@ -437,6 +458,15 @@ func (s *Spawner) scanJobSpec(jobName, submissionID, stagingRef string) *batchv1
 	ttl := jobTTL
 	deadline := scanDeadline
 	backoff := int32(0)
+	scanArgs := []string{
+		"image",
+		"--format", "json",
+		"--quiet",
+	}
+	if isInsecureRegistry(s.cfg.HarborStagingEndpoint) {
+		scanArgs = append(scanArgs, "--insecure")
+	}
+	scanArgs = append(scanArgs, stagingRef)
 
 	return &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{
@@ -467,12 +497,7 @@ func (s *Spawner) scanJobSpec(jobName, submissionID, stagingRef string) *batchv1
 						{
 							Name:  "scan",
 							Image: s.cfg.TrivyImage,
-							Args: []string{
-								"image",
-								"--format", "json",
-								"--quiet",
-								stagingRef,
-							},
+							Args:  scanArgs,
 							Env: []corev1.EnvVar{
 								{Name: "TRIVY_USERNAME", ValueFrom: s.secretKeyRef("harbor-user")},
 								{Name: "TRIVY_PASSWORD", ValueFrom: s.secretKeyRef("harbor-password")},
@@ -497,6 +522,19 @@ func (s *Spawner) sbomJobSpec(jobName, submissionID, stagingRef string) *batchv1
 	deadline := sbomDeadline
 	backoff := int32(0)
 	authority := strings.SplitN(stagingRef, "/", 2)[0]
+	sbomEnv := []corev1.EnvVar{
+		{Name: "SYFT_REGISTRY_AUTH_AUTHORITY", Value: authority},
+		{Name: "SYFT_REGISTRY_AUTH_USERNAME", ValueFrom: s.secretKeyRef("harbor-user")},
+		{Name: "SYFT_REGISTRY_AUTH_PASSWORD", ValueFrom: s.secretKeyRef("harbor-password")},
+		{Name: "TMPDIR", Value: "/tmp"},
+		{Name: "XDG_CACHE_HOME", Value: "/tmp/.cache"},
+	}
+	if isInsecureRegistry(s.cfg.HarborStagingEndpoint) {
+		sbomEnv = append(sbomEnv,
+			corev1.EnvVar{Name: "SYFT_REGISTRY_INSECURE_USE_HTTP", Value: "true"},
+			corev1.EnvVar{Name: "SYFT_REGISTRY_INSECURE_SKIP_TLS_VERIFY", Value: "true"},
+		)
+	}
 
 	return &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{
@@ -531,13 +569,7 @@ func (s *Spawner) sbomJobSpec(jobName, submissionID, stagingRef string) *batchv1
 								"-o", "spdx-json",
 								"-q",
 							},
-							Env: []corev1.EnvVar{
-								{Name: "SYFT_REGISTRY_AUTH_AUTHORITY", Value: authority},
-								{Name: "SYFT_REGISTRY_AUTH_USERNAME", ValueFrom: s.secretKeyRef("harbor-user")},
-								{Name: "SYFT_REGISTRY_AUTH_PASSWORD", ValueFrom: s.secretKeyRef("harbor-password")},
-								{Name: "TMPDIR", Value: "/tmp"},
-								{Name: "XDG_CACHE_HOME", Value: "/tmp/.cache"},
-							},
+							Env: sbomEnv,
 							VolumeMounts: []corev1.VolumeMount{
 								{Name: "tmp", MountPath: "/tmp"},
 							},
@@ -745,6 +777,16 @@ func boolPtr(v bool) *bool {
 
 func int64Ptr(v int64) *int64 {
 	return &v
+}
+
+func isInsecureRegistry(endpoint string) bool {
+	endpoint = strings.TrimSpace(strings.TrimPrefix(strings.TrimPrefix(endpoint, "http://"), "https://"))
+	return strings.HasPrefix(endpoint, "localhost:") ||
+		strings.HasPrefix(endpoint, "127.0.0.1:") ||
+		strings.HasPrefix(endpoint, "10.") ||
+		strings.HasPrefix(endpoint, "172.") ||
+		strings.HasPrefix(endpoint, "192.168.") ||
+		strings.Contains(endpoint, "kind-registry")
 }
 
 // recordBuildPhase and recordBuildRequest expose build pipeline health.

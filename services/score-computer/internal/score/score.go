@@ -109,22 +109,18 @@ func Compute(in Input) (Result, error) {
 		TotalCorrectness: aggregateCorrectness(in.Sessions),
 	}
 
-	if res.TotalCorrectness < cfg.CorrectnessDQThreshold {
-		res.Disqualified = true
-		res.DisqualificationCode = "correctness_below_threshold"
-		return res, nil
-	}
-
 	var ramp *Session
+	disqualificationCode := ""
+	if res.TotalCorrectness < cfg.CorrectnessDQThreshold {
+		disqualificationCode = "correctness_below_threshold"
+	}
 	for i := range in.Sessions {
 		s := &in.Sessions[i]
 		if s.Correct.TotalFills > 0 {
 			sessionCorrectness := float64(s.Correct.ValidFills) / float64(s.Correct.TotalFills)
 			sessionCorrectness = min(sessionCorrectness, 1.0)
-			if sessionCorrectness < cfg.CorrectnessDQThreshold {
-				res.Disqualified = true
-				res.DisqualificationCode = "session_correctness_below_threshold"
-				return res, nil
+			if sessionCorrectness < cfg.CorrectnessDQThreshold && disqualificationCode == "" {
+				disqualificationCode = "session_correctness_below_threshold"
 			}
 		}
 		if s.Scenario == "ramp" {
@@ -134,12 +130,10 @@ func Compute(in Input) (Result, error) {
 	if ramp == nil {
 		return res, ErrMissingRampSession
 	}
-	if ramp.Correct.ViolationCount > 0 {
+	if ramp.Correct.ViolationCount > 0 && disqualificationCode == "" {
 		// v1 approximation from ROADMAP.md: session-level correctness gate is
 		// applied to every wave until correctness_violations carries wave buckets.
-		res.Disqualified = true
-		res.DisqualificationCode = "ramp_session_violation"
-		return res, nil
+		disqualificationCode = "ramp_session_violation"
 	}
 
 	res.SpikeRecoveryNS = spikeRecoveryNS(in.Sessions, cfg.WaveDurationNS)
@@ -170,6 +164,10 @@ func Compute(in Input) (Result, error) {
 		if !wr.Passed {
 			break
 		}
+	}
+	if disqualificationCode != "" {
+		res.Disqualified = true
+		res.DisqualificationCode = disqualificationCode
 	}
 	return res, nil
 }

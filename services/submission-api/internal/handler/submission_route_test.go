@@ -2,6 +2,8 @@ package handler
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -58,15 +60,29 @@ func TestIntegration_GetSubmissionRoute(t *testing.T) {
 	fixed := chi.NewRouter()
 	fixed.Get("/submissions/{submission_id}", h)
 	rec = httptest.NewRecorder()
-	fixed.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/submissions/"+id, nil))
+	fixed.ServeHTTP(rec, authedRequest(http.MethodGet, "/submissions/"+id, "c"))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("matched route, existing submission: got %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
 
+	rec = httptest.NewRecorder()
+	fixed.ServeHTTP(rec, authedRequest(http.MethodGet, "/submissions/"+id, "other-contestant"))
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("matched route, other contestant: got %d, want 404; body=%s", rec.Code, rec.Body.String())
+	}
+
 	// Missing id on the fixed route -> 404 (not 400/500).
 	rec = httptest.NewRecorder()
-	fixed.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/submissions/does-not-exist-"+id, nil))
+	fixed.ServeHTTP(rec, authedRequest(http.MethodGet, "/submissions/does-not-exist-"+id, "c"))
 	if rec.Code != http.StatusNotFound {
 		t.Errorf("matched route, missing submission: got %d, want 404", rec.Code)
 	}
+}
+
+func authedRequest(method, target, sub string) *http.Request {
+	req := httptest.NewRequest(method, target, nil)
+	header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"none"}`))
+	payload, _ := json.Marshal(map[string]string{"sub": sub})
+	req.Header.Set("Authorization", "Bearer "+header+"."+base64.RawURLEncoding.EncodeToString(payload)+".")
+	return req
 }

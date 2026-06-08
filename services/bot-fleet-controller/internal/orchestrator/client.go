@@ -10,8 +10,8 @@
 // Pod and one Service (both named algo-{slot_id}), created together on
 // POST and released together on DELETE. slot_id is always the controller's
 // session_id verbatim — the orchestrator does not mint its own IDs. Image
-// ref is supplied by the caller (controller composes the Harbor reference
-// from HARBOR_PRODUCTION_ENDPOINT and HARBOR_PROJECT env).
+// ref is supplied by the caller from submissions.image_ref, which is persisted
+// by the build pipeline after the image is pushed/promoted.
 package orchestrator
 
 import (

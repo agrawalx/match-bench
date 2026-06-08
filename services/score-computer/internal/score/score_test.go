@@ -60,8 +60,8 @@ func TestComputeCorrectnessDQ(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !res.Disqualified || res.PeakSustainedTPS != 0 || res.DisqualificationCode == "" {
-		t.Fatalf("want dq with zero peak, got %#v", res)
+	if !res.Disqualified || res.PeakSustainedTPS != 30_000 || res.DisqualificationCode == "" {
+		t.Fatalf("want dq with measured peak retained, got %#v", res)
 	}
 }
 

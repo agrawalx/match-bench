@@ -72,7 +72,8 @@ impl TelemetrySink {
     }
 
     /// close drops the final sender and waits for the aggregator to flush.
-    /// Any final publish failure is returned to the workload caller.
+    /// Telemetry is loss-tolerant; publish failures are logged by the
+    /// aggregator and must not block workload offset commits.
     pub async fn close(self) -> Result<()> {
         drop(self.tx);
 
@@ -124,9 +125,11 @@ async fn run_aggregator(
                         }
                     }
                     None => {
-                        flush(&producer, &topic, &session_id, &worker_id, &mut events)
-                            .await
-                            .context("flush final telemetry batch")?;
+                        if let Err(err) = flush(&producer, &topic, &session_id, &worker_id, &mut events).await {
+                            error!(error = %err, "failed to flush final telemetry batch");
+                            metrics::telemetry_dropped();
+                            events.clear();
+                        }
                         return Ok(());
                     }
                 }
@@ -179,6 +182,7 @@ async fn flush(
     Ok(())
 }
 
-/// Max events per published orders.sent Kafka message — keeps each message well
-/// under the 1 MiB topic max.message.bytes regardless of how many accumulated.
-const MAX_EVENTS_PER_BATCH: usize = 1000;
+/// Max events per published orders.sent Kafka message. Keep this comfortably
+/// under Kafka's default 1 MiB max.message.bytes even when msgpack named-field
+/// payloads grow with larger identifiers and FIX telemetry.
+const MAX_EVENTS_PER_BATCH: usize = 200;

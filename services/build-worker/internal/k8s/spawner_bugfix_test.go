@@ -95,6 +95,31 @@ func TestScanSbomHaveWritableScratch(t *testing.T) {
 	}
 }
 
+func TestBuildJobAllowsInsecureKindRegistry(t *testing.T) {
+	s := bugfixSpawner(fake.NewSimpleClientset(), nil)
+	s.cfg.HarborStagingEndpoint = "172.20.0.3:5000"
+
+	build := s.buildJobSpec("build-sub", topics.SubmissionBuildRequested{SubmissionID: "sub"}, "172.20.0.3:5000/iicpc/sub:latest", "b64")
+	args := build.Spec.Template.Spec.Containers[0].Args
+	if !containsString(args, "--insecure-registry=172.20.0.3:5000") {
+		t.Fatalf("kaniko args missing insecure registry flag: %v", args)
+	}
+	if !containsString(args, "--ignore-path=/product_uuid") {
+		t.Fatalf("kaniko args missing product_uuid ignore path: %v", args)
+	}
+
+	scan := s.scanJobSpec("scan-sub", "sub", "172.20.0.3:5000/iicpc/sub:latest")
+	if !containsString(scan.Spec.Template.Spec.Containers[0].Args, "--insecure") {
+		t.Fatalf("trivy args missing insecure flag: %v", scan.Spec.Template.Spec.Containers[0].Args)
+	}
+
+	sbom := s.sbomJobSpec("sbom-sub", "sub", "172.20.0.3:5000/iicpc/sub:latest")
+	env := sbom.Spec.Template.Spec.Containers[0].Env
+	if value, ok := bfEnv(corev1.Container{Env: env}, "SYFT_REGISTRY_INSECURE_USE_HTTP"); !ok || value != "true" {
+		t.Fatalf("syft missing insecure http env, got %q present=%v", value, ok)
+	}
+}
+
 // H6: a redelivered build (deterministic Job name already exists within its TTL)
 // must NOT force-fail the submission — createJob treats AlreadyExists as success.
 func TestCreateJobIdempotentOnRedelivery(t *testing.T) {
@@ -145,4 +170,17 @@ func (r *recordingUpdater) UpdateDBStatus(ctx context.Context, _, _, _ string) e
 	r.dbWritten = true
 	r.dbCtxErr = ctx.Err()
 	return nil
+}
+
+func (r *recordingUpdater) UpdateImageRef(context.Context, string, string) error {
+	return nil
+}
+
+func containsString(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
 }

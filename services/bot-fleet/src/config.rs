@@ -48,7 +48,7 @@ impl Default for Config {
             workload_failed_topic: TOPIC_WORKLOAD_FAILED.to_string(),
             orders_sent_topic: TOPIC_ORDERS_SENT.to_string(),
             telemetry_flush_interval: Duration::from_millis(5),
-            telemetry_batch_size: 4096,
+            telemetry_batch_size: 200,
             telemetry_channel_capacity: 65536,
             // The per-pod task ceiling. Must be >= the controller's
             // MAX_TASKS_PER_WORKER (default 1000): the controller shards a

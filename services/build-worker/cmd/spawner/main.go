@@ -128,6 +128,10 @@ func (u *statusUpdater) UpdateDBStatus(ctx context.Context, submissionID, status
 	return u.pg.UpdateStatus(ctx, submissionID, status, message)
 }
 
+func (u *statusUpdater) UpdateImageRef(ctx context.Context, submissionID, imageRef string) error {
+	return u.pg.UpdateImageRef(ctx, submissionID, imageRef)
+}
+
 func envOr(key, def string) string {
 	if v := os.Getenv(key); v != "" {
 		return v

@@ -3,6 +3,8 @@ package read
 import (
 	"strings"
 	"testing"
+
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 func TestLeaderboardOrderByAllowlist(t *testing.T) {
@@ -43,5 +45,14 @@ func TestCacheableLeaderboardOnlyDefaultTopRank(t *testing.T) {
 	}
 	if cacheableLeaderboard(LeaderboardQuery{Limit: 50, ContestantID: "c1"}) {
 		t.Fatal("filtered leaderboard should not be cacheable")
+	}
+}
+
+func TestIsUndefinedTable(t *testing.T) {
+	if !isUndefinedTable(&pgconn.PgError{Code: "42P01"}) {
+		t.Fatal("undefined_table was not recognized")
+	}
+	if isUndefinedTable(&pgconn.PgError{Code: "23505"}) {
+		t.Fatal("non-undefined table error was recognized")
 	}
 }

@@ -4,10 +4,12 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -123,6 +125,9 @@ SELECT rank, run_group_id, submission_id, contestant_id, team_name, peak_sustain
  ORDER BY `+orderBy+`
  LIMIT $5 OFFSET $6`, q.RunGroupID, q.SubmissionID, contestantFilter, q.TeamName, limit+1, offset)
 	if err != nil {
+		if isUndefinedTable(err) {
+			return LeaderboardResponse{Source: "frozen", Rows: []LeaderboardRow{}}, nil
+		}
 		return LeaderboardResponse{}, err
 	}
 	defer rows.Close()
@@ -155,6 +160,11 @@ SELECT rank, run_group_id, submission_id, contestant_id, team_name, peak_sustain
 	return resp, nil
 }
 
+func isUndefinedTable(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == "42P01"
+}
+
 type leaderboardCursor struct {
 	Offset int `json:"offset"`
 }
@@ -174,11 +184,11 @@ type SessionDetail struct {
 }
 
 type MetricPoint struct {
-	TimeUnixNS int64   `json:"time_unix_ns"`
-	WaveIndex  int     `json:"wave_index"`
-	P50NS      uint64  `json:"p50_ns"`
-	P90NS      uint64  `json:"p90_ns"`
-	P99NS      uint64  `json:"p99_ns"`
+	TimeUnixNS int64  `json:"time_unix_ns"`
+	WaveIndex  int    `json:"wave_index"`
+	P50NS      uint64 `json:"p50_ns"`
+	P90NS      uint64 `json:"p90_ns"`
+	P99NS      uint64 `json:"p99_ns"`
 	// response_time = r9 - t0: the bot-side round trip including coordinated-
 	// omission delay (vs service_time = t7 - t3, the algo-side processing only).
 	RTP50NS    uint64  `json:"rt_p50_ns"`

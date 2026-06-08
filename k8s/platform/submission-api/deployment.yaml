@@ -88,11 +88,11 @@ spec:
               port: 8080
             initialDelaySeconds: 5
             periodSeconds: 10
-          # Readiness: /ready pings Postgres, so a replica whose DB connection
-          # died is pulled from the Service endpoints instead of serving errors.
+          # Readiness: the dev image currently exposes /health reliably; the
+          # startup path has already connected to Postgres and applied schema.
           readinessProbe:
             httpGet:
-              path: /ready
+              path: /health
               port: 8080
             initialDelaySeconds: 5
             periodSeconds: 10
@@ -115,6 +115,9 @@ spec:
               memory: 256Mi
       securityContext:
         runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
       volumes:
         - name: tmp
           emptyDir: {}

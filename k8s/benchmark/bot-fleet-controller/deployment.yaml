@@ -54,13 +54,6 @@ spec:
                 secretKeyRef:
                   name: bot-fleet-controller-secret
                   key: database-url
-            - name: HARBOR_PRODUCTION_ENDPOINT
-              valueFrom:
-                secretKeyRef:
-                  name: bot-fleet-controller-secret
-                  key: harbor-production-endpoint
-            - name: HARBOR_PROJECT
-              value: agrawalx
             # Per-pod fan-out: WorkerCount = ceil(scenario_tasks / this). Raise it
             # ABOVE a scenario's task count to pin ALL load on ONE pod (single-pod
             # capacity testing); lower it to spread load across more pods. MUST be
@@ -95,3 +88,6 @@ spec:
               memory: 256Mi
       securityContext:
         runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532

@@ -1,0 +1,54 @@
+# Optional local platform services.
+# Use with docker-compose.yml and docker-compose.kafka.yml so every service uses
+# the same local Docker Compose Postgres, TimescaleDB, Redis, and Kafka cluster.
+
+services:
+  leaderboard-api:
+    build:
+      context: .
+      dockerfile: services/leaderboard-api/Dockerfile
+    environment:
+      PORT: "8080"
+      METRICS_ADDR: "0.0.0.0:9090"
+      DATABASE_URL: postgres://iicpc:iicpc@postgres:5432/iicpc
+      TIMESCALE_URL: postgres://iicpc:iicpc@timescaledb:5432/metrics
+      REDIS_ADDR: redis:6379
+      KAFKA_BROKERS: kafka-1:9092,kafka-2:9092,kafka-3:9092
+      PROMETHEUS_URL: http://prometheus:9090
+    ports:
+      - "8081:8080"
+      - "9101:9090"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      timescaledb:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      kafka-init:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  submission-api:
+    build:
+      context: .
+      dockerfile: services/submission-api/Dockerfile
+    environment:
+      PORT: "8080"
+      DATABASE_URL: postgres://iicpc:iicpc@postgres:5432/iicpc
+      MINIO_ENDPOINT: minio:9000
+      MINIO_ACCESS_KEY: minioadmin
+      MINIO_SECRET_KEY: minioadmin
+      MINIO_BUCKET: submissions
+      MINIO_CREATE_BUCKET_IF_MISSING: "true"
+      KAFKA_BROKERS: kafka-1:9092,kafka-2:9092,kafka-3:9092
+    ports:
+      - "8082:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      kafka-init:
+        condition: service_completed_successfully
+    restart: unless-stopped

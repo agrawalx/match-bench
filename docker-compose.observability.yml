@@ -38,7 +38,7 @@ services:
       GF_SECURITY_ADMIN_PASSWORD: admin
       GF_USERS_DEFAULT_THEME: system
     ports:
-      - "3000:3000"
+      - "3005:3000"
     volumes:
       - grafana_data:/var/lib/grafana
       - ./ops/grafana/provisioning:/etc/grafana/provisioning:ro

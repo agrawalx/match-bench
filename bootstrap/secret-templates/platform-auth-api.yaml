@@ -1,0 +1,11 @@
+# Placeholder secret shape only. Create the real secret outside Git.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: auth-api-secret
+  namespace: platform
+type: Opaque
+data:
+  google-client-id: ""
+  google-client-secret: ""
+  google-allowed-redirect-uris: ""

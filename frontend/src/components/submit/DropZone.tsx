@@ -43,7 +43,6 @@ export function DropZone({ file, error, onFile }: Props) {
               <Archive size={22} strokeWidth={1.8} />
             </span>
             <span className={styles.file}>{file.name}</span>
-            <span className={styles.size}>{(file.size / 1024 / 1024).toFixed(2)} MB</span>
             <span
               className={styles.clear}
               role="button"

@@ -244,6 +244,124 @@
   font-family: var(--font-mono);
 }
 
+/* Run History Table styling */
+.tableWrap {
+  overflow-x: auto;
+  border-top: 1px solid var(--color-border-subtle);
+  margin-top: var(--space-4);
+}
+
+.runTable {
+  width: 100%;
+  border-collapse: collapse;
+  table-layout: fixed;
+}
+
+.runTable th {
+  height: 38px;
+  color: #555555;
+  border-bottom: 1px solid var(--color-border-subtle);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.1em;
+  text-align: left;
+  padding: 0 12px;
+}
+
+.runTableRow {
+  height: 52px;
+  border-bottom: 1px solid var(--color-surface-1);
+  cursor: pointer;
+  transition: background var(--duration-base) var(--ease-std);
+}
+
+.runTableRow:hover {
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.runTableRow td {
+  padding: 0 12px;
+  font-size: 13px;
+}
+
+.runId {
+  color: var(--color-text-primary);
+  font-family: var(--font-mono);
+  font-weight: 500;
+}
+
+.submissionId {
+  color: var(--color-text-secondary);
+  font-family: var(--font-mono);
+}
+
+.timestamp {
+  color: var(--color-text-tertiary);
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+
+/* Status Badges */
+.statusBadge {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: var(--radius-sm);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  background: var(--color-surface-3);
+  color: var(--color-text-secondary);
+  border: 1px solid var(--color-border-subtle);
+}
+
+.status_requested {
+  background: rgba(230, 211, 106, 0.08);
+  color: var(--color-warning, #e6d36a);
+  border-color: rgba(230, 211, 106, 0.22);
+}
+
+.status_running {
+  background: rgba(0, 229, 255, 0.05);
+  color: var(--color-accent);
+  border-color: var(--color-accent-dim);
+}
+
+.status_completed {
+  background: rgba(46, 204, 113, 0.08);
+  color: var(--color-success, #2ecc71);
+  border-color: rgba(46, 204, 113, 0.22);
+}
+
+.status_failed {
+  background: rgba(231, 76, 60, 0.08);
+  color: var(--color-error, #e74c3c);
+  border-color: rgba(231, 76, 60, 0.22);
+}
+
+/* Detail Mode Back Link */
+.backLink {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin-bottom: var(--space-2);
+  background: none;
+  border: none;
+  color: var(--color-text-secondary);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  cursor: pointer;
+  padding: 0;
+  transition: color var(--duration-base) var(--ease-std);
+}
+
+.backLink:hover {
+  color: var(--color-accent);
+}
+
 @media (max-width: 1000px) {
   .charts {
     grid-template-columns: 1fr;

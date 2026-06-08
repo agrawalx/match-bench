@@ -1,7 +1,13 @@
 export function formatLatencyNs(value: number): string {
   if (!Number.isFinite(value)) return '-';
   if (value === 0) return '0 us';
-  const microseconds = value / 1000;
+  return formatLatencyUs(value / 1000);
+}
+
+export function formatLatencyUs(value: number): string {
+  if (!Number.isFinite(value)) return '-';
+  if (value === 0) return '0 us';
+  const microseconds = value;
   if (microseconds < 1000) return `${microseconds.toFixed(1)} us`;
   const milliseconds = microseconds / 1000;
   if (milliseconds < 1000) return `${milliseconds.toFixed(2)} ms`;

@@ -103,6 +103,24 @@
   transition: width 0.25s var(--ease-std);
 }
 
+.hint {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-2);
+  padding: 10px 12px;
+  color: var(--color-warning);
+  background: rgba(255, 214, 0, 0.08);
+  border: 1px solid rgba(255, 214, 0, 0.32);
+  border-radius: var(--radius-md);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.hint svg {
+  flex: 0 0 auto;
+  margin-top: 1px;
+}
+
 .logs {
   max-height: 200px;
   overflow: auto;

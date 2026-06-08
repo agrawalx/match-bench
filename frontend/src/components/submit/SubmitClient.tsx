@@ -4,7 +4,8 @@ import { useState } from 'react';
 import { useMutation, useQuery } from '@tanstack/react-query';
 import { useRouter } from 'next/navigation';
 import { motion } from 'framer-motion';
-import { LogIn, Play, Send, ShieldCheck } from 'lucide-react';
+import { AlertTriangle, LogIn, Play, Send, ShieldCheck } from 'lucide-react';
+import toast from 'react-hot-toast';
 import { GoogleButton } from '@/auth/GoogleButton';
 import { useAuth } from '@/auth/useAuth';
 import { createRun, getSubmissionStatus, uploadSubmission } from '@/api/submission';
@@ -17,14 +18,18 @@ import { UploadProgress } from './UploadProgress';
 import styles from './SubmitClient.module.css';
 
 export function SubmitClient() {
-  const { status, getToken, signIn } = useAuth();
+  const { status, user, getToken, signIn } = useAuth();
   const router = useRouter();
   const [file, setFile] = useState<File | null>(null);
   const [progress, setProgress] = useState(0);
   const [submissionId, setSubmissionId] = useState<string | null>(null);
+  const [optimisticStatus, setOptimisticStatus] = useState<SubmissionStatus | null>(null);
   const [fileError, setFileError] = useState<string | null>(null);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
+  const [isDuplicate, setIsDuplicate] = useState(false);
   const token = getToken();
+  const ownerId = user?.contestantId || user?.sub || '';
+  const duplicateError = fileError?.toLowerCase().includes('duplicate') ?? false;
 
   const statusQuery = useQuery<SubmissionStatus>({
     queryKey: ['submission', submissionId],
@@ -46,14 +51,48 @@ export function SubmitClient() {
       return uploadSubmission(file, token, setProgress);
     },
     onSuccess: (result) => {
-      rememberSubmissionId(result.submission_id);
+      const now = new Date().toISOString();
+      rememberSubmissionId(result.submission_id, ownerId);
       setSubmissionId(result.submission_id);
+      setOptimisticStatus({
+        submission_id: result.submission_id,
+        contestant_id: ownerId || undefined,
+        status: 'queued',
+        created_at: now,
+        updated_at: now,
+      });
       setProgress(100);
-      setStatusMessage(result.reused ? 'Bundle already exists. Loaded the existing submission.' : null);
+      setIsDuplicate(Boolean(result.reused));
+      setStatusMessage(result.reused ? 'Duplicate submission detected. Existing submission loaded.' : null);
+      if (result.reused) {
+        toast('Duplicate submission detected. Loaded the existing submission instead.', {
+          icon: <AlertTriangle size={18} strokeWidth={2} />,
+          duration: 9000,
+          style: {
+            borderColor: 'rgba(255, 214, 0, 0.5)',
+          },
+        });
+      } else {
+        toast.success('Bundle uploaded. Build pipeline started.');
+      }
     },
     onError: (error) => {
+      const message = error instanceof Error ? error.message : 'Upload failed';
+      const duplicate = message.toLowerCase().includes('duplicate');
+      setIsDuplicate(duplicate);
       setStatusMessage(null);
-      setFileError(error instanceof Error ? error.message : 'Upload failed');
+      setFileError(message);
+      if (duplicate) {
+        toast('Duplicate submission detected. Change the ZIP contents and upload again.', {
+          icon: <AlertTriangle size={18} strokeWidth={2} />,
+          duration: 9000,
+          style: {
+            borderColor: 'rgba(255, 214, 0, 0.5)',
+          },
+        });
+      } else {
+        toast.error(message);
+      }
     },
   });
 
@@ -63,14 +102,18 @@ export function SubmitClient() {
       return createRun(submissionId, token);
     },
     onSuccess: (result) => {
-      rememberSubmissionId(result.submission_id);
-      rememberRunGroupId(result.run_group_id);
+      rememberSubmissionId(result.submission_id, ownerId);
+      rememberRunGroupId(result.run_group_id, ownerId);
       router.push(`/run?run_group_id=${encodeURIComponent(result.run_group_id)}`);
+    },
+    onError: (error) => {
+      toast.error(error instanceof Error ? error.message : 'Benchmark run failed');
     },
   });
 
   const authenticated = status === 'authenticated';
-  const terminalReady = statusQuery.data?.status === 'ready';
+  const timelineStatus = statusQuery.data ?? optimisticStatus;
+  const terminalReady = timelineStatus?.status === 'ready';
 
   return (
     <motion.section
@@ -102,14 +145,47 @@ export function SubmitClient() {
             </div>
           )}
           <UploadProgress progress={progress} />
+          {(isDuplicate || duplicateError) && (
+            <div className={styles.duplicateWarning}>
+              <div className={styles.duplicateIcon}>
+                <AlertTriangle size={20} strokeWidth={2} />
+              </div>
+              <div className={styles.duplicateText}>
+                <strong>Duplicate Submission Detected</strong>
+                {submissionId ? (
+                  <>
+                    <p>
+                      This exact ZIP bundle (matching SHA256) was already uploaded.
+                      The platform loaded the existing submission, so any run uses the previously built version.
+                    </p>
+                    <small>
+                      To build a new version, make a trivial edit, re-zip the bundle, and upload again.
+                    </small>
+                  </>
+                ) : (
+                  <>
+                    <p>
+                      This ZIP matches a bundle that is already in the platform cache, so it cannot be accepted as a new submission.
+                    </p>
+                    <small>
+                      Use one of the fresh sample ZIPs or change any source/comment before re-zipping.
+                    </small>
+                  </>
+                )}
+              </div>
+            </div>
+          )}
           <div className={styles.dropWrap}>
             <DropZone
               file={file}
               error={null}
               onFile={(next) => {
                 setFile(next);
+                setSubmissionId(null);
+                setOptimisticStatus(null);
                 setFileError(null);
                 setStatusMessage(null);
+                setIsDuplicate(false);
                 setProgress(0);
               }}
             />
@@ -137,14 +213,15 @@ export function SubmitClient() {
             )}
           </div>
           {(fileError || statusMessage || run.error) && (
-            <p className={fileError || run.error ? styles.actionError : styles.actionNotice}>
-              {fileError ?? statusMessage ?? (run.error instanceof Error ? run.error.message : 'Benchmark run failed')}
-            </p>
+            <div className={(fileError && !duplicateError) || run.error ? styles.actionError : styles.actionNotice} role="status">
+              <AlertTriangle size={16} strokeWidth={2} aria-hidden="true" />
+              <span>{fileError ?? statusMessage ?? (run.error instanceof Error ? run.error.message : 'Benchmark run failed')}</span>
+            </div>
           )}
         </motion.div>
         <motion.aside className={styles.statusPanel} aria-label="Submission status" layout>
-          <BuildTimeline status={statusQuery.data ?? null} />
-          {!statusQuery.data && (
+          <BuildTimeline status={timelineStatus ?? null} />
+          {!timelineStatus && (
             <div className={styles.placeholder}>
               <ShieldCheck size={24} strokeWidth={1.6} aria-hidden="true" />
               <strong>Pipeline status</strong>

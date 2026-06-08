@@ -2,6 +2,7 @@
 
 import { Bar, BarChart, CartesianGrid, ReferenceLine, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
 import type { LatencyHistogram as Histogram, RunDetail } from '@/types/run';
+import { formatLatencyUs } from '@/utils/format';
 import styles from './Charts.module.css';
 
 export function LatencyHistogram({ histogram, run }: { histogram?: Histogram; run: RunDetail }) {
@@ -19,9 +20,24 @@ export function LatencyHistogram({ histogram, run }: { histogram?: Histogram; ru
           <ResponsiveContainer width="100%" height={280}>
             <BarChart data={data}>
               <CartesianGrid stroke="#1a1a1a" vertical={false} />
-              <XAxis dataKey="upper_bound_us" tick={{ fill: '#555', fontSize: 11 }} stroke="#222" />
+              <XAxis
+                dataKey="upper_bound_us"
+                tick={{ fill: '#555', fontSize: 11 }}
+                stroke="#222"
+                tickFormatter={formatLatencyUs}
+              />
               <YAxis tick={{ fill: '#555', fontSize: 11 }} stroke="#222" />
-              <Tooltip contentStyle={{ background: '#161616', border: '1px solid #222', borderRadius: 4, color: '#e8e8e8', fontFamily: 'var(--font-mono)' }} />
+              <Tooltip
+                formatter={(value) => [value, 'Samples']}
+                labelFormatter={(value) => `<= ${formatLatencyUs(Number(value))}`}
+                contentStyle={{
+                  background: '#161616',
+                  border: '1px solid #222',
+                  borderRadius: 4,
+                  color: '#e8e8e8',
+                  fontFamily: 'var(--font-mono)',
+                }}
+              />
               <Bar dataKey="count" fill="#00e5ff" opacity={0.65} />
               {histogram && <ReferenceLine x={histogram.p50_us} stroke="#00c853" strokeDasharray="4 4" />}
               {histogram && <ReferenceLine x={histogram.p99_us} stroke="#ffd600" strokeDasharray="4 4" />}

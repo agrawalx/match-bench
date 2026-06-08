@@ -59,7 +59,6 @@ export function getRunGroups(
   token: string,
 ): Promise<RunGroupHistoryResponse> {
   const query = new URLSearchParams();
-  if (params.contestantId) query.set('contestant_id', params.contestantId);
   for (const submissionId of params.submissionIds ?? []) {
     query.append('submission_id', submissionId);
   }

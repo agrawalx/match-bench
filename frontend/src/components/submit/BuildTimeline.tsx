@@ -1,7 +1,7 @@
 import { Badge } from '@/components/common/Badge';
 import type { SubmissionStatus } from '@/types/submission';
 import { AnimatePresence, motion } from 'framer-motion';
-import { CheckCircle2, XCircle } from 'lucide-react';
+import { AlertTriangle, CheckCircle2, XCircle } from 'lucide-react';
 import styles from './BuildTimeline.module.css';
 
 const steps = ['queued', 'building', 'scanning', 'promoting', 'ready'] as const;
@@ -21,6 +21,8 @@ export function BuildTimeline({ status }: { status: SubmissionStatus | null }) {
   const isTerminal = status.status === 'ready' || status.status === 'failed';
   const logs = status.build_logs?.split('\n').slice(-20).join('\n');
   const timestamp = status.updated_at ?? status.created_at;
+  const queuedForMs = Date.now() - Date.parse(timestamp);
+  const showQueuedHint = status.status === 'queued' && queuedForMs > 90_000;
 
   return (
     <section className={styles.timeline}>
@@ -54,6 +56,14 @@ export function BuildTimeline({ status }: { status: SubmissionStatus | null }) {
       <div className={styles.track} aria-hidden="true">
         <span style={{ width: `${(progress / steps.length) * 100}%` }} />
       </div>
+      {showQueuedHint && (
+        <div className={styles.hint} role="status">
+          <AlertTriangle size={16} strokeWidth={2} aria-hidden="true" />
+          <span>
+            Still queued. Check that the local build-worker is running and connected to the same Kafka/Postgres stack.
+          </span>
+        </div>
+      )}
       {status.status === 'failed' && logs && <pre className={styles.logs}>{logs}</pre>}
     </section>
   );

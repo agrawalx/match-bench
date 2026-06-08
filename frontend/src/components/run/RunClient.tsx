@@ -4,7 +4,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { motion } from 'framer-motion';
 import { useRouter } from 'next/navigation';
-import { Brackets, CheckCircle2, Clock3, History, LoaderCircle, XCircle } from 'lucide-react';
+import { ArrowLeft, Brackets, CheckCircle2, Clock3, History, LoaderCircle, XCircle } from 'lucide-react';
 import { GoogleButton } from '@/auth/GoogleButton';
 import { useAuth } from '@/auth/useAuth';
 import { getRunGroups, getRunGroupStatus } from '@/api/submission';
@@ -12,11 +12,11 @@ import { platformConfig } from '@/config/platform';
 import { ErrorBanner } from '@/components/common/ErrorBanner';
 import { useRunDetail } from '@/hooks/useRunDetail';
 import {
-  getRememberedRunGroupId,
   getRememberedSubmissionIds,
   rememberRunGroupId,
   rememberSubmissionId,
 } from '@/utils/submissionHistory';
+import type { RunGroupStatus } from '@/types/run';
 import { LatencyHistogram } from './LatencyHistogram';
 import { RunHeader } from './RunHeader';
 import { SessionCards } from './SessionCards';
@@ -27,29 +27,30 @@ export function RunClient({ initialRunGroupId }: { initialRunGroupId?: string })
   const { status, user, getToken } = useAuth();
   const router = useRouter();
   const token = getToken();
-  const [selectedRunGroupId, setSelectedRunGroupId] = useState<string | null>(null);
+  const ownerId = user?.contestantId || user?.sub || '';
   const [rememberedSubmissionIds, setRememberedSubmissionIds] = useState<string[]>([]);
+
+  // Determine mode: detail (run_group_id provided) vs table (no run_group_id)
+  const detailMode = Boolean(initialRunGroupId);
 
   useEffect(() => {
     if (initialRunGroupId) {
-      rememberRunGroupId(initialRunGroupId);
-      setSelectedRunGroupId(initialRunGroupId);
-      return;
+      rememberRunGroupId(initialRunGroupId, ownerId);
     }
-    setSelectedRunGroupId(getRememberedRunGroupId());
-  }, [initialRunGroupId]);
+  }, [initialRunGroupId, ownerId]);
 
   useEffect(() => {
-    setRememberedSubmissionIds(getRememberedSubmissionIds());
-  }, []);
+    setRememberedSubmissionIds(getRememberedSubmissionIds(ownerId));
+  }, [ownerId]);
 
+  // History query — used in table mode to list all run groups
   const historyQuery = useQuery({
     queryKey: ['my-run-history', user?.contestantId, rememberedSubmissionIds],
     enabled: status === 'authenticated',
     queryFn: () =>
       getRunGroups(
         {
-          contestantId: user?.contestantId || user?.sub,
+          contestantId: ownerId,
           submissionIds: rememberedSubmissionIds,
           limit: platformConfig.leaderboardLimit,
         },
@@ -61,16 +62,18 @@ export function RunClient({ initialRunGroupId }: { initialRunGroupId?: string })
 
   const history = useMemo(() => historyQuery.data?.run_groups ?? [], [historyQuery.data?.run_groups]);
 
-  const { data, histogram, throughput, isLoading, error } = useRunDetail(selectedRunGroupId);
+  // Detail queries — only active in detail mode
+  const { data, histogram, throughput, isLoading, error } = useRunDetail(detailMode ? (initialRunGroupId ?? null) : null);
   const runGroupQuery = useQuery({
-    queryKey: ['run-group-status', selectedRunGroupId],
-    enabled: Boolean(selectedRunGroupId && token),
-    queryFn: () => getRunGroupStatus(selectedRunGroupId ?? '', token ?? ''),
+    queryKey: ['run-group-status', initialRunGroupId],
+    enabled: Boolean(detailMode && token),
+    queryFn: () => getRunGroupStatus(initialRunGroupId ?? '', token ?? ''),
     refetchInterval: (query) => {
       const phase = query.state.data?.status;
       return phase === 'requested' || phase === 'running' ? 2500 : false;
     },
   });
+
   const authenticated = status === 'authenticated';
   const showRunGroupState =
     Boolean(runGroupQuery.data) &&
@@ -80,10 +83,11 @@ export function RunClient({ initialRunGroupId }: { initialRunGroupId?: string })
   useEffect(() => {
     const submissionId = runGroupQuery.data?.submission_id;
     if (!submissionId) return;
-    rememberSubmissionId(submissionId);
-    setRememberedSubmissionIds(getRememberedSubmissionIds());
-  }, [runGroupQuery.data?.submission_id]);
+    rememberSubmissionId(submissionId, ownerId);
+    setRememberedSubmissionIds(getRememberedSubmissionIds(ownerId));
+  }, [runGroupQuery.data?.submission_id, ownerId]);
 
+  // --- Unauthenticated ---
   if (!authenticated) {
     return (
       <motion.section className={styles.page} initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.22, ease: 'easeOut' }}>
@@ -101,9 +105,43 @@ export function RunClient({ initialRunGroupId }: { initialRunGroupId?: string })
     );
   }
 
-  if (historyQuery.isLoading && !selectedRunGroupId) return <p className={styles.mono}>Loading run history...</p>;
+  // --- Detail mode: single run view ---
+  if (detailMode) {
+    return (
+      <motion.section className={styles.page} initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.22, ease: 'easeOut' }}>
+        <div className={styles.heading}>
+          <button type="button" className={styles.backLink} onClick={() => router.push('/run')}>
+            <ArrowLeft size={14} strokeWidth={2} />
+            <span>Back to all runs</span>
+          </button>
+          <h1>RUN DETAIL</h1>
+          <p className={styles.mono}>{initialRunGroupId}</p>
+        </div>
+        {runGroupQuery.data && showRunGroupState && <PendingRunCard runGroup={runGroupQuery.data} />}
+        {runGroupQuery.isLoading && !data && <p className={styles.mono}>Loading benchmark run...</p>}
+        {runGroupQuery.error && !data && (
+          <ErrorBanner message={runGroupQuery.error instanceof Error ? runGroupQuery.error.message : 'Run status failed to load'} />
+        )}
+        {isLoading && !data && <p className={styles.mono}>Loading run telemetry...</p>}
+        {error && !runGroupQuery.data && <ErrorBanner message={error instanceof Error ? error.message : 'Run failed to load'} />}
+        {data && (
+          <>
+            <RunHeader run={data} />
+            <div className={styles.charts}>
+              <LatencyHistogram histogram={histogram} run={data} />
+              <ThroughputChart throughput={throughput} run={data} />
+            </div>
+            <SessionCards sessions={data.sessions} />
+          </>
+        )}
+      </motion.section>
+    );
+  }
 
-  if (historyQuery.error && !selectedRunGroupId) {
+  // --- Table mode: all runs ---
+  if (historyQuery.isLoading) return <p className={styles.mono}>Loading run history...</p>;
+
+  if (historyQuery.error) {
     return (
       <motion.section className={styles.page} initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.22, ease: 'easeOut' }}>
         <div className={styles.heading}>
@@ -115,7 +153,7 @@ export function RunClient({ initialRunGroupId }: { initialRunGroupId?: string })
     );
   }
 
-  if (history.length === 0 && !selectedRunGroupId) {
+  if (history.length === 0) {
     return (
       <motion.section className={styles.page} initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.22, ease: 'easeOut' }}>
         <div className={styles.heading}>
@@ -137,51 +175,41 @@ export function RunClient({ initialRunGroupId }: { initialRunGroupId?: string })
         <h1>MY RUN</h1>
         <p>Run history and benchmark telemetry for your submitted algorithms.</p>
       </div>
-      <div className={styles.history}>
-        {selectedRunGroupId && !history.some((row) => row.run_group_id === selectedRunGroupId) && (
-          <button className={`${styles.historyItem} ${styles.selected}`} type="button">
-            <span>{selectedRunGroupId}</span>
-            <strong>{runGroupQuery.data?.status ?? 'requested'}</strong>
-            <small>Current benchmark run</small>
-          </button>
-        )}
-        {history.map((row) => {
-          const selectRun = () => {
-            rememberRunGroupId(row.run_group_id);
-            setSelectedRunGroupId(row.run_group_id);
-            router.replace(`/run?run_group_id=${encodeURIComponent(row.run_group_id)}`);
-          };
-          return (
-            <button
-              key={row.run_group_id}
-              className={`${styles.historyItem} ${selectedRunGroupId === row.run_group_id ? styles.selected : ''}`}
-              type="button"
-              onClick={selectRun}
-            >
-              <span>{row.run_group_id}</span>
-              <strong>{row.status}</strong>
-              <small>{row.runs.length} scenarios / {row.submission_id}</small>
-            </button>
-          );
-        })}
+      <div className={styles.tableWrap}>
+        <table className={styles.runTable} aria-label="Run history">
+          <thead>
+            <tr>
+              <th>RUN GROUP</th>
+              <th>STATUS</th>
+              <th>SCENARIOS</th>
+              <th>SUBMISSION</th>
+              <th>CREATED</th>
+            </tr>
+          </thead>
+          <tbody>
+            {history.map((row) => (
+              <tr
+                key={row.run_group_id}
+                className={styles.runTableRow}
+                onClick={() => {
+                  rememberRunGroupId(row.run_group_id, ownerId);
+                  router.push(`/run?run_group_id=${encodeURIComponent(row.run_group_id)}`);
+                }}
+              >
+                <td className={styles.runId}>{row.run_group_id}</td>
+                <td>
+                  <span className={`${styles.statusBadge} ${styles[`status_${row.status}`] ?? ''}`}>
+                    {row.status}
+                  </span>
+                </td>
+                <td>{row.runs.length}</td>
+                <td className={styles.submissionId}>{row.submission_id}</td>
+                <td className={styles.timestamp}>{formatTimestamp(row.created_at)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
       </div>
-      {runGroupQuery.data && showRunGroupState && <PendingRunCard runGroup={runGroupQuery.data} />}
-      {runGroupQuery.isLoading && selectedRunGroupId && !data && <p className={styles.mono}>Loading current benchmark run...</p>}
-      {runGroupQuery.error && selectedRunGroupId && !data && (
-        <ErrorBanner message={runGroupQuery.error instanceof Error ? runGroupQuery.error.message : 'Run status failed to load'} />
-      )}
-      {isLoading && !data && <p className={styles.mono}>Loading selected run...</p>}
-      {error && !runGroupQuery.data && <ErrorBanner message={error instanceof Error ? error.message : 'Run failed to load'} />}
-      {data && (
-        <>
-          <RunHeader run={data} />
-          <div className={styles.charts}>
-            <LatencyHistogram histogram={histogram} run={data} />
-            <ThroughputChart throughput={throughput} run={data} />
-          </div>
-          <SessionCards sessions={data.sessions} />
-        </>
-      )}
     </motion.section>
   );
 }
@@ -220,7 +248,8 @@ function PendingRunCard({ runGroup }: { runGroup: Awaited<ReturnType<typeof getR
       </div>
       {stalled && (
         <p className={styles.stalledNotice}>
-          No runner has consumed this benchmark request yet. Check that submission-api and bot-fleet-controller are using the same Kafka and Postgres stack.
+          No runner has consumed this benchmark request yet. This usually means host-vs-Kind split brain:
+          submission-api wrote the run to one Kafka/Postgres stack, while bot-fleet-controller is listening to another.
         </p>
       )}
       <div className={styles.sessionList}>
@@ -235,4 +264,20 @@ function PendingRunCard({ runGroup }: { runGroup: Awaited<ReturnType<typeof getR
       </div>
     </section>
   );
+}
+
+function formatTimestamp(iso: string): string {
+  try {
+    const d = new Date(iso);
+    return d.toLocaleString('en-GB', {
+      day: '2-digit',
+      month: 'short',
+      year: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: false,
+    });
+  } catch {
+    return iso;
+  }
 }

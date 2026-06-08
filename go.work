@@ -3,6 +3,7 @@ go 1.25.0
 use (
 	./libs/go
 	./schemas/go
+	./services/auth-api
 	./services/bot-fleet-controller
 	./services/build-worker
 	./services/correctness-validator

@@ -287,6 +287,37 @@ pub struct OrderAckedBatchRef<'a> {
     pub events: &'a [OrderAckedEventRef<'a>],
 }
 
+/// CorrectnessScoreEvent is published to "scores.correctness" (JSON, not
+/// MessagePack) by the correctness-validator after the post-run order-book
+/// replay. Consumed by score-computer for the hard correctness gate.
+/// Key: session_id. Mirrors `topics.CorrectnessScoreEvent` in schemas/go.
+///
+/// The `*_count` fields are the telemetry-completeness counters behind the
+/// verdict: how many orders.sent events the validator's drain returned
+/// (sent_count), how many orders.acked events survived dedup (acked_count),
+/// and how many distinct orders appeared in BOTH streams — the replay's
+/// actual inputs (matched_count). score-computer derives a coverage ratio
+/// from these and refuses to apply violation-based disqualification when the
+/// inputs were incomplete. `#[serde(default)]` so payloads from validators
+/// that predate the completeness gate still decode (field-add-only evolution).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CorrectnessScoreEvent {
+    pub session_id: String,
+    pub contestant_id: String,
+    pub valid_fills: u64,
+    pub total_fills: u64,
+    /// valid_fills / total_fills.
+    pub correctness_score: f64,
+    pub violation_count: u32,
+    pub computed_at_ns: u64,
+    #[serde(default)]
+    pub sent_count: u64,
+    #[serde(default)]
+    pub acked_count: u64,
+    #[serde(default)]
+    pub matched_count: u64,
+}
+
 /// Side is serialized as BUY or SELL in telemetry payloads.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "UPPERCASE")]
@@ -368,6 +399,54 @@ mod tests {
         assert_eq!(spec.protocol, Protocol::Fix);
         assert_eq!(spec.tasks.len(), 1);
         assert_eq!(spec.tasks[0].profile, BotProfile::Hft);
+    }
+
+    #[test]
+    fn correctness_score_event_decodes_go_validator_payload() {
+        let payload = br#"{
+            "session_id":"sess-1",
+            "contestant_id":"team-1",
+            "valid_fills":2,
+            "total_fills":4,
+            "correctness_score":0.5,
+            "violation_count":2,
+            "computed_at_ns":123,
+            "sent_count":1000,
+            "acked_count":950,
+            "matched_count":940
+        }"#;
+
+        let ev: CorrectnessScoreEvent =
+            serde_json::from_slice(payload).expect("decode correctness score event");
+        assert_eq!(ev.session_id, "sess-1");
+        assert_eq!(ev.contestant_id, "team-1");
+        assert_eq!(ev.valid_fills, 2);
+        assert_eq!(ev.total_fills, 4);
+        assert_eq!(ev.correctness_score, 0.5);
+        assert_eq!(ev.violation_count, 2);
+        assert_eq!(ev.computed_at_ns, 123);
+        assert_eq!(ev.sent_count, 1000);
+        assert_eq!(ev.acked_count, 950);
+        assert_eq!(ev.matched_count, 940);
+
+        // Pre-completeness-gate validators omit the counters entirely; the
+        // documented schema-evolution rule is field-add only, so the legacy
+        // payload must still decode, with the counters defaulting to 0
+        // ("coverage unknown" downstream).
+        let legacy = br#"{
+            "session_id":"sess-1",
+            "contestant_id":"team-1",
+            "valid_fills":2,
+            "total_fills":4,
+            "correctness_score":0.5,
+            "violation_count":2,
+            "computed_at_ns":123
+        }"#;
+        let ev: CorrectnessScoreEvent =
+            serde_json::from_slice(legacy).expect("decode legacy correctness score event");
+        assert_eq!(ev.sent_count, 0);
+        assert_eq!(ev.acked_count, 0);
+        assert_eq!(ev.matched_count, 0);
     }
 
     #[test]

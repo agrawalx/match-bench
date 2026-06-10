@@ -6,7 +6,20 @@ Run commands from the repository root unless a command changes directories.
 
 ## Shared Integration Environment
 
-Start dependencies first:
+Start the full local validation stack:
+
+```bash
+docker compose \
+  -f docker-compose.yml \
+  -f docker-compose.kafka.yml \
+  -f docker-compose.platform.yml \
+  -f docker-compose.observability.yml \
+  up -d --build
+```
+
+This starts PostgreSQL, TimescaleDB, Redis, MinIO, Kafka, Kafka topic initialization, the compose-hosted platform APIs, Prometheus, Grafana, Loki, and the PostgreSQL exporter.
+
+For tests that only need shared dependencies and run services from source, use the lighter stack:
 
 ```bash
 docker compose -f docker-compose.yml -f docker-compose.kafka.yml up -d
@@ -28,41 +41,8 @@ export IICPC_INTEGRATION=1
 All Go tests:
 
 ```bash
-env GOCACHE=/tmp/iicpc-go-build-cache go test \
+go test \
   ./libs/go/... \
-  ./schemas/go/... \
-  ./services/auth-api/... \
-  ./services/submission-api/... \
-  ./services/build-worker/... \
-  ./services/bot-fleet-controller/... \
-  ./services/sandbox-orchestrator/... \
-  ./services/correctness-validator/... \
-  ./services/leaderboard-api/... \
-  ./services/score-computer/...
-```
-
-Race tests:
-
-```bash
-env GOCACHE=/tmp/iicpc-go-build-cache go test -race -count=1 \
-  ./libs/go/... \
-  ./schemas/go/... \
-  ./services/auth-api/... \
-  ./services/submission-api/... \
-  ./services/build-worker/... \
-  ./services/bot-fleet-controller/... \
-  ./services/sandbox-orchestrator/... \
-  ./services/correctness-validator/... \
-  ./services/leaderboard-api/... \
-  ./services/score-computer/...
-```
-
-Vet:
-
-```bash
-env GOCACHE=/tmp/iicpc-go-build-cache go vet \
-  ./libs/go/... \
-  ./schemas/go/... \
   ./services/auth-api/... \
   ./services/submission-api/... \
   ./services/build-worker/... \
@@ -76,24 +56,34 @@ env GOCACHE=/tmp/iicpc-go-build-cache go vet \
 Service-specific tests:
 
 ```bash
-env GOCACHE=/tmp/iicpc-go-build-cache go test ./services/auth-api/...
-env GOCACHE=/tmp/iicpc-go-build-cache go test ./services/submission-api/...
-env GOCACHE=/tmp/iicpc-go-build-cache go test ./services/build-worker/...
-env GOCACHE=/tmp/iicpc-go-build-cache go test ./services/bot-fleet-controller/...
-env GOCACHE=/tmp/iicpc-go-build-cache go test ./services/sandbox-orchestrator/...
-env GOCACHE=/tmp/iicpc-go-build-cache go test ./services/correctness-validator/...
-env GOCACHE=/tmp/iicpc-go-build-cache go test ./services/leaderboard-api/...
-env GOCACHE=/tmp/iicpc-go-build-cache go test ./services/score-computer/...
-env GOCACHE=/tmp/iicpc-go-build-cache go test ./libs/go/...
-env GOCACHE=/tmp/iicpc-go-build-cache go test ./schemas/go/...
+go test ./services/auth-api/...
+go test ./services/submission-api/...
+go test ./services/build-worker/...
+go test ./services/bot-fleet-controller/...
+go test ./services/sandbox-orchestrator/...
+go test ./services/correctness-validator/...
+go test ./services/leaderboard-api/...
+go test ./services/score-computer/...
+go test ./libs/go/...
+```
+
+Race-focused tests:
+
+```bash
+go test -race -count=1 ./services/bot-fleet-controller/internal/controller -run TestSessionManagerConcurrentAccess
+go test -race -count=1 ./services/sandbox-orchestrator/internal/store -run TestSlotStoreConcurrentAccess
 ```
 
 Correctness validator integration:
 
 ```bash
-KAFKA_BROKERS=localhost:9092 \
+KAFKA_BROKERS=localhost:9092,localhost:9095,localhost:9096 \
 DATABASE_URL='postgres://iicpc:iicpc@localhost:5433/iicpc?sslmode=disable' \
-env GOCACHE=/tmp/iicpc-go-build-cache go test ./services/correctness-validator/... -run Integration -v
+go test \
+  ./services/correctness-validator \
+  ./services/correctness-validator/internal/source \
+  ./services/correctness-validator/internal/store \
+  -run Integration -v
 ```
 
 Score computer integration:
@@ -103,8 +93,8 @@ IICPC_INTEGRATION=1 \
 DATABASE_URL='postgres://iicpc:iicpc@localhost:5433/iicpc?sslmode=disable' \
 TIMESCALE_URL='postgres://iicpc:iicpc@localhost:5434/metrics' \
 REDIS_ADDR=localhost:6379 \
-KAFKA_BROKERS=localhost:9092 \
-env GOCACHE=/tmp/iicpc-go-build-cache go test ./services/score-computer/... -v
+KAFKA_BROKERS=localhost:9092,localhost:9095,localhost:9096 \
+go test ./services/score-computer -v
 ```
 
 Leaderboard API integration:
@@ -114,8 +104,8 @@ IICPC_INTEGRATION=1 \
 DATABASE_URL='postgres://iicpc:iicpc@localhost:5433/iicpc?sslmode=disable' \
 TIMESCALE_URL='postgres://iicpc:iicpc@localhost:5434/metrics' \
 REDIS_ADDR=localhost:6379 \
-KAFKA_BROKERS=localhost:9092 \
-env GOCACHE=/tmp/iicpc-go-build-cache go test ./services/leaderboard-api/... -v
+KAFKA_BROKERS=localhost:9092,localhost:9095,localhost:9096 \
+go test ./services/leaderboard-api -v
 ```
 
 ## Rust
@@ -132,10 +122,12 @@ Workspace check:
 cargo check --workspace
 ```
 
-Workspace tests:
+Rust unit tests:
 
 ```bash
-cargo test --workspace
+cargo test -p iicpc-bot-fleet
+cargo test -p iicpc-telemetry-ingester
+cargo test -p iicpc-ebpf-latency
 ```
 
 Telemetry ingester integration:
@@ -154,17 +146,13 @@ KAFKA_BROKERS=localhost:9092 \
 cargo test -p iicpc-bot-fleet --test kafka_integration -- --nocapture
 ```
 
-eBPF latency tests:
-
-```bash
-cargo test -p iicpc-ebpf-latency
-```
-
 Privileged eBPF tests:
 
 ```bash
-sudo -E cargo test -p iicpc-ebpf-latency --test real_ebpf -- --ignored --nocapture
-sudo -E cargo test -p iicpc-ebpf-latency --test mtu_clamp -- --ignored --nocapture
+IICPC_REAL_EBPF_STRICT=1 sudo -E env "PATH=$PATH" \
+  cargo test -p iicpc-ebpf-latency --test real_ebpf -- --ignored --nocapture
+IICPC_REAL_EBPF_STRICT=1 sudo -E env "PATH=$PATH" \
+  cargo test -p iicpc-ebpf-latency --test mtu_clamp -- --ignored --nocapture
 ```
 
 ## Frontend
@@ -179,13 +167,66 @@ npm run build
 
 ## Smoke Checks
 
-Compose:
+Full Docker Compose stack:
 
 ```bash
-docker compose -f docker-compose.yml -f docker-compose.kafka.yml ps
+docker compose \
+  -f docker-compose.yml \
+  -f docker-compose.kafka.yml \
+  -f docker-compose.platform.yml \
+  -f docker-compose.observability.yml \
+  ps
+```
+
+Core dependency health:
+
+```bash
 curl -f http://localhost:9000/minio/health/ready
+docker compose -f docker-compose.yml exec postgres pg_isready -U iicpc -d iicpc
+docker compose -f docker-compose.yml exec timescaledb pg_isready -U iicpc -d metrics
+docker compose -f docker-compose.yml exec redis redis-cli ping
+docker compose -f docker-compose.yml -f docker-compose.kafka.yml exec kafka-1 \
+  /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka-1:9092 --list
+```
+
+Platform API health:
+
+```bash
 curl -f http://localhost:8081/healthz
-curl -f http://localhost:8082/healthz
+curl -f http://localhost:8081/ready
+curl -f http://localhost:8082/health
+curl -f http://localhost:8082/ready
+```
+
+Observability health:
+
+```bash
+curl -f http://localhost:9090/-/ready
+curl -f http://localhost:3005/api/health
+curl -f http://localhost:3100/ready
+curl -f http://localhost:9187/metrics
+```
+
+Compose logs for failures:
+
+```bash
+docker compose \
+  -f docker-compose.yml \
+  -f docker-compose.kafka.yml \
+  -f docker-compose.platform.yml \
+  -f docker-compose.observability.yml \
+  logs --tail=120
+```
+
+Stop the full Docker Compose stack:
+
+```bash
+docker compose \
+  -f docker-compose.yml \
+  -f docker-compose.kafka.yml \
+  -f docker-compose.platform.yml \
+  -f docker-compose.observability.yml \
+  down
 ```
 
 Kubernetes:

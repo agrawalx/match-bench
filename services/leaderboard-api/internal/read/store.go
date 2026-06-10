@@ -199,7 +199,12 @@ type MetricPoint struct {
 	RTP99NS    uint64  `json:"rt_p99_ns"`
 	TPS1S      float64 `json:"tps_1s"`
 	ErrorRate  float64 `json:"error_rate"`
-	HDREncoded string  `json:"hdr_encoded,omitempty"`
+	// V2-deflate HDR histograms (base64): service_time (t7-t3, scored),
+	// response_time (r9-t0, client round trip), schedule_slip (t1-t0, the
+	// back-pressure signal). The frontend decodes and overlays them.
+	HDREncoded     string `json:"hdr_encoded,omitempty"`
+	RTHDREncoded   string `json:"rt_hdr_encoded,omitempty"`
+	SlipHDREncoded string `json:"slip_hdr_encoded,omitempty"`
 }
 
 type ViolationEntry struct {
@@ -262,7 +267,7 @@ func (s *Store) Chart(ctx context.Context, sessionID string) ([]MetricPoint, err
 SELECT EXTRACT(EPOCH FROM time) * 1000000000, wave_index,
        COALESCE(p50_ns,0), COALESCE(p90_ns,0), COALESCE(p99_ns,0),
        COALESCE(rt_p50_ns,0), COALESCE(rt_p90_ns,0), COALESCE(rt_p99_ns,0),
-       COALESCE(tps_1s,0), COALESCE(error_rate,0), hdr_encoded
+       COALESCE(tps_1s,0), COALESCE(error_rate,0), hdr_encoded, rt_hdr_encoded, slip_hdr_encoded
   FROM metrics
  WHERE session_id=$1
  ORDER BY time
@@ -276,8 +281,8 @@ SELECT EXTRACT(EPOCH FROM time) * 1000000000, wave_index,
 		var p MetricPoint
 		var p50, p90, p99, rt50, rt90, rt99 int64
 		var nsFloat float64
-		var hdr []byte
-		if err := rows.Scan(&nsFloat, &p.WaveIndex, &p50, &p90, &p99, &rt50, &rt90, &rt99, &p.TPS1S, &p.ErrorRate, &hdr); err != nil {
+		var hdr, rtHdr, slipHdr []byte
+		if err := rows.Scan(&nsFloat, &p.WaveIndex, &p50, &p90, &p99, &rt50, &rt90, &rt99, &p.TPS1S, &p.ErrorRate, &hdr, &rtHdr, &slipHdr); err != nil {
 			return nil, err
 		}
 		p.TimeUnixNS = int64(nsFloat)
@@ -285,6 +290,12 @@ SELECT EXTRACT(EPOCH FROM time) * 1000000000, wave_index,
 		p.RTP50NS, p.RTP90NS, p.RTP99NS = nonNegativeUint64(rt50), nonNegativeUint64(rt90), nonNegativeUint64(rt99)
 		if len(hdr) > 0 {
 			p.HDREncoded = base64.StdEncoding.EncodeToString(hdr)
+		}
+		if len(rtHdr) > 0 {
+			p.RTHDREncoded = base64.StdEncoding.EncodeToString(rtHdr)
+		}
+		if len(slipHdr) > 0 {
+			p.SlipHDREncoded = base64.StdEncoding.EncodeToString(slipHdr)
 		}
 		out = append(out, p)
 	}

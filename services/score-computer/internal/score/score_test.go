@@ -98,7 +98,7 @@ func TestComputeDeterministicJSON(t *testing.T) {
 func TestComputeNoRampDisqualifiedReturnsResult(t *testing.T) {
 	in := baseInput()
 	in.Sessions = in.Sessions[:2] // drop the ramp session
-	in.Sessions[0].Correct.ValidFills = 900
+	in.Sessions[0].Correct.ValidFills = 800
 	res, err := Compute(in)
 	if err != nil {
 		t.Fatalf("rampless DQ run-group must score, not error: %v", err)
@@ -128,8 +128,9 @@ func TestComputeNoRampWithoutDQReturnsError(t *testing.T) {
 // are still scored normally.
 func TestComputeIncompleteTelemetrySkipsViolationDQ(t *testing.T) {
 	in := baseInput()
-	// Ramp session reports a violation, but its coverage is 850/1000 = 0.85,
-	// below the 0.90 default threshold.
+	// Ramp session reports a few violations but its correctness RATIO stays 1.0
+	// (ValidFills==TotalFills); coverage 850/1000 = 0.85 is below the 0.90
+	// threshold, so the run is flagged IncompleteTelemetry.
 	in.Sessions[2].Correct.ViolationCount = 1
 	in.Sessions[2].Correct.SentCount = 1000
 	in.Sessions[2].Correct.AckedCount = 900
@@ -138,8 +139,10 @@ func TestComputeIncompleteTelemetrySkipsViolationDQ(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// A high correctness ratio never disqualifies regardless of violation count
+	// (under-reporting and order-dependent breaks are not ratio failures).
 	if res.Disqualified || res.DisqualificationCode != "" {
-		t.Fatalf("violation DQ must not fire on incomplete telemetry: %#v", res)
+		t.Fatalf("high-ratio ramp must not be disqualified: %#v", res)
 	}
 	if !res.IncompleteTelemetry {
 		t.Fatalf("IncompleteTelemetry not set: %#v", res)
@@ -157,7 +160,10 @@ func TestComputeIncompleteTelemetrySkipsViolationDQ(t *testing.T) {
 // ramp violation disqualifies exactly as before and the flag stays false.
 func TestComputeCoverageAtThresholdKeepsViolationDQ(t *testing.T) {
 	in := baseInput()
-	in.Sessions[2].Correct.ViolationCount = 1
+	// Ramp correctness ratio 850/1000 = 0.85 < 0.95 (aggregate stays at 0.95,
+	// so the per-session gate is what fires); coverage 950/1000 = 0.95 >= 0.90,
+	// so the run is NOT flagged incomplete.
+	in.Sessions[2].Correct.ValidFills = 850
 	in.Sessions[2].Correct.SentCount = 1000
 	in.Sessions[2].Correct.AckedCount = 960
 	in.Sessions[2].Correct.MatchedCount = 950 // 0.95 >= 0.90
@@ -165,11 +171,11 @@ func TestComputeCoverageAtThresholdKeepsViolationDQ(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !res.Disqualified || res.DisqualificationCode != "ramp_session_violation" {
-		t.Fatalf("complete telemetry must keep the violation DQ: %#v", res)
+	if !res.Disqualified || res.DisqualificationCode != "session_correctness_below_threshold" {
+		t.Fatalf("a ramp below the correctness threshold must be disqualified: %#v", res)
 	}
 	if res.IncompleteTelemetry || res.IncompleteTelemetryReason != "" {
-		t.Fatalf("flag must stay false at/above the threshold: %#v", res)
+		t.Fatalf("flag must stay false at/above the coverage threshold: %#v", res)
 	}
 }
 
@@ -179,7 +185,7 @@ func TestComputeCoverageAtThresholdKeepsViolationDQ(t *testing.T) {
 // below-threshold correctness still disqualifies even when the run is flagged.
 func TestComputeIncompleteTelemetryKeepsCorrectnessGates(t *testing.T) {
 	in := baseInput()
-	in.Sessions[0].Correct.ValidFills = 900 // 0.9 aggregate < 0.99 DQ threshold
+	in.Sessions[0].Correct.ValidFills = 800 // 0.933 aggregate < 0.95 DQ threshold
 	in.Sessions[2].Correct.SentCount = 1000
 	in.Sessions[2].Correct.MatchedCount = 100 // 0.10 coverage — grossly incomplete
 	res, err := Compute(in)
@@ -201,7 +207,10 @@ func TestComputeIncompleteTelemetryKeepsCorrectnessGates(t *testing.T) {
 // preserved rather than retroactively reflagging historical runs.
 func TestComputeUnknownCoverageNotGated(t *testing.T) {
 	in := baseInput()
-	in.Sessions[2].Correct.ViolationCount = 1 // counts all zero across sessions
+	// sent_count==0 everywhere => coverage unknown => not flagged. The ramp's
+	// correctness ratio 850/1000 = 0.85 < 0.95 still disqualifies via the
+	// per-session gate (ratio gates do not depend on coverage).
+	in.Sessions[2].Correct.ValidFills = 850
 	res, err := Compute(in)
 	if err != nil {
 		t.Fatal(err)
@@ -209,8 +218,8 @@ func TestComputeUnknownCoverageNotGated(t *testing.T) {
 	if res.IncompleteTelemetry || res.IncompleteTelemetryReason != "" {
 		t.Fatalf("unknown coverage must not flag the run: %#v", res)
 	}
-	if !res.Disqualified || res.DisqualificationCode != "ramp_session_violation" {
-		t.Fatalf("pre-gate violation DQ must be preserved for legacy rows: %#v", res)
+	if !res.Disqualified || res.DisqualificationCode != "session_correctness_below_threshold" {
+		t.Fatalf("ramp below correctness threshold must disqualify: %#v", res)
 	}
 }
 

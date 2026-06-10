@@ -79,6 +79,8 @@ mod tests {
             tps_1s: 0.0,
             error_rate: 0.0,
             hdr_encoded: Vec::new(),
+            rt_hdr_encoded: Vec::new(),
+            slip_hdr_encoded: Vec::new(),
         }
     }
 

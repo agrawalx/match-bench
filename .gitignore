@@ -34,3 +34,4 @@ target/
 bootstrap/secrets-live/
 /auth-api
 services/auth-api/auth-api
+deploy-local/

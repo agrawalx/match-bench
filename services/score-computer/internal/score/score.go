@@ -10,7 +10,7 @@ import (
 )
 
 const (
-	DefaultCorrectnessDQThreshold = 0.99
+	DefaultCorrectnessDQThreshold = 0.95
 	DefaultMaxErrorRate           = 0.01
 	DefaultMaxP99NS               = uint64(1_000_000)
 	DefaultWaveDurationNS         = uint64(20_000_000_000)
@@ -200,15 +200,14 @@ func Compute(in Input) (Result, error) {
 		}
 		return res, ErrMissingRampSession
 	}
-	if ramp.Correct.ViolationCount > 0 && disqualificationCode == "" && !res.IncompleteTelemetry {
-		// v1 approximation from ROADMAP.md: session-level correctness gate is
-		// applied to every wave until correctness_violations carries wave buckets.
-		// Suppressed when the telemetry-completeness gate fired: absolute
-		// violation counts are unsound on incomplete data — a lost orders.sent
-		// flush turns every one of its acks into a false phantom violation —
-		// so a DQ on them would punish telemetry loss, not the contestant.
-		disqualificationCode = "ramp_session_violation"
-	}
+	// The ramp session's correctness is gated by the per-session correctness-ratio
+	// check above (the ramp IS a session), so there is no separate ramp gate. The
+	// earlier binary "any ramp violation -> DQ" rule was removed: a handful of
+	// order-dependent violations out of tens of thousands of fills (a live engine
+	// cannot reproduce the offline effective_t3 order exactly — see the validator's
+	// aggressive-fill tolerance) must not disqualify a correct engine. Only a ramp
+	// whose correctness RATIO falls below the threshold is disqualified, which the
+	// per-session gate already enforces.
 
 	res.SpikeRecoveryNS = spikeRecoveryNS(in.Sessions, cfg.WaveDurationNS)
 

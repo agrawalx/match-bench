@@ -163,7 +163,12 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       code_challenge_method: 'S256',
       state: oauthState,
       nonce,
-      prompt: 'select_account',
+      // 'consent' (not 'select_account') so Google returns a refresh_token on
+      // EVERY login. With access_type=offline alone, Google only returns a
+      // refresh_token on the first-ever authorization; re-logins then yield no
+      // refresh_token, the backend sets no refresh cookie, and the session
+      // can't survive a page reload (silent /refresh has nothing to use).
+      prompt: 'consent',
       access_type: 'offline',
     });
 

@@ -18,6 +18,7 @@ import {
 } from '@/utils/submissionHistory';
 import type { RunGroupStatus } from '@/types/run';
 import { LatencyHistogram } from './LatencyHistogram';
+import { HdrPercentileChart } from './HdrPercentileChart';
 import { RunHeader } from './RunHeader';
 import { SessionCards } from './SessionCards';
 import { ThroughputChart } from './ThroughputChart';
@@ -63,7 +64,7 @@ export function RunClient({ initialRunGroupId }: { initialRunGroupId?: string })
   const history = useMemo(() => historyQuery.data?.run_groups ?? [], [historyQuery.data?.run_groups]);
 
   // Detail queries — only active in detail mode
-  const { data, histogram, throughput, isLoading, error } = useRunDetail(detailMode ? (initialRunGroupId ?? null) : null);
+  const { data, histogram, throughput, hdrSeries, isLoading, error } = useRunDetail(detailMode ? (initialRunGroupId ?? null) : null);
   const runGroupQuery = useQuery({
     queryKey: ['run-group-status', initialRunGroupId],
     enabled: Boolean(detailMode && token),
@@ -127,6 +128,7 @@ export function RunClient({ initialRunGroupId }: { initialRunGroupId?: string })
         {data && (
           <>
             <RunHeader run={data} />
+            {hdrSeries && hdrSeries.length > 0 && <HdrPercentileChart series={hdrSeries} />}
             <div className={styles.charts}>
               <LatencyHistogram histogram={histogram} run={data} />
               <ThroughputChart throughput={throughput} run={data} />

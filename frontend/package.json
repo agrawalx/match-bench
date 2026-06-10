@@ -15,6 +15,7 @@
     "@fontsource/geist-sans": "^5.2.5",
     "@tanstack/react-query": "^5.80.7",
     "framer-motion": "^12.40.0",
+    "hdr-histogram-js": "^3.0.1",
     "lucide-react": "^1.17.0",
     "next": "14.2.30",
     "react": "^18.3.1",

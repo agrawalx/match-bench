@@ -90,4 +90,4 @@ sequenceDiagram
         CV->>K: scores.correctness · key=session_id · JSON
     end
 
-    Note over U,CV: Next layer (designed, not built): scoring-service consumes metrics + scores.correctness<br/> to peak-sustained-TPS gated by latency + correctness to leaderboard-api + SSE to frontend.
+    Note over U,CV: Scoring layer (built): score-computer consumes scores.correctness + per-wave metrics (TimescaleDB)<br/> to peak-sustained-TPS = highest wave passing median-p99≤1ms + error≤1% + coverage≥90%, skipping warmup wave 0<br/> to correctness DQ if valid/total < 0.95 (per-session or aggregate) to scores table<br/> to leaderboard-api (2s Redis cache on list) + SSE to frontend.

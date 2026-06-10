@@ -4,6 +4,7 @@ import { useQuery } from '@tanstack/react-query';
 import { getRunDetail } from '@/api/leaderboard';
 import { useAuth } from '@/auth/useAuth';
 import type { LatencyHistogram, RunDetail, ThroughputWindow } from '@/types/run';
+import { deriveHdrSeries, type HdrSeries } from '@/utils/hdr';
 
 export function useRunDetail(runGroupId: string | null) {
   const { getToken } = useAuth();
@@ -12,6 +13,7 @@ export function useRunDetail(runGroupId: string | null) {
     detail: RunDetail;
     histogram?: LatencyHistogram;
     throughput?: ThroughputWindow[];
+    hdrSeries?: HdrSeries[];
   }>({
     queryKey: ['run-detail', runGroupId],
     enabled: Boolean(runGroupId && token),
@@ -20,7 +22,8 @@ export function useRunDetail(runGroupId: string | null) {
       const detail = await getRunDetail(runGroupId, token);
       const histogram = deriveLatencyHistogram(detail);
       const throughput = deriveThroughput(detail);
-      return { detail, histogram, throughput };
+      const hdrSeries = deriveHdrSeries(detail);
+      return { detail, histogram, throughput, hdrSeries };
     },
     refetchInterval: (query) => {
       const detail = query.state.data?.detail;
@@ -34,6 +37,7 @@ export function useRunDetail(runGroupId: string | null) {
     data: query.data?.detail,
     histogram: query.data?.histogram,
     throughput: query.data?.throughput,
+    hdrSeries: query.data?.hdrSeries,
     isLoading: query.isLoading,
     error: query.error,
   };

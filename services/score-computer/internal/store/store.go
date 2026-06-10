@@ -57,7 +57,7 @@ CREATE TABLE IF NOT EXISTS scoring_config (
 ALTER TABLE scoring_config ADD COLUMN IF NOT EXISTS min_coverage DOUBLE PRECISION NOT NULL DEFAULT 0.90;
 
 INSERT INTO scoring_config(config_id, correctness_dq_threshold, max_error_rate, max_p99_ns, wave_duration_ns, min_coverage)
-VALUES ('v1', 0.99, 0.01, 1000000, 20000000000, 0.90)
+VALUES ('v1', 0.95, 0.01, 1000000, 20000000000, 0.90)
 ON CONFLICT (config_id) DO NOTHING;
 
 CREATE TABLE IF NOT EXISTS scores (

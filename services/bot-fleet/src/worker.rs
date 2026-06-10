@@ -6,7 +6,10 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-use futures::SinkExt;
+use futures::{
+    stream::{SplitSink, SplitStream},
+    SinkExt, StreamExt,
+};
 use iicpc_schemas_rust::{
     BotProfile, OrdType, OrderSentEvent, PayloadType, Protocol, ReadySignal, Side, TaskSpec,
     WorkloadSpec,
@@ -587,10 +590,11 @@ struct PendingOrder {
 type PendingMap = Arc<Mutex<HashMap<String, PendingOrder>>>;
 
 impl ConnectedTask {
-    /// run dispatches to the protocol-specific task driver. FIX gets the
-    /// full three-loop (writer + reader + watchdog) setup so r9 is captured.
-    /// REST/WS keep the legacy single-loop write-only path with r9=0 and
-    /// timed_out=false (response capture for non-FIX protocols is a v2 item).
+    /// run dispatches to the protocol-specific task driver. All three protocols
+    /// (FIX, REST, WS) run the three-loop writer + reader + watchdog setup so
+    /// r9 (response_time) is captured and coordinated omission is observable.
+    /// REST matches responses by the echoed cl_ord_id in the HTTP JSON body;
+    /// WS by the cl_ord_id in the frame payload; FIX by ClOrdID (tag 11).
     #[allow(clippy::too_many_arguments)]
     async fn run(
         self,
@@ -619,10 +623,8 @@ impl ConnectedTask {
 
         match self.client {
             TargetClient::Fix(fix) => run_fix_task(self.task, fix, ctx).await,
-            TargetClient::Rest(stream) => {
-                run_writeonly_task(self.task, WriteOnly::Rest(stream), ctx).await
-            }
-            TargetClient::Ws(ws) => run_writeonly_task(self.task, WriteOnly::Ws(ws), ctx).await,
+            TargetClient::Rest(stream) => run_rest_task(self.task, stream, ctx).await,
+            TargetClient::Ws(ws) => run_ws_task(self.task, ws, ctx).await,
         }
     }
 }
@@ -685,7 +687,7 @@ async fn run_fix_task(task: TaskSpec, fix: FixConnection, ctx: TaskContext) -> R
         ctx.worker_id.clone(),
         drain_end_ns,
     ));
-    set.spawn(fix_watchdog_loop(
+    set.spawn(watchdog_loop(
         task.task_id,
         pending.clone(),
         ctx.telemetry.clone(),
@@ -1042,7 +1044,7 @@ async fn fix_read_loop(
     Ok(0)
 }
 
-/// fix_watchdog_loop evicts pending orders whose send_ts_ns is older than
+/// watchdog_loop evicts pending orders whose send_ts_ns is older than
 /// RESPONSE_TIMEOUT_NS. Evicted orders emit with timed_out=true and
 /// recv_done_ts_ns=0 — the explicit marker that the response was lost rather
 /// than received at instant 0.
@@ -1051,7 +1053,7 @@ async fn fix_read_loop(
 /// more sends are happening) it flushes everything still pending, regardless
 /// of age.
 #[allow(clippy::too_many_arguments)]
-async fn fix_watchdog_loop(
+async fn watchdog_loop(
     task_id: u32,
     pending: PendingMap,
     telemetry: TelemetrySink,
@@ -1127,21 +1129,20 @@ async fn fix_watchdog_loop(
     Ok(0)
 }
 
-/// WriteOnly wraps the REST and WS connections that share the legacy
-/// single-loop path (no response capture in v1).
-enum WriteOnly {
-    Rest(TcpStream),
-    Ws(WebSocketStream<MaybeTlsStream<TcpStream>>),
+/// RwWriter is the write half of a REST or WS connection. REST writes the
+/// full HTTP/1.1 request bytes; WS sends a binary JSON frame. Both feed the
+/// same paced pending-map write loop so r9 (recv_done) can be captured by the
+/// matching reader — the v2 response-capture path for non-FIX protocols.
+enum RwWriter {
+    Rest(WriteHalf<TcpStream>),
+    Ws(SplitSink<WebSocketStream<MaybeTlsStream<TcpStream>>, WsMessage>),
 }
 
-impl WriteOnly {
-    async fn write(&mut self, frame: &OrderFrame) -> Result<()> {
+impl RwWriter {
+    async fn write_order(&mut self, frame: &OrderFrame) -> Result<()> {
         match self {
-            Self::Rest(stream) => stream
-                .write_all(&frame.rest)
-                .await
-                .context("write REST order"),
-            Self::Ws(ws) => ws
+            Self::Rest(w) => w.write_all(&frame.rest).await.context("write REST order"),
+            Self::Ws(s) => s
                 .send(WsMessage::Binary(frame.ws_bytes.clone()))
                 .await
                 .context("write WS order"),
@@ -1149,87 +1150,208 @@ impl WriteOnly {
     }
 }
 
-/// run_writeonly_task is the legacy single-loop path for REST and WS. The
-/// emitted OrderSentEvent has recv_done_ts_ns=0 and timed_out=false; the
-/// ingester is expected to treat that pair as "r9 not captured for this
-/// protocol" rather than "lost response."
-async fn run_writeonly_task(
+/// run_rest_task and run_ws_task mirror run_fix_task: a paced write loop feeds a
+/// shared pending map, a protocol-specific read loop matches responses by
+/// ClOrdID and stamps r9, and the generic watchdog evicts unanswered orders as
+/// timed_out. This gives REST and WS the same coordinated-omission-correct
+/// response_time (r9 - t0) the FIX path already had.
+async fn run_rest_task(task: TaskSpec, stream: TcpStream, ctx: TaskContext) -> Result<u64> {
+    let (read_half, write_half) = tokio::io::split(stream);
+    run_readwrite_task(
+        task,
+        RwWriter::Rest(write_half),
+        ReadSource::Rest(read_half),
+        ctx,
+    )
+    .await
+}
+
+async fn run_ws_task(
     task: TaskSpec,
-    mut client: WriteOnly,
+    ws: WebSocketStream<MaybeTlsStream<TcpStream>>,
+    ctx: TaskContext,
+) -> Result<u64> {
+    let (sink, stream) = ws.split();
+    run_readwrite_task(task, RwWriter::Ws(sink), ReadSource::Ws(stream), ctx).await
+}
+
+/// ReadSource is the read half handed to the response reader.
+enum ReadSource {
+    Rest(ReadHalf<TcpStream>),
+    Ws(SplitStream<WebSocketStream<MaybeTlsStream<TcpStream>>>),
+}
+
+/// run_readwrite_task spawns the three loops (writer + reader + watchdog) shared
+/// by REST and WS and waits for them to terminate, like run_fix_task.
+async fn run_readwrite_task(
+    task: TaskSpec,
+    writer: RwWriter,
+    reader: ReadSource,
     ctx: TaskContext,
 ) -> Result<u64> {
     let task_start_ns = ctx.barrier_epoch_ns.saturating_add(task.start_offset_ns);
     let task_end_ns = task_start_ns.saturating_add(task.duration_ns);
+    let drain_end_ns = task_end_ns.saturating_add(RESPONSE_TIMEOUT_NS);
+
+    let pending: PendingMap = Arc::new(Mutex::new(HashMap::new()));
+    let mut set: JoinSet<Result<u64>> = JoinSet::new();
+
+    set.spawn(rw_write_loop(
+        writer,
+        task.clone(),
+        pending.clone(),
+        ctx.session_id.clone(),
+        ctx.target_host.clone(),
+        ctx.fix_version.clone(),
+        ctx.global_seed,
+        task_start_ns,
+        task_end_ns,
+        ctx.write_timeout,
+        ctx.cancel.clone(),
+    ));
+    match reader {
+        ReadSource::Rest(read_half) => set.spawn(rest_read_loop(
+            read_half,
+            task.task_id,
+            pending.clone(),
+            ctx.telemetry.clone(),
+            ctx.session_id.clone(),
+            ctx.submission_id.clone(),
+            ctx.worker_id.clone(),
+            drain_end_ns,
+        )),
+        ReadSource::Ws(stream) => set.spawn(ws_read_loop(
+            stream,
+            task.task_id,
+            pending.clone(),
+            ctx.telemetry.clone(),
+            ctx.session_id.clone(),
+            ctx.submission_id.clone(),
+            ctx.worker_id.clone(),
+            drain_end_ns,
+        )),
+    };
+    set.spawn(watchdog_loop(
+        task.task_id,
+        pending.clone(),
+        ctx.telemetry.clone(),
+        ctx.session_id.clone(),
+        ctx.submission_id.clone(),
+        ctx.worker_id.clone(),
+        drain_end_ns,
+    ));
+
+    let mut sent_total = 0u64;
+    while let Some(result) = set.join_next().await {
+        match result.context("join REST/WS sub-task")? {
+            Ok(n) => sent_total += n,
+            Err(err) => {
+                warn!(task_id = task.task_id, error = %err, "REST/WS sub-task ended with error");
+            }
+        }
+    }
+    Ok(sent_total)
+}
+
+/// rw_write_loop is the fixed-interval pacer for REST/WS. Identical in shape to
+/// fix_write_loop minus the FIX SendingTime patch: it inserts a PendingOrder
+/// before each write so a fast contestant cannot reply before the entry exists,
+/// then the reader/watchdog own emission.
+#[allow(clippy::too_many_arguments)]
+async fn rw_write_loop(
+    mut writer: RwWriter,
+    task: TaskSpec,
+    pending: PendingMap,
+    session_id: String,
+    target_host: String,
+    fix_version: String,
+    global_seed: u64,
+    task_start_ns: u64,
+    task_end_ns: u64,
+    write_timeout: Duration,
+    cancel: CancelToken,
+) -> Result<u64> {
     time::sleep_until(instant_from_unix_nanos(task_start_ns)).await;
 
     let interval_ns = 1_000_000_000_u64 / u64::from(task.target_rps);
     let mut next_send_ns = task_start_ns;
     let mut generator = TaskGenerator::new(
-        ctx.session_id.clone(),
+        session_id.clone(),
         u64::from(task.task_id),
         task.profile,
         mix_from_task(&task),
-        ctx.global_seed ^ u64::from(task.task_id),
+        global_seed ^ u64::from(task.task_id),
     );
     let mut sent: u64 = 0;
 
     loop {
-        // Stop at the task deadline or on a shutdown signal (L43).
-        if should_stop_sending(&ctx.cancel, task_end_ns) {
+        if should_stop_sending(&cancel, task_end_ns) {
             break;
         }
         let target_send_ts_ns = next_send_ns;
-
         tokio::select! {
             _ = time::sleep_until(instant_from_unix_nanos(next_send_ns)) => {}
-            _ = ctx.cancel.cancelled() => break,
+            _ = cancel.cancelled() => break,
         }
 
         let action = generator.next();
         let seq = action.seq();
-        // REST/WS transports send frame.rest / frame.ws_bytes, which do not
-        // carry FIX tag 52, so no patch_timestamp is needed here.
+        // REST/WS frames carry no FIX tag 52, so no patch_timestamp is needed.
         let frame = render_frame(
-            &ctx.fix_version,
-            &ctx.session_id,
-            &ctx.target_host,
+            &fix_version,
+            &session_id,
+            &target_host,
             u64::from(task.task_id),
             &action,
         );
 
-        match time::timeout(ctx.write_timeout, client.write(&frame)).await {
+        {
+            let mut map = pending.lock().expect("pending map poisoned");
+            map.insert(
+                frame.order_id.clone(),
+                PendingOrder {
+                    order_id: frame.order_id.clone(),
+                    orig_order_id: frame.orig_order_id.clone(),
+                    target_send_ts_ns,
+                    send_ts_ns: 0,
+                    price: frame.price,
+                    qty: frame.qty,
+                    side: frame.side,
+                    payload_type: frame.payload_type,
+                    ord_type: frame.ord_type,
+                },
+            );
+        }
+
+        match time::timeout(write_timeout, writer.write_order(&frame)).await {
             Ok(Ok(())) => {
                 let send_ts_ns = unix_nanos();
-                ctx.telemetry
-                    .record(OrderSentEvent {
-                        session_id: ctx.session_id.clone(),
-                        submission_id: ctx.submission_id.clone(),
-                        worker_id: ctx.worker_id.clone(),
-                        task_id: task.task_id,
-                        order_id: frame.order_id,
-                        target_send_ts_ns,
-                        send_ts_ns,
-                        recv_done_ts_ns: 0,
-                        timed_out: false,
-                        price: frame.price,
-                        qty: frame.qty,
-                        side: frame.side,
-                        payload_type: frame.payload_type,
-                        ord_type: frame.ord_type,
-                        orig_order_id: frame.orig_order_id,
-                    })
-                    .await;
+                metrics::order_sent();
+                if let Some(p) = pending
+                    .lock()
+                    .expect("pending map poisoned")
+                    .get_mut(&frame.order_id)
+                {
+                    p.send_ts_ns = send_ts_ns;
+                }
                 sent += 1;
             }
             Ok(Err(err)) => {
-                warn!(task_id = task.task_id, seq, error = %err, "task write failed; task exiting");
+                pending
+                    .lock()
+                    .expect("pending map poisoned")
+                    .remove(&frame.order_id);
+                metrics::order_write_error();
+                warn!(task_id = task.task_id, seq, error = %err, "REST/WS write failed; writer exiting");
                 return Ok(sent);
             }
             Err(_) => {
-                warn!(
-                    task_id = task.task_id,
-                    seq, "task write timeout; task exiting"
-                );
+                pending
+                    .lock()
+                    .expect("pending map poisoned")
+                    .remove(&frame.order_id);
+                metrics::order_write_error();
+                warn!(task_id = task.task_id, seq, "REST/WS write timeout; writer exiting");
                 return Ok(sent);
             }
         }
@@ -1238,6 +1360,222 @@ async fn run_writeonly_task(
     }
 
     Ok(sent)
+}
+
+/// emit_response records the matched OrderSentEvent (timed_out=false) for a
+/// pending order whose response just arrived. Shared by the REST and WS readers.
+#[allow(clippy::too_many_arguments)]
+async fn emit_response(
+    telemetry: &TelemetrySink,
+    pending: &PendingMap,
+    session_id: &str,
+    submission_id: &str,
+    worker_id: &str,
+    task_id: u32,
+    clord_id: &str,
+) {
+    // First response wins: the remove() consumes the entry, so later responses
+    // (partial fills) for the same ClOrdID are ignored — same rule as FIX.
+    let pending_order = {
+        let mut map = pending.lock().expect("pending map poisoned");
+        map.remove(clord_id)
+    };
+    let Some(p) = pending_order else { return };
+    let recv_done_ts_ns = unix_nanos();
+    telemetry
+        .record(OrderSentEvent {
+            session_id: session_id.to_string(),
+            submission_id: submission_id.to_string(),
+            worker_id: worker_id.to_string(),
+            task_id,
+            order_id: p.order_id,
+            target_send_ts_ns: p.target_send_ts_ns,
+            send_ts_ns: p.send_ts_ns,
+            recv_done_ts_ns,
+            timed_out: false,
+            price: p.price,
+            qty: p.qty,
+            side: p.side,
+            payload_type: p.payload_type,
+            ord_type: p.ord_type,
+            orig_order_id: p.orig_order_id,
+        })
+        .await;
+}
+
+/// clordid_from_json extracts the "cl_ord_id" string from a JSON response body
+/// (the algo's execution report echoes the request's cl_ord_id). Returns None
+/// if the body is not JSON or carries no cl_ord_id.
+fn clordid_from_json(body: &[u8]) -> Option<String> {
+    #[derive(serde::Deserialize)]
+    struct Resp {
+        cl_ord_id: Option<String>,
+    }
+    serde_json::from_slice::<Resp>(body).ok().and_then(|r| r.cl_ord_id)
+}
+
+/// next_http_response frames one HTTP/1.1 response from the buffer head and
+/// returns (cl_ord_id, bytes_consumed). Handles Content-Length and chunked
+/// bodies (keep-alive: several responses can sit in the buffer). Returns None
+/// while the response is still incomplete.
+fn next_http_response(buf: &[u8]) -> Option<(Option<String>, usize)> {
+    let hdr_end = find_subslice(buf, b"\r\n\r\n")?;
+    let body_start = hdr_end + 4;
+    let headers = &buf[..hdr_end];
+    if header_is_chunked(headers) {
+        let rel = find_subslice(&buf[body_start..], b"0\r\n\r\n")?;
+        let total = body_start + rel + 5;
+        // Best-effort: extract from the first chunk's bytes (single-chunk JSON).
+        let chunk_body = dechunk_first(&buf[body_start..total]);
+        return Some((clordid_from_json(&chunk_body), total));
+    }
+    let content_len = header_content_length(headers).unwrap_or(0);
+    let total = body_start + content_len;
+    if buf.len() < total {
+        return None;
+    }
+    Some((clordid_from_json(&buf[body_start..total]), total))
+}
+
+fn find_subslice(hay: &[u8], needle: &[u8]) -> Option<usize> {
+    if needle.is_empty() || hay.len() < needle.len() {
+        return None;
+    }
+    hay.windows(needle.len()).position(|w| w == needle)
+}
+
+fn header_content_length(headers: &[u8]) -> Option<usize> {
+    let lower: Vec<u8> = headers.iter().map(u8::to_ascii_lowercase).collect();
+    let i = find_subslice(&lower, b"content-length:")?;
+    let rest = &headers[i + b"content-length:".len()..];
+    let end = rest.iter().position(|&b| b == b'\r').unwrap_or(rest.len());
+    std::str::from_utf8(&rest[..end]).ok()?.trim().parse().ok()
+}
+
+fn header_is_chunked(headers: &[u8]) -> bool {
+    let lower: Vec<u8> = headers.iter().map(u8::to_ascii_lowercase).collect();
+    match find_subslice(&lower, b"transfer-encoding:") {
+        Some(i) => {
+            let rest = &lower[i + b"transfer-encoding:".len()..];
+            let end = rest.iter().position(|&b| b == b'\r').unwrap_or(rest.len());
+            find_subslice(&rest[..end], b"chunked").is_some()
+        }
+        None => false,
+    }
+}
+
+/// dechunk_first returns the bytes of the first chunk (enough for a single-chunk
+/// JSON execution report); good enough for ClOrdID extraction.
+fn dechunk_first(body: &[u8]) -> Vec<u8> {
+    let Some(crlf) = find_subslice(body, b"\r\n") else {
+        return Vec::new();
+    };
+    let size = std::str::from_utf8(&body[..crlf])
+        .ok()
+        .and_then(|s| usize::from_str_radix(s.trim(), 16).ok())
+        .unwrap_or(0);
+    let start = crlf + 2;
+    let end = (start + size).min(body.len());
+    body[start..end].to_vec()
+}
+
+/// rest_read_loop drains HTTP responses, matches each by the echoed cl_ord_id,
+/// and emits with timed_out=false. Exits at drain_end_ns; stragglers are the
+/// watchdog's job. Mirrors fix_read_loop.
+#[allow(clippy::too_many_arguments)]
+async fn rest_read_loop(
+    mut read_half: ReadHalf<TcpStream>,
+    task_id: u32,
+    pending: PendingMap,
+    telemetry: TelemetrySink,
+    session_id: String,
+    submission_id: String,
+    worker_id: String,
+    drain_end_ns: u64,
+) -> Result<u64> {
+    let mut buf: Vec<u8> = Vec::with_capacity(8192);
+    let mut chunk = [0u8; 4096];
+
+    loop {
+        let now_ns = unix_nanos();
+        if now_ns >= drain_end_ns {
+            break;
+        }
+        let remaining = Duration::from_nanos(drain_end_ns - now_ns);
+        let n = match time::timeout(remaining, read_half.read(&mut chunk)).await {
+            Ok(Ok(0)) => break,
+            Ok(Ok(n)) => n,
+            Ok(Err(err)) => {
+                warn!(task_id, error = %err, "REST read failed; reader exiting");
+                break;
+            }
+            Err(_) => break,
+        };
+        buf.extend_from_slice(&chunk[..n]);
+
+        // Drain every complete response currently in the buffer.
+        while let Some((clord, consumed)) = next_http_response(&buf) {
+            if let Some(clord_id) = clord {
+                emit_response(
+                    &telemetry, &pending, &session_id, &submission_id, &worker_id, task_id, &clord_id,
+                )
+                .await;
+            }
+            buf.drain(..consumed);
+        }
+
+        if buf.len() > 1_048_576 {
+            warn!(task_id, "REST read buffer overflow; resetting");
+            buf.clear();
+        }
+    }
+
+    Ok(0)
+}
+
+/// ws_read_loop drains WebSocket frames (tungstenite handles framing), matches
+/// each by the echoed cl_ord_id from the JSON payload, and emits. Mirrors
+/// fix_read_loop.
+#[allow(clippy::too_many_arguments)]
+async fn ws_read_loop(
+    mut stream: SplitStream<WebSocketStream<MaybeTlsStream<TcpStream>>>,
+    task_id: u32,
+    pending: PendingMap,
+    telemetry: TelemetrySink,
+    session_id: String,
+    submission_id: String,
+    worker_id: String,
+    drain_end_ns: u64,
+) -> Result<u64> {
+    loop {
+        let now_ns = unix_nanos();
+        if now_ns >= drain_end_ns {
+            break;
+        }
+        let remaining = Duration::from_nanos(drain_end_ns - now_ns);
+        let msg = match time::timeout(remaining, stream.next()).await {
+            Ok(Some(Ok(m))) => m,
+            Ok(Some(Err(err))) => {
+                warn!(task_id, error = %err, "WS read failed; reader exiting");
+                break;
+            }
+            Ok(None) => break, // stream closed
+            Err(_) => break,   // drain deadline
+        };
+        let body: Vec<u8> = match msg {
+            WsMessage::Text(t) => t.into_bytes(),
+            WsMessage::Binary(b) => b,
+            _ => continue, // ping/pong/close carry no execution report
+        };
+        if let Some(clord_id) = clordid_from_json(&body) {
+            emit_response(
+                &telemetry, &pending, &session_id, &submission_id, &worker_id, task_id, &clord_id,
+            )
+            .await;
+        }
+    }
+
+    Ok(0)
 }
 
 /// order_shape produces deterministic price, quantity, and side values for
@@ -1368,6 +1706,59 @@ impl TargetClient {
 mod tests {
     use super::*;
     use std::net::SocketAddr;
+
+    #[test]
+    fn http_response_framed_by_content_length_and_clordid_extracted() {
+        let body = br#"{"cl_ord_id":"sess_1_2_O","exec_type":"2","fill_qty":5,"fill_price":10000}"#;
+        let resp = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+            body.len(),
+            std::str::from_utf8(body).unwrap()
+        );
+        let (clord, consumed) = next_http_response(resp.as_bytes()).expect("complete response");
+        assert_eq!(clord.as_deref(), Some("sess_1_2_O"));
+        assert_eq!(consumed, resp.len());
+    }
+
+    #[test]
+    fn http_two_pipelined_responses_drain_in_order() {
+        let one = "HTTP/1.1 200 OK\r\nContent-Length: 22\r\n\r\n{\"cl_ord_id\":\"ord-A\"}\r\n";
+        let two = "HTTP/1.1 200 OK\r\nContent-Length: 22\r\n\r\n{\"cl_ord_id\":\"ord-B\"}\r\n";
+        let mut buf = format!("{one}{two}").into_bytes();
+        let (a, n1) = next_http_response(&buf).expect("first");
+        assert_eq!(a.as_deref(), Some("ord-A"));
+        buf.drain(..n1);
+        let (b, _) = next_http_response(&buf).expect("second");
+        assert_eq!(b.as_deref(), Some("ord-B"));
+    }
+
+    #[test]
+    fn http_incomplete_response_returns_none() {
+        // header says 50 bytes of body but only a few are present
+        let partial = "HTTP/1.1 200 OK\r\nContent-Length: 50\r\n\r\n{\"cl_ord_id\":";
+        assert!(next_http_response(partial.as_bytes()).is_none());
+    }
+
+    #[test]
+    fn http_chunked_response_clordid_extracted() {
+        // single-chunk JSON body
+        let json = "{\"cl_ord_id\":\"ord-C\"}";
+        let resp = format!(
+            "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n{:x}\r\n{}\r\n0\r\n\r\n",
+            json.len(),
+            json
+        );
+        let (clord, _) = next_http_response(resp.as_bytes()).expect("chunked complete");
+        assert_eq!(clord.as_deref(), Some("ord-C"));
+    }
+
+    #[test]
+    fn ws_json_payload_clordid_extracted() {
+        let payload = br#"{"cl_ord_id":"ord-ws-1","exec_type":"0"}"#;
+        assert_eq!(clordid_from_json(payload).as_deref(), Some("ord-ws-1"));
+        assert_eq!(clordid_from_json(b"not json"), None);
+        assert_eq!(clordid_from_json(b"{\"other\":1}"), None);
+    }
 
     // Regression: the controller passes target_host as a DNS name
     // (algo-{session_id}.sandbox.svc.cluster.local), never a numeric IP.

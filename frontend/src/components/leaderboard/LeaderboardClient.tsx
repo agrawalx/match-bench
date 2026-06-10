@@ -9,6 +9,7 @@ import { platformConfig } from '@/config/platform';
 import { useLeaderboard } from '@/hooks/useLeaderboard';
 import type { LeaderboardEntry } from '@/types/leaderboard';
 import { LeaderboardControls } from './LeaderboardControls';
+import { ScoringRules } from './ScoringRules';
 import { LeaderboardTable } from './LeaderboardTable';
 import styles from './LeaderboardClient.module.css';
 
@@ -46,6 +47,7 @@ export function LeaderboardClient() {
         <h1>LEADERBOARD</h1>
         <p>Ranked benchmark results across active IICPC sessions.</p>
       </div>
+      <ScoringRules />
       {error && (
         <ErrorBanner message="Leaderboard API is unavailable. Start or connect the platform leaderboard service to load live standings." />
       )}

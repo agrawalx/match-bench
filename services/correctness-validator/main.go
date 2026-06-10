@@ -64,6 +64,11 @@ func main() {
 	settleDelay := time.Duration(envInt("SETTLE_DELAY_MS", 10000)) * time.Millisecond
 	validationTimeout := time.Duration(envInt("VALIDATION_TIMEOUT_MS", 60000)) * time.Millisecond
 	concurrency := envInt("VALIDATOR_CONCURRENCY", 4)
+	// Aggressive-fill tolerance (µs): a live engine processes in socket-arrival
+	// order, not the offline effective_t3 order, so a market/crossing-limit fill
+	// is accepted if it matched genuine non-self opposite liquidity within this
+	// window of the order's effective_t3. 0 = strict. See internal/validate.
+	validate.AggressiveFillToleranceNs = uint64(envInt("AGGRESSIVE_FILL_TOLERANCE_US", 0)) * 1000
 	brokers := parseBrokers(kafkaBrokers)
 	// Fail fast on a timeout budget the settle delay alone would consume: every
 	// session would hit the timeout fallback and be recorded as timed_out, so a

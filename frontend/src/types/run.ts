@@ -25,7 +25,9 @@ export interface MetricPoint {
   rt_p99_ns: number;
   tps_1s: number;
   error_rate: number;
-  hdr_encoded?: string;
+  hdr_encoded?: string; // service_time t7-t3 (scored)
+  rt_hdr_encoded?: string; // response_time r9-t0 (client round trip)
+  slip_hdr_encoded?: string; // schedule_slip t1-t0 (back-pressure)
 }
 
 export interface ViolationEntry {

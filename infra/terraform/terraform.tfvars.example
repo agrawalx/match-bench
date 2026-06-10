@@ -1,0 +1,20 @@
+# Copy to terraform.tfvars and edit. These are the two most common overrides.
+#
+# Prod (matches DEPLOYMENT_EKS.md §2.2 sizing):
+#   region                = "us-east-1"
+#   cluster_name          = "iicpc-prod"
+#   general_instance_type = "m6i.2xlarge"
+#   sandbox_min_size      = 0
+#
+# Smoke / minimal-first (MEMORY: ~$22/day; sandbox hard floor of 1 for cpuset):
+region                = "us-east-1"
+cluster_name          = "iicpc-prod"
+general_instance_type = "m6i.xlarge"
+sandbox_instance_type = "c6i.2xlarge"
+general_min_size      = 2
+general_max_size      = 4
+sandbox_min_size      = 1
+sandbox_max_size      = 4
+
+# account_id resolves automatically from your caller identity if left blank.
+# account_id = "123456789012"

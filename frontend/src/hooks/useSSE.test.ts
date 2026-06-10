@@ -1,6 +1,16 @@
-import { act, renderHook } from '@testing-library/react';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { useSSE } from './useSSE';
+/**
+ * This file defines tests for useSSE.test.
+ * It is part of the IICPC frontend and keeps UI, API, or test behavior
+ * scoped to this module so callers can rely on stable boundaries.
+ */
+import { act, renderHook } from "@testing-library/react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { useSSE } from "./useSSE";
+
+/**
+ * FakeEventSource describes structured data exchanged by this module.
+ * Keep this shape aligned with API and component expectations.
+ */
 
 class FakeEventSource {
   static instances: FakeEventSource[] = [];
@@ -30,10 +40,10 @@ class FakeEventSource {
   }
 }
 
-describe('useSSE', () => {
+describe("useSSE", () => {
   beforeEach(() => {
     FakeEventSource.instances = [];
-    vi.stubGlobal('EventSource', FakeEventSource);
+    vi.stubGlobal("EventSource", FakeEventSource);
   });
 
   afterEach(() => {
@@ -42,18 +52,18 @@ describe('useSSE', () => {
 
   it.each([
     {
-      name: 'snapshot carries the raw LeaderboardResponse',
-      event: 'snapshot' as const,
-      payload: { source: 'store', rows: [], next_cursor: 'abc' },
+      name: "snapshot carries the raw LeaderboardResponse",
+      event: "snapshot" as const,
+      payload: { source: "store", rows: [], next_cursor: "abc" },
     },
     {
-      name: 'update carries the flat LeaderboardUpdateEvent',
-      event: 'update' as const,
+      name: "update carries the flat LeaderboardUpdateEvent",
+      event: "update" as const,
       payload: {
-        run_group_id: 'rg-1',
-        submission_id: 'sub-1',
-        contestant_id: 'c-1',
-        team_name: 'Ada',
+        run_group_id: "rg-1",
+        submission_id: "sub-1",
+        contestant_id: "c-1",
+        team_name: "Ada",
         rank: 1,
         rank_delta: 2,
         peak_sustained_tps: 9001,
@@ -64,29 +74,37 @@ describe('useSSE', () => {
         updated_at_ns: 1717,
       },
     },
-  ])('dispatches named events: $name', ({ event, payload }) => {
+  ])("dispatches named events: $name", ({ event, payload }) => {
     const onMessage = vi.fn();
-    renderHook(() => useSSE('/api/leaderboard/v1/events', { onMessage }));
+    renderHook(() => useSSE("/api/leaderboard/v1/events", { onMessage }));
     const source = FakeEventSource.instances[0];
     act(() => source.emit(event, JSON.stringify(payload)));
     expect(onMessage).toHaveBeenCalledTimes(1);
     expect(onMessage).toHaveBeenCalledWith({ type: event, data: payload });
   });
 
-  it('connects to the URL as-is, without a token query param', () => {
-    renderHook(() => useSSE('/api/leaderboard/v1/events', { onMessage: vi.fn() }));
+  it("connects to the URL as-is, without a token query param", () => {
+    renderHook(() =>
+      useSSE("/api/leaderboard/v1/events", { onMessage: vi.fn() }),
+    );
     expect(FakeEventSource.instances).toHaveLength(1);
-    expect(FakeEventSource.instances[0].url).toBe('/api/leaderboard/v1/events');
+    expect(FakeEventSource.instances[0].url).toBe("/api/leaderboard/v1/events");
   });
 
-  it('does not connect while disabled', () => {
-    renderHook(() => useSSE('/api/leaderboard/v1/events', { enabled: false, onMessage: vi.fn() }));
+  it("does not connect while disabled", () => {
+    renderHook(() =>
+      useSSE("/api/leaderboard/v1/events", {
+        enabled: false,
+        onMessage: vi.fn(),
+      }),
+    );
     expect(FakeEventSource.instances).toHaveLength(0);
   });
 
-  it('closes the stream when enabled flips to false', () => {
+  it("closes the stream when enabled flips to false", () => {
     const { rerender } = renderHook(
-      ({ enabled }) => useSSE('/api/leaderboard/v1/events', { enabled, onMessage: vi.fn() }),
+      ({ enabled }) =>
+        useSSE("/api/leaderboard/v1/events", { enabled, onMessage: vi.fn() }),
       { initialProps: { enabled: true } },
     );
     expect(FakeEventSource.instances).toHaveLength(1);
@@ -95,11 +113,11 @@ describe('useSSE', () => {
     expect(FakeEventSource.instances).toHaveLength(1);
   });
 
-  it('ignores malformed payloads and keeps the stream alive', () => {
+  it("ignores malformed payloads and keeps the stream alive", () => {
     const onMessage = vi.fn();
-    renderHook(() => useSSE('/api/leaderboard/v1/events', { onMessage }));
+    renderHook(() => useSSE("/api/leaderboard/v1/events", { onMessage }));
     const source = FakeEventSource.instances[0];
-    act(() => source.emit('update', '{not json'));
+    act(() => source.emit("update", "{not json"));
     expect(onMessage).not.toHaveBeenCalled();
     expect(source.closed).toBe(false);
   });

@@ -1,6 +1,21 @@
-import styles from './Skeleton.module.css';
+/**
+ * This file defines frontend behavior for Skeleton.
+ * It is part of the IICPC frontend and keeps UI, API, or test behavior
+ * scoped to this module so callers can rely on stable boundaries.
+ */
+import styles from "./Skeleton.module.css";
 
-export function SkeletonRows({ rows = 12, columns = 10 }: { rows?: number; columns?: number }) {
+/**
+ * SkeletonRows performs the module-specific operation described by its name.
+ * It keeps inputs, side effects, and returned values within this module's contract.
+ */
+export function SkeletonRows({
+  rows = 12,
+  columns = 10,
+}: {
+  rows?: number;
+  columns?: number;
+}) {
   return (
     <>
       {Array.from({ length: rows }, (_, row) => (

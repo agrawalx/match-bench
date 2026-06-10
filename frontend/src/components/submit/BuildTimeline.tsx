@@ -1,28 +1,40 @@
-import { Badge } from '@/components/common/Badge';
-import type { SubmissionStatus } from '@/types/submission';
-import { AnimatePresence, motion } from 'framer-motion';
-import { AlertTriangle, CheckCircle2, XCircle } from 'lucide-react';
-import styles from './BuildTimeline.module.css';
+/**
+ * This file defines frontend behavior for BuildTimeline.
+ * It is part of the IICPC frontend and keeps UI, API, or test behavior
+ * scoped to this module so callers can rely on stable boundaries.
+ */
+import { Badge } from "@/components/common/Badge";
+import type { SubmissionStatus } from "@/types/submission";
+import { AnimatePresence, motion } from "framer-motion";
+import { AlertTriangle, CheckCircle2, XCircle } from "lucide-react";
+import styles from "./BuildTimeline.module.css";
 
-const steps = ['queued', 'building', 'scanning', 'promoting', 'ready'] as const;
-const labels: Record<(typeof steps)[number] | 'failed', string> = {
-  queued: 'Queued',
-  building: 'Building image',
-  scanning: 'Scanning image',
-  promoting: 'Promoting artifact',
-  ready: 'Ready',
-  failed: 'Failed',
+const steps = ["queued", "building", "scanning", "promoting", "ready"] as const;
+const labels: Record<(typeof steps)[number] | "failed", string> = {
+  queued: "Queued",
+  building: "Building image",
+  scanning: "Scanning image",
+  promoting: "Promoting artifact",
+  ready: "Ready",
+  failed: "Failed",
 };
 
+/**
+ * BuildTimeline performs the module-specific operation described by its name.
+ * It keeps inputs, side effects, and returned values within this module's contract.
+ */
 export function BuildTimeline({ status }: { status: SubmissionStatus | null }) {
   if (!status) return null;
-  const activeIndex = Math.max(steps.indexOf(status.status === 'failed' ? 'ready' : status.status), 0);
-  const progress = status.status === 'failed' ? activeIndex : activeIndex + 1;
-  const isTerminal = status.status === 'ready' || status.status === 'failed';
-  const logs = status.build_logs?.split('\n').slice(-20).join('\n');
+  const activeIndex = Math.max(
+    steps.indexOf(status.status === "failed" ? "ready" : status.status),
+    0,
+  );
+  const progress = status.status === "failed" ? activeIndex : activeIndex + 1;
+  const isTerminal = status.status === "ready" || status.status === "failed";
+  const logs = status.build_logs?.split("\n").slice(-20).join("\n");
   const timestamp = status.updated_at ?? status.created_at;
   const queuedForMs = Date.now() - Date.parse(timestamp);
-  const showQueuedHint = status.status === 'queued' && queuedForMs > 90_000;
+  const showQueuedHint = status.status === "queued" && queuedForMs > 90_000;
 
   return (
     <section className={styles.timeline}>
@@ -37,12 +49,20 @@ export function BuildTimeline({ status }: { status: SubmissionStatus | null }) {
           initial={{ opacity: 0, y: 8 }}
           animate={{ opacity: 1, y: 0 }}
           exit={{ opacity: 0, y: -8 }}
-          transition={{ duration: 0.2, ease: 'easeOut' }}
+          transition={{ duration: 0.2, ease: "easeOut" }}
         >
-          <span className={`${styles.marker} ${status.status === 'ready' ? styles.done : ''} ${status.status === 'failed' ? styles.failed : styles.active}`}>
-            {status.status === 'ready' && <CheckCircle2 size={24} strokeWidth={1.8} />}
-            {status.status === 'failed' && <XCircle size={24} strokeWidth={1.8} />}
-            {!isTerminal && <span className={styles.spinnerRing} aria-hidden="true" />}
+          <span
+            className={`${styles.marker} ${status.status === "ready" ? styles.done : ""} ${status.status === "failed" ? styles.failed : styles.active}`}
+          >
+            {status.status === "ready" && (
+              <CheckCircle2 size={24} strokeWidth={1.8} />
+            )}
+            {status.status === "failed" && (
+              <XCircle size={24} strokeWidth={1.8} />
+            )}
+            {!isTerminal && (
+              <span className={styles.spinnerRing} aria-hidden="true" />
+            )}
           </span>
           <div className={styles.currentText}>
             <strong>{labels[status.status]}</strong>
@@ -60,11 +80,14 @@ export function BuildTimeline({ status }: { status: SubmissionStatus | null }) {
         <div className={styles.hint} role="status">
           <AlertTriangle size={16} strokeWidth={2} aria-hidden="true" />
           <span>
-            Still queued. Check that the local build-worker is running and connected to the same Kafka/Postgres stack.
+            Still queued. Check that the local build-worker is running and
+            connected to the same Kafka/Postgres stack.
           </span>
         </div>
       )}
-      {status.status === 'failed' && logs && <pre className={styles.logs}>{logs}</pre>}
+      {status.status === "failed" && logs && (
+        <pre className={styles.logs}>{logs}</pre>
+      )}
     </section>
   );
 }

@@ -1,8 +1,18 @@
-import { SkeletonRows } from '@/components/common/Skeleton';
-import type { LeaderboardEntry } from '@/types/leaderboard';
-import type { SortBy, SortOrder } from './LeaderboardClient';
-import { LeaderboardRow } from './LeaderboardRow';
-import styles from './LeaderboardTable.module.css';
+/**
+ * This file defines frontend behavior for LeaderboardTable.
+ * It is part of the IICPC frontend and keeps UI, API, or test behavior
+ * scoped to this module so callers can rely on stable boundaries.
+ */
+import { SkeletonRows } from "@/components/common/Skeleton";
+import type { LeaderboardEntry } from "@/types/leaderboard";
+import type { SortBy, SortOrder } from "./LeaderboardClient";
+import { LeaderboardRow } from "./LeaderboardRow";
+import styles from "./LeaderboardTable.module.css";
+
+/**
+ * Props describes structured data exchanged by this module.
+ * Keep this shape aligned with API and component expectations.
+ */
 
 interface Props {
   rows: LeaderboardEntry[];
@@ -14,17 +24,28 @@ interface Props {
 }
 
 const headers = [
-  ['rank', '#'],
-  ['team_name', 'TEAM'],
-  ['peak_sustained_tps', 'PEAK TPS'],
-  ['p99_ns_at_peak_tps', 'P99 AT PEAK'],
-  ['spike_recovery_ns', 'RECOVERY'],
-  ['total_correctness', 'CORRECT'],
-  ['rank_delta', 'DELTA'],
-  ['status', 'STATUS'],
+  ["rank", "#"],
+  ["team_name", "TEAM"],
+  ["peak_sustained_tps", "PEAK TPS"],
+  ["p99_ns_at_peak_tps", "P99 AT PEAK"],
+  ["spike_recovery_ns", "RECOVERY"],
+  ["total_correctness", "CORRECT"],
+  ["rank_delta", "DELTA"],
+  ["status", "STATUS"],
 ] as const;
 
-export function LeaderboardTable({ rows, loading, ownContestantId, flashedRows, sortBy, sortOrder }: Props) {
+/**
+ * LeaderboardTable performs the module-specific operation described by its name.
+ * It keeps inputs, side effects, and returned values within this module's contract.
+ */
+export function LeaderboardTable({
+  rows,
+  loading,
+  ownContestantId,
+  flashedRows,
+  sortBy,
+  sortOrder,
+}: Props) {
   return (
     <div className={styles.wrap}>
       <table className={styles.table} aria-label="Leaderboard">
@@ -41,7 +62,17 @@ export function LeaderboardTable({ rows, loading, ownContestantId, flashedRows, 
         <thead>
           <tr>
             {headers.map(([key, label]) => (
-              <th key={key} scope="col" aria-sort={key === sortBy ? (sortOrder === 'asc' ? 'ascending' : 'descending') : undefined}>
+              <th
+                key={key}
+                scope="col"
+                aria-sort={
+                  key === sortBy
+                    ? sortOrder === "asc"
+                      ? "ascending"
+                      : "descending"
+                    : undefined
+                }
+              >
                 {label}
               </th>
             ))}

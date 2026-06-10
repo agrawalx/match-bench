@@ -1,5 +1,22 @@
-export type LeaderboardStatus = 'scored' | 'running' | 'failed' | 'disqualified';
+/**
+ * This file defines frontend behavior for leaderboard.
+ * It is part of the IICPC frontend and keeps UI, API, or test behavior
+ * scoped to this module so callers can rely on stable boundaries.
+ */
+/**
+ * LeaderboardStatus describes structured data exchanged by this module.
+ * Keep this shape aligned with API and component expectations.
+ */
+export type LeaderboardStatus =
+  | "scored"
+  | "running"
+  | "failed"
+  | "disqualified";
 
+/**
+ * LeaderboardEntry describes structured data exchanged by this module.
+ * Keep this shape aligned with API and component expectations.
+ */
 export interface LeaderboardEntry {
   rank: number;
   run_group_id: string;
@@ -16,14 +33,20 @@ export interface LeaderboardEntry {
   computed_at_ns: number;
 }
 
+/**
+ * LeaderboardResponse describes structured data exchanged by this module.
+ * Keep this shape aligned with API and component expectations.
+ */
 export interface LeaderboardResponse {
   source: string;
   rows: LeaderboardEntry[];
   next_cursor?: string;
 }
 
-// Wire shape of the leaderboard-api SSE "update" event. Mirrors
-// schemas/go/topics/topics.go LeaderboardUpdateEvent (snake_case JSON tags).
+/**
+ * LeaderboardUpdateEvent describes structured data exchanged by this module.
+ * Keep this shape aligned with API and component expectations.
+ */
 export interface LeaderboardUpdateEvent {
   run_group_id: string;
   submission_id: string;
@@ -40,12 +63,18 @@ export interface LeaderboardUpdateEvent {
   updated_at_ns: number;
 }
 
-// The broker sends two named SSE events: "snapshot" (the raw LeaderboardResponse
-// rendered on connect) and "update" (one flat LeaderboardUpdateEvent per change).
+/**
+ * SSEEvent describes structured data exchanged by this module.
+ * Keep this shape aligned with API and component expectations.
+ */
 export type SSEEvent =
-  | { type: 'snapshot'; data: LeaderboardResponse }
-  | { type: 'update'; data: LeaderboardUpdateEvent };
+  | { type: "snapshot"; data: LeaderboardResponse }
+  | { type: "update"; data: LeaderboardUpdateEvent };
 
+/**
+ * statusForEntry performs the module-specific operation described by its name.
+ * It keeps inputs, side effects, and returned values within this module's contract.
+ */
 export function statusForEntry(entry: LeaderboardEntry): LeaderboardStatus {
-  return entry.disqualified ? 'disqualified' : 'scored';
+  return entry.disqualified ? "disqualified" : "scored";
 }

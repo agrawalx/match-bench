@@ -1,17 +1,28 @@
-'use client';
+/**
+ * This file defines frontend behavior for useLeaderboard.
+ * It is part of the IICPC frontend and keeps UI, API, or test behavior
+ * scoped to this module so callers can rely on stable boundaries.
+ */
+"use client";
 
-import { useCallback, useState } from 'react';
-import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { getLeaderboard } from '@/api/leaderboard';
-import { ApiError } from '@/api/client';
-import { useAuth } from '@/auth/useAuth';
-import { platformConfig } from '@/config/platform';
-import type { LeaderboardEntry, LeaderboardResponse, LeaderboardUpdateEvent, SSEEvent } from '@/types/leaderboard';
-import { useSSE, type SSEStatus } from './useSSE';
+import { useCallback, useState } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { getLeaderboard } from "@/api/leaderboard";
+import { ApiError } from "@/api/client";
+import { useAuth } from "@/auth/useAuth";
+import { platformConfig } from "@/config/platform";
+import type {
+  LeaderboardEntry,
+  LeaderboardResponse,
+  LeaderboardUpdateEvent,
+  SSEEvent,
+} from "@/types/leaderboard";
+import { useSSE, type SSEStatus } from "./useSSE";
 
-// Merges one SSE "update" event into the cached leaderboard: the row keyed by
-// (run_group_id, contestant_id) is replaced, or appended if it is new. The
-// component sorts client-side, so insertion order does not matter here.
+/**
+ * applyLeaderboardUpdate performs the module-specific operation described by its name.
+ * It keeps inputs, side effects, and returned values within this module's contract.
+ */
 export function applyLeaderboardUpdate(
   current: LeaderboardResponse,
   update: LeaderboardUpdateEvent,
@@ -32,23 +43,32 @@ export function applyLeaderboardUpdate(
     computed_at_ns: update.updated_at_ns,
   };
   const matches = (row: LeaderboardEntry) =>
-    row.run_group_id === update.run_group_id && row.contestant_id === update.contestant_id;
+    row.run_group_id === update.run_group_id &&
+    row.contestant_id === update.contestant_id;
   const rows = current.rows.some(matches)
     ? current.rows.map((row) => (matches(row) ? entry : row))
     : [...current.rows, entry];
   return { ...current, rows };
 }
 
+/**
+ * useLeaderboard performs the module-specific operation described by its name.
+ * It keeps inputs, side effects, and returned values within this module's contract.
+ */
 export function useLeaderboard(sessionId?: string) {
   const { getToken } = useAuth();
   const token = getToken();
   const queryClient = useQueryClient();
-  const [sseStatus, setSseStatus] = useState<SSEStatus>('closed');
+  const [sseStatus, setSseStatus] = useState<SSEStatus>("closed");
   const [flashedRows, setFlashedRows] = useState<Set<string>>(new Set());
 
   const query = useQuery<LeaderboardResponse, ApiError>({
-    queryKey: ['leaderboard', sessionId],
-    queryFn: () => getLeaderboard({ runGroupId: sessionId, limit: platformConfig.leaderboardLimit }, token ?? undefined),
+    queryKey: ["leaderboard", sessionId],
+    queryFn: () =>
+      getLeaderboard(
+        { runGroupId: sessionId, limit: platformConfig.leaderboardLimit },
+        token ?? undefined,
+      ),
   });
 
   const flash = useCallback((contestantId: string) => {
@@ -64,15 +84,17 @@ export function useLeaderboard(sessionId?: string) {
 
   const onMessage = useCallback(
     (event: SSEEvent) => {
-      if (event.type === 'snapshot') {
-        // Snapshot is the full LeaderboardResponse: replace the cache wholesale.
-        queryClient.setQueryData(['leaderboard', sessionId], event.data);
+      if (event.type === "snapshot") {
+        queryClient.setQueryData(["leaderboard", sessionId], event.data);
       }
-      if (event.type === 'update') {
-        queryClient.setQueryData<LeaderboardResponse>(['leaderboard', sessionId], (current) => {
-          if (!current) return current;
-          return applyLeaderboardUpdate(current, event.data);
-        });
+      if (event.type === "update") {
+        queryClient.setQueryData<LeaderboardResponse>(
+          ["leaderboard", sessionId],
+          (current) => {
+            if (!current) return current;
+            return applyLeaderboardUpdate(current, event.data);
+          },
+        );
         flash(event.data.contestant_id);
       }
     },

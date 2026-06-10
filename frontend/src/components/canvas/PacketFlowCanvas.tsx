@@ -1,7 +1,17 @@
-'use client';
+/**
+ * This file defines frontend behavior for PacketFlowCanvas.
+ * It is part of the IICPC frontend and keeps UI, API, or test behavior
+ * scoped to this module so callers can rely on stable boundaries.
+ */
+"use client";
 
-import { useEffect, useRef } from 'react';
-import styles from './PacketFlowCanvas.module.css';
+import { useEffect, useRef } from "react";
+import styles from "./PacketFlowCanvas.module.css";
+
+/**
+ * Packet describes structured data exchanged by this module.
+ * Keep this shape aligned with API and component expectations.
+ */
 
 interface Packet {
   edge: number;
@@ -11,26 +21,33 @@ interface Packet {
 }
 
 const labels = [
-  'submission-api',
-  'build-worker',
-  'sandbox-orchestrator',
-  'bot-fleet-controller',
-  'bot-fleet',
-  'ebpf-latency',
-  'telemetry-ingester',
-  'correctness-validator',
-  'score-computer',
-  'leaderboard-api',
+  "submission-api",
+  "build-worker",
+  "sandbox-orchestrator",
+  "bot-fleet-controller",
+  "bot-fleet",
+  "ebpf-latency",
+  "telemetry-ingester",
+  "correctness-validator",
+  "score-computer",
+  "leaderboard-api",
 ];
 
-export function PacketFlowCanvas(props: React.CanvasHTMLAttributes<HTMLCanvasElement>) {
+/**
+ * PacketFlowCanvas performs the module-specific operation described by its name.
+ * It keeps inputs, side effects, and returned values within this module's contract.
+ */
+export function PacketFlowCanvas(
+  props: React.CanvasHTMLAttributes<HTMLCanvasElement>,
+) {
   const ref = useRef<HTMLCanvasElement | null>(null);
 
   useEffect(() => {
-    if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return undefined;
+    if (window.matchMedia("(prefers-reduced-motion: reduce)").matches)
+      return undefined;
     const canvas = ref.current;
     if (!canvas) return undefined;
-    const context = canvas.getContext('2d');
+    const context = canvas.getContext("2d");
     if (!context) return undefined;
 
     let frame = 0;
@@ -64,7 +81,7 @@ export function PacketFlowCanvas(props: React.CanvasHTMLAttributes<HTMLCanvasEle
       const p = points();
       context.clearRect(0, 0, window.innerWidth, window.innerHeight);
       context.lineWidth = 0.5;
-      context.strokeStyle = '#1a1a1a';
+      context.strokeStyle = "#1a1a1a";
       for (let index = 0; index < p.length - 1; index += 1) {
         context.beginPath();
         context.moveTo(p[index].x, p[index].y);
@@ -74,9 +91,9 @@ export function PacketFlowCanvas(props: React.CanvasHTMLAttributes<HTMLCanvasEle
       p.forEach((point) => {
         context.beginPath();
         context.arc(point.x, point.y, 4, 0, Math.PI * 2);
-        context.fillStyle = '#1c1c1c';
+        context.fillStyle = "#1c1c1c";
         context.fill();
-        context.strokeStyle = '#333333';
+        context.strokeStyle = "#333333";
         context.lineWidth = 1;
         context.stroke();
       });
@@ -104,17 +121,17 @@ export function PacketFlowCanvas(props: React.CanvasHTMLAttributes<HTMLCanvasEle
           0,
           Math.PI * 2,
         );
-        context.fillStyle = '#00e5ff';
+        context.fillStyle = "#00e5ff";
         context.fill();
       });
       frame = requestAnimationFrame(draw);
     };
 
     resize();
-    window.addEventListener('resize', resize);
+    window.addEventListener("resize", resize);
     frame = requestAnimationFrame(draw);
     return () => {
-      window.removeEventListener('resize', resize);
+      window.removeEventListener("resize", resize);
       cancelAnimationFrame(frame);
     };
   }, []);

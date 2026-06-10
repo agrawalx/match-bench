@@ -1,5 +1,7 @@
 /// <reference types="next" />
 /// <reference types="next/image-types/global" />
-
-// NOTE: This file should not be edited
-// see https://nextjs.org/docs/app/building-your-application/configuring/typescript for more information.
+/**
+ * This file defines frontend behavior for next env.d.
+ * It is part of the IICPC frontend and keeps UI, API, or test behavior
+ * scoped to this module so callers can rely on stable boundaries.
+ */

@@ -1,3 +1,11 @@
+# Placeholder shape only — never commit real values. Create out of band (data-tier
+# passwords come from postgres-secret / timescaledb-secret):
+#   kubectl -n benchmark create secret generic score-computer-secret \
+#     --from-literal=database-url='postgres://iicpc:<pg_pw>@postgres.data.svc.cluster.local:5432/iicpc' \
+#     --from-literal=timescale-url='postgres://iicpc:<ts_pw>@timescaledb.data.svc.cluster.local:5432/metrics' \
+#     --from-literal=kafka-brokers='kafka-0.kafka.data.svc.cluster.local:9092,kafka-1.kafka.data.svc.cluster.local:9092,kafka-2.kafka.data.svc.cluster.local:9092' \
+#     --from-literal=redis-addr='redis.data.svc.cluster.local:6379'
+# database-url + kafka-brokers equal correctness-validator-secret's — reuse those.
 apiVersion: v1
 kind: Secret
 metadata:

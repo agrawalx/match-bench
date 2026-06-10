@@ -12,7 +12,10 @@
 # Usage:  make init plan apply kubeconfig ecr-login images deploy
 #         make destroy   (tears the cluster down)
 
-SHELL := /usr/bin/env bash
+# /bin/bash, not `/usr/bin/env bash` — GNU make treats SHELL as a literal path and
+# does not word-split it, so the env form fails with "/usr/bin/env bash: No such
+# file or directory" on some hosts.
+SHELL := /bin/bash
 .ONESHELL:
 .SHELLFLAGS := -eu -o pipefail -c
 
@@ -22,10 +25,11 @@ TF_DIR    := $(REPO_ROOT)/infra/terraform
 K8S       := $(REPO_ROOT)/k8s
 
 # Resolved lazily (= not :=) so they only run terraform when a target needs them.
-REGION    = $(shell cd $(TF_DIR) && terraform output -raw region)
-CLUSTER   = $(shell cd $(TF_DIR) && terraform output -raw cluster_name)
-REGISTRY  = $(shell cd $(TF_DIR) && terraform output -raw ecr_registry)
-TAG      ?= $(shell git -C $(REPO_ROOT) rev-parse --short HEAD)
+REGION      = $(shell cd $(TF_DIR) && terraform output -raw region)
+CLUSTER     = $(shell cd $(TF_DIR) && terraform output -raw cluster_name)
+REGISTRY    = $(shell cd $(TF_DIR) && terraform output -raw ecr_registry)
+SPAWNER_ARN = $(shell cd $(TF_DIR) && terraform output -json irsa_role_arns | python3 -c "import sys,json;print(json.load(sys.stdin)['build_spawner'])")
+TAG        ?= $(shell git -C $(REPO_ROOT) rev-parse --short HEAD)
 
 # The 12 images as "imageName:buildContextDir:dockerfile". The first 11 build from
 # the repo root (Go/Rust workspace); frontend builds from frontend/. Image name
@@ -152,8 +156,10 @@ deploy:
 	kubectl -n platform set image deployment/leaderboard-api leaderboard-api=$$REG/iicpc/leaderboard-api:$$T 2>/dev/null || true
 	kubectl -n platform set image deployment/frontend        frontend=$$REG/iicpc/frontend:$$T 2>/dev/null || true
 
-	echo ">> [7] build (RBAC + SA already IRSA-annotated by Terraform, then spawner)"
+	echo ">> [7] build (substitute spawner IRSA role ARN into the SA, then spawner image)"
 	kubectl apply -R -f $(K8S)/build/
+	kubectl -n build annotate serviceaccount build-spawner \
+	  eks.amazonaws.com/role-arn="$(SPAWNER_ARN)" --overwrite
 	kubectl -n build set image deployment/spawner spawner=$$REG/iicpc/spawner:$$T 2>/dev/null || true
 
 	echo ">> [8] sandbox (RBAC, netpol, orchestrator) + inject CAPTURE_IMAGE = ebpf-latency ref"

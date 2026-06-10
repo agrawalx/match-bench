@@ -645,6 +645,26 @@ Throughput only counts if the fills are correct. A reference price-time-priority
 
 **Evidence.** `replay/order.go:21` `const TieToleranceNs = 100`; `order.go:68-73` `CrossFlowTie` returns false for same-flow else `absDiff(EffectiveT3) < tolerance`; `validate.go:260` `if replay.CrossFlowTie(o, other) { continue }`. **Number:** 100 ns.
 
+### 6.5.1 Aggressive-fill tolerance — judging a live engine against an offline replay
+
+**Problem.** The reference replays the order stream in one canonical offline order — `effective_t3`, the order bytes hit the algo's veth (kernel ingress). A **live** in-sandbox engine cannot observe `effective_t3`; it processes orders in the order its sockets become readable. For resting (limit) orders this is benign — a crossing limit is unambiguous and the 100 ns cross-flow tolerance (§6.5) covers the residual. But a **market/IOC** fill is decided entirely by which liquidity is resting at the instant it is processed, so any cross-flow reordering between the veth and the engine's userspace flips the outcome — and market orders never rest, so the §6.5 tolerance (which only suppresses *resting-order* time-priority breaks) does not apply to them at all. A correct market-filling engine is therefore penalized for an ordering it could not observe.
+
+We measured this exactly. Same matching logic, three configurations:
+
+| Engine | Validator | Correctness |
+|---|---|---|
+| Go `net/http`, goroutine-per-connection | strict | **0.22** (every violation a market-order "price" break; limit fills 0 violations) |
+| Go `net/http` | 50 ms tolerance | **0.92** (residual = Go scheduler reordering by ms under GC on a shared host, beyond 50 ms) |
+| Tight single-threaded **epoll** (readiness order ≈ veth arrival) | 50 ms tolerance | **1.00 / 0.998** |
+
+The split is the whole finding: it is **not** a broken validator and **not** a hardware wall — it is (1) **engine architecture** (a real HFT engine is a single-threaded arrival-order loop; a goroutine-scrambled one diverges by milliseconds) and (2) a **measurement-fairness gap** the platform must close for aggressive fills.
+
+**Decision.** During the reference replay, record each resting order's **availability window** `[enter_t3, exit_t3]` (enter = its `effective_t3`; exit = the `effective_t3` of whatever consumed/cancelled it, or +∞ if still resting at end). A reported aggressive fill at price P is accepted if **non-self opposite liquidity at P was genuinely resting within ±tolerance of the aggressor's `effective_t3`** — the fairness analog of the cross-flow tie tolerance, extended to liquidity timing. Overfill and self-trade are never tolerated; under-reporting is never penalized.
+
+**Why.** It holds a live engine to the only thing it *can* satisfy: that it matched real liquidity present near its arrival, not an exact offline interleaving it cannot see. Production sets a tight tolerance (µs, matched to veth→userspace reorder) so a well-built engine fits inside it without it forgiving genuinely wrong fills.
+
+**Evidence.** `book.go` `type Availability` + `closeAvail` + `Availability()` (liquidity timeline); `validate.go` `availByLevel` index + `tolerated()` + `windowsOverlap()`; `main.go` `AGGRESSIVE_FILL_TOLERANCE_US`. Reference contestants: `deploy-local/passing-engine-epoll` (tight epoll) and `deploy-local/passing-engine` (Go `net/http`). **Numbers:** 0.22 → 0.92 → 1.00/0.998; tolerance configured in µs (0 = strict).
+
 ### 6.6 Price-scale reconciliation
 
 **Problem.** `orders.sent.price` is a raw FIX tag-44 integer while `orders.acked.fill_price` is fixed-point ×1e9 from the kernel parser; without rescaling, every fill is a phantom price violation and CorrectnessScore collapses to ~0.
@@ -705,15 +725,17 @@ Throughput only counts if the fills are correct. A reference price-time-priority
 
 **Evidence.** `main.go:310-318` `timeoutRecord` with `validate.Report{}` zero value; rationale `main.go:306-309`; score-computer `score/score.go:181` `if s.Correct.TotalFills > 0` skips the gate; `score.go:255-258` aggregate returns 0 only when total==0. **Number:** 0/0 placeholder.
 
-### 6.12 Peak-sustained-TPS gating
+### 6.12 Peak-sustained-TPS gating (stable-window p99, warmup skip)
 
-**Problem.** Raw burst TPS is meaningless if it was only achieved while blowing the p99 budget or erroring out.
+**Problem.** Raw burst TPS is meaningless if it was only achieved while blowing the p99 budget or erroring out. Two subtleties make the *naïve* gate wrong: (a) gating on the **worst single second** fails an otherwise-healthy wave on one cold-start or GC-transient second; (b) **wave 0** is dominated by connection/cache/JIT warmup (tens of ms even on a healthy node), so including it zeroes every climb.
 
-**Decision.** Walk the wave schedule in offered-RPS order and stop at the first wave failing the error-rate or p99 gate; peak is the last passing wave's offered RPS. Break-on-first-failure makes peak monotonic.
+**Decision.** Walk the wave schedule in offered-RPS order, **skip wave 0 (warmup)**, and gate each wave on the **median of its per-second p99** (the sustained "stable-window" value), not the max. Stop at the first wave failing the error-rate or median-p99 gate; peak is the last passing wave's offered RPS. Break-on-first-failure keeps peak monotonic.
 
-**Why.** Throughput is defined as sustainable-under-SLA.
+**Why.** Throughput is "sustainable-under-SLA"; the median is the wave's representative latency (a single transient second is not), and the warmup wave is not representative of the engine at all. Error rate stays a *max* — a sustained error second is a real fault.
 
-**Evidence.** `score/score.go:227-241` switch on `MaxErrorRate>cfg.MaxErrorRate` / `MaxP99NS>cfg.MaxP99NS` else `Passed + PeakSustainedTPS=wave.OfferedRPS`, then `if !wr.Passed { break }`; defaults `score.go:14-16` `DefaultMaxErrorRate=0.01`, `DefaultMaxP99NS=1_000_000` (1ms), `DefaultWaveDurationNS=20s`. **Numbers:** p99 gate 1,000,000 ns (1ms); error-rate gate 0.01; wave 20s.
+**Evidence.** `score/score.go` wave loop: `if wave.WaveIndex == 0 { continue }` (warmup skip); gate on `m.StableP99NS` (median via `medianU64` over `summarizeMetrics`'s per-second `p99Samples`), `MaxP99NS` retained for the dashboard; `else Passed + PeakSustainedTPS=wave.OfferedRPS`, then `if !wr.Passed { break }`. Defaults: `DefaultMaxErrorRate=0.01`, `DefaultMaxP99NS=1_000_000` (1 ms), `DefaultWaveDurationNS=20s`. **Numbers:** p99 gate 1 ms (production; relax only for jittery local hardware); error-rate 0.01; wave 20 s.
+
+> **Correctness DQ gate.** A run-group is disqualified when its aggregate correctness `Σvalid/Σtotal`, or any session's correctness ratio, falls **below 0.95** (`scoring_config.correctness_dq_threshold`, judge-tunable, was 0.99). The earlier binary "any ramp violation → DQ" rule was removed: a handful of order-dependent violations out of tens of thousands of fills (see §6.5.1) must not disqualify a correct engine — only a sub-threshold *ratio* does, which the per-session gate (the ramp is a session) already enforces. The rule is stated verbatim on the leaderboard (`ScoringRules`).
 
 ### 6.13 DQ-aware ranking
 

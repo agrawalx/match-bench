@@ -88,25 +88,11 @@ export function RunClient({ initialRunGroupId }: { initialRunGroupId?: string })
     setRememberedSubmissionIds(getRememberedSubmissionIds(ownerId));
   }, [runGroupQuery.data?.submission_id, ownerId]);
 
-  // --- Unauthenticated ---
-  if (!authenticated) {
-    return (
-      <motion.section className={styles.page} initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.22, ease: 'easeOut' }}>
-        <div className={styles.heading}>
-          <h1>MY RUN</h1>
-          <p>Run history and benchmark telemetry for your submitted algorithms.</p>
-        </div>
-        <div className={styles.empty}>
-          <span className={styles.emptyIcon}><Brackets size={32} strokeWidth={1.5} /></span>
-          <strong>Sign in to load your run history</strong>
-          <p>The page stays available, but personal runs require your contestant identity.</p>
-          <GoogleButton />
-        </div>
-      </motion.section>
-    );
-  }
-
-  // --- Detail mode: single run view ---
+  // --- Detail mode: single run view (public — works signed-out) ---
+  // Run detail + HDR/throughput charts come from leaderboard-api, which has no
+  // auth. So a run detail page renders for anyone with the link. Only the live
+  // pending-run card (runGroupQuery) needs a token; it's simply omitted when
+  // signed out, and the completed-run charts still show.
   if (detailMode) {
     return (
       <motion.section className={styles.page} initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.22, ease: 'easeOut' }}>
@@ -136,6 +122,26 @@ export function RunClient({ initialRunGroupId }: { initialRunGroupId?: string })
             <SessionCards sessions={data.sessions} />
           </>
         )}
+      </motion.section>
+    );
+  }
+
+  // --- Unauthenticated (table/history mode only) ---
+  // The personal run history is per-contestant and needs the signed-in identity.
+  // Detail mode above already returned for anyone with a run link.
+  if (!authenticated) {
+    return (
+      <motion.section className={styles.page} initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.22, ease: 'easeOut' }}>
+        <div className={styles.heading}>
+          <h1>MY RUN</h1>
+          <p>Run history and benchmark telemetry for your submitted algorithms.</p>
+        </div>
+        <div className={styles.empty}>
+          <span className={styles.emptyIcon}><Brackets size={32} strokeWidth={1.5} /></span>
+          <strong>Sign in to load your run history</strong>
+          <p>The page stays available, but personal runs require your contestant identity.</p>
+          <GoogleButton />
+        </div>
       </motion.section>
     );
   }

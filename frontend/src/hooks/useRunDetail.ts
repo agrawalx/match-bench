@@ -16,10 +16,13 @@ export function useRunDetail(runGroupId: string | null) {
     hdrSeries?: HdrSeries[];
   }>({
     queryKey: ['run-detail', runGroupId],
-    enabled: Boolean(runGroupId && token),
+    // Run detail + HDR charts are served by leaderboard-api with no auth, so the
+    // view works signed-out (public run pages). A token, when present, is sent
+    // but ignored server-side; we don't gate the query on it.
+    enabled: Boolean(runGroupId),
     queryFn: async () => {
-      if (!runGroupId || !token) throw new Error('missing_run');
-      const detail = await getRunDetail(runGroupId, token);
+      if (!runGroupId) throw new Error('missing_run');
+      const detail = await getRunDetail(runGroupId, token ?? '');
       const histogram = deriveLatencyHistogram(detail);
       const throughput = deriveThroughput(detail);
       const hdrSeries = deriveHdrSeries(detail);

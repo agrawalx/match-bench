@@ -8,6 +8,15 @@
   background: #0f0f0f;
 }
 
+.clickable {
+  cursor: pointer;
+}
+
+.clickable:focus-visible {
+  outline: 1px solid var(--color-accent);
+  outline-offset: -1px;
+}
+
 .own {
   background: rgba(0, 229, 255, 0.03);
   box-shadow: inset 2px 0 0 var(--color-accent);

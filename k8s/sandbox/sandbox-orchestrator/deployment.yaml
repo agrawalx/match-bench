@@ -1,3 +1,10 @@
+# k8s/sandbox/sandbox-orchestrator/deployment.yaml
+#
+# This file declares Kubernetes resources for k8s/sandbox/sandbox-orchestrator.
+# It is part of the IICPC platform configuration and should remain
+# aligned with the deployment and operations guidance in the README.
+# Keep comments at the file header so resource bodies stay declarative.
+
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -26,7 +33,6 @@ spec:
               containerPort: 8080
               protocol: TCP
           env:
-            # In-cluster Loki push endpoint (logger appends /loki/api/v1/push).
             - name: LOKI_URL
               value: http://loki.observability.svc.cluster.local:3100
             - name: PORT
@@ -35,51 +41,24 @@ spec:
               value: prod
             - name: K8S_NAMESPACE
               value: sandbox
-            # RUNTIME_CLASS is empty for dev k3s — algo pods get the default runtime.
-            # In prod, set this to "gvisor" (after installing the runsc RuntimeClass).
-            # Toggle pattern: empty value disables the feature, non-empty enables it
-            # (same shape as BUILD_NODE_POOL on the spawner). Use this shape for any
-            # future dev/prod-divergent k8s behaviour so the orchestrator pod spec
-            # remains identical across environments and only the env value differs.
             - name: RUNTIME_CLASS
               value: ""
-            # Equal request/limit makes algo pods Guaranteed QoS. Integer CPU
-            # ("2", not "2000m") enables cpuset pinning when the sandbox node
-            # pool's kubelet is configured with cpuManagerPolicy=static and
-            # cpuManagerPolicyOptions.full-pcpus-only=true. The pod spec alone
-            # is necessary but not sufficient — without those kubelet settings
-            # the algo pod still gets equal request/limit but shares cores via
-            # CFS bandwidth instead of getting an exclusive cpuset.
             - name: ALGO_CPU
               value: "2"
             - name: ALGO_MEMORY
               value: "1Gi"
-            # Dedicated sandbox node pool. Empty in dev k3s (no taint exists).
-            # Prod: set to "sandbox" with matching taint sandbox=true:NoSchedule
-            # on the dedicated node pool. Mirrors BUILD_NODE_POOL.
             - name: SANDBOX_NODE_POOL
               value: ""
-            # Per-pod NIC bandwidth caps. Read by the CNI bandwidth plugin
-            # (and Cilium) from kubernetes.io/{egress,ingress}-bandwidth
-            # annotations. Set to empty to disable.
             - name: ALGO_EGRESS_BANDWIDTH
               value: "100M"
             - name: ALGO_INGRESS_BANDWIDTH
               value: "100M"
-            # eBPF latency capture. When CAPTURE_ENABLED=true the orchestrator spawns a
-            # privileged capture Job (hostPID + CAP_BPF/NET_ADMIN/SYS_ADMIN) per slot that
-            # attaches to the algo netns and publishes orders.acked to Kafka. CAPTURE_IMAGE
-            # is required when enabled; KAFKA_BROKERS is passed through to the Job. Same
-            # toggle shape as RUNTIME_CLASS — set CAPTURE_ENABLED="" to disable.
             - name: CAPTURE_ENABLED
               value: "true"
             - name: CAPTURE_IMAGE
               value: ghcr.io/agrawalx/ebpf-latency:dev
             - name: KAFKA_BROKERS
               value: kafka.data.svc.cluster.local:9092
-            # Optional imagePullSecret in the sandbox namespace for private
-            # contestant images. Leave empty for public registries or local
-            # clusters with preloaded images.
             - name: ALGO_IMAGE_PULL_SECRET
               value: ""
           livenessProbe:

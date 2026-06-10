@@ -1,11 +1,10 @@
-# Placeholder only — never commit real credentials. Create the real secret out of
-# band, e.g.:
-#   kubectl -n benchmark create secret generic correctness-validator-secret \
-#     --from-literal=kafka-brokers=kafka-0.kafka.data.svc.cluster.local:9092,kafka-1...:9092,kafka-2...:9092 \
-#     --from-literal=database-url='postgres://iicpc:<pw>@postgres.data.svc.cluster.local:5432/iicpc?sslmode=disable'
+# bootstrap/secret-templates/benchmark-correctness-validator.yaml
 #
-# database-url points at the metadata Postgres (run history / scores), the same
-# instance the bot-fleet-controller uses — NOT the TimescaleDB metrics instance.
+# This file documents the secret shape required by benchmark correctness validator.
+# It is part of the IICPC platform configuration and should remain
+# aligned with the deployment and operations guidance in the README.
+# Keep comments at the file header so resource bodies stay declarative.
+
 apiVersion: v1
 kind: Secret
 metadata:

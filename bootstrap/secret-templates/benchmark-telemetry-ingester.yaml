@@ -1,9 +1,10 @@
-# Placeholder only — never commit real credentials. Create the real secret out
-# of band, e.g.:
-#   kubectl -n benchmark create secret generic telemetry-ingester-secrets \
-#     --from-literal=KAFKA_BROKERS=kafka-0.kafka.data.svc.cluster.local:9092,kafka-1...:9092,kafka-2...:9092 \
-#     --from-literal=TIMESCALE_URL='postgres://iicpc:<pw>@timescaledb.data.svc.cluster.local:5432/metrics' \
-#     --from-literal=REDIS_URL='redis://redis.data.svc.cluster.local:6379'
+# bootstrap/secret-templates/benchmark-telemetry-ingester.yaml
+#
+# This file documents the secret shape required by benchmark telemetry ingester.
+# It is part of the IICPC platform configuration and should remain
+# aligned with the deployment and operations guidance in the README.
+# Keep comments at the file header so resource bodies stay declarative.
+
 apiVersion: v1
 kind: Secret
 metadata:

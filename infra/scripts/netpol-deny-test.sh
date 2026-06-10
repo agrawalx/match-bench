@@ -1,31 +1,21 @@
 #!/usr/bin/env bash
-# netpol-deny-test.sh — the HARD GATE from DEPLOYMENT_EKS.md §3.1 / §13.1.
+# infra/scripts/netpol-deny-test.sh
 #
-# Problem: on stock EKS the VPC CNI ignores NetworkPolicy objects entirely, so
-# `kubectl get netpol` shows every isolation policy present while NOTHING is
-# enforced. "The policy exists" and "the policy is enforced" are different facts;
-# only the second protects contestants. The sandbox-isolation policy
-# (k8s/sandbox/network-policy.yaml) blocks ALL cluster egress from algo pods —
-# they must not reach postgres/kafka/minio or other contestants.
-#
-# Decision: prove enforcement empirically. Spawn a throwaway pod in the `sandbox`
-# namespace (subject to sandbox-isolation, no ebpf-capture label) and assert:
-#   1. it CANNOT open postgres.data:5432   (egress to cluster -> must FAIL)
-#   2. it CAN resolve DNS + reach the public internet (egress allowlist -> must PASS)
-# If (1) succeeds in connecting, enforcement is OFF — exit non-zero and STOP the
-# deploy.
-#
-# Why a real pod (not a dry-run): the whole point is that the data plane, not the
-# API server, is what enforces. Requires the data tier (postgres) to be up, or
-# step 1 is inconclusive; run this AFTER the data tier and CNI are deployed.
+# This script automates infrastructure operations for netpol deny test.
+# It belongs to the IICPC operational toolchain and should keep
+# setup, validation, and deployment behavior explicit at entry points.
+# Function-level comments describe reusable shell routines below.
+
 set -euo pipefail
 
 NS=sandbox
 POD=netpol-deny-test
-IMAGE=nicolaka/netshoot:latest # has nc, dig, curl
+IMAGE=nicolaka/netshoot:latest
 PG_HOST=postgres.data.svc.cluster.local
 PG_PORT=5432
 
+# cleanup performs the script-specific operation described by its name.
+# It keeps command side effects explicit and returns shell status to callers.
 cleanup() { kubectl -n "$NS" delete pod "$POD" --ignore-not-found --wait=false >/dev/null 2>&1 || true; }
 trap cleanup EXIT
 

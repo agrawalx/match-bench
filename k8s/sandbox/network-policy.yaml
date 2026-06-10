@@ -1,7 +1,10 @@
-# sandbox namespace: contestant trading algorithm pods (gVisor runtime).
-# Only bot-workers (benchmark namespace) may send orders inbound.
-# All intra-cluster egress is blocked — contestants cannot reach postgres, kafka, minio,
-# or other contestant pods. Public internet egress is allowed.
+# k8s/sandbox/network-policy.yaml
+#
+# This file declares Kubernetes resources for k8s/sandbox.
+# It is part of the IICPC platform configuration and should remain
+# aligned with the deployment and operations guidance in the README.
+# Keep comments at the file header so resource bodies stay declarative.
+
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -20,7 +23,6 @@ spec:
               name: benchmark
 
   egress:
-    # Public internet only — no private/cluster CIDRs
     - to:
         - ipBlock:
             cidr: 0.0.0.0/0
@@ -28,7 +30,6 @@ spec:
               - 10.0.0.0/8
               - 172.16.0.0/12
               - 192.168.0.0/16
-    # DNS
     - to:
         - namespaceSelector:
             matchLabels:
@@ -39,12 +40,6 @@ spec:
         - port: 53
           protocol: TCP
 ---
-# H15: the per-slot eBPF latency-capture Job (app=ebpf-capture) lives in the
-# sandbox namespace but must publish orders.acked to Kafka in the data namespace.
-# The base sandbox-isolation policy denies all cluster egress; NetworkPolicies are
-# ADDITIVE, so this grants the capture Job the one egress it needs (+DNS) while
-# contestant algo pods (no ebpf-capture label) stay fully isolated. Without it,
-# enabling CAPTURE_ENABLED silently drops all latency telemetry.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -57,9 +52,6 @@ spec:
   policyTypes:
     - Ingress
     - Egress
-  # Prometheus (observability namespace) scrapes the capture pod's metrics on
-  # 9090. Algo pods (no ebpf-capture label) are NOT selected here and stay
-  # locked down by sandbox-isolation.
   ingress:
     - from:
         - namespaceSelector:
@@ -76,8 +68,6 @@ spec:
       ports:
         - port: 9092
           protocol: TCP
-    # Loki log shipping — the capture's logger pushes to
-    # loki.observability.svc:3100 (LOKI_URL).
     - to:
         - namespaceSelector:
             matchLabels:

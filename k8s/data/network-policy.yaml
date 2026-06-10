@@ -1,7 +1,10 @@
-# data namespace: stateful services (postgres, kafka, minio).
-# Only platform, build, and benchmark namespaces may reach data services.
-# (benchmark added for bot-fleet-controller: Kafka publish/consume + runs-table reads.)
-# Data pods never initiate outbound connections.
+# k8s/data/network-policy.yaml
+#
+# This file declares Kubernetes resources for k8s/data.
+# It is part of the IICPC platform configuration and should remain
+# aligned with the deployment and operations guidance in the README.
+# Keep comments at the file header so resource bodies stay declarative.
+
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -24,8 +27,6 @@ spec:
         - namespaceSelector:
             matchLabels:
               name: benchmark
-    # H15: per-slot eBPF capture Jobs (sandbox namespace) publish orders.acked to
-    # Kafka. Scope them to the broker port ONLY — never postgres/redis/timescale.
     - from:
         - namespaceSelector:
             matchLabels:
@@ -33,13 +34,6 @@ spec:
       ports:
         - port: 9092
           protocol: TCP
-    # KEDA operator (keda namespace): the kafka scaler for bot-fleet-worker
-    # reads consumer-group lag on workload.assignments straight from the broker.
-    # Without this rule the scaler's metadata requests are default-denied, lag
-    # always reads as unknown, and the fleet never scales up. Broker port ONLY,
-    # like the sandbox rule above. The keda namespace is helm-managed, so match
-    # the automatic kubernetes.io/metadata.name label instead of a hand-applied
-    # name label.
     - from:
         - namespaceSelector:
             matchLabels:
@@ -47,11 +41,6 @@ spec:
       ports:
         - port: 9092
           protocol: TCP
-    # Intra-namespace Kafka: the 3-node KRaft quorum talks broker-to-broker on
-    # 9093 (controller) and 9092 (broker), and the kafka-topic-init Job connects
-    # to a broker on 9092. Without this rule those flows are default-denied by
-    # the Egress block below on a NetworkPolicy-enforcing CNI, so the cluster
-    # never forms a quorum and topic creation hangs.
     - from:
         - podSelector: {}
       ports:
@@ -59,9 +48,6 @@ spec:
           protocol: TCP
         - port: 9093
           protocol: TCP
-    # Prometheus (observability namespace) scrapes the exporter sidecars +
-    # native MinIO metrics: postgres/timescale-exporter 9187, redis_exporter 9121,
-    # kafka-exporter 9308, MinIO native metrics on the 9000 S3 API port.
     - from:
         - namespaceSelector:
             matchLabels:
@@ -86,8 +72,6 @@ spec:
           protocol: UDP
         - port: 53
           protocol: TCP
-    # Egress side of the intra-namespace Kafka traffic above (broker-to-broker
-    # quorum + topic-init Job -> broker). Same-namespace pods only.
     - to:
         - podSelector: {}
       ports:

@@ -1,3 +1,10 @@
+# k8s/data/minio/statefulset.yaml
+#
+# This file declares Kubernetes resources for k8s/data/minio.
+# It is part of the IICPC platform configuration and should remain
+# aligned with the deployment and operations guidance in the README.
+# Keep comments at the file header so resource bodies stay declarative.
+
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
@@ -14,9 +21,6 @@ spec:
       labels:
         app: minio
       annotations:
-        # MinIO serves native Prometheus metrics on the S3 API port (9000) at
-        # /minio/v2/metrics/cluster. MINIO_PROMETHEUS_AUTH_TYPE=public (below)
-        # makes the endpoint scrapeable without a bearer token.
         prometheus.io/scrape: "true"
         prometheus.io/path: /minio/v2/metrics/cluster
         prometheus.io/port: "9000"
@@ -27,8 +31,8 @@ spec:
           image: quay.io/minio/minio:RELEASE.2024-07-16T23-46-41Z
           command: ["minio", "server", "/data", "--console-address", ":9001"]
           ports:
-            - containerPort: 9000   # S3 API
-            - containerPort: 9001   # web console
+            - containerPort: 9000
+            - containerPort: 9001
           env:
             - name: MINIO_ROOT_USER
               valueFrom:
@@ -40,8 +44,6 @@ spec:
                 secretKeyRef:
                   name: minio-secret
                   key: secret-key
-            # Allow Prometheus to scrape /minio/v2/metrics/cluster without a
-            # signed bearer token (in-cluster scrape only; not internet-exposed).
             - name: MINIO_PROMETHEUS_AUTH_TYPE
               value: public
           volumeMounts:
@@ -71,9 +73,6 @@ spec:
               memory: 1Gi
       securityContext:
         runAsNonRoot: true
-        # runAsNonRoot only asserts uid != 0; without an explicit numeric uid the
-        # kubelet cannot verify it before start and the container fails with
-        # CreateContainerConfigError (the minio image declares no USER).
         runAsUser: 1000
         runAsGroup: 1000
         fsGroup: 1000

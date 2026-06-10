@@ -1,9 +1,10 @@
-# The platform namespace is default-deny. The frontend is a static SPA + nginx
-# proxy: it only needs to (1) be reachable on 8080 (from the ingress controller
-# and, for the proxy hop, intra-namespace), and (2) reach leaderboard-api
-# (/api/leaderboard), submission-api (/api/submission) AND auth-api (/api/auth)
-# in the same namespace, plus DNS. It touches no database, Kafka, or Redis
-# directly — the APIs it proxies to do that.
+# k8s/platform/frontend/network-policy.yaml
+#
+# This file declares Kubernetes resources for k8s/platform/frontend.
+# It is part of the IICPC platform configuration and should remain
+# aligned with the deployment and operations guidance in the README.
+# Keep comments at the file header so resource bodies stay declarative.
+
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -17,9 +18,6 @@ spec:
     - Ingress
     - Egress
   ingress:
-    # Public traffic arrives via the ingress controller. Adjust the namespace
-    # label to match your ingress controller's namespace if it is not labelled
-    # `name: ingress-nginx`.
     - from:
         - namespaceSelector:
             matchLabels:
@@ -28,9 +26,6 @@ spec:
         - port: 8080
           protocol: TCP
   egress:
-    # Proxy hops to the three platform APIs (same namespace, pod port 8080):
-    #   /api/leaderboard/* -> leaderboard-api, /api/submission/* -> submission-api,
-    #   /api/auth/* -> auth-api.
     - to:
         - podSelector:
             matchLabels:
@@ -44,7 +39,6 @@ spec:
       ports:
         - port: 8080
           protocol: TCP
-    # DNS resolution.
     - to:
         - namespaceSelector:
             matchLabels:

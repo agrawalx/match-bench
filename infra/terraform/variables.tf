@@ -1,19 +1,9 @@
-# variables.tf — every operator-tunable input.
+# infra/terraform/variables.tf
 #
-# Problem: the DEPLOYMENT_EKS.md runbook hard-codes region/cluster/account into
-# shell exports; that does not compose with Terraform and makes a second
-# environment (staging) a copy-paste hazard.
-#
-# Decision: lift exactly the knobs the runbook exports (region, cluster name,
-# account id, instance types, node-group sizes) into variables with defaults that
-# match the documented prod values, so `terraform apply` with no -var reproduces
-# the runbook's cluster, and overriding a single -var produces a smaller smoke
-# cluster (see the MEMORY "EKS minimal first" note).
-#
-# Why defaults mirror DEPLOYMENT_EKS.md §2.3 exactly: the manifests, kubelet
-# tuning, and ALGO_CPU math all assume an 8-vCPU sandbox node with cores 0,1
-# reserved; changing the instance family without re-deriving ALGO_CPU breaks the
-# cpuset pinning. The defaults are the validated combination.
+# This Terraform file declares operator-tunable inputs for the AWS deployment.
+# It belongs to the IICPC AWS infrastructure layer and should remain
+# aligned with infra/README.md and the Kubernetes manifests under k8s/.
+# Keep explanatory comments at this file header so resource blocks stay declarative.
 
 variable "region" {
   description = "AWS region for the cluster and ECR repos."
@@ -43,9 +33,6 @@ variable "account_id" {
   default     = ""
 }
 
-# ---------------------------------------------------------------------------
-# Networking
-# ---------------------------------------------------------------------------
 
 variable "vpc_cidr" {
   description = "CIDR for the VPC created for the cluster."
@@ -63,15 +50,10 @@ variable "az_count" {
   default     = 3
 }
 
-# ---------------------------------------------------------------------------
-# general node group — data tier, APIs, controllers, build, telemetry, KEDA
-# ---------------------------------------------------------------------------
 
 variable "general_instance_type" {
   description = "Instance type for the general node group."
   type        = string
-  # DEPLOYMENT_EKS.md §2.2 suggests m6i.2xlarge; the TASK + MEMORY 'EKS minimal
-  # first' smoke plan uses m6i.xlarge. Default to the smoke size; bump for prod.
   default = "m6i.xlarge"
 }
 
@@ -96,9 +78,6 @@ variable "general_disk_size" {
   default     = 100
 }
 
-# ---------------------------------------------------------------------------
-# sandbox node group — one algo pod + its capture Job per node
-# ---------------------------------------------------------------------------
 
 variable "sandbox_instance_type" {
   description = <<-EOT
@@ -140,9 +119,6 @@ variable "sandbox_reserved_system_cpus" {
   default     = "0,1"
 }
 
-# ---------------------------------------------------------------------------
-# ECR
-# ---------------------------------------------------------------------------
 
 variable "service_images" {
   description = <<-EOT
@@ -156,7 +132,7 @@ variable "service_images" {
     "auth-api",
     "submission-api",
     "leaderboard-api",
-    "spawner", # services/build-worker -> image name 'spawner'
+    "spawner",
     "sandbox-orchestrator",
     "bot-fleet-controller",
     "bot-fleet",

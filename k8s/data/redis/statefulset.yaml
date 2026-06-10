@@ -1,6 +1,10 @@
-# Redis — the hot per-contestant snapshot the leaderboard reads without a DB
-# round-trip. Single replica; the data is a rebuildable cache (TimescaleDB is the
-# durable store), so no replication in v1.
+# k8s/data/redis/statefulset.yaml
+#
+# This file declares Kubernetes resources for k8s/data/redis.
+# It is part of the IICPC platform configuration and should remain
+# aligned with the deployment and operations guidance in the README.
+# Keep comments at the file header so resource bodies stay declarative.
+
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
@@ -17,7 +21,6 @@ spec:
       labels:
         app: redis
       annotations:
-        # redis_exporter sidecar (below) exposes metrics on 9121.
         prometheus.io/scrape: "true"
         prometheus.io/path: /metrics
         prometheus.io/port: "9121"
@@ -26,7 +29,7 @@ spec:
       containers:
         - name: redis
           image: redis:7-alpine
-          args: ["--save", "", "--appendonly", "no"] # cache only — no persistence
+          args: ["--save", "", "--appendonly", "no"]
           ports:
             - containerPort: 6379
           readinessProbe:
@@ -49,9 +52,6 @@ spec:
             limits:
               cpu: "1"
               memory: 512Mi
-        # redis_exporter sidecar — Redis has no auth (cache only), so the
-        # exporter connects to redis://localhost:6379. securityContext mirrors
-        # the postgres-exporter style.
         - name: redis-exporter
           image: oliver006/redis_exporter:v1.62.0-alpine
           args:

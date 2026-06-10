@@ -1,21 +1,18 @@
+# k8s/benchmark/bot-fleet-controller/deployment.yaml
+#
+# This file declares Kubernetes resources for k8s/benchmark/bot-fleet-controller.
+# It is part of the IICPC platform configuration and should remain
+# aligned with the deployment and operations guidance in the README.
+# Keep comments at the file header so resource bodies stay declarative.
+
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: bot-fleet-controller
   namespace: benchmark
 spec:
-  # Single replica — architecturally locked at 1. DO NOT SCALE.
-  # The session map lives in memory only; if two replicas existed, the
-  # bot.ready consumer group would shard messages across them and a
-  # ReadySignal for session S could land on a replica that does not know
-  # about S — fan-in for that session would never complete. Crash
-  # recovery (mark-failed-on-restart) is the deliberate trade-off that
-  # lets us keep the controller stateless across pods.
   replicas: 1
   strategy:
-    # Prevent two replicas from briefly coexisting during rolling updates —
-    # the second pod would consume bot.ready for an in-flight session it
-    # doesn't know about and the first pod would never get the barrier fired.
     type: Recreate
   selector:
     matchLabels:
@@ -38,7 +35,6 @@ spec:
               containerPort: 8080
               protocol: TCP
           env:
-            # In-cluster Loki push endpoint (logger appends /loki/api/v1/push).
             - name: LOKI_URL
               value: http://loki.observability.svc.cluster.local:3100
             - name: PORT
@@ -54,10 +50,6 @@ spec:
                 secretKeyRef:
                   name: bot-fleet-controller-secret
                   key: database-url
-            # Per-pod fan-out: WorkerCount = ceil(scenario_tasks / this). Raise it
-            # ABOVE a scenario's task count to pin ALL load on ONE pod (single-pod
-            # capacity testing); lower it to spread load across more pods. MUST be
-            # <= the bot-fleet replica count, and <= the worker's MAX_BOTS_PER_WORKER.
             - name: MAX_TASKS_PER_WORKER
               value: "1000"
           livenessProbe:

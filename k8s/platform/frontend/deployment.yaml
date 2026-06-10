@@ -1,3 +1,10 @@
+# k8s/platform/frontend/deployment.yaml
+#
+# This file declares Kubernetes resources for k8s/platform/frontend.
+# It is part of the IICPC platform configuration and should remain
+# aligned with the deployment and operations guidance in the README.
+# Keep comments at the file header so resource bodies stay declarative.
+
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -27,9 +34,6 @@ spec:
           ports:
             - name: http
               containerPort: 8080
-          # Upstream hosts/ports for the envsubst-rendered nginx config. These
-          # are the in-namespace Services; submission-api serves http on
-          # service port 80 (8080 on that Service is the metrics port).
           env:
             - name: LEADERBOARD_API_HOST
               value: leaderboard-api
@@ -62,9 +66,6 @@ spec:
             capabilities:
               drop:
                 - ALL
-          # nginx writable paths (root fs is read-only): pid file under /tmp,
-          # temp paths under /var/cache/nginx, and the envsubst render target
-          # at /etc/nginx/conf.d.
           volumeMounts:
             - name: tmp
               mountPath: /tmp

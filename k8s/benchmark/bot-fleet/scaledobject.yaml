@@ -1,14 +1,10 @@
-# KEDA ScaledObject — autoscales bot-fleet workers on workload.assignments lag.
-# Requires the KEDA operator (keda.sh) installed in the cluster. The Deployment
-# works standalone without this (at its fixed replica count); apply this only
-# when KEDA is present and you want lag-driven 2->50 scaling per architecture_v2.
+# k8s/benchmark/bot-fleet/scaledobject.yaml
 #
-# Scaling-vs-barrier caveat: workers scale up reactively after the controller
-# publishes WorkloadSpecs, but the controller sets the barrier >=30s out and
-# READY_DEADLINE is 30s. For large worker_count (the ramp), KEDA + node
-# provisioning cold-start can exceed that window. For deterministic large runs,
-# pre-scale (raise the Deployment replicas to >= expected worker_count) instead
-# of relying solely on reactive scaling.
+# This file declares Kubernetes resources for k8s/benchmark/bot-fleet.
+# It is part of the IICPC platform configuration and should remain
+# aligned with the deployment and operations guidance in the README.
+# Keep comments at the file header so resource bodies stay declarative.
+
 apiVersion: keda.sh/v1alpha1
 kind: ScaledObject
 metadata:
@@ -19,17 +15,13 @@ spec:
     name: bot-fleet-worker
   minReplicaCount: 2
   maxReplicaCount: 50
-  pollingInterval: 5    # seconds between lag checks
-  cooldownPeriod: 120   # seconds of no activity before scaling back down
+  pollingInterval: 5
+  cooldownPeriod: 120
   triggers:
     - type: kafka
       metadata:
         bootstrapServers: kafka.data.svc.cluster.local:9092
         consumerGroup: bot-fleet
         topic: workload.assignments
-        lagThreshold: "1"            # any pending assignment triggers scale-up
-        # Must match the worker's auto.offset.reset=earliest. With `latest`, KEDA
-        # treats the unconsumed backlog on a fresh group (first run / after offset
-        # retention) as zero lag and never scales up — exactly when a large
-        # worker_count is needed. `earliest` counts pre-existing backlog as lag.
+        lagThreshold: "1"
         offsetResetPolicy: earliest

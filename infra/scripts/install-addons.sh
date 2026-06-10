@@ -1,16 +1,11 @@
 #!/usr/bin/env bash
-# install-addons.sh — FALLBACK installer for the non-Terraform cluster addons.
+# infra/scripts/install-addons.sh
 #
-# Terraform already installs the gp3 StorageClass, the AWS Load Balancer
-# Controller, KEDA, and the gVisor RuntimeClass object (infra/terraform/addons.tf).
-# Use this script only if you ran Terraform with the helm provider disabled, or to
-# (re)install a single addon out of band. It is idempotent.
-#
-# It does NOT install runsc on the sandbox nodes — that is a host-level step
-# (privileged DaemonSet or custom AMI); see infra/README.md "Manual steps".
-#
-# Requires: kubectl pointed at the cluster, helm v3, and these env vars:
-#   CLUSTER, AWS_REGION, VPC_ID, ALB_ROLE_ARN  (from `terraform output`)
+# This script automates infrastructure operations for install addons.
+# It belongs to the IICPC operational toolchain and should keep
+# setup, validation, and deployment behavior explicit at entry points.
+# Function-level comments describe reusable shell routines below.
+
 set -euo pipefail
 
 : "${CLUSTER:?set CLUSTER}"
@@ -53,7 +48,6 @@ allowVolumeExpansion: true
 reclaimPolicy: Retain
 YAML
 
-# If a gp2 default exists, demote it so gp3 is the sole default.
 if kubectl get storageclass gp2 >/dev/null 2>&1; then
   kubectl patch storageclass gp2 \
     -p '{"metadata":{"annotations":{"storageclass.kubernetes.io/is-default-class":"false"}}}' || true

@@ -1,6 +1,10 @@
-# TSDB persistent volume — survives Prometheus pod restarts so historical
-# samples are not lost on a rollout. Uses the cluster default StorageClass
-# (no storageClassName), matching the data-tier volumeClaimTemplates.
+# k8s/observability/prometheus/pvc.yaml
+#
+# This file declares Kubernetes resources for k8s/observability/prometheus.
+# It is part of the IICPC platform configuration and should remain
+# aligned with the deployment and operations guidance in the README.
+# Keep comments at the file header so resource bodies stay declarative.
+
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:

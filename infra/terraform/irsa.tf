@@ -1,23 +1,10 @@
-# irsa.tf — IAM Roles for Service Accounts (IRSA).
+# infra/terraform/irsa.tf
 #
-# Problem: three in-cluster components need AWS permissions that must NOT be
-# granted to the broad node role: the EBS CSI driver (create/attach volumes), the
-# AWS Load Balancer Controller (create ALBs/target groups/SGs), and the
-# build-spawner ServiceAccount (push images to ECR + create repos on demand).
-# Granting these on the node role would hand them to every pod on the node,
-# including untrusted contestant algo pods.
-#
-# Decision: mint one IAM role per component, each with a trust policy scoped to a
-# single ServiceAccount via the cluster OIDC provider, using the
-# iam-role-for-service-accounts-eks module's well-known-policy presets where they
-# exist (EBS CSI, ALB controller) and a hand-written least-privilege policy for
-# the spawner (the only custom one). Why the module presets: AWS maintains the
-# exact managed-policy attachments those controllers need; re-deriving them by
-# hand drifts.
+# This Terraform file declares IAM roles for Kubernetes service accounts.
+# It belongs to the IICPC AWS infrastructure layer and should remain
+# aligned with infra/README.md and the Kubernetes manifests under k8s/.
+# Keep explanatory comments at this file header so resource blocks stay declarative.
 
-# ---------------------------------------------------------------------------
-# EBS CSI driver — wired into the aws-ebs-csi-driver addon in main.tf.
-# ---------------------------------------------------------------------------
 module "ebs_csi_irsa" {
   source  = "terraform-aws-modules/iam/aws//modules/iam-role-for-service-accounts-eks"
   version = ">= 5.39.0, < 6.0.0"
@@ -35,10 +22,6 @@ module "ebs_csi_irsa" {
   tags = var.tags
 }
 
-# ---------------------------------------------------------------------------
-# AWS Load Balancer Controller — assumed by the SA the helm chart creates.
-# DEPLOYMENT §3.3: fronts the `frontend` (the single public URL) via an ALB.
-# ---------------------------------------------------------------------------
 module "alb_controller_irsa" {
   source  = "terraform-aws-modules/iam/aws//modules/iam-role-for-service-accounts-eks"
   version = ">= 5.39.0, < 6.0.0"
@@ -56,21 +39,8 @@ module "alb_controller_irsa" {
   tags = var.tags
 }
 
-# ---------------------------------------------------------------------------
-# build-spawner — pushes built contestant images to ECR and lazily creates the
-# per-contestant repo on first build (the spawner pre-creates ECR repos,
-# DEPLOYMENT §1.2 / the 'ECR repo pre-create in spawner' recent work).
-# ---------------------------------------------------------------------------
-# Problem: kaniko build Jobs (and the spawner that orchestrates them) need to
-# authenticate to ECR, create a repository if missing, and push layers. They run
-# in the `build` namespace under the `build-spawner` ServiceAccount
-# (k8s/build/serviceaccount.yaml). Decision: a least-privilege policy granting
-# exactly Get/Create/Describe + the push verbs, scoped to repos under the
-# iicpc/* prefix in this account/region. Why scoped to iicpc/*: a contestant
-# build must never be able to push over a platform service image.
 
 data "aws_iam_policy_document" "spawner_ecr" {
-  # Auth token is account-wide (no resource scoping possible on this action).
   statement {
     sid       = "EcrAuth"
     effect    = "Allow"
@@ -78,9 +48,6 @@ data "aws_iam_policy_document" "spawner_ecr" {
     resources = ["*"]
   }
 
-  # Create/describe repos. CreateRepository cannot be resource-scoped to a prefix
-  # (the repo does not exist yet), so it is account-wide; the push/pull verbs
-  # below ARE scoped to iicpc/*.
   statement {
     sid    = "EcrManageRepos"
     effect = "Allow"
@@ -91,7 +58,6 @@ data "aws_iam_policy_document" "spawner_ecr" {
     resources = ["*"]
   }
 
-  # Push + describe layers, scoped to iicpc/* repositories only.
   statement {
     sid    = "EcrPush"
     effect = "Allow"
@@ -127,7 +93,6 @@ module "spawner_irsa" {
   oidc_providers = {
     main = {
       provider_arn               = module.eks.oidc_provider_arn
-      # Matches k8s/build/serviceaccount.yaml (namespace build, name build-spawner).
       namespace_service_accounts = ["build:build-spawner"]
     }
   }
@@ -135,12 +100,6 @@ module "spawner_irsa" {
   tags = var.tags
 }
 
-# Annotate the existing build-spawner ServiceAccount with the IRSA role ARN.
-# Problem: the SA manifest (k8s/build/serviceaccount.yaml) has no role annotation;
-# without it the spawner pod gets the node role, not this scoped role. Decision:
-# patch the annotation from Terraform so the IAM<->SA binding is declared in one
-# place. Why not edit the YAML: keeps the repo manifests cloud-agnostic (they also
-# run on k3s); the EKS-specific binding lives only here.
 resource "kubernetes_annotations" "spawner_sa_irsa" {
   api_version = "v1"
   kind        = "ServiceAccount"
@@ -151,7 +110,5 @@ resource "kubernetes_annotations" "spawner_sa_irsa" {
   annotations = {
     "eks.amazonaws.com/role-arn" = module.spawner_irsa.iam_role_arn
   }
-  # The SA is created by `kubectl apply -f k8s/build` (Makefile deploy target),
-  # which may run after apply. force lets Terraform own just this annotation.
   force = true
 }

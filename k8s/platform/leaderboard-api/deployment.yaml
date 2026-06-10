@@ -1,3 +1,10 @@
+# k8s/platform/leaderboard-api/deployment.yaml
+#
+# This file declares Kubernetes resources for k8s/platform/leaderboard-api.
+# It is part of the IICPC platform configuration and should remain
+# aligned with the deployment and operations guidance in the README.
+# Keep comments at the file header so resource bodies stay declarative.
+
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -58,11 +65,6 @@ spec:
               value: http://loki.observability.svc.cluster.local:3100
             - name: PROMETHEUS_URL
               value: http://prometheus.observability.svc:9090
-            # Per-pod SSE consumer group: each replica must consume the FULL
-            # leaderboard.updates stream (group derived from the pod name), or
-            # the 2 replicas split one shared group and each SSE client only
-            # sees the ~half of updates its replica's partitions carry —
-            # snapshot-then-silence for the rest.
             - name: POD_NAME
               valueFrom:
                 fieldRef:

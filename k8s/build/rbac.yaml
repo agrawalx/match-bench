@@ -1,10 +1,16 @@
+# k8s/build/rbac.yaml
+#
+# This file declares Kubernetes resources for k8s/build.
+# It is part of the IICPC platform configuration and should remain
+# aligned with the deployment and operations guidance in the README.
+# Keep comments at the file header so resource bodies stay declarative.
+
 apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: build-spawner
   namespace: build
 ---
-# Grants the build-spawner ServiceAccount permission to manage Jobs in the build namespace.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:

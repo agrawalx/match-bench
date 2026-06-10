@@ -1,12 +1,10 @@
-# Telemetry ingester — consumes orders.sent + orders.acked, snapshots
-# per-(session, wave) latency to TimescaleDB + Redis every second.
+# k8s/benchmark/telemetry-ingester/deployment.yaml
 #
-# SINGLE replica on purpose: it keeps per-(session, wave) HDR histograms in
-# memory and writes one metrics row per window per second. Running >1 replica
-# would shard partitions across pods, splitting a window's histogram across them
-# and producing partial rows that must be merged at query time. Horizontal
-# scaling (additive-histogram merge on read) is a follow-up; for v1 one consumer
-# reads all partitions. So no KEDA ScaledObject here.
+# This file declares Kubernetes resources for k8s/benchmark/telemetry-ingester.
+# It is part of the IICPC platform configuration and should remain
+# aligned with the deployment and operations guidance in the README.
+# Keep comments at the file header so resource bodies stay declarative.
+
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -15,7 +13,7 @@ metadata:
 spec:
   replicas: 1
   strategy:
-    type: Recreate # never run two consumers in the same group during a rollout
+    type: Recreate
   selector:
     matchLabels:
       app: telemetry-ingester
@@ -24,8 +22,6 @@ spec:
       labels:
         app: telemetry-ingester
       annotations:
-        # metrics.rs start_server binds METRICS_ADDR (default 0.0.0.0:9090); no
-        # METRICS_ADDR is set below, so it listens on 9090.
         prometheus.io/scrape: "true"
         prometheus.io/path: /metrics
         prometheus.io/port: "9090"
@@ -38,7 +34,6 @@ spec:
             - name: metrics
               containerPort: 9090
           env:
-            # In-cluster Loki push endpoint (logger appends /loki/api/v1/push).
             - name: LOKI_URL
               value: http://loki.observability.svc.cluster.local:3100
             - name: KAFKA_BROKERS

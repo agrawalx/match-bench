@@ -1,3 +1,10 @@
+# k8s/observability/loki/deployment.yaml
+#
+# This file declares Kubernetes resources for k8s/observability/loki.
+# It is part of the IICPC platform configuration and should remain
+# aligned with the deployment and operations guidance in the README.
+# Keep comments at the file header so resource bodies stay declarative.
+
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -6,7 +13,6 @@ metadata:
 spec:
   replicas: 1
   strategy:
-    # Single-binary Loki owns a ReadWriteOnce PVC; never run two at once.
     type: Recreate
   selector:
     matchLabels:
@@ -16,7 +22,6 @@ spec:
       labels:
         app: loki
       annotations:
-        # Loki exposes its own /metrics on the HTTP port.
         prometheus.io/scrape: "true"
         prometheus.io/path: /metrics
         prometheus.io/port: "3100"
@@ -67,9 +72,6 @@ spec:
               memory: 1Gi
       securityContext:
         runAsNonRoot: true
-        # grafana/loki runs as uid/gid 10001; set it numerically so the kubelet
-        # can verify non-root before start (matches the data-tier pattern), and
-        # fsGroup so the PVC is writable.
         runAsUser: 10001
         runAsGroup: 10001
         fsGroup: 10001

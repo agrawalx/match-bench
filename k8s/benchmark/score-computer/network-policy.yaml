@@ -1,3 +1,10 @@
+# k8s/benchmark/score-computer/network-policy.yaml
+#
+# This file declares Kubernetes resources for k8s/benchmark/score-computer.
+# It is part of the IICPC platform configuration and should remain
+# aligned with the deployment and operations guidance in the README.
+# Keep comments at the file header so resource bodies stay declarative.
+
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:

@@ -1,20 +1,16 @@
+# k8s/benchmark/bot-fleet/deployment.yaml
+#
+# This file declares Kubernetes resources for k8s/benchmark/bot-fleet.
+# It is part of the IICPC platform configuration and should remain
+# aligned with the deployment and operations guidance in the README.
+# Keep comments at the file header so resource bodies stay declarative.
+
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: bot-fleet-worker
   namespace: benchmark
 spec:
-  # Base replica count. Workers are fungible and stateless: each consumes
-  # whatever WorkloadSpec lands on its partition (the worker_index is carried in
-  # the message, not the pod identity), so any worker can run any assignment.
-  #
-  # The controller shards a session into ceil(total_tasks / 1000) WorkloadSpecs.
-  # For a session to barrier correctly, there must be at least that many worker
-  # pods so each WorkloadSpec is handled by a distinct pod concurrently (a single
-  # worker processes assignments serially, so two specs for the same session on
-  # one pod would miss the barrier). The 511-task baseline = 1 worker, so 2 is
-  # plenty for that; raise the count (or use the KEDA ScaledObject) before the
-  # ramp, which needs more.
   replicas: 5
   selector:
     matchLabels:
@@ -24,20 +20,11 @@ spec:
       labels:
         app: bot-fleet-worker
       annotations:
-        # The worker's metrics server (src/metrics.rs start_server) binds
-        # METRICS_PORT, defaulting to 9090 — and no METRICS_PORT is set below, so
-        # it listens on 9090.
         prometheus.io/scrape: "true"
         prometheus.io/path: /metrics
         prometheus.io/port: "9090"
     spec:
-      # The worker never calls the Kubernetes API — it only consumes Kafka and
-      # opens TCP to algo pods. No ServiceAccount token is mounted.
       automountServiceAccountToken: false
-      # On SIGTERM the worker is killed; a longer grace period gives an in-flight
-      # session a chance to finish its short run before the pod goes away.
-      # (Graceful SIGTERM draining in the worker is a follow-up; today the run
-      # loop only catches SIGINT.)
       terminationGracePeriodSeconds: 30
       containers:
         - name: bot-fleet-worker
@@ -46,14 +33,8 @@ spec:
             - name: metrics
               containerPort: 9090
           env:
-            # In-cluster Loki push endpoint (logger appends /loki/api/v1/push).
             - name: LOKI_URL
               value: http://loki.observability.svc.cluster.local:3100
-            # worker_id is read from HOSTNAME (config.rs from_env). Setting it
-            # explicitly from the Downward API guarantees it equals the pod name
-            # regardless of container runtime, satisfying the per-pod-unique
-            # worker_id invariant (each pod must publish bot.ready with a unique
-            # id or the controller's fan-in never completes).
             - name: HOSTNAME
               valueFrom:
                 fieldRef:
@@ -62,27 +43,12 @@ spec:
               value: kafka.data.svc.cluster.local:9092
             - name: KAFKA_CONSUMER_GROUP
               value: bot-fleet
-            # Per-pod task ceiling (= max TCP connections one pod holds). The sole
-            # per-pod cap (the old hard-coded 1000 was removed). MUST be >= the
-            # controller's MAX_TASKS_PER_WORKER; raise both together to pin a large,
-            # high-RPS scenario onto a single pod for capacity testing.
             - name: MAX_BOTS_PER_WORKER
               value: "1000"
-            # Keep orders.sent messages below Kafka's default max.message.bytes:
-            # 1000 events x ~360 B msgpack-named ≈ 360 KiB < 1 MiB. 1000 matches
-            # the eBPF acked-side chunk size; smaller values starve the sink at
-            # ramp-peak rates (the aggregator awaits one delivery per chunk).
             - name: TELEMETRY_BATCH_SIZE
               value: "1000"
-            # Kafka max.poll.interval.ms AND the L39 wall-time guard (kept equal).
-            # The worker doesn't poll while a workload runs (barrier + duration +
-            # drain), so this must exceed that whole wall time or Kafka rebalances
-            # mid-run and re-delivers the assignment. 1800000 = 30 min covers long
-            # (5-min+) and high-RPS runs; background heartbeat still proves liveness.
             - name: MAX_POLL_INTERVAL_MS
               value: "1800000"
-          # No HTTP server (the worker is a Kafka consumer), so no httpGet
-          # probes. KEDA scales on consumer lag; liveness is process-level.
           securityContext:
             readOnlyRootFilesystem: true
             allowPrivilegeEscalation: false
@@ -91,10 +57,6 @@ spec:
               drop:
                 - ALL
           resources:
-            # Modest requests so workers schedule on a small/test cluster, with
-            # headroom to burst during a run. For accurate pacing under the heavy
-            # scenarios (HFT tasks at 1000 rps each), raise requests toward the
-            # limit and consider Guaranteed QoS on the botworker node pool.
             requests:
               cpu: 500m
               memory: 512Mi
@@ -106,14 +68,3 @@ spec:
         runAsUser: 65532
         runAsGroup: 65532
         fsGroup: 65532
-      # Pin to the dedicated bot-worker node pool in production so the load
-      # generator never shares a node with other workloads (measurement
-      # fairness). Left commented so the Deployment schedules anywhere on a
-      # test cluster — uncomment and match your node pool's label/taint.
-      # nodeSelector:
-      #   node-pool: botworker
-      # tolerations:
-      #   - key: botworker
-      #     operator: Equal
-      #     value: "true"
-      #     effect: NoSchedule

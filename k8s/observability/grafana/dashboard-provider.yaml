@@ -1,6 +1,10 @@
-# Grafana dashboard provider — loads JSON dashboards from disk. Mounted at
-# /etc/grafana/provisioning/dashboards; the JSON files come from the
-# grafana-dashboards ConfigMap mounted at /var/lib/grafana/dashboards.
+# k8s/observability/grafana/dashboard-provider.yaml
+#
+# This file declares Kubernetes resources for k8s/observability/grafana.
+# It is part of the IICPC platform configuration and should remain
+# aligned with the deployment and operations guidance in the README.
+# Keep comments at the file header so resource bodies stay declarative.
+
 apiVersion: v1
 kind: ConfigMap
 metadata:

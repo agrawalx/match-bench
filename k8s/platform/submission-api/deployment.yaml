@@ -1,3 +1,10 @@
+# k8s/platform/submission-api/deployment.yaml
+#
+# This file declares Kubernetes resources for k8s/platform/submission-api.
+# It is part of the IICPC platform configuration and should remain
+# aligned with the deployment and operations guidance in the README.
+# Keep comments at the file header so resource bodies stay declarative.
+
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -24,7 +31,6 @@ spec:
           ports:
             - containerPort: 8080
           env:
-            # In-cluster Loki push endpoint (logger appends /loki/api/v1/push).
             - name: LOKI_URL
               value: http://loki.observability.svc.cluster.local:3100
             - name: DATABASE_URL
@@ -46,15 +52,10 @@ spec:
                   key: minio-secret-key
             - name: MINIO_BUCKET
               value: submissions
-            # Create the submissions bucket on startup if MinIO doesn't have it yet,
-            # so a fresh cluster doesn't 500 every upload with "bucket does not exist".
             - name: MINIO_CREATE_BUCKET_IF_MISSING
               value: "true"
             - name: KAFKA_BROKERS
               value: kafka.data.svc.cluster.local:9092
-            # JWT verification (AUTH_REQUIRED defaults true): the Google client
-            # ID is the token audience check. Sourced from auth-api-secret so
-            # auth-api and submission-api can never disagree on the audience.
             - name: GOOGLE_CLIENT_ID
               valueFrom:
                 secretKeyRef:
@@ -64,12 +65,6 @@ spec:
               value: prod
             - name: METRICS_PORT
               value: "8080"
-            # ── Load-shape knobs (scenario builder) ──────────────────────────
-            # Durations (whole seconds) and aggregate-RPS budgets for the three
-            # canonical scenarios. The participant mix (HFT/Retail/Inst) and
-            # per-bot rates are fixed; bot counts derive from (budget / per-bot).
-            # See .env.example "workload recipes" for tuned profiles + the
-            # spike-shape knobs (SPIKE_PREWINDOW_S, SPIKE_BURST_S).
             - name: CONSTANT_DURATION_S
               value: "60"
             - name: SPIKE_DURATION_S
@@ -82,23 +77,14 @@ spec:
               value: "50000"
             - name: RAMP_PEAK_RPS
               value: "90000"
-            # Seeding is INSERT ... ON CONFLICT DO NOTHING by default, so changing
-            # the values above does NOT touch an already-seeded scenarios table on
-            # restart. Flip this to "true" to upsert (rewrite duration + task_specs
-            # from the env above, preserving scenario_id), then restart this
-            # Deployment to apply. Leave "false" in steady state.
             - name: RESEED_SCENARIOS
               value: "false"
-          # Liveness: static /health (no deps) — restart only on a hung process.
           livenessProbe:
             httpGet:
               path: /health
               port: 8080
             initialDelaySeconds: 5
             periodSeconds: 10
-          # Readiness: /ready pings Postgres (handler.Readiness over
-          # pgStore.Ping), so a replica that loses its DB connection drops out
-          # of rotation instead of serving 500s while still "ready".
           readinessProbe:
             httpGet:
               path: /ready

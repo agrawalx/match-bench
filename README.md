@@ -72,14 +72,14 @@ These numbers useful because they show the platform has room to scale before the
 
 ## Architecture
 
-Architecture diagrams are kept as Mermaid files under [`mermaids/`](mermaids/) so they can be rendered in GitHub, documentation sites, or architecture review decks without duplicating diagrams in the README.
+Architecture diagrams are kept as Mermaid files under [`mermaids/`](./mermaids/) so they can be rendered in GitHub, documentation sites, or architecture review decks without duplicating diagrams in the README.
 
 Available diagrams:
 
-- [`mermaids/end_to_end_pipeline.mermaid`](mermaids/end_to_end_pipeline.mermaid): sequence-level view of one benchmark run, from user trigger to final score.
-- [`mermaids/k8s_namespaces.mermaid`](mermaids/k8s_namespaces.mermaid): deployment-level view of the Kubernetes namespaces and the services in each tier.
+- [`mermaids/end_to_end_pipeline.mermaid`](./mermaids/end_to_end_pipeline.mermaid): sequence-level view of one benchmark run, from user trigger to final score.
+- [`mermaids/k8s_namespaces.mermaid`](./mermaids/k8s_namespaces.mermaid): deployment-level view of the Kubernetes namespaces and the services in each tier.
 
-The README intentionally does not inline the full architecture diagram. The Mermaid files are the source of truth for architecture visuals, while [design.md](design.md) is the source of truth for detailed engineering rationale.
+The README intentionally does not inline the full architecture diagram. The Mermaid files are the source of truth for architecture visuals, while [design.md](./design.md) is the source of truth for detailed engineering rationale.
 
 ## Tech Stack
 
@@ -118,7 +118,7 @@ testing_commands.md        Test command reference
 
 Use the local run guide for setup commands:
 
-- [Local development guide](docs/local-run.md)
+- [Local development guide](./docs/local-run.md)
 
 The local setup uses Docker Compose for dependencies such as PostgreSQL, TimescaleDB, Redis, Kafka, MinIO, Prometheus, Grafana, and Loki. Individual services can then be run from source.
 
@@ -126,7 +126,7 @@ The local setup uses Docker Compose for dependencies such as PostgreSQL, Timesca
 
 Test commands are maintained separately:
 
-- [Testing command reference](testing_commands.md)
+- [Testing command reference](./docs/testing_commands.md)
 
 The test guide covers Go tests, Rust tests, frontend checks, integration tests, and Kubernetes smoke checks.
 
@@ -134,9 +134,9 @@ The test guide covers Go tests, Rust tests, frontend checks, integration tests, 
 
 AWS deployment instructions are in:
 
-- [AWS deployment guide](docs/aws-deployment.md)
-- [Infrastructure README](infra/README.md)
-- [Secret bootstrap guide](bootstrap/README.md)
+- [AWS deployment guide](./docs/aws-deployment.md)
+- [Infrastructure README](./infra/README.md)
+- [Secret bootstrap guide](./bootstrap/README.md)
 
 The AWS path uses EKS, ECR, Terraform, Kubernetes manifests, IRSA, KEDA, and the AWS Load Balancer Controller.
 
@@ -160,7 +160,7 @@ Suggested target:
 
 ## Design Notes
 
-The detailed system design is documented in [design.md](design.md). It explains the measurement model, deterministic workload generation, sandboxing strategy, telemetry pipeline, correctness validation, and scoring model.
+The detailed system design is documented in [design.md](./design.md). It explains the measurement model, deterministic workload generation, sandboxing strategy, telemetry pipeline, correctness validation, and scoring model.
 
 ### Development Team
 

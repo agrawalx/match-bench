@@ -1,3 +1,8 @@
+// Package authn defines tests for verifier test.
+//
+// This file is part of the IICPC benchmarking platform and keeps its
+// responsibilities local to the surrounding package. It should be read with
+// the service-level design in design.md for broader operational context.
 package authn
 
 import (
@@ -19,9 +24,8 @@ import (
 
 const testClientID = "test-client-id.apps.googleusercontent.com"
 
-// testJWKS serves a JWKS document over httptest and counts fetches so cache
-// behaviour (TTL reuse, refresh-on-unknown-kid, no refetch on a kid hit) is
-// assertable from tests.
+// testJWKS groups the state and dependencies used by this package.
+// Keep this type aligned with the runtime contract around it.
 type testJWKS struct {
 	srv     *httptest.Server
 	fetches atomic.Int64
@@ -30,6 +34,8 @@ type testJWKS struct {
 	keys map[string]*rsa.PublicKey
 }
 
+// newTestJWKS performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func newTestJWKS(t *testing.T) *testJWKS {
 	t.Helper()
 	j := &testJWKS{keys: map[string]*rsa.PublicKey{}}
@@ -37,6 +43,8 @@ func newTestJWKS(t *testing.T) *testJWKS {
 		j.fetches.Add(1)
 		j.mu.Lock()
 		defer j.mu.Unlock()
+		// jwk groups the state and dependencies used by this package.
+		// Keep this type aligned with the runtime contract around it.
 		type jwk struct {
 			Kty string `json:"kty"`
 			Kid string `json:"kid"`
@@ -65,12 +73,16 @@ func newTestJWKS(t *testing.T) *testJWKS {
 	return j
 }
 
+// setKey applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (j *testJWKS) setKey(kid string, pub *rsa.PublicKey) {
 	j.mu.Lock()
 	defer j.mu.Unlock()
 	j.keys[kid] = pub
 }
 
+// newRSAKey performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func newRSAKey(t *testing.T) *rsa.PrivateKey {
 	t.Helper()
 	key, err := rsa.GenerateKey(rand.Reader, 2048)
@@ -80,6 +92,8 @@ func newRSAKey(t *testing.T) *rsa.PrivateKey {
 	return key
 }
 
+// signRS256 performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func signRS256(t *testing.T, key *rsa.PrivateKey, kid string, claims jwt.MapClaims) string {
 	t.Helper()
 	tok := jwt.NewWithClaims(jwt.SigningMethodRS256, claims)
@@ -91,8 +105,8 @@ func signRS256(t *testing.T, key *rsa.PrivateKey, kid string, claims jwt.MapClai
 	return signed
 }
 
-// googleClaims is a valid Google ID-token claim set; tests mutate single
-// fields to produce each rejection case.
+// googleClaims performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func googleClaims(sub string) jwt.MapClaims {
 	now := time.Now()
 	return jwt.MapClaims{
@@ -104,10 +118,8 @@ func googleClaims(sub string) jwt.MapClaims {
 	}
 }
 
-// TestVerify covers the full acceptance matrix for Google ID tokens: RS256
-// only (alg:none and HS256 rejected), iss restricted to the two Google forms,
-// aud == configured client ID, exp/iat with 60s leeway, and signatures checked
-// against the JWKS key for the token's kid.
+// TestVerify performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func TestVerify(t *testing.T) {
 	key := newRSAKey(t)
 	jwks := newTestJWKS(t)
@@ -264,8 +276,8 @@ func TestVerify(t *testing.T) {
 	}
 }
 
-// TestVerifyCachesJWKS asserts that a kid hit inside the TTL does NOT refetch
-// the JWKS document — one fetch serves many verifications.
+// TestVerifyCachesJWKS performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func TestVerifyCachesJWKS(t *testing.T) {
 	key := newRSAKey(t)
 	jwks := newTestJWKS(t)
@@ -286,9 +298,8 @@ func TestVerifyCachesJWKS(t *testing.T) {
 	}
 }
 
-// TestVerifyRefreshesOnUnknownKid simulates Google's key rotation: a token
-// signed by a kid that is absent from the cached document must trigger one
-// refetch, after which the rotated key verifies.
+// TestVerifyRefreshesOnUnknownKid performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func TestVerifyRefreshesOnUnknownKid(t *testing.T) {
 	key1 := newRSAKey(t)
 	jwks := newTestJWKS(t)
@@ -303,7 +314,6 @@ func TestVerifyRefreshesOnUnknownKid(t *testing.T) {
 		t.Fatalf("Verify() with kid-1: %v", err)
 	}
 
-	// Rotate: the JWKS endpoint now also serves kid-2.
 	key2 := newRSAKey(t)
 	jwks.setKey("kid-2", &key2.PublicKey)
 
@@ -319,16 +329,16 @@ func TestVerifyRefreshesOnUnknownKid(t *testing.T) {
 	}
 }
 
-// TestNewVerifierRequiresClientID rejects construction with an empty audience —
-// an unset GOOGLE_CLIENT_ID must fail closed, never verify-against-nothing.
+// TestNewVerifierRequiresClientID performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func TestNewVerifierRequiresClientID(t *testing.T) {
 	if _, err := NewVerifierWithJWKSURL("", "http://127.0.0.1:1/jwks"); err == nil {
 		t.Fatal("NewVerifierWithJWKSURL(\"\", ...) = nil error, want error")
 	}
 }
 
-// TestNewVerifierJWKSURLFromEnv: GOOGLE_JWKS_URL overrides the default Google
-// endpoint so tests and air-gapped dev environments can point at a fake.
+// TestNewVerifierJWKSURLFromEnv performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func TestNewVerifierJWKSURLFromEnv(t *testing.T) {
 	key := newRSAKey(t)
 	jwks := newTestJWKS(t)

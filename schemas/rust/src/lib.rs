@@ -1,3 +1,9 @@
+//! This module defines shared schema contracts for lib.
+//!
+//! It belongs to the IICPC benchmarking platform and should keep its
+//! behavior consistent with the service contracts documented in design.md.
+//! The comments in this file describe public structure and callable behavior.
+
 use serde::{Deserialize, Serialize};
 
 pub const TOPIC_SUBMISSION_BUILD_REQUESTED: &str = "submission.build.requested";
@@ -14,63 +20,48 @@ pub const TOPIC_SCORES_CORRECTNESS: &str = "scores.correctness";
 pub const TOPIC_LEADERBOARD_UPDATES: &str = "leaderboard.updates";
 pub const TELEMETRY_PRICE_SCALE: u64 = 1_000_000_000;
 
-/// Protocol identifies the transport a bot-fleet worker should use.
-/// Serialized as FIX, REST, or WS to match controller payloads.
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "UPPERCASE")]
+/// Protocol enumerates the states or variants handled by this module.
+/// Match arms should preserve the semantic contract of each variant.
 pub enum Protocol {
     Fix,
     Rest,
     Ws,
 }
 
-/// PayloadType identifies the order lifecycle operation carried by an event.
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "UPPERCASE")]
+/// PayloadType enumerates the states or variants handled by this module.
+/// Match arms should preserve the semantic contract of each variant.
 pub enum PayloadType {
     New,
     Cancel,
     Replace,
 }
 
-/// OrdType is the FIX OrdType (tag 40) of the order an event pertains to:
-/// Limit (40=2) or Market (40=1). The bot records it so the correctness
-/// validator can replay market orders (immediate execution) vs limit orders
-/// (rest in the book) without re-parsing tag 40 from the wire on the algo side.
-/// Cancel/Replace events carry the OrdType of the resting order they act on,
-/// which is always Limit in v1 (market orders never rest).
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "UPPERCASE")]
+/// OrdType enumerates the states or variants handled by this module.
+/// Match arms should preserve the semantic contract of each variant.
 pub enum OrdType {
     Limit,
     Market,
 }
 
-/// BotProfile is the participant archetype a task simulates. Per-bot RPS and
-/// order-shape biasing are determined by the profile; the controller does not
-/// dictate a per-message mix.
-///
-/// v1 archetypes match the hackathon spec: HFT market maker, Retail trader,
-/// Institutional. Per-bot RPS values (midpoints of the arch_v2 ranges) live
-/// in the scenarios table and are tunable by judges without code changes.
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+/// BotProfile enumerates the states or variants handled by this module.
+/// Match arms should preserve the semantic contract of each variant.
 pub enum BotProfile {
     Hft,
     Retail,
     Institutional,
 }
 
-/// WorkloadSpec is published to "workload.assignments" by the test controller.
-/// Each message is keyed by session_id:worker_index and consumed by one worker.
-///
-/// The flat (bot_count, orders_per_bot, profile_mix) shape is replaced by a
-/// list of TaskSpec values. Every TaskSpec is one tokio task in the worker =
-/// one TCP connection = one constant-rate sender. Load-pattern variation
-/// (spike, ramp) emerges from the schedule of TaskSpecs: tasks start at their
-/// start_offset_ns and stop after duration_ns. Bots never change behaviour
-/// mid-flight.
 #[derive(Debug, Clone, Deserialize, Serialize)]
+/// WorkloadSpec stores the state passed across this module boundary.
+/// Keep field changes compatible with callers and serialized contracts.
 pub struct WorkloadSpec {
     pub session_id: String,
     pub submission_id: String,
@@ -88,34 +79,20 @@ pub struct WorkloadSpec {
     pub connect_timeout_ms: u64,
     #[serde(default = "default_write_timeout_ms")]
     pub write_timeout_ms: u64,
-    // barrier_epoch_ns was historically carried here as a fallback for a
-    // lost BarrierEvent, but workers never read it — wait_for_barrier reads
-    // BarrierEvent.target_epoch_unix_nanos. The controller now publishes a
-    // fresh epoch AFTER fan-in, so the BarrierEvent value is the only one
-    // workers need. Default to 0 if older controllers still send the field.
     #[serde(default)]
     pub barrier_epoch_ns: u64,
-    /// This worker's slice of the scenario's task list.
     pub tasks: Vec<TaskSpec>,
 }
 
-/// TaskSpec is one sender: one tokio task, one TCP connection, one constant rate.
-///
-/// All tasks pre-open their TCP connection at barrier time (avoids cold-start
-/// jitter contaminating spike measurements). Each task sleeps until
-/// barrier_epoch_ns + start_offset_ns, then sends at target_rps via
-/// fixed-interval pacing until barrier_epoch_ns + start_offset_ns + duration_ns.
 #[derive(Debug, Clone, Deserialize, Serialize)]
+/// TaskSpec stores the state passed across this module boundary.
+/// Keep field changes compatible with callers and serialized contracts.
 pub struct TaskSpec {
     pub task_id: u32,
     pub profile: BotProfile,
     pub target_rps: u32,
     pub start_offset_ns: u64,
     pub duration_ns: u64,
-    /// Order-type mix as a percentage of messages sent by this task. The limit
-    /// fraction is implied: 100 - market_pct - cancel_pct - replace_pct. Source:
-    /// architecture_v2.md Bot Profiles. `#[serde(default)]` so older
-    /// WorkloadSpecs without these fields decode as all-limit (0/0/0).
     #[serde(default)]
     pub market_pct: u8,
     #[serde(default)]
@@ -124,57 +101,31 @@ pub struct TaskSpec {
     pub replace_pct: u8,
 }
 
-/// BarrierEvent is published to "barrier" once all workers have reported ready.
 #[derive(Debug, Clone, Deserialize, Serialize)]
+/// BarrierEvent stores the state passed across this module boundary.
+/// Keep field changes compatible with callers and serialized contracts.
 pub struct BarrierEvent {
     pub session_id: String,
     pub target_epoch_unix_nanos: u64,
 }
 
-/// ReadySignal is published by each bot-fleet worker to "bot.ready".
-/// It tells the controller how many local tasks connected before the barrier.
 #[derive(Debug, Clone, Deserialize, Serialize)]
+/// ReadySignal stores the state passed across this module boundary.
+/// Keep field changes compatible with callers and serialized contracts.
 pub struct ReadySignal {
     pub session_id: String,
     pub submission_id: String,
     pub worker_id: String,
     pub worker_index: u32,
     pub worker_count: u32,
-    /// Number of TaskSpecs assigned to this worker (replaces the old bot_count).
     pub task_count: u32,
-    /// Number of tasks that successfully pre-opened their TCP connection.
     pub connected_count: u32,
     pub ready_at_unix_nanos: u64,
 }
 
-/// OrderSentEvent records one outbound order with the three bot-side
-/// timestamps the telemetry-ingester needs to detect coordinated omission.
-///
-/// Timestamp definitions (all CLOCK_REALTIME nanoseconds, bot-side):
-///   - target_send_ts_ns (t0): the schedule's intended fire time for this
-///     order. Computed deterministically from
-///     `barrier_epoch_ns + task.start_offset_ns + seq * (1e9 / target_rps)`.
-///     Captured BEFORE sleep_until — never a clock read. The gap
-///     `send_ts_ns - target_send_ts_ns` IS coordinated omission, by definition.
-///   - send_ts_ns (t1): wall-clock immediately after the TCP write returned.
-///   - recv_done_ts_ns (r9): wall-clock immediately after the FIRST response
-///     for this order was read off the socket. Subsequent ExecutionReports
-///     for the same ClOrdID (partial fills, final fills) are ignored — r9 is
-///     "I heard back."
-///
-/// Emission semantics:
-///   - Emitted only ONCE per order, either when r9 is captured (timed_out=false)
-///     or when the watchdog evicts the order at the 5s deadline (timed_out=true,
-///     recv_done_ts_ns=0).
-///   - Late emission: events lag the actual write by up to RESPONSE_TIMEOUT
-///     (5s). Live latency dashboards must source from order.service.events
-///     (algo-side, no delay); orders.sent is the CO-detection stream.
-///
-/// REST/WS caveat (v1): the response read path is FIX-only. For REST and WS
-/// the bot emits with recv_done_ts_ns=0 and timed_out=false immediately after
-/// the write, matching the legacy behaviour. Ingesters can distinguish by
-/// checking `recv_done_ts_ns > 0 || timed_out`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+/// OrderSentEvent stores the state passed across this module boundary.
+/// Keep field changes compatible with callers and serialized contracts.
 pub struct OrderSentEvent {
     pub session_id: String,
     pub submission_id: String,
@@ -188,45 +139,24 @@ pub struct OrderSentEvent {
     pub price: u64,
     pub qty: u64,
     pub side: Side,
-    /// NEW | CANCEL | REPLACE. Lets the validator/ingester separate cancels and
-    /// replaces from new orders (e.g. the HFT cancel-throughput metric).
     pub payload_type: PayloadType,
-    /// LIMIT | MARKET (FIX tag 40). Distinguishes market from limit new orders,
-    /// which share payload_type=NEW, so the validator can replay them correctly.
     pub ord_type: OrdType,
-    /// Bot-authoritative target of a CANCEL/REPLACE: the original ClOrdID the
-    /// bot is amending. The correctness-validator keys its reference matching
-    /// engine off THIS value rather than the contestant's echoed tag 41 in
-    /// orders.acked, so a contestant cannot steer the reference book by
-    /// omitting or altering the cancel target. Empty for NEW orders.
     #[serde(default)]
     pub orig_order_id: String,
 }
 
-/// OrderSentBatch is MessagePack-encoded on "orders.sent".
-/// Batching keeps Kafka traffic proportional to flush rate instead of order rate.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+/// OrderSentBatch stores the state passed across this module boundary.
+/// Keep field changes compatible with callers and serialized contracts.
 pub struct OrderSentBatch {
     pub session_id: String,
     pub worker_id: String,
     pub events: Vec<OrderSentEvent>,
 }
 
-/// OrderAckedEvent records the request/response boundary timestamps for one FIX
-/// ClOrdID. One order may produce SEVERAL events — one per response packet (ACK,
-/// then each partial fill) — all sharing the request's t3.
-///
-/// Timestamp definitions (the kernel stamps CLOCK_MONOTONIC via bpf_ktime_get_ns;
-/// the ebpf-latency userspace adds a sampled realtime-minus-monotonic offset, so
-/// the published values are CLOCK_REALTIME, matching the bot fleet's t0/t1/r9):
-///   - t3_xdp_ingress_ns: captured by XDP when the request segment enters the
-///     algo pod's veth.
-///   - t7_xdp_egress_ns: captured by tc egress when the response segment leaves
-///     the algo pod's veth.
-/// The telemetry ingester joins this stream with `orders.sent` on
-/// `(session_id, order_id)`. The primary contestant latency metric is
-/// `pod_service_time_ns = max(0, t7_xdp_egress_ns - t3_xdp_ingress_ns)`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+/// OrderAckedEvent stores the state passed across this module boundary.
+/// Keep field changes compatible with callers and serialized contracts.
 pub struct OrderAckedEvent {
     pub session_id: String,
     pub contestant_id: String,
@@ -239,18 +169,15 @@ pub struct OrderAckedEvent {
     pub pod_service_time_ns: u64,
     pub exec_type: String,
     pub fill_qty: u64,
-    /// Fill price as a fixed-point integer scaled by TELEMETRY_PRICE_SCALE.
     pub fill_price: u64,
     pub orig_order_id: String,
     pub reordering_detected: bool,
     pub retransmission_count: u32,
 }
 
-/// Borrowed serialization view for `OrderAckedEvent`.
-///
-/// Producers that already carry `session_id` and `contestant_id` at the batch
-/// level can use this to avoid allocating cloned id strings for every event.
 #[derive(Debug, Clone, Copy, Serialize)]
+/// OrderAckedEventRef stores the state passed across this module boundary.
+/// Keep field changes compatible with callers and serialized contracts.
 pub struct OrderAckedEventRef<'a> {
     pub session_id: &'a str,
     pub contestant_id: &'a str,
@@ -269,44 +196,32 @@ pub struct OrderAckedEventRef<'a> {
     pub retransmission_count: u32,
 }
 
-/// OrderAckedBatch is MessagePack-encoded on "orders.acked".
-/// Batching keeps one Kafka record per drain interval instead of one record
-/// per response packet.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+/// OrderAckedBatch stores the state passed across this module boundary.
+/// Keep field changes compatible with callers and serialized contracts.
 pub struct OrderAckedBatch {
     pub session_id: String,
     pub contestant_id: String,
     pub events: Vec<OrderAckedEvent>,
 }
 
-/// Borrowed serialization view for `OrderAckedBatch`.
 #[derive(Debug, Clone, Copy, Serialize)]
+/// OrderAckedBatchRef stores the state passed across this module boundary.
+/// Keep field changes compatible with callers and serialized contracts.
 pub struct OrderAckedBatchRef<'a> {
     pub session_id: &'a str,
     pub contestant_id: &'a str,
     pub events: &'a [OrderAckedEventRef<'a>],
 }
 
-/// CorrectnessScoreEvent is published to "scores.correctness" (JSON, not
-/// MessagePack) by the correctness-validator after the post-run order-book
-/// replay. Consumed by score-computer for the hard correctness gate.
-/// Key: session_id. Mirrors `topics.CorrectnessScoreEvent` in schemas/go.
-///
-/// The `*_count` fields are the telemetry-completeness counters behind the
-/// verdict: how many orders.sent events the validator's drain returned
-/// (sent_count), how many orders.acked events survived dedup (acked_count),
-/// and how many distinct orders appeared in BOTH streams — the replay's
-/// actual inputs (matched_count). score-computer derives a coverage ratio
-/// from these and refuses to apply violation-based disqualification when the
-/// inputs were incomplete. `#[serde(default)]` so payloads from validators
-/// that predate the completeness gate still decode (field-add-only evolution).
 #[derive(Debug, Clone, Serialize, Deserialize)]
+/// CorrectnessScoreEvent stores the state passed across this module boundary.
+/// Keep field changes compatible with callers and serialized contracts.
 pub struct CorrectnessScoreEvent {
     pub session_id: String,
     pub contestant_id: String,
     pub valid_fills: u64,
     pub total_fills: u64,
-    /// valid_fills / total_fills.
     pub correctness_score: f64,
     pub violation_count: u32,
     pub computed_at_ns: u64,
@@ -318,25 +233,29 @@ pub struct CorrectnessScoreEvent {
     pub matched_count: u64,
 }
 
-/// Side is serialized as BUY or SELL in telemetry payloads.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "UPPERCASE")]
+/// Side enumerates the states or variants handled by this module.
+/// Match arms should preserve the semantic contract of each variant.
 pub enum Side {
     Buy,
     Sell,
 }
 
-/// default_fix_version supplies FIX.4.2 when a workload omits the field.
+/// default_fix_version performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 fn default_fix_version() -> String {
     "FIX.4.2".to_string()
 }
 
-/// default_connect_timeout_ms bounds initial TCP/WebSocket connection setup.
+/// default_connect_timeout_ms performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 fn default_connect_timeout_ms() -> u64 {
     1500
 }
 
-/// default_write_timeout_ms bounds per-order socket writes.
+/// default_write_timeout_ms performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 fn default_write_timeout_ms() -> u64 {
     250
 }
@@ -346,6 +265,8 @@ mod tests {
     use super::*;
 
     #[test]
+    /// topic_constants_match_platform_contract performs the module-specific operation described by its name.
+    /// It keeps validation, side effects, and returned values within this module's contract.
     fn topic_constants_match_platform_contract() {
         let topics = [
             TOPIC_SUBMISSION_BUILD_REQUESTED,
@@ -374,6 +295,8 @@ mod tests {
     }
 
     #[test]
+    /// workload_spec_decodes_go_controller_payload performs the module-specific operation described by its name.
+    /// It keeps validation, side effects, and returned values within this module's contract.
     fn workload_spec_decodes_go_controller_payload() {
         let payload = br#"{
             "session_id":"sess-1",
@@ -402,6 +325,8 @@ mod tests {
     }
 
     #[test]
+    /// correctness_score_event_decodes_go_validator_payload performs the module-specific operation described by its name.
+    /// It keeps validation, side effects, and returned values within this module's contract.
     fn correctness_score_event_decodes_go_validator_payload() {
         let payload = br#"{
             "session_id":"sess-1",
@@ -429,10 +354,6 @@ mod tests {
         assert_eq!(ev.acked_count, 950);
         assert_eq!(ev.matched_count, 940);
 
-        // Pre-completeness-gate validators omit the counters entirely; the
-        // documented schema-evolution rule is field-add only, so the legacy
-        // payload must still decode, with the counters defaulting to 0
-        // ("coverage unknown" downstream).
         let legacy = br#"{
             "session_id":"sess-1",
             "contestant_id":"team-1",
@@ -450,6 +371,8 @@ mod tests {
     }
 
     #[test]
+    /// ready_signal_encodes_go_controller_fields performs the module-specific operation described by its name.
+    /// It keeps validation, side effects, and returned values within this module's contract.
     fn ready_signal_encodes_go_controller_fields() {
         let signal = ReadySignal {
             session_id: "sess-1".into(),

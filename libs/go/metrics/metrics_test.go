@@ -1,3 +1,8 @@
+// Package metrics defines tests for metrics test.
+//
+// This file is part of the IICPC benchmarking platform and keeps its
+// responsibilities local to the surrounding package. It should be read with
+// the service-level design in design.md for broader operational context.
 package metrics
 
 import (
@@ -9,9 +14,9 @@ import (
 	"testing"
 )
 
+// TestRejectsNonFiniteSamples performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func TestRejectsNonFiniteSamples(t *testing.T) {
-	// Problem: registry edge cases regress silently until Prometheus scrapes
-	// break. Fix: pin the production-safety behavior with focused tests.
 	resetGlobalForTest()
 
 	Gauge("bad_gauge", "Bad gauge.", nil, math.NaN())
@@ -31,6 +36,8 @@ func TestRejectsNonFiniteSamples(t *testing.T) {
 	}
 }
 
+// TestMetricDefinitionConflictIsDropped performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func TestMetricDefinitionConflictIsDropped(t *testing.T) {
 	resetGlobalForTest()
 
@@ -46,6 +53,8 @@ func TestMetricDefinitionConflictIsDropped(t *testing.T) {
 	}
 }
 
+// TestSanitizesMetricAndHistogramLabels performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func TestSanitizesMetricAndHistogramLabels(t *testing.T) {
 	resetGlobalForTest()
 	global.registerCatalog([]metricSpec{
@@ -66,6 +75,8 @@ func TestSanitizesMetricAndHistogramLabels(t *testing.T) {
 	}
 }
 
+// TestLabelNameCollisionIsDropped performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func TestLabelNameCollisionIsDropped(t *testing.T) {
 	resetGlobalForTest()
 	global.registerCatalog([]metricSpec{
@@ -83,6 +94,8 @@ func TestLabelNameCollisionIsDropped(t *testing.T) {
 	}
 }
 
+// TestUnregisteredMetricIsDropped performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func TestUnregisteredMetricIsDropped(t *testing.T) {
 	resetGlobalForTest()
 
@@ -97,6 +110,8 @@ func TestUnregisteredMetricIsDropped(t *testing.T) {
 	}
 }
 
+// TestIncludesOfficialRuntimeCollectors performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func TestIncludesOfficialRuntimeCollectors(t *testing.T) {
 	resetGlobalForTest()
 
@@ -108,6 +123,8 @@ func TestIncludesOfficialRuntimeCollectors(t *testing.T) {
 	}
 }
 
+// TestUploadBytesUsesByteBuckets performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func TestUploadBytesUsesByteBuckets(t *testing.T) {
 	resetGlobalForTest()
 
@@ -122,6 +139,8 @@ func TestUploadBytesUsesByteBuckets(t *testing.T) {
 	}
 }
 
+// TestStartServerReportsBindFailure performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func TestStartServerReportsBindFailure(t *testing.T) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -135,6 +154,8 @@ func TestStartServerReportsBindFailure(t *testing.T) {
 	}
 }
 
+// TestHTTPMiddlewareRecordsFirstStatus performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func TestHTTPMiddlewareRecordsFirstStatus(t *testing.T) {
 	resetGlobalForTest()
 
@@ -160,6 +181,8 @@ func TestHTTPMiddlewareRecordsFirstStatus(t *testing.T) {
 	}
 }
 
+// TestHTTPMiddlewareRecordsImplicitOKAfterWrite performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func TestHTTPMiddlewareRecordsImplicitOKAfterWrite(t *testing.T) {
 	resetGlobalForTest()
 
@@ -185,6 +208,8 @@ func TestHTTPMiddlewareRecordsImplicitOKAfterWrite(t *testing.T) {
 	}
 }
 
+// TestHTTPMiddlewarePreservesFlusher performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func TestHTTPMiddlewarePreservesFlusher(t *testing.T) {
 	resetGlobalForTest()
 
@@ -211,10 +236,14 @@ func TestHTTPMiddlewarePreservesFlusher(t *testing.T) {
 	}
 }
 
+// resetGlobalForTest performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func resetGlobalForTest() {
 	global = newRegistry()
 }
 
+// renderForTest performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func renderForTest(t *testing.T) string {
 	t.Helper()
 	rr := httptest.NewRecorder()

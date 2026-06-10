@@ -1,3 +1,8 @@
+// Package logger defines shared library behavior for loki.
+//
+// This file is part of the IICPC benchmarking platform and keeps its
+// responsibilities local to the surrounding package. It should be read with
+// the service-level design in design.md for broader operational context.
 package logger
 
 import (
@@ -20,8 +25,6 @@ import (
 
 const defaultServiceName = "iicpc"
 
-// cachedHostname avoids repeated os.Hostname() syscalls when DefaultConfig
-// or normalizeConfig are called multiple times during setup.
 var cachedHostname = func() string {
 	h, _ := os.Hostname()
 	return h
@@ -36,11 +39,12 @@ var slicePool = sync.Pool{
 
 var warnBatchSizeOnce sync.Once
 
-// we use empty structs to prevent collisions in context field names
+// contextAttrsKey groups the state and dependencies used by this package.
+// Keep this type aligned with the runtime contract around it.
 type contextAttrsKey struct{}
 
-// Config controls application logging and optional Loki shipping.
-// Label fields should stay low-cardinality so Loki indexes remain healthy.
+// Config groups the state and dependencies used by this package.
+// Keep this type aligned with the runtime contract around it.
 type Config struct {
 	ServiceName string
 	Environment string
@@ -55,8 +59,8 @@ type Config struct {
 	MaxRetries  int
 }
 
-// DefaultConfig returns production-shaped defaults with Loki disabled unless
-// LOKI_URL is provided through the environment.
+// DefaultConfig performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func DefaultConfig() Config {
 	return Config{
 		ServiceName: defaultServiceName,
@@ -73,6 +77,8 @@ func DefaultConfig() Config {
 	}
 }
 
+// normalizeConfig performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func normalizeConfig(cfg Config) Config {
 	defaults := DefaultConfig()
 	if cfg.ServiceName == "" {
@@ -111,6 +117,8 @@ func normalizeConfig(cfg Config) Config {
 	return cfg
 }
 
+// lokiPushURL performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func lokiPushURL(baseURL string) string {
 	if strings.HasSuffix(baseURL, "/loki/api/v1/push") {
 		return baseURL
@@ -118,6 +126,8 @@ func lokiPushURL(baseURL string) string {
 	return strings.TrimSuffix(baseURL, "/") + "/loki/api/v1/push"
 }
 
+// lokiLabels performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func lokiLabels(cfg Config) map[string]string {
 	labels := map[string]string{
 		"service_name": cfg.ServiceName,
@@ -129,6 +139,8 @@ func lokiLabels(cfg Config) map[string]string {
 	return labels
 }
 
+// serviceAttrs performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func serviceAttrs(cfg Config) []slog.Attr {
 	attrs := []slog.Attr{
 		slog.String("service_name", cfg.ServiceName),
@@ -141,6 +153,8 @@ func serviceAttrs(cfg Config) []slog.Attr {
 	return attrs
 }
 
+// parseLevel performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func parseLevel(value string) slog.Level {
 	switch strings.ToLower(strings.TrimSpace(value)) {
 	case "debug":
@@ -154,6 +168,8 @@ func parseLevel(value string) slog.Level {
 	}
 }
 
+// envOr performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func envOr(key, fallback string) string {
 	if value := os.Getenv(key); value != "" {
 		return value
@@ -161,8 +177,8 @@ func envOr(key, fallback string) string {
 	return fallback
 }
 
-// NewProductionLogger builds the process logger used by services.
-// It always writes JSON to stdout and optionally mirrors batches to Loki.
+// NewProductionLogger performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func NewProductionLogger(cfg Config) (*slog.Logger, *LokiClient) {
 	cfg = normalizeConfig(cfg)
 
@@ -187,15 +203,16 @@ func NewProductionLogger(cfg Config) (*slog.Logger, *LokiClient) {
 	return slog.New(handler), client
 }
 
-// NewLokiClient keeps the old constructor while using production defaults.
+// NewLokiClient performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func NewLokiClient(baseURL string) *LokiClient {
 	cfg := DefaultConfig()
 	cfg.LokiURL = baseURL
 	return NewLokiClientWithConfig(cfg)
 }
 
-// NewLokiClientWithConfig creates and starts a Loki client.
-// Panics if cfg.LokiURL is not empty and is invalid (missing scheme or host).
+// NewLokiClientWithConfig performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func NewLokiClientWithConfig(cfg Config) *LokiClient {
 	cfg = normalizeConfig(cfg)
 
@@ -229,8 +246,8 @@ func NewLokiClientWithConfig(cfg Config) *LokiClient {
 	return c
 }
 
-// WithAttrs returns a child context whose attributes are appended to every
-// slog record handled by ContextHandler.
+// WithAttrs performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func WithAttrs(ctx context.Context, attrs ...slog.Attr) context.Context {
 	if len(attrs) == 0 {
 		return ctx
@@ -242,17 +259,20 @@ func WithAttrs(ctx context.Context, attrs ...slog.Attr) context.Context {
 	return context.WithValue(ctx, contextAttrsKey{}, merged)
 }
 
-// ContextHandler injects attributes carried in context into slog records.
+// ContextHandler groups the state and dependencies used by this package.
+// Keep this type aligned with the runtime contract around it.
 type ContextHandler struct {
 	next slog.Handler
 }
 
-// Enabled delegates level filtering to the wrapped handler.
+// Enabled applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (h *ContextHandler) Enabled(ctx context.Context, level slog.Level) bool {
 	return h.next.Enabled(ctx, level)
 }
 
-// Handle adds request-scoped context attributes before writing a record.
+// Handle applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (h *ContextHandler) Handle(ctx context.Context, record slog.Record) error {
 	if attrs, ok := ctx.Value(contextAttrsKey{}).([]slog.Attr); ok && len(attrs) > 0 {
 		cloned := record.Clone()
@@ -262,33 +282,40 @@ func (h *ContextHandler) Handle(ctx context.Context, record slog.Record) error {
 	return h.next.Handle(ctx, record)
 }
 
-// WithAttrs returns a handler with static attributes attached.
+// WithAttrs applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (h *ContextHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
 	return &ContextHandler{next: h.next.WithAttrs(attrs)}
 }
 
-// WithGroup returns a handler with the named attribute group attached.
+// WithGroup applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (h *ContextHandler) WithGroup(name string) slog.Handler {
 	return &ContextHandler{next: h.next.WithGroup(name)}
 }
 
-// LokiEntry represents a serialized JSON log line queued for Loki.
+// LokiEntry groups the state and dependencies used by this package.
+// Keep this type aligned with the runtime contract around it.
 type LokiEntry struct {
 	Timestamp time.Time
 	Line      string
 }
 
+// lokiPushRequest groups the state and dependencies used by this package.
+// Keep this type aligned with the runtime contract around it.
 type lokiPushRequest struct {
 	Streams []lokiStream `json:"streams"`
 }
 
+// lokiStream groups the state and dependencies used by this package.
+// Keep this type aligned with the runtime contract around it.
 type lokiStream struct {
 	Stream map[string]string `json:"stream"`
 	Values [][]string        `json:"values"`
 }
 
-// LokiClient handles bounded queueing, batching, retrying, and sending logs to
-// Grafana Loki's push API.
+// LokiClient groups the state and dependencies used by this package.
+// Keep this type aligned with the runtime contract around it.
 type LokiClient struct {
 	url        string
 	labels     map[string]string // only Loki-specific
@@ -307,10 +334,8 @@ type LokiClient struct {
 	maxRetries int
 }
 
-// QueueLog pushes a serialized log entry to the bounded Loki queue.
-// Safe to call concurrently with Close — silently drops after shutdown.
-// Uses an atomic check as a fast-path gate and a deferred recover to absorb
-// the rare TOCTOU panic if Close fires between the flag check and the send.
+// QueueLog applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (c *LokiClient) QueueLog(t time.Time, line string) {
 	if c.closed.Load() {
 		return
@@ -318,8 +343,6 @@ func (c *LokiClient) QueueLog(t time.Time, line string) {
 
 	defer func() {
 		if r := recover(); r != nil {
-			// Channel closed between the atomic check and the send.
-			// Silently drop — this is a shutdown race, not backpressure.
 		}
 	}()
 
@@ -333,9 +356,8 @@ func (c *LokiClient) QueueLog(t time.Time, line string) {
 	}
 }
 
-// Close gracefully stops the worker and flushes any remaining queued logs.
-// Note: Close blocks until all queued logs are flushed. If a Loki push retry is in progress,
-// it can block Close for up to HTTPTimeout per attempt before completing.
+// Close applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (c *LokiClient) Close() {
 	c.closeOnce.Do(func() {
 		c.closed.Store(true)
@@ -351,16 +373,20 @@ func (c *LokiClient) Close() {
 	})
 }
 
-// QueueDrops returns the number of logs dropped because the queue was full.
+// QueueDrops applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (c *LokiClient) QueueDrops() uint64 {
 	return c.queueDrops.Load()
 }
 
-// SendDrops returns the number of logs dropped because Loki push failed.
+// SendDrops applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (c *LokiClient) SendDrops() uint64 {
 	return c.sendDrops.Load()
 }
 
+// start applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (c *LokiClient) start() {
 	ticker := time.NewTicker(c.batchWait)
 	defer ticker.Stop()
@@ -388,6 +414,8 @@ func (c *LokiClient) start() {
 	}
 }
 
+// flush applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (c *LokiClient) flush(batch []LokiEntry) {
 	if len(batch) == 0 {
 		return
@@ -421,8 +449,6 @@ func (c *LokiClient) flush(batch []LokiEntry) {
 		return
 	}
 
-	// Put the values slice back to pool after marshalling is done
-	// values was copied/serialized by json.Marshal, so we can recycle now
 	for i := range values {
 		values[i] = nil
 	}
@@ -432,7 +458,6 @@ func (c *LokiClient) flush(batch []LokiEntry) {
 	delay := 100 * time.Millisecond
 	for attempt := 1; attempt <= c.maxRetries; attempt++ {
 		if attempt > 1 {
-			// Add random jitter up to delay/2 to avoid thundering herd retry storms
 			jitter := time.Duration(rand.Int64N(int64(delay / 2)))
 			timer := time.NewTimer(delay + jitter)
 			select {
@@ -479,18 +504,23 @@ func (c *LokiClient) flush(batch []LokiEntry) {
 	fmt.Fprintf(os.Stderr, "loki permanently dropped batch of %d log lines\n", len(batch))
 }
 
+// renderState groups the state and dependencies used by this package.
+// Keep this type aligned with the runtime contract around it.
 type renderState struct {
 	buf     *bytes.Buffer
 	handler slog.Handler
 }
 
+// slogStep groups the state and dependencies used by this package.
+// Keep this type aligned with the runtime contract around it.
 type slogStep struct {
 	isGroup bool
 	group   string
 	attrs   []slog.Attr
 }
 
-// LokiHandler mirrors structured slog records to Loki while preserving stdout.
+// LokiHandler groups the state and dependencies used by this package.
+// Keep this type aligned with the runtime contract around it.
 type LokiHandler struct {
 	client *LokiClient
 	next   slog.Handler
@@ -498,11 +528,14 @@ type LokiHandler struct {
 	pool   *sync.Pool
 }
 
-// NewLokiHandler wraps a LokiClient and fallback handler.
+// NewLokiHandler performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func NewLokiHandler(client *LokiClient, fallback slog.Handler) *LokiHandler {
 	return buildLokiHandler(client, fallback, nil)
 }
 
+// buildLokiHandler performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func buildLokiHandler(client *LokiClient, next slog.Handler, steps []slogStep) *LokiHandler {
 	pool := &sync.Pool{
 		New: func() any {
@@ -541,12 +574,14 @@ func buildLokiHandler(client *LokiClient, next slog.Handler, steps []slogStep) *
 	}
 }
 
-// Enabled delegates level filtering to the wrapped handler.
+// Enabled applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (h *LokiHandler) Enabled(ctx context.Context, level slog.Level) bool {
 	return h.next.Enabled(ctx, level)
 }
 
-// Handle writes to stdout and queues the same structured record for Loki.
+// Handle applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (h *LokiHandler) Handle(ctx context.Context, record slog.Record) error {
 	err := h.next.Handle(ctx, record)
 	if h.client == nil {
@@ -570,7 +605,8 @@ func (h *LokiHandler) Handle(ctx context.Context, record slog.Record) error {
 	return err
 }
 
-// WithAttrs returns a handler with static attributes attached.
+// WithAttrs applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (h *LokiHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
 	steps := append(append([]slogStep(nil), h.steps...), slogStep{
 		attrs: attrs,
@@ -578,7 +614,8 @@ func (h *LokiHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
 	return buildLokiHandler(h.client, h.next.WithAttrs(attrs), steps)
 }
 
-// WithGroup returns a handler with a named attribute group attached.
+// WithGroup applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (h *LokiHandler) WithGroup(name string) slog.Handler {
 	steps := append(append([]slogStep(nil), h.steps...), slogStep{
 		isGroup: true,

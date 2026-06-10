@@ -1,3 +1,8 @@
+// Package k8s defines tests for spawner test.
+//
+// This file is part of the IICPC benchmarking platform and keeps its
+// responsibilities local to the surrounding package. It should be read with
+// the service-level design in design.md for broader operational context.
 package k8s
 
 import (
@@ -8,6 +13,8 @@ import (
 	corev1 "k8s.io/api/core/v1"
 )
 
+// TestResourceNameIsKubernetesSafeAndStable performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func TestResourceNameIsKubernetesSafeAndStable(t *testing.T) {
 	tests := []struct {
 		name         string
@@ -45,6 +52,8 @@ func TestResourceNameIsKubernetesSafeAndStable(t *testing.T) {
 	}
 }
 
+// TestResourceNameAvoidsTruncationCollision performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func TestResourceNameAvoidsTruncationCollision(t *testing.T) {
 	left := resourceName("build", strings.Repeat("a", 80)+"1")
 	right := resourceName("build", strings.Repeat("a", 80)+"2")
@@ -53,6 +62,8 @@ func TestResourceNameAvoidsTruncationCollision(t *testing.T) {
 	}
 }
 
+// TestJobSpecsUseSecretRefsForCredentials performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func TestJobSpecsUseSecretRefsForCredentials(t *testing.T) {
 	spawner := &Spawner{cfg: JobConfig{Namespace: "build", JobSecretName: "spawner-secret"}}
 	msg := topics.SubmissionBuildRequested{
@@ -67,10 +78,6 @@ func TestJobSpecsUseSecretRefsForCredentials(t *testing.T) {
 	assertSecretEnv(t, fetchEnv, "HARBOR_USER", "spawner-secret", "harbor-user")
 	assertSecretEnv(t, fetchEnv, "HARBOR_PASSWORD", "spawner-secret", "harbor-password")
 	assertLockedDownContainer(t, build.Spec.Template.Spec.InitContainers[0].SecurityContext)
-	// The kaniko build container must NOT be locked down: it runs as root and
-	// writes to the root filesystem during layer extraction. Hardening it
-	// produces CreateContainerConfigError / extraction failures and breaks
-	// every build.
 	assertKanikoCompatibleContainer(t, build.Spec.Template.Spec.Containers[0].SecurityContext)
 
 	scan := spawner.scanJobSpec("scan-sub-123", "sub-123", "registry.example/iicpc/sub-123:latest")
@@ -91,6 +98,8 @@ func TestJobSpecsUseSecretRefsForCredentials(t *testing.T) {
 	assertLockedDownContainer(t, sbomContainer.SecurityContext)
 }
 
+// assertSecretEnv performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func assertSecretEnv(t *testing.T, envs []corev1.EnvVar, name, secretName, key string) {
 	t.Helper()
 	for _, env := range envs {
@@ -114,6 +123,8 @@ func assertSecretEnv(t *testing.T, envs []corev1.EnvVar, name, secretName, key s
 	t.Fatalf("env %s not found", name)
 }
 
+// assertLockedDownContainer performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func assertLockedDownContainer(t *testing.T, securityContext *corev1.SecurityContext) {
 	t.Helper()
 	if securityContext == nil {
@@ -130,10 +141,8 @@ func assertLockedDownContainer(t *testing.T, securityContext *corev1.SecurityCon
 	}
 }
 
-// assertKanikoCompatibleContainer verifies the kaniko build container is left
-// runnable: root user, writable root filesystem, and capabilities not dropped
-// (it needs CAP_CHOWN et al. for layer extraction). It still keeps
-// AllowPrivilegeEscalation disabled.
+// assertKanikoCompatibleContainer performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func assertKanikoCompatibleContainer(t *testing.T, securityContext *corev1.SecurityContext) {
 	t.Helper()
 	if securityContext == nil {

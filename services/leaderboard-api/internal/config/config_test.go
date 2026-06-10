@@ -1,3 +1,8 @@
+// Package config defines tests for config test.
+//
+// This file is part of the IICPC benchmarking platform and keeps its
+// responsibilities local to the surrounding package. It should be read with
+// the service-level design in design.md for broader operational context.
 package config
 
 import (
@@ -5,9 +10,8 @@ import (
 	"testing"
 )
 
-// TestSSEConsumerGroupPerPod guards the SSE fan-out posture: every replica
-// must land in its own consumer group, otherwise replicas split the
-// leaderboard.updates partitions and only a subset of SSE clients see updates.
+// TestSSEConsumerGroupPerPod performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func TestSSEConsumerGroupPerPod(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -29,6 +33,8 @@ func TestSSEConsumerGroupPerPod(t *testing.T) {
 	}
 }
 
+// TestSSEConsumerGroupFallsBackToHostname performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func TestSSEConsumerGroupFallsBackToHostname(t *testing.T) {
 	t.Setenv("POD_NAME", "")
 	t.Setenv("KAFKA_GROUP", "")

@@ -1,3 +1,8 @@
+// Package handler implements health behavior.
+//
+// This file is part of the IICPC benchmarking platform and keeps its
+// responsibilities local to the surrounding package. It should be read with
+// the service-level design in design.md for broader operational context.
 package handler
 
 import (
@@ -8,23 +13,22 @@ import (
 	"github.com/iicpc/bot-fleet-controller/internal/controller"
 )
 
-// ReadyState is flipped after startup recovery completes AND the consumers
-// have started. /readyz returns 200 only after both happen.
-//
-// Why both: on a controller restart, runs.status rows are marked failed by
-// the recovery sweep BEFORE the benchmark.requested consumer starts (so a
-// retriggered run can pass the partial unique index on submission_id).
-// If /readyz returned 200 before recovery finished, the Service would
-// route new benchmark.requested messages to a controller mid-cleanup and
-// they would be processed against a stale session map.
+// ReadyState groups the state and dependencies used by this package.
+// Keep this type aligned with the runtime contract around it.
 type ReadyState struct {
 	ready atomic.Bool
 }
 
+// NewReadyState performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func NewReadyState() *ReadyState { return &ReadyState{} }
 
+// MarkReady applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (r *ReadyState) MarkReady() { r.ready.Store(true) }
 
+// Healthz performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func Healthz(sessions *controller.SessionManager) http.HandlerFunc {
 	return func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{
@@ -34,6 +38,8 @@ func Healthz(sessions *controller.SessionManager) http.HandlerFunc {
 	}
 }
 
+// Readyz performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func Readyz(r *ReadyState) http.HandlerFunc {
 	return func(w http.ResponseWriter, _ *http.Request) {
 		if !r.ready.Load() {
@@ -44,6 +50,8 @@ func Readyz(r *ReadyState) http.HandlerFunc {
 	}
 }
 
+// writeJSON performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)

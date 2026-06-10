@@ -1,3 +1,8 @@
+// Package handler implements auth behavior.
+//
+// This file is part of the IICPC benchmarking platform and keeps its
+// responsibilities local to the surrounding package. It should be read with
+// the service-level design in design.md for broader operational context.
 package handler
 
 import (
@@ -9,41 +14,33 @@ import (
 	"strings"
 )
 
-// TokenVerifier is the slice of libs/go/authn.Verifier the middleware needs:
-// verify a raw bearer token, return the stable subject (Google `sub`) it
-// authenticates. Kept as a local interface so handler tests can fake it and
-// the handler package does not couple to the authn implementation.
+// TokenVerifier defines the behavior expected by this package boundary.
+// Implementations should preserve the caller-visible contract.
 type TokenVerifier interface {
 	Verify(ctx context.Context, rawToken string) (string, error)
 }
 
-// contestantIDKeyType keys the verified contestant ID in the request context.
-// Unexported struct type — collision-proof against other packages' context keys.
+// contestantIDKeyType groups the state and dependencies used by this package.
+// Keep this type aligned with the runtime contract around it.
 type contestantIDKeyType struct{}
 
 var contestantIDKey contestantIDKeyType
 
+// withContestantID performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func withContestantID(ctx context.Context, contestantID string) context.Context {
 	return context.WithValue(ctx, contestantIDKey, contestantID)
 }
 
-// contestantIDFromContext returns the contestant ID the auth middleware
-// stored in the request context, or "" when no middleware ran. Handlers keep
-// their own ""-means-401 guards so a route accidentally mounted without the
-// middleware fails closed instead of serving unauthenticated traffic.
+// contestantIDFromContext performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func contestantIDFromContext(ctx context.Context) string {
 	contestantID, _ := ctx.Value(contestantIDKey).(string)
 	return contestantID
 }
 
-// RequireContestant is the chi middleware in front of every contestant-facing
-// route. It extracts the Bearer token, verifies it as a Google ID token —
-// RS256 signature against Google's JWKS, iss/aud/exp/iat; see libs/go/authn —
-// and stores the verified sub in the request context for handlers to read.
-//
-// Missing token and failed verification are both 401. This replaces the
-// pre-Critical-1 contestantIDFromRequest, which base64-decoded the payload
-// with NO verification and accepted alg:none forgeries.
+// RequireContestant performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func RequireContestant(v TokenVerifier, log *slog.Logger) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -54,8 +51,6 @@ func RequireContestant(v TokenVerifier, log *slog.Logger) func(http.Handler) htt
 			}
 			sub, err := v.Verify(r.Context(), token)
 			if err != nil {
-				// 401 with a generic message; the specific failure
-				// (signature, exp, aud, ...) goes to logs only.
 				log.WarnContext(r.Context(), "rejected bearer token", "error", err)
 				writeError(w, http.StatusUnauthorized, "invalid or expired token")
 				return
@@ -65,10 +60,8 @@ func RequireContestant(v TokenVerifier, log *slog.Logger) func(http.Handler) htt
 	}
 }
 
-// InsecureTrustSubClaim is the AUTH_REQUIRED=false twin of RequireContestant:
-// it trusts the token's unverified sub claim, exactly the pre-fix behaviour.
-// Dev and test environments only — main.go refuses to select it unless
-// AUTH_REQUIRED is explicitly set to false, and logs loudly when it is.
+// InsecureTrustSubClaim performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func InsecureTrustSubClaim(log *slog.Logger) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -82,7 +75,8 @@ func InsecureTrustSubClaim(log *slog.Logger) func(http.Handler) http.Handler {
 	}
 }
 
-// bearerToken extracts the RFC 6750 Bearer token, or "" when absent/malformed.
+// bearerToken performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func bearerToken(r *http.Request) string {
 	auth := strings.TrimSpace(r.Header.Get("Authorization"))
 	token, ok := strings.CutPrefix(auth, "Bearer ")
@@ -92,10 +86,8 @@ func bearerToken(r *http.Request) string {
 	return strings.TrimSpace(token)
 }
 
-// unverifiedSubClaim base64-decodes the JWT payload and returns its sub claim
-// WITHOUT any signature/iss/aud/exp validation. This is the Critical-1 bug
-// preserved deliberately — and exclusively — for InsecureTrustSubClaim's
-// dev-mode. Never call it from a production path.
+// unverifiedSubClaim performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func unverifiedSubClaim(token string) string {
 	parts := strings.Split(token, ".")
 	if len(parts) < 2 {

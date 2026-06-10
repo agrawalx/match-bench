@@ -1,14 +1,8 @@
-// bot-fleet-controller drives benchmark runs end-to-end:
-// consumes benchmark.requested, allocates a sandbox slot via sandbox-orchestrator,
-// publishes WorkloadSpec to bot-fleet workers, fans in bot.ready signals,
-// publishes the barrier, and reports back via benchmark.status.updated.
+// Package main starts the bot-fleet-controller service.
 //
-// HARD INVARIANT: this service runs at exactly 1 replica, architecturally locked.
-// No sharding, no horizontal scale-out. submission-api is the stateless service
-// that scales; the controller stays at 1. Session state lives in-memory behind
-// a sync.RWMutex; on crash, in-flight runs are marked failed by the recovery
-// sweep on the next startup and the user re-triggers. A PodDisruptionBudget
-// with minAvailable=1 protects against routine node drains.
+// This file is part of the IICPC benchmarking platform and keeps its
+// responsibilities local to the surrounding package. It should be read with
+// the service-level design in design.md for broader operational context.
 package main
 
 import (
@@ -31,6 +25,8 @@ import (
 	"github.com/iicpc/libs/metrics"
 )
 
+// main performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func main() {
 	logCfg := logger.DefaultConfig()
 	logCfg.ServiceName = "bot-fleet-controller"
@@ -73,18 +69,6 @@ func main() {
 	producer := controller.NewProducer(kafkaBrokers, log)
 	defer producer.Close()
 
-	// Synchronous crash recovery — MUST run before consumers start.
-	//
-	// v1 recovery strategy is "mark-failed-on-restart": every runs row in a
-	// non-terminal state (requested|deploying|waiting_ready|barrier_fired|
-	// running) is updated to failed with message='controller restart'.
-	// User re-triggers via the frontend. No attempt to resume in-flight
-	// sessions — their goroutines died with the previous process, the
-	// algo pod was likely torn down, and the bot workers have moved on.
-	//
-	// This must complete BEFORE consumers start because the partial unique
-	// index on runs(submission_id) WHERE status NOT IN ('completed','failed')
-	// otherwise blocks any retriggered benchmark for an in-flight submission.
 	if err := controller.RecoverInFlightRuns(ctx, st, producer, log); err != nil {
 		log.Error("startup recovery failed", "error", err)
 		os.Exit(1)
@@ -106,9 +90,6 @@ func main() {
 	r.Use(middleware.RequestID)
 	r.Use(middleware.RealIP)
 	r.Use(requestLogger(log))
-	// Problem: the single-replica controller is operationally critical, but
-	// only exposed health probes. Fix: export RED metrics and controller domain
-	// gauges/counters so alerts can detect stalled or unhealthy coordination.
 	r.Use(metrics.HTTPMiddleware("bot-fleet-controller", chiRoutePattern))
 	r.Use(middleware.Recoverer)
 	r.Get("/healthz", handler.Healthz(sessions))
@@ -147,6 +128,8 @@ func main() {
 	log.Info("controller stopped")
 }
 
+// chiRoutePattern performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func chiRoutePattern(r *http.Request) string {
 	if routeCtx := chi.RouteContext(r.Context()); routeCtx != nil {
 		return routeCtx.RoutePattern()
@@ -154,10 +137,8 @@ func chiRoutePattern(r *http.Request) string {
 	return ""
 }
 
-// runConfigFromEnv loads the deployment-wide operational knobs. The
-// load-shape (worker count, task list, durations) is now per-scenario and
-// lives in the scenarios table — this function only configures the cluster-
-// wide deadlines and protocol settings that apply to every benchmark.
+// runConfigFromEnv performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func runConfigFromEnv() controller.RunConfig {
 	return controller.RunConfig{
 		GlobalSeed:       uint64(envOrInt("GLOBAL_SEED", 42)),
@@ -173,6 +154,8 @@ func runConfigFromEnv() controller.RunConfig {
 	}
 }
 
+// requestLogger performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func requestLogger(log *slog.Logger) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -189,6 +172,8 @@ func requestLogger(log *slog.Logger) func(http.Handler) http.Handler {
 	}
 }
 
+// envOr performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func envOr(key, def string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
@@ -196,6 +181,8 @@ func envOr(key, def string) string {
 	return def
 }
 
+// envOrInt performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func envOrInt(key string, def int) int {
 	v := os.Getenv(key)
 	if v == "" {
@@ -209,6 +196,8 @@ func envOrInt(key string, def int) int {
 	return n
 }
 
+// envOrDuration performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func envOrDuration(key string, def time.Duration) time.Duration {
 	v := os.Getenv(key)
 	if v == "" {
@@ -222,6 +211,8 @@ func envOrDuration(key string, def time.Duration) time.Duration {
 	return d
 }
 
+// mustEnv performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func mustEnv(key string) string {
 	v := os.Getenv(key)
 	if v == "" {

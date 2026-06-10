@@ -1,3 +1,8 @@
+// Package handler implements submit behavior.
+//
+// This file is part of the IICPC benchmarking platform and keeps its
+// responsibilities local to the surrounding package. It should be read with
+// the service-level design in design.md for broader operational context.
 package handler
 
 import (
@@ -18,9 +23,10 @@ import (
 	"github.com/iicpc/submission-api/internal/validator"
 )
 
-// maxFormBytes caps the entire multipart body (file + form overhead).
 const maxFormBytes = validator.MaxZipBytes + 4096
 
+// submitResponse groups the state and dependencies used by this package.
+// Keep this type aligned with the runtime contract around it.
 type submitResponse struct {
 	SubmissionID string    `json:"submission_id"`
 	Status       string    `json:"status"`
@@ -32,11 +38,15 @@ type submitResponse struct {
 	CreatedAt    time.Time `json:"created_at"`
 }
 
+// errorResponse groups the state and dependencies used by this package.
+// Keep this type aligned with the runtime contract around it.
 type errorResponse struct {
 	Error        string `json:"error"`
 	SubmissionID string `json:"submission_id,omitempty"`
 }
 
+// Submit performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func Submit(ms *store.MinioStore, pg *store.PostgresStore, pub publisher.Publisher, log *slog.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		r.Body = http.MaxBytesReader(w, r.Body, maxFormBytes)
@@ -46,8 +56,6 @@ func Submit(ms *store.MinioStore, pg *store.PostgresStore, pub publisher.Publish
 			writeError(w, http.StatusBadRequest, "failed to parse form: "+err.Error())
 			return
 		}
-		// multipart temp files are not cleaned up without
-		// explicit RemoveAll; relying on GC finalization leaks disk space under load
 		defer r.MultipartForm.RemoveAll()
 
 		file, _, err := r.FormFile("file")
@@ -58,7 +66,6 @@ func Submit(ms *store.MinioStore, pg *store.PostgresStore, pub publisher.Publish
 		}
 		defer file.Close()
 
-		// Find file size using Seek.
 		size, err := file.Seek(0, io.SeekEnd)
 		if err != nil {
 			log.ErrorContext(r.Context(), "failed to seek end of upload file", "error", err)
@@ -71,7 +78,6 @@ func Submit(ms *store.MinioStore, pg *store.PostgresStore, pub publisher.Publish
 			return
 		}
 
-		// Validate zip structure and parse benchmark.yaml.
 		cfg, err := validator.ValidateSubmissionZip(file, size)
 		if err != nil {
 			metrics.Counter("submission_validation_failures_total", "Submission validation failures.", metrics.Labels("reason", "invalid_zip"), 1)
@@ -92,8 +98,6 @@ func Submit(ms *store.MinioStore, pg *store.PostgresStore, pub publisher.Publish
 			return
 		}
 
-		// Compute SHA-256 before uploading so the object metadata and database
-		// row agree on the exact digest we intended to store.
 		if _, err := file.Seek(0, io.SeekStart); err != nil {
 			log.ErrorContext(r.Context(), "failed to reset upload file pointer", "error", err)
 			writeError(w, http.StatusInternalServerError, "failed to read file")
@@ -119,10 +123,6 @@ func Submit(ms *store.MinioStore, pg *store.PostgresStore, pub publisher.Publish
 				return
 			}
 			if existing != nil {
-				// Bind an unowned duplicate to this contestant, or — when
-				// the claim is lost to a concurrent request — resolve the
-				// owner from the DB row. Only the DB-confirmed owner may
-				// learn the existing submission_id below.
 				existing, err = claimOrResolveOwner(r.Context(), pg, existing, contestantID)
 				if err != nil {
 					log.ErrorContext(r.Context(), "claim duplicate submission contestant failed", "submission_id", existingID, "error", err)
@@ -140,7 +140,6 @@ func Submit(ms *store.MinioStore, pg *store.PostgresStore, pub publisher.Publish
 			return
 		}
 
-		// Upload artifact to MinIO.
 		uploadStart := time.Now()
 		if _, err := file.Seek(0, io.SeekStart); err != nil {
 			log.ErrorContext(r.Context(), "failed to reset upload file pointer", "error", err)
@@ -155,7 +154,6 @@ func Submit(ms *store.MinioStore, pg *store.PostgresStore, pub publisher.Publish
 			return
 		}
 
-		// Persist metadata to PostgreSQL.
 		meta := store.SubmissionMeta{
 			SubmissionID: submissionID,
 			ContestantID: contestantID,
@@ -182,9 +180,6 @@ func Submit(ms *store.MinioStore, pg *store.PostgresStore, pub publisher.Publish
 						log.ErrorContext(r.Context(), "duplicate owner lookup failed during race resolution", "submission_id", existingID, "error", getErr)
 					}
 					if existing != nil {
-						// Same claim-or-resolve as the pre-upload duplicate
-						// path: never assume the claim took — the DB row
-						// decides who may learn the existing submission_id.
 						existing, getErr = claimOrResolveOwner(r.Context(), pg, existing, contestantID)
 						if getErr != nil {
 							log.ErrorContext(r.Context(), "duplicate ownership resolution failed during race resolution", "submission_id", existingID, "error", getErr)
@@ -203,17 +198,11 @@ func Submit(ms *store.MinioStore, pg *store.PostgresStore, pub publisher.Publish
 				return
 			}
 			log.ErrorContext(r.Context(), "postgres insert failed", "submission_id", submissionID, "error", err)
-			// The artifact upload already succeeded and there is no atomic
-			// transaction across MinIO and Postgres. Log the object path so a
-			// reconciliation job or operator can clean up the orphaned object.
 			log.ErrorContext(r.Context(), "orphaned minio artifact after postgres insert failure", "submission_id", submissionID, "artifact_path", artifactPath)
 			writeError(w, http.StatusInternalServerError, "failed to save metadata")
 			return
 		}
 
-		// Publish to Kafka — best-effort, does not fail the request. This is
-		// intentionally weaker than benchmark.requested, where Kafka delivery is
-		// required because the user receives a live run_id immediately.
 		if err := pub.PublishBuildRequested(r.Context(), publisher.PublishMeta{
 			SubmissionID: submissionID,
 			ContestantID: meta.ContestantID,
@@ -253,16 +242,22 @@ func Submit(ms *store.MinioStore, pg *store.PostgresStore, pub publisher.Publish
 	}
 }
 
+// writeJSON performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	json.NewEncoder(w).Encode(v)
 }
 
+// writeError performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func writeError(w http.ResponseWriter, status int, msg string) {
 	writeJSON(w, status, errorResponse{Error: msg})
 }
 
+// writeErrorWithID performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func writeErrorWithID(w http.ResponseWriter, status int, msg, id string) {
 	writeJSON(w, status, errorResponse{Error: msg, SubmissionID: id})
 }

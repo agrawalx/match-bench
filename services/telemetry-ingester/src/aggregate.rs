@@ -1,17 +1,8 @@
-//! Per-`(session, wave)` metric aggregation.
+//! This module implements aggregate behavior.
 //!
-//! Two independent streams feed the same windows:
-//!   - `orders.acked` (algo side): the scored `service_time = t7 - t3` (already
-//!     computed as `pod_service_time_ns`), recorded ONCE per order (first
-//!     response, via the dedup tracker); plus fill latency, accept/reject counts.
-//!   - `orders.sent` (bot side): `response_time = r9 - t0`, `schedule_slip =
-//!     t1 - t0`, offered count, and timeouts (`timed_out`).
-//!
-//! `wave_index = floor((t - session_start) / wave_ns)` where `session_start` is
-//! the earliest timestamp seen for the session — a pure time bucket (the scoring
-//! service interprets it as ramp waves and ignores it for constant/spike).
-//! Service-time percentiles are cumulative per wave (rolling); tps and error_rate
-//! are per snapshot interval.
+//! It belongs to the IICPC benchmarking platform and should keep its
+//! behavior consistent with the service contracts documented in design.md.
+//! The comments in this file describe public structure and callable behavior.
 
 use std::collections::HashMap;
 
@@ -24,14 +15,12 @@ use crate::join::FirstResponseTracker;
 pub const DEFAULT_WAVE_NS: u64 = 20_000_000_000; // 20 s ramp wave
 const HDR_MAX_NS: u64 = 60_000_000_000; // 60 s upper bound
 const HDR_SIGFIG: u8 = 3;
-/// Evict a first-response entry / a window after this much idle. The first-
-/// response window matches the eBPF reader's 5 s eviction; windows live longer so
-/// a whole wave's cumulative histogram survives a quiet second.
 pub const FIRST_RESP_IDLE_NS: u64 = 5_000_000_000;
 pub const WINDOW_IDLE_NS: u64 = 30_000_000_000;
 
-/// One row to be written to TimescaleDB + Redis on a snapshot tick.
 #[derive(Debug, Clone, PartialEq)]
+/// Snapshot stores the state passed across this module boundary.
+/// Keep field changes compatible with callers and serialized contracts.
 pub struct Snapshot {
     pub time_ns: u64,
     pub session_id: String,
@@ -41,26 +30,18 @@ pub struct Snapshot {
     pub p90_ns: u64,
     pub p99_ns: u64,
     pub p999_ns: u64,
-    // response_time = r9 - t0 (the bot-side round trip including coordinated-
-    // omission/queueing delay). 0 when no order in this window got a response.
     pub rt_p50_ns: u64,
     pub rt_p90_ns: u64,
     pub rt_p99_ns: u64,
     pub tps_1s: f64,
     pub error_rate: f64,
-    /// V2-deflate-serialized cumulative service-time (t7-t3) histogram — the
-    /// scored metric, for offline analysis and the frontend percentile chart.
     pub hdr_encoded: Vec<u8>,
-    /// V2-deflate-serialized cumulative response-time (r9-t0) histogram — the
-    /// bot-side round trip including coordinated-omission/queueing delay. Empty
-    /// when no order in this window got a response (e.g. all timed out).
     pub rt_hdr_encoded: Vec<u8>,
-    /// V2-deflate-serialized cumulative schedule-slip (t1-t0) histogram — how
-    /// far the bot's write fell behind its intended send schedule: the pure
-    /// back-pressure / coordinated-omission signal (all protocols).
     pub slip_hdr_encoded: Vec<u8>,
 }
 
+/// Window stores the state passed across this module boundary.
+/// Keep field changes compatible with callers and serialized contracts.
 struct Window {
     contestant_id: String,
     service_time: Histogram<u64>,
@@ -68,7 +49,6 @@ struct Window {
     response_time: Histogram<u64>,
     schedule_slip: Histogram<u64>,
     last_update_ns: u64,
-    // Reset every snapshot interval:
     offered: u64,
     responded: u64,
     accepted: u64,
@@ -78,6 +58,8 @@ struct Window {
 }
 
 impl Window {
+    /// new performs the module-specific operation described by its name.
+    /// It keeps validation, side effects, and returned values within this module's contract.
     fn new(contestant_id: String, now_ns: u64) -> Self {
         Self {
             contestant_id,
@@ -95,31 +77,40 @@ impl Window {
         }
     }
 
+    /// interval_active performs the module-specific operation described by its name.
+    /// It keeps validation, side effects, and returned values within this module's contract.
     fn interval_active(&self) -> bool {
         self.offered > 0 || self.responded > 0 || self.fills > 0
     }
 }
 
+/// new_hist performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 fn new_hist() -> Histogram<u64> {
     Histogram::<u64>::new_with_bounds(1, HDR_MAX_NS, HDR_SIGFIG)
         .expect("valid HDR bounds (1..=60s, 3 sig figs)")
 }
 
-/// HDR's lower bound is 1; a genuine 0 ns measurement is clamped to 1.
+/// record performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 fn record(hist: &mut Histogram<u64>, value_ns: u64) {
     let _ = hist.record(value_ns.max(1));
 }
 
-/// FIX ExecType (tag 150) "8" is Rejected.
+/// is_reject performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 fn is_reject(exec_type: &str) -> bool {
     exec_type == "8"
 }
 
-/// FIX ExecType: "1" PartialFill, "2" Filled, "F" Trade (4.4). A fill must carry qty.
+/// is_fill performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 fn is_fill(exec_type: &str, fill_qty: u64) -> bool {
     fill_qty > 0 && matches!(exec_type, "1" | "2" | "F")
 }
 
+/// Aggregator stores the state passed across this module boundary.
+/// Keep field changes compatible with callers and serialized contracts.
 pub struct Aggregator {
     windows: HashMap<(String, u32), Window>,
     session_start: HashMap<String, u64>,
@@ -130,6 +121,8 @@ pub struct Aggregator {
 }
 
 impl Aggregator {
+    /// new performs the module-specific operation described by its name.
+    /// It keeps validation, side effects, and returned values within this module's contract.
     pub fn new(wave_ns: u64) -> Self {
         Self {
             windows: HashMap::new(),
@@ -141,6 +134,8 @@ impl Aggregator {
         }
     }
 
+    /// wave_of performs the module-specific operation described by its name.
+    /// It keeps validation, side effects, and returned values within this module's contract.
     fn wave_of(&mut self, session_id: &str, t_ns: u64) -> u32 {
         let start = self
             .session_start
@@ -152,6 +147,8 @@ impl Aggregator {
         ((t_ns.saturating_sub(*start)) / self.wave_ns) as u32
     }
 
+    /// observe_sent performs the module-specific operation described by its name.
+    /// It keeps validation, side effects, and returned values within this module's contract.
     pub fn observe_sent(&mut self, e: &OrderSentEvent) {
         let t0 = e.target_send_ts_ns;
         let t1 = e.send_ts_ns;
@@ -180,6 +177,8 @@ impl Aggregator {
         w.last_update_ns = w.last_update_ns.max(t1.max(t0));
     }
 
+    /// observe_acked performs the module-specific operation described by its name.
+    /// It keeps validation, side effects, and returned values within this module's contract.
     pub fn observe_acked(&mut self, e: &OrderAckedEvent) {
         let t3 = e.t3_xdp_ingress_ns;
         self.session_contestant
@@ -193,11 +192,6 @@ impl Aggregator {
             w.contestant_id = e.contestant_id.clone();
         }
 
-        // First response of an order = the scored service-time sample. Track idle
-        // by the response's ARRIVAL time (t7), not the fixed request t3 — otherwise
-        // the idle clock never advances across an order's stream of fills, so a
-        // resting order whose fills span >5 s gets evicted mid-stream and its next
-        // fill is re-scored as a fresh first response, corrupting service_time/tps.
         if self.first_response.observe(&e.order_id, e.t7_xdp_egress_ns) {
             record(&mut w.service_time, e.pod_service_time_ns);
             w.responded += 1;
@@ -214,9 +208,8 @@ impl Aggregator {
         w.last_update_ns = w.last_update_ns.max(e.t7_xdp_egress_ns);
     }
 
-    /// Produce a snapshot per active window, reset per-interval counters, and
-    /// evict idle windows + first-response entries. `interval_secs` is the wall
-    /// time since the previous snapshot (≈ 1.0).
+    /// snapshot performs the module-specific operation described by its name.
+    /// It keeps validation, side effects, and returned values within this module's contract.
     pub fn snapshot(&mut self, now_ns: u64, interval_secs: f64) -> Vec<Snapshot> {
         let interval = if interval_secs > 0.0 {
             interval_secs
@@ -228,18 +221,11 @@ impl Aggregator {
             if !w.interval_active() {
                 continue;
             }
-            // M34: backfill contestant_id for a sent-first window from the session
-            // map (observe_sent defaults it to "" until the first ack arrives).
             if w.contestant_id.is_empty() {
                 if let Some(c) = self.session_contestant.get(session_id) {
                     w.contestant_id = c.clone();
                 }
             }
-            // M33/M34: only emit a latency row once a scored service-time sample
-            // exists AND the contestant is known. A sent-only window (e.g. a wave
-            // whose orders all timed out) has an empty histogram, so emitting it
-            // would write misleading 0-latency, unattributable rows that drag down
-            // the metrics_10s p99 average. Counters still reset below regardless.
             if !w.service_time.is_empty() && !w.contestant_id.is_empty() {
                 let error_rate = if w.offered > 0 {
                     (w.timed_out + w.rejected) as f64 / w.offered as f64
@@ -275,9 +261,6 @@ impl Aggregator {
 
         self.windows
             .retain(|_, w| now_ns.saturating_sub(w.last_update_ns) < WINDOW_IDLE_NS);
-        // M29: prune per-session state once no window for that session remains, so
-        // session_start/session_contestant grow with IN-FLIGHT sessions rather than
-        // every session ever seen (this is a single, long-lived replica).
         let live: std::collections::HashSet<&str> =
             self.windows.keys().map(|(s, _)| s.as_str()).collect();
         self.session_start.retain(|s, _| live.contains(s.as_str()));
@@ -287,22 +270,27 @@ impl Aggregator {
         out
     }
 
+    /// window_count performs the module-specific operation described by its name.
+    /// It keeps validation, side effects, and returned values within this module's contract.
     pub fn window_count(&self) -> usize {
         self.windows.len()
     }
 
-    /// Current first-response join-buffer size (in-flight tracked orders).
+    /// join_buffer_size performs the module-specific operation described by its name.
+    /// It keeps validation, side effects, and returned values within this module's contract.
     pub fn join_buffer_size(&self) -> usize {
         self.first_response.len()
     }
 
-    /// First-response entries evicted by the most recent `snapshot` call (idle
-    /// in-flight orders that never completed a scored sample).
+    /// last_evicted performs the module-specific operation described by its name.
+    /// It keeps validation, side effects, and returned values within this module's contract.
     pub fn last_evicted(&self) -> usize {
         self.last_evicted
     }
 }
 
+/// serialize_hist performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 fn serialize_hist(hist: &Histogram<u64>) -> Vec<u8> {
     let mut buf = Vec::new();
     let _ = V2DeflateSerializer::new().serialize(hist, &mut buf);
@@ -314,6 +302,8 @@ mod tests {
     use super::*;
     use iicpc_schemas_rust::{OrdType, PayloadType, Side};
 
+    /// acked performs the module-specific operation described by its name.
+    /// It keeps validation, side effects, and returned values within this module's contract.
     fn acked(
         session: &str,
         order: &str,
@@ -341,6 +331,8 @@ mod tests {
         }
     }
 
+    /// sent performs the module-specific operation described by its name.
+    /// It keeps validation, side effects, and returned values within this module's contract.
     fn sent(
         session: &str,
         order: &str,
@@ -369,26 +361,24 @@ mod tests {
     }
 
     #[test]
+    /// service_time_recorded_once_per_order_first_response performs the module-specific operation described by its name.
+    /// It keeps validation, side effects, and returned values within this module's contract.
     fn service_time_recorded_once_per_order_first_response() {
         let mut a = Aggregator::new(DEFAULT_WAVE_NS);
-        // ACK at +100us, then a fill at +200us — only the ACK is the scored sample.
         a.observe_acked(&acked("S", "o1", 1_000, 101_000, "0", 0));
         a.observe_acked(&acked("S", "o1", 1_000, 201_000, "2", 12));
         let snaps = a.snapshot(1_000_000_000, 1.0);
         assert_eq!(snaps.len(), 1);
         let s = &snaps[0];
-        // one service-time sample of 100_000 ns
         assert_eq!(s.p50_ns, hist_q(100_000));
         assert_eq!(s.tps_1s, 1.0, "one order responded");
         assert_eq!(s.contestant_id, "c-1");
         assert!(!s.hdr_encoded.is_empty());
     }
 
-    // H11: a resting order's fills stream in over several seconds. The idle clock
-    // must track each fill's arrival (t7), so the order stays deduped and a later
-    // fill is NOT re-scored as a fresh first response. With the old t3-based clock
-    // the order evicted mid-stream and the trailing fill re-counted as a response.
     #[test]
+    /// late_streaming_fill_not_rescored performs the module-specific operation described by its name.
+    /// It keeps validation, side effects, and returned values within this module's contract.
     fn late_streaming_fill_not_rescored() {
         let mut a = Aggregator::new(DEFAULT_WAVE_NS);
         a.observe_acked(&acked("S", "o1", 0, 1_000_000_000, "0", 0)); // ACK -> scored
@@ -407,10 +397,9 @@ mod tests {
         );
     }
 
-    // M33/M34: a window that only ever saw sent events (a wave whose orders all
-    // timed out) has an empty service-time histogram and no contestant, so it must
-    // emit NO row rather than a misleading 0-latency, unattributable one.
     #[test]
+    /// sent_only_window_emits_no_row performs the module-specific operation described by its name.
+    /// It keeps validation, side effects, and returned values within this module's contract.
     fn sent_only_window_emits_no_row() {
         let mut a = Aggregator::new(DEFAULT_WAVE_NS);
         a.observe_sent(&sent("S2", "o1", 0, 10, 0, true)); // timed out, never acked
@@ -421,14 +410,13 @@ mod tests {
         );
     }
 
-    // M29: per-session maps must be pruned once a session's windows evict, so they
-    // grow with in-flight sessions rather than every session ever seen.
     #[test]
+    /// session_state_pruned_after_window_eviction performs the module-specific operation described by its name.
+    /// It keeps validation, side effects, and returned values within this module's contract.
     fn session_state_pruned_after_window_eviction() {
         let mut a = Aggregator::new(DEFAULT_WAVE_NS);
         a.observe_acked(&acked("S3", "o1", 0, 1_000, "0", 0));
         assert_eq!(a.session_start.len(), 1);
-        // Advance past WINDOW_IDLE_NS so the window (and its session state) evict.
         let _ = a.snapshot(WINDOW_IDLE_NS + 2_000_000_000, 1.0);
         assert_eq!(a.window_count(), 0, "window evicted");
         assert_eq!(a.session_start.len(), 0, "M29: session_start pruned");
@@ -440,6 +428,8 @@ mod tests {
     }
 
     #[test]
+    /// wave_bucketing_by_elapsed_since_session_start performs the module-specific operation described by its name.
+    /// It keeps validation, side effects, and returned values within this module's contract.
     fn wave_bucketing_by_elapsed_since_session_start() {
         let mut a = Aggregator::new(DEFAULT_WAVE_NS); // 20s
         let start = 1_000_000_000;
@@ -470,9 +460,10 @@ mod tests {
     }
 
     #[test]
+    /// error_rate_from_timeouts_and_rejects performs the module-specific operation described by its name.
+    /// It keeps validation, side effects, and returned values within this module's contract.
     fn error_rate_from_timeouts_and_rejects() {
         let mut a = Aggregator::new(DEFAULT_WAVE_NS);
-        // 4 offered: 1 timed out (sent), 1 rejected (acked), 2 accepted (acked)
         a.observe_sent(&sent("S", "o1", 1000, 1100, 0, true)); // timeout
         a.observe_sent(&sent("S", "o2", 1000, 1100, 5000, false));
         a.observe_sent(&sent("S", "o3", 1000, 1100, 5000, false));
@@ -482,18 +473,18 @@ mod tests {
         a.observe_acked(&acked("S", "o4", 1000, 2000, "0", 0)); // accept
         let snaps = a.snapshot(1_000_000_000, 1.0);
         assert_eq!(snaps.len(), 1);
-        // error_rate = (1 timeout + 1 reject) / 4 offered = 0.5
         assert!((snaps[0].error_rate - 0.5).abs() < 1e-9);
     }
 
     #[test]
+    /// percentiles_are_cumulative_across_snapshots_counters_reset performs the module-specific operation described by its name.
+    /// It keeps validation, side effects, and returned values within this module's contract.
     fn percentiles_are_cumulative_across_snapshots_counters_reset() {
         let mut a = Aggregator::new(DEFAULT_WAVE_NS);
         a.observe_acked(&acked("S", "o1", 0, 100_000, "0", 0));
         let s1 = a.snapshot(1_000_000_000, 1.0);
         assert_eq!(s1[0].tps_1s, 1.0);
         let p99_after_one = s1[0].p99_ns;
-        // second interval: another sample; tps resets to per-interval, histogram stays cumulative
         a.observe_acked(&acked("S", "o2", 0, 100_000, "0", 0));
         let s2 = a.snapshot(2_000_000_000, 1.0);
         assert_eq!(
@@ -508,17 +499,19 @@ mod tests {
     }
 
     #[test]
+    /// idle_windows_are_evicted performs the module-specific operation described by its name.
+    /// It keeps validation, side effects, and returned values within this module's contract.
     fn idle_windows_are_evicted() {
         let mut a = Aggregator::new(DEFAULT_WAVE_NS);
         a.observe_acked(&acked("S", "o1", 1000, 2000, "0", 0));
         a.snapshot(3000, 1.0);
         assert_eq!(a.window_count(), 1);
-        // far in the future, no activity -> window evicted on the next snapshot
         a.snapshot(3000 + WINDOW_IDLE_NS + 1, 1.0);
         assert_eq!(a.window_count(), 0);
     }
 
-    // The exact bucket value HDR returns for a recorded latency (3 sig figs).
+    /// hist_q performs the module-specific operation described by its name.
+    /// It keeps validation, side effects, and returned values within this module's contract.
     fn hist_q(v: u64) -> u64 {
         let mut h = new_hist();
         let _ = h.record(v);

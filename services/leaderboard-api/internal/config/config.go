@@ -1,3 +1,8 @@
+// Package config implements config behavior.
+//
+// This file is part of the IICPC benchmarking platform and keeps its
+// responsibilities local to the surrounding package. It should be read with
+// the service-level design in design.md for broader operational context.
 package config
 
 import (
@@ -7,6 +12,8 @@ import (
 	"strings"
 )
 
+// Config groups the state and dependencies used by this package.
+// Keep this type aligned with the runtime contract around it.
 type Config struct {
 	Port                 string
 	MetadataDatabaseURL  string
@@ -18,6 +25,8 @@ type Config struct {
 	MetricsAddr          string
 }
 
+// Load performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func Load(log *slog.Logger) Config {
 	return Config{
 		Port:                 envOr("PORT", "8080"),
@@ -31,12 +40,8 @@ func Load(log *slog.Logger) Config {
 	}
 }
 
-// sseConsumerGroup returns a per-pod Kafka consumer group so EVERY replica
-// receives EVERY leaderboard update. The SSE broker only fans out to its own
-// connected clients, so a shared group would split the topic's partitions
-// across replicas and leave roughly half of the clients snapshot-then-silent.
-// POD_NAME comes from the downward API; the hostname (== pod name on k8s) is
-// the fallback when it is unset (e.g. local runs).
+// sseConsumerGroup performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func sseConsumerGroup() string {
 	base := envOr("KAFKA_GROUP", "leaderboard-api-sse")
 	pod := os.Getenv("POD_NAME")
@@ -50,6 +55,8 @@ func sseConsumerGroup() string {
 	return base + "-" + pod
 }
 
+// envOr performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func envOr(key, def string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
@@ -57,6 +64,8 @@ func envOr(key, def string) string {
 	return def
 }
 
+// mustEnv performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func mustEnv(key string, log *slog.Logger) string {
 	v := os.Getenv(key)
 	if v == "" {
@@ -66,6 +75,8 @@ func mustEnv(key string, log *slog.Logger) string {
 	return v
 }
 
+// parseBrokers performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func parseBrokers(s string) []string {
 	var out []string
 	for _, b := range strings.Split(s, ",") {

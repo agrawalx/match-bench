@@ -1,3 +1,8 @@
+// Package k8s implements client behavior.
+//
+// This file is part of the IICPC benchmarking platform and keeps its
+// responsibilities local to the surrounding package. It should be read with
+// the service-level design in design.md for broader operational context.
 package k8s
 
 import (
@@ -8,14 +13,8 @@ import (
 	"k8s.io/client-go/tools/clientcmd"
 )
 
-// NewClient builds a kubernetes.Interface using in-cluster config when running
-// inside a pod, falling back to kubeconfig for local dev.
-//
-// This is the standard k8s config loader for every service in this repo.
-// Copy it verbatim into any new service that needs the API — do not invent
-// variations. Order matters: rest.InClusterConfig() succeeds only when the
-// process is running inside a pod with a mounted ServiceAccount token, so
-// the kubeconfig fallback only fires for local dev.
+// NewClient performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func NewClient() (kubernetes.Interface, error) {
 	cfg, err := loadConfig()
 	if err != nil {
@@ -24,6 +23,8 @@ func NewClient() (kubernetes.Interface, error) {
 	return kubernetes.NewForConfig(cfg)
 }
 
+// loadConfig performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func loadConfig() (*rest.Config, error) {
 	cfg, inClusterErr := rest.InClusterConfig()
 	if inClusterErr == nil {

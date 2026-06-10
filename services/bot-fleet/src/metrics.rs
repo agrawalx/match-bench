@@ -1,3 +1,9 @@
+//! This module implements metrics behavior.
+//!
+//! It belongs to the IICPC benchmarking platform and should keep its
+//! behavior consistent with the service contracts documented in design.md.
+//! The comments in this file describe public structure and callable behavior.
+
 use std::{
     env,
     io::{Read, Write},
@@ -15,6 +21,8 @@ use prometheus_client::{
 
 type ResultFamily = Family<[(&'static str, &'static str); 1], Counter>;
 
+/// Metrics stores the state passed across this module boundary.
+/// Keep field changes compatible with callers and serialized contracts.
 struct Metrics {
     registry: Registry,
     workloads: ResultFamily,
@@ -101,6 +109,8 @@ static METRICS: LazyLock<Metrics> = LazyLock::new(|| {
     }
 });
 
+/// start_server performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 pub fn start_server() {
     let port = env::var("METRICS_PORT").unwrap_or_else(|_| "9090".to_string());
     let addr = format!("0.0.0.0:{port}");
@@ -120,10 +130,14 @@ pub fn start_server() {
     });
 }
 
+/// workload_ok performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 pub fn workload_ok() {
     METRICS.workloads.get_or_create(&[("result", "ok")]).inc();
 }
 
+/// workload_error performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 pub fn workload_error() {
     METRICS
         .workloads
@@ -131,41 +145,59 @@ pub fn workload_error() {
         .inc();
 }
 
+/// tasks_assigned performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 pub fn tasks_assigned(n: usize) {
     METRICS.tasks_assigned.inc_by(n as u64);
 }
 
+/// tasks_connected performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 pub fn tasks_connected(n: usize) {
     METRICS.tasks_connected.inc_by(n as u64);
 }
 
+/// connect_failure performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 pub fn connect_failure() {
     METRICS.connect_failures.inc();
 }
 
+/// order_sent performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 pub fn order_sent() {
     METRICS.orders_sent.inc();
 }
 
+/// order_write_error performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 pub fn order_write_error() {
     METRICS.order_write_errors.inc();
 }
 
+/// telemetry_dropped performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 pub fn telemetry_dropped() {
     METRICS.telemetry_dropped.inc();
 }
 
+/// telemetry_flushed performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 pub fn telemetry_flushed(events: usize) {
     METRICS.telemetry_batches.inc();
     METRICS.telemetry_events_flushed.inc_by(events as u64);
 }
 
+/// render performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 fn render() -> String {
     let mut out = String::new();
     let _ = encode(&mut out, &METRICS.registry);
     out
 }
 
+/// handle_client performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 fn handle_client(mut stream: TcpStream) {
     let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
     let mut buf = [0_u8; 512];

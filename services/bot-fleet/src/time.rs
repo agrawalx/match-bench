@@ -1,7 +1,13 @@
+//! This module implements time behavior.
+//!
+//! It belongs to the IICPC benchmarking platform and should keep its
+//! behavior consistent with the service contracts documented in design.md.
+//! The comments in this file describe public structure and callable behavior.
+
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// unix_nanos returns the current realtime clock as nanoseconds since Unix epoch.
-/// It is used for cross-process telemetry and controller barrier timestamps.
+/// unix_nanos performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 pub fn unix_nanos() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -9,10 +15,8 @@ pub fn unix_nanos() -> u64 {
         .as_nanos() as u64
 }
 
-/// format_fix_timestamp formats a UNIX nanosecond timestamp into the standard
-/// FIX SendingTime format: `YYYYMMDD-HH:MM:SS.mmm` in UTC.
-///
-/// Bypasses Chrono to perform zero-allocation stack formatting.
+/// format_fix_timestamp performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 pub fn format_fix_timestamp(nanos: u64) -> [u8; crate::fix::FIX_TIMESTAMP_LEN] {
     let millis = nanos / 1_000_000;
     let total_secs = millis / 1000;
@@ -27,7 +31,6 @@ pub fn format_fix_timestamp(nanos: u64) -> [u8; crate::fix::FIX_TIMESTAMP_LEN] {
     let total_days = total_hours / 24;
     let hour = total_hours % 24;
 
-    // Epoch calendar calculation (1970-01-01 was Thursday)
     let mut year = 1970;
     let mut days_left = total_days;
 
@@ -59,7 +62,6 @@ pub fn format_fix_timestamp(nanos: u64) -> [u8; crate::fix::FIX_TIMESTAMP_LEN] {
     let day = days_left + 1;
 
     let mut buf = [0u8; crate::fix::FIX_TIMESTAMP_LEN];
-    // YYYYMMDD-HH:MM:SS.mmm
     buf[0] = b'0' + (year / 1000) as u8;
     buf[1] = b'0' + ((year / 100) % 10) as u8;
     buf[2] = b'0' + ((year / 10) % 10) as u8;

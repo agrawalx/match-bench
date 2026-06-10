@@ -1,3 +1,8 @@
+// Package k8s defines tests for phase2 outcome test.
+//
+// This file is part of the IICPC benchmarking platform and keeps its
+// responsibilities local to the surrounding package. It should be read with
+// the service-level design in design.md for broader operational context.
 package k8s
 
 import (
@@ -7,8 +12,8 @@ import (
 	"github.com/iicpc/schemas/topics"
 )
 
-// closedStatuses / closedErrs build the already-closed channels phase2Outcome
-// expects (the waiter goroutine closes both after wg.Wait).
+// closedStatuses performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func closedStatuses(vals ...string) <-chan string {
 	ch := make(chan string, len(vals))
 	for _, v := range vals {
@@ -18,6 +23,8 @@ func closedStatuses(vals ...string) <-chan string {
 	return ch
 }
 
+// closedErrs performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func closedErrs(vals ...error) <-chan error {
 	ch := make(chan error, len(vals))
 	for _, v := range vals {
@@ -27,6 +34,8 @@ func closedErrs(vals ...error) <-chan error {
 	return ch
 }
 
+// TestPhase2Outcome_BothSucceed_ReturnsAllStatuses performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func TestPhase2Outcome_BothSucceed_ReturnsAllStatuses(t *testing.T) {
 	oks, err := phase2Outcome(
 		closedStatuses(topics.StatusScanned, topics.StatusSBOMReady),
@@ -40,9 +49,8 @@ func TestPhase2Outcome_BothSucceed_ReturnsAllStatuses(t *testing.T) {
 	}
 }
 
-// The finding-36 regression: a partial failure must yield NO success statuses,
-// so the caller can never publish a sibling's forward-progress status ahead of
-// `failed`.
+// TestPhase2Outcome_PartialFailure_PublishesNoSuccessStatus performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func TestPhase2Outcome_PartialFailure_PublishesNoSuccessStatus(t *testing.T) {
 	sbomErr := errors.New("sbom: job timed out")
 	oks, err := phase2Outcome(
@@ -57,6 +65,8 @@ func TestPhase2Outcome_PartialFailure_PublishesNoSuccessStatus(t *testing.T) {
 	}
 }
 
+// TestPhase2Outcome_BothFail_ReturnsAnError performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func TestPhase2Outcome_BothFail_ReturnsAnError(t *testing.T) {
 	oks, err := phase2Outcome(
 		closedStatuses(),

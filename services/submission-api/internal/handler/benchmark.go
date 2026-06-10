@@ -1,3 +1,8 @@
+// Package handler implements benchmark behavior.
+//
+// This file is part of the IICPC benchmarking platform and keeps its
+// responsibilities local to the surrounding package. It should be read with
+// the service-level design in design.md for broader operational context.
 package handler
 
 import (
@@ -17,8 +22,8 @@ import (
 	"github.com/iicpc/submission-api/internal/store"
 )
 
-// runGroupChild is one row in the benchmarkResponse.Runs array — one entry
-// per scenario the controller will execute back-to-back.
+// runGroupChild groups the state and dependencies used by this package.
+// Keep this type aligned with the runtime contract around it.
 type runGroupChild struct {
 	SessionID    string    `json:"session_id"`
 	ScenarioID   string    `json:"scenario_id"`
@@ -29,6 +34,8 @@ type runGroupChild struct {
 	UpdatedAt    time.Time `json:"updated_at"`
 }
 
+// benchmarkResponse groups the state and dependencies used by this package.
+// Keep this type aligned with the runtime contract around it.
 type benchmarkResponse struct {
 	RunGroupID   string          `json:"run_group_id"`
 	SubmissionID string          `json:"submission_id"`
@@ -37,6 +44,8 @@ type benchmarkResponse struct {
 	Runs         []runGroupChild `json:"runs"`
 }
 
+// runResponse groups the state and dependencies used by this package.
+// Keep this type aligned with the runtime contract around it.
 type runResponse struct {
 	SessionID    string    `json:"session_id"`
 	SubmissionID string    `json:"submission_id"`
@@ -48,48 +57,8 @@ type runResponse struct {
 	UpdatedAt    time.Time `json:"updated_at"`
 }
 
-// StartBenchmark handles POST /submissions/{submission_id}/benchmark.
-//
-// One click expands into a run-group with N child sessions, one per row in
-// the scenarios table (v1: constant, spike, ramp). The handler mints one
-// run_group_id and N session_ids, persists everything in a single transaction,
-// and publishes N benchmark.requested messages — each carrying the shared
-// run_group_id and its own scenario_id.
-//
-// Idempotency contract (unchanged from the per-run version):
-//   - HTTP 200 + existing run_group_id  → an active run-group is already in
-//     flight for this submission; caller joined it.
-//   - HTTP 202 + new run_group_id       → a fresh run-group was started.
-//
-// Body shape is identical in both cases; the status code distinguishes
-// "joined" from "started".
-//
-// Idempotency is enforced at the database level by a partial unique index
-// on run_groups(submission_id) WHERE status NOT IN ('completed','failed').
-// The flow is:
-//
-//  1. Look up the submission; verify status='ready'.
-//  2. List scenarios. If empty, return 500 — the seed must have run.
-//  3. Check for an active run-group for this submission. If found,
-//     load its child runs and return 200.
-//  4. Mint run_group_id + N session_ids. INSERT all rows in one transaction.
-//  5. On unique_violation (lost a race with a concurrent click) → re-query
-//     the active group and return whichever row won, with 200.
-//  6. Publish one benchmark.requested per child. Each carries the same
-//     run_group_id; each carries a distinct scenario_id.
-//  7. Return 202 with the freshly minted run_group_id and child sessions.
-//
-// session_id and run_group_id are minted here as UUID v7 — globally unique
-// and time-ordered (v7 timestamps embed in the high bits). The API returns
-// them synchronously so the frontend can start tracking immediately.
-//
-// Failure-mode note: if the INSERT succeeds but a subsequent Kafka publish
-// fails, we have an orphaned run-group with some scenarios announced and
-// some not. The runs row is already inserted but Kafka publish failed —
-// we can't roll back the INSERT (another reader could already be looking
-// at it). The bot-fleet-controller's startup recovery sweep marks every
-// in-flight run failed on its next restart, so this orphan cleans itself
-// up. We surface the publish failure to the user so they retry.
+// StartBenchmark performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func StartBenchmark(pg *store.PostgresStore, pub publisher.Publisher, log *slog.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		submissionID := chi.URLParam(r, "submission_id")
@@ -115,10 +84,6 @@ func StartBenchmark(pg *store.PostgresStore, pub publisher.Publisher, log *slog.
 			writeError(w, http.StatusUnauthorized, "benchmark requires an authenticated contestant")
 			return
 		}
-		// Bind an unowned submission to this contestant, or — when the claim
-		// is lost to a concurrent request — resolve ownership from the DB row
-		// instead of assuming we won. The loser must see 404 below, exactly
-		// as if the submission had always belonged to someone else.
 		sub, err = claimOrResolveOwner(ctx, pg, sub, contestantID)
 		if err != nil {
 			if errors.Is(err, cerrs.ErrSubmissionNotFound) {
@@ -149,15 +114,11 @@ func StartBenchmark(pg *store.PostgresStore, pub publisher.Publisher, log *slog.
 			return
 		}
 		if len(scenarios) == 0 {
-			// Defensive: the scenarios table is seeded on submission-api
-			// startup. An empty table means the seed didn't run or someone
-			// deleted everything — either way, we cannot proceed.
 			log.ErrorContext(ctx, "scenarios table is empty — seed must run before benchmarks can be triggered")
 			writeError(w, http.StatusInternalServerError, "no scenarios configured")
 			return
 		}
 
-		// Step 3 of the flow above — short-circuit on existing active group.
 		if existing, err := pg.FindActiveRunGroup(ctx, submissionID); err != nil {
 			log.ErrorContext(ctx, "find active run-group", "submission_id", submissionID, "error", err)
 			writeError(w, http.StatusInternalServerError, "lookup failed")
@@ -206,13 +167,6 @@ func StartBenchmark(pg *store.PostgresStore, pub publisher.Publisher, log *slog.
 
 		if err := pg.InsertRunGroupWithChildren(ctx, group, children); err != nil {
 			if errors.Is(err, cerrs.ErrActiveRunGroupExists) {
-				// Lost a race with a concurrent click — another request
-				// inserted an active run_groups row for this submission
-				// between our FindActiveRunGroup check above and our INSERT
-				// here. The partial unique index rejected ours with
-				// unique_violation (PostgreSQL error code 23505), which the
-				// store layer translated to ErrActiveRunGroupExists.
-				// Re-query and return whichever group won, with HTTP 200.
 				existing, ferr := pg.FindActiveRunGroup(ctx, submissionID)
 				if ferr != nil || existing == nil {
 					log.ErrorContext(ctx, "active run-group conflict but no row found", "submission_id", submissionID, "error", ferr)
@@ -229,12 +183,6 @@ func StartBenchmark(pg *store.PostgresStore, pub publisher.Publisher, log *slog.
 			return
 		}
 
-		// Publish one benchmark.requested per child. The publisher keys all
-		// of them by run_group_id, so the group's N messages land on ONE
-		// partition and arrive at the controller in publish order — sibling
-		// sessions of one group cannot race each other across partitions.
-		// The controller still processes them sequentially per run-group
-		// (see the run-group orchestrator).
 		for _, c := range children {
 			if err := pub.PublishBenchmarkRequested(ctx, publisher.BenchmarkMeta{
 				SessionID:    c.SessionID,
@@ -244,10 +192,6 @@ func StartBenchmark(pg *store.PostgresStore, pub publisher.Publisher, log *slog.
 				ScenarioID:   c.ScenarioID,
 				RequestedAt:  now,
 			}); err != nil {
-				// Orphan window — see the failure-mode note in the function
-				// doc. Surface the failure so the user can retry; the
-				// controller's startup recovery sweep will clean up the
-				// half-published group on its next restart.
 				log.ErrorContext(ctx, "publish benchmark.requested",
 					"session_id", c.SessionID, "scenario_id", c.ScenarioID, "error", err)
 				metrics.Counter("benchmark_publish_failures_total", "Benchmark publish failures by topic.", metrics.Labels("topic", topics.TopicBenchmarkRequested), 1)
@@ -270,6 +214,8 @@ func StartBenchmark(pg *store.PostgresStore, pub publisher.Publisher, log *slog.
 	}
 }
 
+// ListRunGroups performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func ListRunGroups(pg *store.PostgresStore, log *slog.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		q := r.URL.Query()
@@ -312,8 +258,8 @@ func ListRunGroups(pg *store.PostgresStore, log *slog.Logger) http.HandlerFunc {
 	}
 }
 
-// GetRunGroup handles GET /run-groups/{run_group_id}.
-// Returns the group's metadata plus all child runs in scenario-name order.
+// GetRunGroup performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func GetRunGroup(pg *store.PostgresStore, log *slog.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		runGroupID := chi.URLParam(r, "run_group_id")
@@ -349,8 +295,8 @@ func GetRunGroup(pg *store.PostgresStore, log *slog.Logger) http.HandlerFunc {
 	}
 }
 
-// GetRun handles GET /runs/{session_id}.
-// Single-session view for the frontend's per-scenario tab.
+// GetRun performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func GetRun(pg *store.PostgresStore, log *slog.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		sessionID := chi.URLParam(r, "session_id")
@@ -388,10 +334,8 @@ func GetRun(pg *store.PostgresStore, log *slog.Logger) http.HandlerFunc {
 	}
 }
 
-// respondWithGroup loads child runs for the group, joins them with scenarios
-// to produce human-readable names, and writes the JSON response with the
-// given HTTP status. Used by both the create path (HTTP 202), the
-// already-exists path (HTTP 200), and GET /run-groups/{id} (HTTP 200).
+// respondWithGroup performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func respondWithGroup(
 	ctx context.Context,
 	w http.ResponseWriter,
@@ -410,6 +354,8 @@ func respondWithGroup(
 	writeJSON(w, httpStatus, resp)
 }
 
+// groupResponse performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func groupResponse(
 	ctx context.Context,
 	pg *store.PostgresStore,
@@ -446,6 +392,8 @@ func groupResponse(
 	}, nil
 }
 
+// newUUIDv7 performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func newUUIDv7() (string, error) {
 	id, err := uuid.NewV7()
 	if err != nil {

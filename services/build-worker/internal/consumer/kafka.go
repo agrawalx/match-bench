@@ -1,3 +1,8 @@
+// Package consumer implements kafka behavior.
+//
+// This file is part of the IICPC benchmarking platform and keeps its
+// responsibilities local to the surrounding package. It should be read with
+// the service-level design in design.md for broader operational context.
 package consumer
 
 import (
@@ -12,18 +17,22 @@ import (
 	kafka "github.com/segmentio/kafka-go"
 )
 
-// Handler processes one decoded build request. Implementations must treat
-// SubmissionID as the idempotency key because Kafka can redeliver messages.
+// Handler defines the behavior expected by this package boundary.
+// Implementations should preserve the caller-visible contract.
 type Handler interface {
 	Run(ctx context.Context, msg topics.SubmissionBuildRequested)
 }
 
+// Consumer groups the state and dependencies used by this package.
+// Keep this type aligned with the runtime contract around it.
 type Consumer struct {
 	reader  *kafka.Reader
 	handler Handler
 	log     *slog.Logger
 }
 
+// NewKafkaConsumer performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func NewKafkaConsumer(brokers, groupID string, handler Handler, log *slog.Logger) *Consumer {
 	r := kafka.NewReader(kafka.ReaderConfig{
 		Brokers:        parseBrokers(brokers),
@@ -37,7 +46,8 @@ func NewKafkaConsumer(brokers, groupID string, handler Handler, log *slog.Logger
 	return &Consumer{reader: r, handler: handler, log: log}
 }
 
-// Start blocks and processes messages until ctx is cancelled.
+// Start applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (c *Consumer) Start(ctx context.Context) {
 	c.log.Info("consumer started", "topic", topics.TopicSubmissionBuildRequested)
 	for {
@@ -73,11 +83,14 @@ func (c *Consumer) Start(ctx context.Context) {
 	}
 }
 
+// Close applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (c *Consumer) Close() error {
 	return c.reader.Close()
 }
 
-// recordConsume/recordCommit expose build queue health.
+// recordConsume performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func recordConsume(result string, durationSeconds float64) {
 	labels := metrics.Labels("service", "build-worker", "topic", topics.TopicSubmissionBuildRequested, "result", result)
 	metrics.Counter("kafka_messages_consumed_total", "Kafka messages consumed by topic and result.", labels, 1)
@@ -86,6 +99,8 @@ func recordConsume(result string, durationSeconds float64) {
 	}
 }
 
+// recordCommit performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func recordCommit(err error) {
 	result := "ok"
 	if err != nil {
@@ -94,6 +109,8 @@ func recordCommit(err error) {
 	metrics.Counter("kafka_consumer_commit_total", "Kafka consumer commits by topic and result.", metrics.Labels("service", "build-worker", "topic", topics.TopicSubmissionBuildRequested, "result", result), 1)
 }
 
+// parseBrokers performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func parseBrokers(brokers string) []string {
 	parts := strings.Split(brokers, ",")
 	out := make([]string, 0, len(parts))

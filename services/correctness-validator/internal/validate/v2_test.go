@@ -1,3 +1,8 @@
+// Package validate defines tests for v2 test.
+//
+// This file is part of the IICPC benchmarking platform and keeps its
+// responsibilities local to the surrounding package. It should be read with
+// the service-level design in design.md for broader operational context.
 package validate
 
 import (
@@ -8,9 +13,8 @@ import (
 	"github.com/iicpc/correctness-validator/internal/replay"
 )
 
-// ordWithFlow is like the test helper `order` but lets a scenario set the flow,
-// tcp_seq and t3 so ordering-sensitive checks (time priority / cross-flow tie) can
-// be exercised. effective_t3 is computed by replay.Order, mirroring production.
+// ordWithFlow performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func ordWithFlow(id string, kind model.Kind, side model.Side, price int64, qty uint64, flow model.Flow, seq uint32, t3 uint64, resp ...model.Response) *model.Order {
 	return &model.Order{
 		OrderID: id, Kind: kind, Side: side, Price: price, Qty: qty,
@@ -18,21 +22,20 @@ func ordWithFlow(id string, kind model.Kind, side model.Side, price int64, qty u
 	}
 }
 
+// replaceOrd performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func replaceOrd(id, orig string, side model.Side, price int64, qty uint64, resp ...model.Response) *model.Order {
 	return &model.Order{OrderID: id, OrigOrderID: orig, Kind: model.Replace, Side: side, Price: price, Qty: qty, Responses: resp}
 }
 
-// ---- TIME PRIORITY -----------------------------------------------------------
-
-// Two same-price resting sells: S1 (FIFO front) then S2. A single buy of 5 should,
-// per price-time priority, fill S1. If the contestant instead reports S2 filling
-// while S1 still rests with full qty, S2 jumped the queue -> time-priority violation.
+// TestTimePriorityViolationFlagged performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func TestTimePriorityViolationFlagged(t *testing.T) {
 	fa := model.Flow{SrcIP: 1, SrcPort: 1}
 	ordered := []*model.Order{
-		ordWithFlow("S1", model.NewLimit, model.Sell, 100, 10, fa, 1, 10),                // front, no fill reported
-		ordWithFlow("S2", model.NewLimit, model.Sell, 100, 10, fa, 2, 20, fill(5, 100)),  // behind S1, but reports a fill
-		ordWithFlow("B1", model.NewLimit, model.Buy, 100, 5, fa, 3, 30, fill(5, 100)),    // taker buys 5
+		ordWithFlow("S1", model.NewLimit, model.Sell, 100, 10, fa, 1, 10),               // front, no fill reported
+		ordWithFlow("S2", model.NewLimit, model.Sell, 100, 10, fa, 2, 20, fill(5, 100)), // behind S1, but reports a fill
+		ordWithFlow("B1", model.NewLimit, model.Buy, 100, 5, fa, 3, 30, fill(5, 100)),   // taker buys 5
 	}
 	ordered = replay.Order(ordered)
 	r := Run(ordered, nil)
@@ -44,7 +47,8 @@ func TestTimePriorityViolationFlagged(t *testing.T) {
 	}
 }
 
-// Clean FIFO: the front order S1 fills, S2 untouched -> no time violation.
+// TestTimePriorityCleanNotFlagged performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func TestTimePriorityCleanNotFlagged(t *testing.T) {
 	fa := model.Flow{SrcIP: 1, SrcPort: 1}
 	ordered := []*model.Order{
@@ -59,10 +63,8 @@ func TestTimePriorityCleanNotFlagged(t *testing.T) {
 	}
 }
 
-// ---- SELF-TRADE --------------------------------------------------------------
-
-// Maker and taker order_ids embed the SAME bot_id -> the reported fill is a
-// self-trade. order_id = {session}_{bot}_{seq}_{suffix}.
+// TestSelfTradeViolationFlagged performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func TestSelfTradeViolationFlagged(t *testing.T) {
 	ordered := []*model.Order{
 		order("sess_7_1_O", model.NewLimit, model.Sell, 100, 10, fill(10, 100)), // bot 7 maker
@@ -83,7 +85,8 @@ func TestSelfTradeViolationFlagged(t *testing.T) {
 	}
 }
 
-// Different bot_ids on the two sides -> a normal trade, NOT a self-trade.
+// TestSelfTradeCleanNotFlagged performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func TestSelfTradeCleanNotFlagged(t *testing.T) {
 	ordered := []*model.Order{
 		order("sess_7_1_O", model.NewLimit, model.Sell, 100, 10, fill(10, 100)), // bot 7 maker
@@ -95,19 +98,13 @@ func TestSelfTradeCleanNotFlagged(t *testing.T) {
 	}
 }
 
-// ---- CANCEL-REPLACE PRIORITY LOSS -------------------------------------------
-
-// B_old rests @100. B_other rests @99 (already at the level). REPLACE moves B_old
-// to 99 -> it must go to the BACK, behind B_other. A sell @99 of 10 fills B_other
-// first per FIFO. If the contestant reports B_old_R filling (jumping ahead of the
-// earlier-resting B_other), it kept its old priority -> cancel-replace loss.
+// TestCancelReplacePriorityLossFlagged performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func TestCancelReplacePriorityLossFlagged(t *testing.T) {
 	fa := model.Flow{SrcIP: 1, SrcPort: 1}
 	ordered := []*model.Order{
 		ordWithFlow("B_old", model.NewLimit, model.Buy, 100, 10, fa, 1, 10),
 		ordWithFlow("B_other", model.NewLimit, model.Buy, 99, 10, fa, 2, 20),
-		// REPLACE B_old: price 100 -> 99 (loses priority, goes behind B_other).
-		// Contestant wrongly reports B_old_R filling at 99.
 		{OrderID: "B_old_R", OrigOrderID: "B_old", Kind: model.Replace, Side: model.Buy, Price: 99, Qty: 10,
 			Flow: fa, TCPSeq: 3, T3Ns: 30, Responses: []model.Response{fill(10, 99)}},
 		ordWithFlow("S1", model.NewLimit, model.Sell, 99, 10, fa, 4, 40, fill(10, 99)),
@@ -128,18 +125,16 @@ func TestCancelReplacePriorityLossFlagged(t *testing.T) {
 	}
 }
 
-// A qty-only decrease keeps priority. S1 stays at the front; reporting its fill is
-// legitimate -> no cancel-replace violation.
+// TestCancelReplaceQtyDecreaseKeepsPriority performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func TestCancelReplaceQtyDecreaseKeepsPriority(t *testing.T) {
 	fa := model.Flow{SrcIP: 1, SrcPort: 1}
 	ordered := []*model.Order{
 		ordWithFlow("S1", model.NewLimit, model.Sell, 100, 10, fa, 1, 10),
 		ordWithFlow("S2", model.NewLimit, model.Sell, 100, 10, fa, 2, 20),
-		// REPLACE S1: qty 10 -> 5, SAME price -> keeps front position.
 		replaceOrd("S1_R", "S1", model.Sell, 100, 5, fill(5, 100)),
 		ordWithFlow("B1", model.NewLimit, model.Buy, 100, 5, fa, 4, 40, fill(5, 100)),
 	}
-	// give S1_R a flow/seq so replay ordering is well-defined
 	ordered[2].Flow, ordered[2].TCPSeq, ordered[2].T3Ns = fa, 3, 30
 	ordered = replay.Order(ordered)
 	r := Run(ordered, nil)
@@ -148,11 +143,8 @@ func TestCancelReplaceQtyDecreaseKeepsPriority(t *testing.T) {
 	}
 }
 
-// ---- 100ns CROSS-FLOW TIE TOLERANCE -----------------------------------------
-
-// Same scenario as the time-priority violation, but S1 and S2 are on DIFFERENT
-// flows. Δeffective_t3 = 50ns < 100ns tolerance -> the contestant was free to order
-// them either way, so the queue-jump must be SUPPRESSED.
+// TestCrossFlowTieSuppressesTimeViolation performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func TestCrossFlowTieSuppressesTimeViolation(t *testing.T) {
 	fa := model.Flow{SrcIP: 1, SrcPort: 1}
 	fb := model.Flow{SrcIP: 2, SrcPort: 2}
@@ -168,7 +160,8 @@ func TestCrossFlowTieSuppressesTimeViolation(t *testing.T) {
 	}
 }
 
-// Δeffective_t3 = 150ns >= 100ns -> NOT a tie; the queue-jump IS flagged.
+// TestCrossFlowBeyondToleranceFlagsTimeViolation performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func TestCrossFlowBeyondToleranceFlagsTimeViolation(t *testing.T) {
 	fa := model.Flow{SrcIP: 1, SrcPort: 1}
 	fb := model.Flow{SrcIP: 2, SrcPort: 2}
@@ -184,8 +177,8 @@ func TestCrossFlowBeyondToleranceFlagsTimeViolation(t *testing.T) {
 	}
 }
 
-// Same-flow ordering is strict (no tolerance): a later same-price order jumping the
-// queue is always flagged regardless of how small the t3 gap is.
+// TestSameFlowStrictNoTolerance performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func TestSameFlowStrictNoTolerance(t *testing.T) {
 	fa := model.Flow{SrcIP: 1, SrcPort: 1}
 	ordered := []*model.Order{
@@ -200,8 +193,8 @@ func TestSameFlowStrictNoTolerance(t *testing.T) {
 	}
 }
 
-// ---- DETERMINISM (full synthetic session, run twice, byte-identical) ---------
-
+// TestReportDeterministicFullSession performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func TestReportDeterministicFullSession(t *testing.T) {
 	build := func() []*model.Order {
 		fa := model.Flow{SrcIP: 1, SrcPort: 1}
@@ -222,6 +215,8 @@ func TestReportDeterministicFullSession(t *testing.T) {
 	}
 }
 
+// violationsOfType performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func violationsOfType(r Report, vt ViolationType) int {
 	n := 0
 	for _, v := range r.Violations {

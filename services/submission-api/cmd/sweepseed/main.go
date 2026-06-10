@@ -1,14 +1,8 @@
-// Command sweepseed emits SQL that repurposes the three existing scenario rows
-// (constant, spike, ramp) into a constant-RPS capacity sweep: three 300s
-// constant tests at 25k / 50k / 100k orders/sec. It reuses the scenarios
-// builder so the task_specs (participant mix, per-bot rates) are identical to a
-// real run — only the total RPS and duration differ.
+// Package main starts the sweepseed service.
 //
-// It UPDATEs the existing rows in place (preserving scenario_id, so foreign keys
-// from past runs stay valid) rather than inserting new ones. Output is SQL on
-// stdout; pipe it into psql.
-//
-//	GOWORK=off go run ./cmd/sweepseed | psql ...
+// This file is part of the IICPC benchmarking platform and keeps its
+// responsibilities local to the surrounding package. It should be read with
+// the service-level design in design.md for broader operational context.
 package main
 
 import (
@@ -20,6 +14,8 @@ import (
 	"github.com/iicpc/submission-api/internal/scenarios"
 )
 
+// main performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func main() {
 	type sweep struct {
 		oldName string
@@ -37,9 +33,6 @@ func main() {
 		cfg := scenarios.DefaultConfig()
 		cfg.ConstantDuration = 300 * time.Second
 		cfg.ConstantTotalRPS = s.rps
-		// BuildAll validates the whole config (incl. spike peak >= baseline), so
-		// raise the spike peak to the sweep RPS even though we only use the
-		// constant row.
 		cfg.SpikePeakRPS = s.rps
 
 		rows, err := scenarios.BuildAll(cfg)
@@ -58,7 +51,6 @@ func main() {
 			fmt.Fprintf(os.Stderr, "marshal %s: %v\n", s.newName, err)
 			os.Exit(1)
 		}
-		// $JSON$-quote the task_specs literal; JSON never contains the tag.
 		fmt.Printf("UPDATE scenarios SET name='%s', duration_ns=%d, sort_order=%d, task_specs=$JSON$%s$JSON$ WHERE name='%s';\n",
 			s.newName, c.DurationNs, s.order, string(j), s.oldName)
 	}

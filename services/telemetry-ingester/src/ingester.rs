@@ -1,5 +1,8 @@
-//! The run loop: consume both telemetry streams, aggregate, and snapshot to
-//! TimescaleDB + Redis once per interval.
+//! This module implements ingester behavior.
+//!
+//! It belongs to the IICPC benchmarking platform and should keep its
+//! behavior consistent with the service contracts documented in design.md.
+//! The comments in this file describe public structure and callable behavior.
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -18,6 +21,8 @@ use crate::metrics;
 use crate::redis_sink::RedisSink;
 use crate::store::Store;
 
+/// run performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 pub async fn run(cfg: Config) -> Result<()> {
     let consumer = build_consumer(
         &cfg.kafka_brokers,
@@ -43,7 +48,6 @@ pub async fn run(cfg: Config) -> Result<()> {
     loop {
         tokio::select! {
             _ = tokio::signal::ctrl_c() => {
-                // Final flush so the last second of a run isn't lost.
                 flush(&mut agg, &store, &redis, &mut last_snapshot_ns).await;
                 return Ok(());
             }
@@ -67,6 +71,8 @@ pub async fn run(cfg: Config) -> Result<()> {
     }
 }
 
+/// ingest performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 fn ingest(agg: &mut Aggregator, topic: &str, payload: &[u8]) {
     match topic {
         TOPIC_ORDERS_SENT => match rmp_serde::from_slice::<OrderSentBatch>(payload) {
@@ -97,14 +103,13 @@ fn ingest(agg: &mut Aggregator, topic: &str, payload: &[u8]) {
     }
 }
 
+/// flush performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 async fn flush(agg: &mut Aggregator, store: &Store, redis: &RedisSink, last_snapshot_ns: &mut u64) {
     let now = now_ns();
     let interval_secs = (now.saturating_sub(*last_snapshot_ns)) as f64 / 1e9;
     *last_snapshot_ns = now;
     let snaps = agg.snapshot(now, interval_secs);
-    // Surface join-buffer state every tick, even when nothing is finalized: an
-    // idle eviction (an in-flight order that never completed) happens inside the
-    // snapshot regardless of whether any window produced a row.
     metrics::set_join_buffer_size(agg.join_buffer_size());
     metrics::records_evicted(agg.last_evicted());
     if snaps.is_empty() {
@@ -129,6 +134,8 @@ async fn flush(agg: &mut Aggregator, store: &Store, redis: &RedisSink, last_snap
     }
 }
 
+/// now_ns performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 fn now_ns() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)

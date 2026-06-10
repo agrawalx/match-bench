@@ -1,3 +1,8 @@
+// Package controller defines tests for session test.
+//
+// This file is part of the IICPC benchmarking platform and keeps its
+// responsibilities local to the surrounding package. It should be read with
+// the service-level design in design.md for broader operational context.
 package controller
 
 import (
@@ -7,6 +12,8 @@ import (
 	"github.com/iicpc/schemas/topics"
 )
 
+// TestSessionManagerAddIsIdempotent performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func TestSessionManagerAddIsIdempotent(t *testing.T) {
 	m := NewSessionManager()
 	s1 := newTestSession("sess-A")
@@ -25,6 +32,8 @@ func TestSessionManagerAddIsIdempotent(t *testing.T) {
 	}
 }
 
+// TestDispatchReadyDeliversToSession performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func TestDispatchReadyDeliversToSession(t *testing.T) {
 	m := NewSessionManager()
 	sess := newTestSession("sess-A")
@@ -45,6 +54,8 @@ func TestDispatchReadyDeliversToSession(t *testing.T) {
 	}
 }
 
+// TestDispatchReadyReturnsFalseForUnknownSession performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func TestDispatchReadyReturnsFalseForUnknownSession(t *testing.T) {
 	m := NewSessionManager()
 	if m.DispatchReady(topics.ReadySignal{SessionID: "ghost"}) {
@@ -52,6 +63,8 @@ func TestDispatchReadyReturnsFalseForUnknownSession(t *testing.T) {
 	}
 }
 
+// TestSessionManagerDrop performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func TestSessionManagerDrop(t *testing.T) {
 	m := NewSessionManager()
 	m.Add(newTestSession("sess-A"))
@@ -61,6 +74,8 @@ func TestSessionManagerDrop(t *testing.T) {
 	}
 }
 
+// newTestSession performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func newTestSession(id string) *Session {
 	_, cancel := context.WithCancel(context.Background())
 	return &Session{

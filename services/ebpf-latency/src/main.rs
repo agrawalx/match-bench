@@ -1,11 +1,8 @@
-//! Userspace half of the eBPF latency service.
+//! This module starts the src service.
 //!
-//! The kernel (src/ebpf.rs) only copies TCP payloads + a timestamp into a ring
-//! buffer. This binary does everything else: convert the kernel's CLOCK_MONOTONIC
-//! stamps into CLOCK_REALTIME (matching the bot's t0/t1/r9), reassemble each TCP
-//! byte stream (coalescing + straddling), frame and parse FIX/REST/WS messages,
-//! match responses to requests by ClOrdID, emit one `OrderAckedEvent` per
-//! response (partial fills included), and publish batches to `orders.acked`.
+//! It belongs to the IICPC benchmarking platform and should keep its
+//! behavior consistent with the service contracts documented in design.md.
+//! The comments in this file describe public structure and callable behavior.
 
 mod capture;
 mod matcher;
@@ -45,23 +42,14 @@ const DEFAULT_XDP_INGRESS_PROGRAM: &str = "iicpc_xdp_ingress";
 const DEFAULT_TC_EGRESS_PROGRAM: &str = "iicpc_tc_egress";
 const DEFAULT_FLUSH_INTERVAL: Duration = Duration::from_millis(5);
 const DEFAULT_BATCH_SIZE: usize = 4096;
-/// How often to sweep idle in-flight orders / reassemblers (cheap; bounds memory).
 const EVICT_INTERVAL: Duration = Duration::from_secs(1);
-/// Cap on orders.acked events retained across publish failures (H16). Beyond this
-/// the oldest are dropped so a prolonged broker outage cannot OOM the capture pod.
 const MAX_PENDING_EVENTS: usize = 100_000;
-/// Max events per published orders.acked Kafka message. A msgpack-named event is
-/// ~300+ bytes (repeated field names), so this keeps each message well under the
-/// 1 MiB topic max.message.bytes; larger backlogs are split across messages.
 const MAX_EVENTS_PER_BATCH: usize = 1000;
-/// Default MTU clamp for the capture interface (see src/mtu.rs). EKS pod veths
-/// inherit the node ENI's 9001-byte jumbo MTU; a single super-MTU segment
-/// exceeds the kernel's CAPTURE_CAP copy window and forces a lossy flow reset,
-/// so the interface is clamped to classic Ethernet at attach time. Override
-/// with CAPTURE_CLAMP_MTU (0 disables the clamp).
 const DEFAULT_CLAMP_MTU: usize = 1500;
 
 #[derive(Debug, Clone)]
+/// Config stores the state passed across this module boundary.
+/// Keep field changes compatible with callers and serialized contracts.
 struct Config {
     kafka_brokers: String,
     topic: String,
@@ -79,15 +67,13 @@ struct Config {
 }
 
 impl Config {
+    /// from_env performs the module-specific operation described by its name.
+    /// It keeps validation, side effects, and returned values within this module's contract.
     fn from_env() -> Result<Self> {
         let object_path = env::var("EBPF_OBJECT_PATH")
             .or_else(|_| env::var("IICPC_EBPF_OBJECT"))
             .context("EBPF_OBJECT_PATH must point at the compiled eBPF object")?;
 
-        // Resolve the target network namespace. An explicit EBPF_NETNS_PATH wins
-        // (used by the integration test's named netns); otherwise, in the cluster,
-        // the orchestrator passes the algo pod's UID and we resolve the netns on
-        // the node. With neither set, programs attach in the current namespace.
         let netns_path = match optional_path_env("EBPF_NETNS_PATH") {
             Some(p) => Some(p),
             None => match env::var("EBPF_ALGO_POD_UID")
@@ -122,6 +108,8 @@ impl Config {
         })
     }
 
+    /// validate performs the module-specific operation described by its name.
+    /// It keeps validation, side effects, and returned values within this module's contract.
     fn validate(&self) -> Result<()> {
         if self.batch_size == 0 {
             bail!("EBPF_BATCH_SIZE must be greater than zero");
@@ -129,8 +117,6 @@ impl Config {
         if self.flush_interval.is_zero() {
             bail!("EBPF_FLUSH_INTERVAL_MS must be greater than zero");
         }
-        // 68 is the IPv4 minimum MTU; a sub-minimum clamp would break the algo
-        // pod's networking outright, and >65535 is not a valid interface MTU.
         if self.clamp_mtu != 0 && !(68..=65_535).contains(&self.clamp_mtu) {
             bail!("CAPTURE_CLAMP_MTU must be 0 (disabled) or between 68 and 65535");
         }
@@ -139,6 +125,8 @@ impl Config {
 }
 
 #[tokio::main(flavor = "multi_thread")]
+/// main performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 async fn main() -> Result<()> {
     let _loki_guard = loki::init("ebpf-latency");
     metrics::start_server();
@@ -150,6 +138,8 @@ async fn main() -> Result<()> {
     run(config, producer).await
 }
 
+/// run performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 async fn run(config: Config, producer: KafkaProducer) -> Result<()> {
     let mut bpf = Ebpf::load_file(&config.object_path)
         .with_context(|| format!("load eBPF object {}", config.object_path.display()))?;
@@ -200,16 +190,16 @@ async fn run(config: Config, producer: KafkaProducer) -> Result<()> {
     }
 }
 
-/// Resolves when the process receives SIGTERM or SIGINT. Kubernetes stops the
-/// per-slot capture Job with SIGTERM (ctrl-C in local runs sends SIGINT); both
-/// must take the same graceful path — flush the buffered orders.acked tail and
-/// exit 0 — or the tail is lost on every slot teardown and the Job ends Failed.
+/// ShutdownSignal stores the state passed across this module boundary.
+/// Keep field changes compatible with callers and serialized contracts.
 struct ShutdownSignal {
     sigterm: Signal,
     sigint: Signal,
 }
 
 impl ShutdownSignal {
+    /// new performs the module-specific operation described by its name.
+    /// It keeps validation, side effects, and returned values within this module's contract.
     fn new() -> Result<Self> {
         Ok(Self {
             sigterm: signal(SignalKind::terminate()).context("install SIGTERM handler")?,
@@ -217,7 +207,8 @@ impl ShutdownSignal {
         })
     }
 
-    /// Wait for the next shutdown signal; returns its name for logging.
+    /// recv performs the module-specific operation described by its name.
+    /// It keeps validation, side effects, and returned values within this module's contract.
     async fn recv(&mut self) -> &'static str {
         tokio::select! {
             _ = self.sigterm.recv() => "SIGTERM",
@@ -226,6 +217,8 @@ impl ShutdownSignal {
     }
 }
 
+/// drain_ringbuf performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 async fn drain_ringbuf(
     ringbuf: &mut RingBuf<MapData>,
     pipeline: &mut Pipeline,
@@ -249,6 +242,8 @@ async fn drain_ringbuf(
     Ok(())
 }
 
+/// flush performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 async fn flush(
     producer: &KafkaProducer,
     config: &Config,
@@ -257,12 +252,6 @@ async fn flush(
     if events.is_empty() {
         return Ok(());
     }
-    // Publish in size-bounded CHUNKS. A single msgpack-named OrderAckedBatch of the
-    // whole backlog can exceed the topic's max.message.bytes — each named event is
-    // ~300+ bytes (field names are repeated per event), so a few thousand events
-    // blow past 1 MiB and the broker rejects the whole message (MessageSizeTooLarge).
-    // Cap each Kafka message at MAX_EVENTS_PER_BATCH, draining only what was accepted
-    // so the unsent tail is retried next flush rather than wedging the buffer.
     while !events.is_empty() {
         let n = events.len().min(MAX_EVENTS_PER_BATCH);
         let event_refs = events[..n]
@@ -291,14 +280,8 @@ async fn flush(
             events: &event_refs,
         };
         let payload = rmp_serde::to_vec_named(&batch).context("encode orders.acked messagepack")?;
-        // H16: a transient publish failure must NOT kill the capture (the per-slot
-        // Job is backoffLimit=0/RestartPolicy=Never). Retain the unsent tail for the
-        // next flush; bound memory by dropping the OLDEST events past the cap.
         match kafka::publish_bytes(producer, &config.topic, &config.contestant_id, &payload).await {
             Ok(()) => {
-                // Record metrics only for the events Kafka actually accepted in
-                // this chunk (not the whole pending buffer), so the counters stay
-                // consistent with the H16 retain-on-failure semantics.
                 for event in events[..n].iter() {
                     metrics::event_decoded(event.reordering_detected, event.retransmission_count);
                 }
@@ -322,19 +305,23 @@ async fn flush(
     Ok(())
 }
 
-// ---- map helpers ------------------------------------------------------------
-
+/// take_counter performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 fn take_counter(bpf: &mut Ebpf, name: &str) -> Option<PerCpuArray<MapData, u64>> {
     bpf.take_map(name)
         .and_then(|m| PerCpuArray::try_from(m).ok())
 }
 
+/// read_counter performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 fn read_counter(map: &PerCpuArray<MapData, u64>) -> u64 {
     map.get(&0, 0)
         .map(|vals| vals.iter().copied().sum())
         .unwrap_or(0)
 }
 
+/// report_counter performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 fn report_counter(map: &Option<PerCpuArray<MapData, u64>>, last: &mut u64, msg: &str) {
     if let Some(map) = map {
         let total = read_counter(map);
@@ -346,16 +333,10 @@ fn report_counter(map: &Option<PerCpuArray<MapData, u64>>, last: &mut u64, msg: 
     }
 }
 
-// ---- attach / netns (unchanged) ---------------------------------------------
-
+/// attach_programs performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 fn attach_programs(bpf: &mut Ebpf, config: &Config) -> Result<()> {
     let mut attach = || -> Result<()> {
-        // Runs inside the algo netns (when netns_path is set), so this disables
-        // offloads and clamps the MTU on the algo pod's interface before the
-        // hooks attach. Both are needed for the one-packet=one-order contract:
-        // offloads off bounds segments by the MTU, and the clamp bounds the MTU
-        // itself by CAPTURE_CAP (EKS veths inherit the node ENI's 9001-byte
-        // jumbo MTU, which would truncate every full-MTU segment).
         disable_offloads(&config.iface);
         mtu::clamp_to(&config.iface, config.clamp_mtu);
         attach_xdp_ingress(bpf, &config.xdp_ingress_program, &config.iface)?;
@@ -367,17 +348,8 @@ fn attach_programs(bpf: &mut Ebpf, config: &Config) -> Result<()> {
     attach()
 }
 
-/// disable_offloads turns off segmentation/receive offloads on the capture
-/// interface so the tc/XDP hooks observe one MTU-sized packet per message instead
-/// of coalesced super-frames. A super-frame larger than CAPTURE_CAP is truncated
-/// in the kernel and forces a lossy flow reset in the reassembler (TRUNCATED_CAPTURES),
-/// which is what capped orders.acked delivery under high load. The platform's
-/// measurement contract requires these offloads off on the sandbox veth for
-/// one-packet-per-order/response semantics.
-///
-/// Best-effort by design: a veth reports some features "fixed" (unchangeable), and
-/// the binary image may lack ethtool — neither should abort the capture, since a
-/// degraded-but-running measurement beats none. Per-feature failures are logged.
+/// disable_offloads performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 fn disable_offloads(iface: &str) {
     for feature in ["tso", "gso", "gro", "lro"] {
         match std::process::Command::new("ethtool")
@@ -402,6 +374,8 @@ fn disable_offloads(iface: &str) {
     }
 }
 
+/// with_network_namespace performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 fn with_network_namespace<T>(netns_path: &PathBuf, f: impl FnOnce() -> Result<T>) -> Result<T> {
     let original = File::open("/proc/self/ns/net").context("open current network namespace")?;
     let target = File::open(netns_path)
@@ -424,6 +398,8 @@ fn with_network_namespace<T>(netns_path: &PathBuf, f: impl FnOnce() -> Result<T>
     }
 }
 
+/// set_network_namespace performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 fn set_network_namespace(fd: i32) -> Result<()> {
     let rc = unsafe { libc::setns(fd, libc::CLONE_NEWNET) };
     if rc == 0 {
@@ -433,6 +409,8 @@ fn set_network_namespace(fd: i32) -> Result<()> {
     }
 }
 
+/// attach_xdp_ingress performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 fn attach_xdp_ingress(bpf: &mut Ebpf, program_name: &str, iface: &str) -> Result<()> {
     let program: &mut Xdp = bpf
         .program_mut(program_name)
@@ -464,6 +442,8 @@ fn attach_xdp_ingress(bpf: &mut Ebpf, program_name: &str, iface: &str) -> Result
     }
 }
 
+/// attach_tc_egress performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 fn attach_tc_egress(bpf: &mut Ebpf, program_name: &str, iface: &str) -> Result<()> {
     match tc::qdisc_add_clsact(iface) {
         Ok(()) => {}
@@ -486,8 +466,8 @@ fn attach_tc_egress(bpf: &mut Ebpf, program_name: &str, iface: &str) -> Result<(
     Ok(())
 }
 
-// ---- env helpers ------------------------------------------------------------
-
+/// required_env performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 fn required_env(key: &str) -> Result<String> {
     env::var(key)
         .ok()
@@ -495,6 +475,8 @@ fn required_env(key: &str) -> Result<String> {
         .ok_or_else(|| anyhow!("{key} must be set"))
 }
 
+/// env_or performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 fn env_or(key: &str, default: &str) -> String {
     env::var(key)
         .ok()
@@ -502,6 +484,8 @@ fn env_or(key: &str, default: &str) -> String {
         .unwrap_or_else(|| default.to_string())
 }
 
+/// optional_path_env performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 fn optional_path_env(key: &str) -> Option<PathBuf> {
     env::var(key)
         .ok()
@@ -509,6 +493,8 @@ fn optional_path_env(key: &str) -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
+/// env_usize performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 fn env_usize(key: &str, default: usize) -> usize {
     match env::var(key) {
         Ok(value) if !value.trim().is_empty() => match value.parse() {
@@ -522,6 +508,8 @@ fn env_usize(key: &str, default: usize) -> usize {
     }
 }
 
+/// env_duration_ms performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 fn env_duration_ms(key: &str, default: Duration) -> Duration {
     match env::var(key) {
         Ok(value) if !value.trim().is_empty() => match value.parse::<u64>() {
@@ -558,11 +546,15 @@ mod tests {
         "CAPTURE_CLAMP_MTU",
     ];
 
+    /// env_lock performs the module-specific operation described by its name.
+    /// It keeps validation, side effects, and returned values within this module's contract.
     fn env_lock() -> std::sync::MutexGuard<'static, ()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
         LOCK.get_or_init(|| Mutex::new(())).lock().unwrap()
     }
 
+    /// clear_test_env performs the module-specific operation described by its name.
+    /// It keeps validation, side effects, and returned values within this module's contract.
     fn clear_test_env() {
         for key in ENV_KEYS {
             unsafe {
@@ -571,6 +563,8 @@ mod tests {
         }
     }
 
+    /// set_env performs the module-specific operation described by its name.
+    /// It keeps validation, side effects, and returned values within this module's contract.
     fn set_env(key: &str, value: &str) {
         unsafe {
             env::set_var(key, value);
@@ -578,6 +572,8 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    /// kafka_integration_flush_publishes_real_orders_acked_batch performs the module-specific operation described by its name.
+    /// It keeps validation, side effects, and returned values within this module's contract.
     async fn kafka_integration_flush_publishes_real_orders_acked_batch() {
         let Ok(brokers) = env::var("KAFKA_BROKERS") else {
             eprintln!("skipping real Kafka integration test: KAFKA_BROKERS is not set");
@@ -673,6 +669,8 @@ mod tests {
         }
     }
 
+    /// integration_suffix performs the module-specific operation described by its name.
+    /// It keeps validation, side effects, and returned values within this module's contract.
     fn integration_suffix() -> String {
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -682,6 +680,8 @@ mod tests {
     }
 
     #[test]
+    /// config_from_env_uses_required_values_and_defaults performs the module-specific operation described by its name.
+    /// It keeps validation, side effects, and returned values within this module's contract.
     fn config_from_env_uses_required_values_and_defaults() {
         let _guard = env_lock();
         clear_test_env();
@@ -705,9 +705,10 @@ mod tests {
     }
 
     #[test]
+    /// config_from_env_parses_capture_clamp_mtu performs the module-specific operation described by its name.
+    /// It keeps validation, side effects, and returned values within this module's contract.
     fn config_from_env_parses_capture_clamp_mtu() {
         let _guard = env_lock();
-        // (env value, expected clamp)
         let cases: &[(&str, usize)] = &[
             ("9001", 9001),                      // explicit override
             ("0", 0),                            // explicit disable
@@ -728,11 +729,10 @@ mod tests {
     }
 
     #[test]
+    /// config_validate_rejects_out_of_range_clamp_mtu performs the module-specific operation described by its name.
+    /// It keeps validation, side effects, and returned values within this module's contract.
     fn config_validate_rejects_out_of_range_clamp_mtu() {
         let _guard = env_lock();
-        // (env value, passes validate). 68 is the IPv4 minimum MTU; a sub-minimum
-        // clamp would break the algo pod's networking outright, and anything past
-        // 65535 cannot be a valid interface MTU.
         let cases: &[(&str, bool)] = &[
             ("0", true), // disabled
             ("68", true),
@@ -759,10 +759,9 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    /// shutdown_signal_resolves_on_sigterm_and_sigint performs the module-specific operation described by its name.
+    /// It keeps validation, side effects, and returned values within this module's contract.
     async fn shutdown_signal_resolves_on_sigterm_and_sigint() {
-        // Installing the tokio handlers FIRST means the signals raised below are
-        // routed to the streams instead of killing the test binary. raise()
-        // signals only this process, never the cargo parent.
         let mut shutdown = ShutdownSignal::new().expect("install signal handlers");
 
         unsafe { libc::raise(libc::SIGTERM) };
@@ -779,6 +778,8 @@ mod tests {
     }
 
     #[test]
+    /// config_from_env_rejects_missing_required_values performs the module-specific operation described by its name.
+    /// It keeps validation, side effects, and returned values within this module's contract.
     fn config_from_env_rejects_missing_required_values() {
         let _guard = env_lock();
         clear_test_env();

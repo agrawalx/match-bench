@@ -1,3 +1,9 @@
+//! This module defines tests for kafka integration.
+//!
+//! It belongs to the IICPC benchmarking platform and should keep its
+//! behavior consistent with the service contracts documented in design.md.
+//! The comments in this file describe public structure and callable behavior.
+
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
@@ -6,12 +12,16 @@ use iicpc_schemas_rust::{TOPIC_BOT_READY, TOPIC_ORDERS_SENT};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]
+/// TestEvent stores the state passed across this module boundary.
+/// Keep field changes compatible with callers and serialized contracts.
 struct TestEvent {
     id: String,
     value: String,
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+/// kafka_integration_round_trips_control_and_telemetry_records performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 async fn kafka_integration_round_trips_control_and_telemetry_records() -> Result<()> {
     let Some(brokers) = brokers() else {
         eprintln!("skipping real Kafka integration test: KAFKA_BROKERS is not set");
@@ -87,12 +97,16 @@ async fn kafka_integration_round_trips_control_and_telemetry_records() -> Result
     Ok(())
 }
 
+/// brokers performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 fn brokers() -> Option<String> {
     std::env::var("KAFKA_BROKERS")
         .ok()
         .filter(|value| !value.trim().is_empty())
 }
 
+/// suffix performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 fn suffix() -> String {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)

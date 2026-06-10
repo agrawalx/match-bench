@@ -1,9 +1,8 @@
-//! TimescaleDB sink for metric snapshots.
+//! This module implements store behavior.
 //!
-//! Schema is created on startup (no migration tool), mirroring the Go services'
-//! `createTableSQL` pattern. The `metrics` hypertable is the must-have; the
-//! `metrics_10s` continuous aggregate + refresh policy are best-effort (a fresh
-//! TimescaleDB has the extension; re-creates are idempotent).
+//! It belongs to the IICPC benchmarking platform and should keep its
+//! behavior consistent with the service contracts documented in design.md.
+//! The comments in this file describe public structure and callable behavior.
 
 use anyhow::{Context, Result};
 use deadpool_postgres::{ManagerConfig, Pool, RecyclingMethod, Runtime};
@@ -32,10 +31,6 @@ CREATE TABLE IF NOT EXISTS metrics (
     slip_hdr_encoded BYTEA
 );";
 
-/// Adds the response-time (r9 - t0, the coordinated-omission-aware round trip)
-/// percentile columns to an EXISTING metrics table. CREATE TABLE IF NOT EXISTS
-/// above only covers fresh clusters; this backfills the columns where the table
-/// already exists. Idempotent (ADD COLUMN IF NOT EXISTS).
 const ADD_RT_COLUMNS: &str = "\
 ALTER TABLE metrics ADD COLUMN IF NOT EXISTS rt_p50_ns BIGINT;
 ALTER TABLE metrics ADD COLUMN IF NOT EXISTS rt_p90_ns BIGINT;
@@ -43,8 +38,6 @@ ALTER TABLE metrics ADD COLUMN IF NOT EXISTS rt_p99_ns BIGINT;
 ALTER TABLE metrics ADD COLUMN IF NOT EXISTS rt_hdr_encoded BYTEA;
 ALTER TABLE metrics ADD COLUMN IF NOT EXISTS slip_hdr_encoded BYTEA;";
 
-/// Best-effort, idempotent TimescaleDB setup. Each runs independently; failures
-/// (e.g. continuous-aggregate policy already exists) are logged, not fatal.
 const TIMESCALE_SETUP: &[&str] = &[
     "CREATE EXTENSION IF NOT EXISTS timescaledb;",
     "SELECT create_hypertable('metrics', 'time', if_not_exists => TRUE, chunk_time_interval => INTERVAL '1 hour');",
@@ -63,11 +56,15 @@ INSERT INTO metrics
     (time, session_id, contestant_id, wave_index, p50_ns, p90_ns, p99_ns, p999_ns, rt_p50_ns, rt_p90_ns, rt_p99_ns, tps_1s, error_rate, hdr_encoded, rt_hdr_encoded, slip_hdr_encoded)
 VALUES (to_timestamp($1::double precision / 1e9), $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)";
 
+/// Store stores the state passed across this module boundary.
+/// Keep field changes compatible with callers and serialized contracts.
 pub struct Store {
     pool: Pool,
 }
 
 impl Store {
+    /// connect performs the module-specific operation described by its name.
+    /// It keeps validation, side effects, and returned values within this module's contract.
     pub async fn connect(url: &str) -> Result<Self> {
         let pg_config: tokio_postgres::Config = url.parse().context("parse TIMESCALE_URL")?;
         let mgr = deadpool_postgres::Manager::from_config(
@@ -85,8 +82,8 @@ impl Store {
         Ok(Self { pool })
     }
 
-    /// Create the metrics table (required) + the TimescaleDB hypertable/aggregate
-    /// (best-effort). Returns an error only if the base table can't be created.
+    /// init_schema performs the module-specific operation described by its name.
+    /// It keeps validation, side effects, and returned values within this module's contract.
     pub async fn init_schema(&self) -> Result<()> {
         let client = self.pool.get().await.context("get timescale conn")?;
         client
@@ -106,6 +103,8 @@ impl Store {
         Ok(())
     }
 
+    /// write performs the module-specific operation described by its name.
+    /// It keeps validation, side effects, and returned values within this module's contract.
     pub async fn write(&self, snaps: &[Snapshot]) -> Result<()> {
         if snaps.is_empty() {
             return Ok(());

@@ -1,3 +1,8 @@
+// Package k8s implements ecr aws behavior.
+//
+// This file is part of the IICPC benchmarking platform and keeps its
+// responsibilities local to the surrounding package. It should be read with
+// the service-level design in design.md for broader operational context.
 package k8s
 
 import (
@@ -8,14 +13,14 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/ecr"
 )
 
-// awsECRClient adapts the aws-sdk-go-v2 ECR client to ECRRepositoryClient.
-// Credentials come from the default chain (IRSA in-cluster, env/profile in
-// dev). SDK errors are returned unwrapped so ensureRepository can match
-// RepositoryAlreadyExistsException via the smithy ErrorCode interface.
+// awsECRClient groups the state and dependencies used by this package.
+// Keep this type aligned with the runtime contract around it.
 type awsECRClient struct {
 	api *ecr.Client
 }
 
+// CreateRepository applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (c *awsECRClient) CreateRepository(ctx context.Context, repositoryName string) error {
 	_, err := c.api.CreateRepository(ctx, &ecr.CreateRepositoryInput{
 		RepositoryName: &repositoryName,
@@ -23,7 +28,8 @@ func (c *awsECRClient) CreateRepository(ctx context.Context, repositoryName stri
 	return err
 }
 
-// newAWSECRClient is the production newECRClient implementation.
+// newAWSECRClient performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func newAWSECRClient(ctx context.Context) (ECRRepositoryClient, error) {
 	cfg, err := awsconfig.LoadDefaultConfig(ctx)
 	if err != nil {

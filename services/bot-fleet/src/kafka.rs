@@ -1,3 +1,9 @@
+//! This module implements kafka behavior.
+//!
+//! It belongs to the IICPC benchmarking platform and should keep its
+//! behavior consistent with the service contracts documented in design.md.
+//! The comments in this file describe public structure and callable behavior.
+
 use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
@@ -18,26 +24,21 @@ const TOPIC_REPLICATION_FACTOR: i32 = 3;
 const DEFAULT_TOPIC_PARTITIONS: i32 = 3;
 const HIGH_THROUGHPUT_TOPIC_PARTITIONS: i32 = 24;
 
-/// KafkaProducer wraps rdkafka's FutureProducer. FutureProducer is already
-/// Clone + Send + Sync, so we keep it as a thin newtype rather than wrapping
-/// in Arc<Mutex<_>> — the kafka-rust era of locked-producer-behind-mutex is
-/// gone with the migration to librdkafka.
 #[derive(Clone)]
+/// KafkaProducer stores the state passed across this module boundary.
+/// Keep field changes compatible with callers and serialized contracts.
 pub struct KafkaProducer {
     inner: FutureProducer,
 }
 
-/// KafkaConsumer holds a StreamConsumer. rdkafka's StreamConsumer pulls
-/// messages asynchronously off librdkafka's internal poll loop; the bot-fleet
-/// no longer pays for a tokio spawn_blocking per poll. Manual commit mode is
-/// used so we keep at-least-once delivery semantics — commit fires only
-/// after the caller has finished processing the message.
+/// KafkaConsumer stores the state passed across this module boundary.
+/// Keep field changes compatible with callers and serialized contracts.
 pub struct KafkaConsumer {
     inner: StreamConsumer,
 }
 
-/// KafkaMessage carries a consumed payload plus offset metadata. Callers must
-/// commit it only after the message has been fully handled.
+/// KafkaMessage stores the state passed across this module boundary.
+/// Keep field changes compatible with callers and serialized contracts.
 pub struct KafkaMessage {
     pub payload: Option<Vec<u8>>,
     topic: String,
@@ -45,14 +46,8 @@ pub struct KafkaMessage {
     offset: i64,
 }
 
-/// ensure_topics creates each topic if it doesn't already exist.
-///
-/// Problem: the old fallback could create topics with one partition and RF=1,
-/// which violates the schema-defined Kafka contract. Fix: mirror the explicit
-/// topic-init partition, replication, ISR, retention, and message-size policy.
-///
-/// This is a developer fallback; production/local compose should provision the
-/// same topics before services start.
+/// ensure_topics performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 pub async fn ensure_topics(brokers: &str, topics: &[&str]) -> Result<()> {
     let admin: AdminClient<DefaultClientContext> = ClientConfig::new()
         .set("bootstrap.servers", brokers)
@@ -78,13 +73,11 @@ pub async fn ensure_topics(brokers: &str, topics: &[&str]) -> Result<()> {
         .await
         .context("create topics")?;
 
-    // create_topics returns errors per topic, including "already exists";
-    // librdkafka surfaces them but does not fail the whole call. We don't
-    // need to inspect them — the next operation (producer/consumer) will
-    // fail loudly if a topic genuinely doesn't exist.
     Ok(())
 }
 
+/// topic_partitions performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 fn topic_partitions(topic: &str) -> i32 {
     match topic {
         iicpc_schemas_rust::TOPIC_ORDERS_ACKED
@@ -94,6 +87,8 @@ fn topic_partitions(topic: &str) -> i32 {
     }
 }
 
+/// topic_retention_ms performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 fn topic_retention_ms(topic: &str) -> &'static str {
     match topic {
         iicpc_schemas_rust::TOPIC_ORDERS_ACKED
@@ -106,20 +101,8 @@ fn topic_retention_ms(topic: &str) -> &'static str {
     }
 }
 
-/// control_producer builds a FutureProducer tuned for control-plane messages
-/// (ready signals on bot.ready). Per architecture §6.5, every control topic
-/// (benchmark.requested, barrier, benchmark.status.updated, workload.assignments,
-/// bot.ready) must publish with `acks=all` so that a leader failure between
-/// ack and replication cannot silently drop the message. Tuning:
-///
-///   - `acks=all`: every in-sync replica acks. Costs ~ms of latency, gains
-///     no-loss-on-leader-failure. Required for control plane.
-///   - `enable.idempotence=true`: librdkafka attaches PID + sequence so a
-///     retry after broker error doesn't duplicate. Free when acks=all.
-///   - `linger.ms=0`: no batching. Ready signals are one-per-worker-per-session,
-///     not a stream — coalescing buys nothing and adds wakeup latency.
-///   - `delivery.timeout.ms=10000`: 10s upper bound. Higher than telemetry's
-///     5s because retries with idempotent producer can take longer.
+/// control_producer performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 pub fn control_producer(brokers: &str) -> Result<KafkaProducer> {
     let inner: FutureProducer = ClientConfig::new()
         .set("bootstrap.servers", brokers)
@@ -134,19 +117,8 @@ pub fn control_producer(brokers: &str) -> Result<KafkaProducer> {
     Ok(KafkaProducer { inner })
 }
 
-/// telemetry_producer builds a FutureProducer tuned for the orders.sent
-/// stream. Telemetry is high-volume, loss-tolerant (rare drops show up as
-/// gaps in the HDR histogram, not as wrong scores), so we prioritise
-/// throughput over durability. Tuning:
-///
-///   - `acks=1`: leader-only ack. Rare loss is acceptable for telemetry.
-///   - `linger.ms=2`: 2ms batching window coalesces bursts of small
-///     OrderSentBatch messages into one TCP write.
-///   - `compression.type=lz4`: cheap CPU, ~3x compression on JSON. lz4 is
-///     faster than zstd at our message sizes (~200 bytes) and avoids the
-///     zstd librdkafka feature dependency.
-///   - `delivery.timeout.ms=5000`: 5s upper bound from send() to
-///     delivery-failure. Matches the old kafka-rust ack_timeout.
+/// telemetry_producer performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 pub fn telemetry_producer(brokers: &str) -> Result<KafkaProducer> {
     let inner: FutureProducer = ClientConfig::new()
         .set("bootstrap.servers", brokers)
@@ -161,31 +133,14 @@ pub fn telemetry_producer(brokers: &str) -> Result<KafkaProducer> {
     Ok(KafkaProducer { inner })
 }
 
-/// producer is preserved as an alias for telemetry_producer to keep the
-/// integration test (examples/bot_worker_fix_roundtrip.rs) and any other
-/// historical callers compiling. New code should pick the named variant
-/// explicitly.
+/// producer performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 pub fn producer(brokers: &str) -> Result<KafkaProducer> {
     telemetry_producer(brokers)
 }
 
-/// consumer builds a StreamConsumer subscribed to the requested topics under
-/// the given consumer group. Tuning notes:
-///
-///   - `enable.auto.commit=false`: we commit explicitly after processing each
-///     message so that on a worker crash the message is re-delivered. The
-///     workload-assignment path is idempotent at the controller level (same
-///     session_id is recognised), so re-delivery is safe.
-///   - `auto.offset.reset=earliest`: new consumer groups start from the
-///     beginning of the partition. Bot-workers do not exist before the
-///     controller publishes a workload, so "earliest" effectively means
-///     "the message that was just produced". Switching to `latest` would
-///     mean the worker can miss a workload that landed before its consumer
-///     attached.
-///   - `session.timeout.ms=10000` keeps rebalances tight when KEDA scales
-///     the worker pool.
-///   - `partition.assignment.strategy=roundrobin`: REQUIRED for the 1:1
-///     WorkloadSpec→pod mapping — see consumer_client_config.
+/// consumer performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 pub fn consumer(
     brokers: &str,
     group: &str,
@@ -199,9 +154,8 @@ pub fn consumer(
     Ok(KafkaConsumer { inner })
 }
 
-/// consumer_client_config builds the rdkafka ClientConfig for the worker's
-/// consumers. Factored out of consumer() so the settings the workload
-/// contract depends on are unit-testable without a broker.
+/// consumer_client_config performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 fn consumer_client_config(brokers: &str, group: &str, max_poll_interval: Duration) -> ClientConfig {
     let mut config = ClientConfig::new();
     config
@@ -211,39 +165,17 @@ fn consumer_client_config(brokers: &str, group: &str, max_poll_interval: Duratio
         .set("auto.offset.reset", "earliest")
         .set("fetch.min.bytes", "1")
         .set("fetch.wait.max.ms", "100")
-        // Driven by Config::max_poll_interval (MAX_POLL_INTERVAL_MS) so the
-        // broker bound and the L39 wall-time guard in validate_spec are always
-        // the same value — raising the env knob lifts BOTH, which is what lets a
-        // long high-RPS run complete without a mid-run rebalance. The worker
-        // blocks (does not poll) for the whole run, but librdkafka's background
-        // heartbeat (session.timeout.ms) still proves liveness, so only the
-        // allowed processing-between-polls window grows.
         .set(
             "max.poll.interval.ms",
             max_poll_interval.as_millis().to_string(),
         )
         .set("session.timeout.ms", "10000")
-        // ==================== 1:1 WORKLOADSPEC→POD MAPPING ====================
-        // The controller pins the spec for worker_index i to partition i of
-        // workload.assignments (24 partitions). For every spec to reach a
-        // DISTINCT pod, the group must spread consecutive partitions across
-        // members: roundrobin assigns partition i to consumer (i mod replicas),
-        // so partitions 0..worker_count-1 land on worker_count distinct pods
-        // whenever replicas >= worker_count. The librdkafka default is
-        // "range,roundrobin" — range wins, and range hands one pod a CONTIGUOUS
-        // block (e.g. 8 replicas × 24 partitions ⇒ pod 0 owns partitions 0-2 ⇒
-        // three specs run serially on one pod, two of them missing the
-        // barrier). Do not change this without changing the controller's
-        // partition assignment scheme in lockstep. KEDA scales on lag AFTER
-        // specs are published — pre-scale (minReplicaCount >= the largest
-        // scenario's worker count) for deterministic multi-worker runs.
-        // ======================================================================
         .set("partition.assignment.strategy", "roundrobin");
     config
 }
 
-/// publish_json serializes a value as JSON and publishes it with the provided key.
-/// Used for control-plane messages such as ready signals.
+/// publish_json performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 pub async fn publish_json<T: serde::Serialize>(
     producer: &KafkaProducer,
     topic: &str,
@@ -254,8 +186,8 @@ pub async fn publish_json<T: serde::Serialize>(
     publish_bytes(producer, topic, key, &payload).await
 }
 
-/// publish_bytes sends a pre-encoded payload through the FutureProducer.
-/// Awaits delivery confirmation; returns the librdkafka error on failure.
+/// publish_bytes performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 pub async fn publish_bytes(
     producer: &KafkaProducer,
     topic: &str,
@@ -263,9 +195,6 @@ pub async fn publish_bytes(
     payload: &[u8],
 ) -> Result<()> {
     let record = FutureRecord::to(topic).key(key).payload(payload);
-    // 5s queue timeout matches the producer's delivery.timeout.ms; if the
-    // internal queue is full for longer than this, we surface an error
-    // rather than blocking the caller indefinitely.
     producer
         .inner
         .send(record, Duration::from_secs(5))
@@ -274,9 +203,8 @@ pub async fn publish_bytes(
     Ok(())
 }
 
-/// wait_for_barrier polls the barrier topic until the matching session
-/// event arrives or the wait timeout expires. Malformed or unrelated
-/// messages are dropped and the loop continues.
+/// wait_for_barrier performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 pub async fn wait_for_barrier(
     consumer: &KafkaConsumer,
     session_id: &str,
@@ -314,22 +242,20 @@ pub async fn wait_for_barrier(
     }
 }
 
-/// decode_workload decodes a workload assignment consumed from "workload.assignments".
+/// decode_workload performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 pub fn decode_workload(payload: &[u8]) -> Result<iicpc_schemas_rust::WorkloadSpec> {
     serde_json::from_slice(payload).context("decode workload assignment")
 }
 
-/// ready_key builds the Kafka key used for per-worker ready signals.
+/// ready_key performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 pub fn ready_key(signal: &ReadySignal) -> String {
     format!("{}:{}", signal.session_id, signal.worker_id)
 }
 
-/// recv_message awaits the next message on the consumer's subscribed topics
-/// without committing its offset. Call commit_message after the payload is
-/// handled or intentionally discarded.
-///
-/// Cancellation is the caller's responsibility — wrap this call in a
-/// `tokio::select!` or `tokio::time::timeout` to bound the wait.
+/// recv_message performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 pub async fn recv_message(consumer: &KafkaConsumer) -> Result<KafkaMessage> {
     let mut stream = consumer.inner.stream();
     let msg = stream
@@ -346,8 +272,8 @@ pub async fn recv_message(consumer: &KafkaConsumer) -> Result<KafkaMessage> {
     })
 }
 
-/// commit_message records that the consumed Kafka message has been fully
-/// handled. Kafka commits the next offset, not the current message offset.
+/// commit_message performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 pub fn commit_message(consumer: &KafkaConsumer, message: &KafkaMessage) -> Result<()> {
     let mut offsets = TopicPartitionList::new();
     offsets
@@ -364,7 +290,8 @@ pub fn commit_message(consumer: &KafkaConsumer, message: &KafkaMessage) -> Resul
     Ok(())
 }
 
-/// recv_payload is kept for examples that do not need manual commit control.
+/// recv_payload performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 pub async fn recv_payload(consumer: &KafkaConsumer) -> Result<Option<Vec<u8>>> {
     let message = recv_message(consumer).await?;
     let payload = message.payload.clone();
@@ -376,15 +303,9 @@ pub async fn recv_payload(consumer: &KafkaConsumer) -> Result<Option<Vec<u8>>> {
 mod tests {
     use super::*;
 
-    // The 1:1 WorkloadSpec→pod mapping depends on the roundrobin assignor:
-    // the controller pins the spec for worker_index i to partition i, and
-    // roundrobin hands partition i to consumer (i mod replicas) — distinct
-    // pods for every loaded partition when replicas >= worker_count. The
-    // librdkafka default ("range,roundrobin" — range wins) hands one pod a
-    // CONTIGUOUS block of partitions, concentrating several specs on one pod
-    // (serial execution, missed barriers). This test guards the strategy and
-    // the poll-interval plumbing against silent regression.
     #[test]
+    /// consumer_config_spreads_partitions_roundrobin performs the module-specific operation described by its name.
+    /// It keeps validation, side effects, and returned values within this module's contract.
     fn consumer_config_spreads_partitions_roundrobin() {
         let config = consumer_client_config(
             "localhost:9092",

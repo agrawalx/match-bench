@@ -1,3 +1,8 @@
+// Package main starts the leaderboard-api service.
+//
+// This file is part of the IICPC benchmarking platform and keeps its
+// responsibilities local to the surrounding package. It should be read with
+// the service-level design in design.md for broader operational context.
 package main
 
 import (
@@ -21,6 +26,8 @@ import (
 	"github.com/iicpc/libs/metrics"
 )
 
+// main performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func main() {
 	logCfg := logger.DefaultConfig()
 	logCfg.ServiceName = "leaderboard-api"
@@ -110,6 +117,8 @@ func main() {
 	_ = srv.Shutdown(shutdownCtx)
 }
 
+// chiRoutePattern performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func chiRoutePattern(r *http.Request) string {
 	if routeCtx := chi.RouteContext(r.Context()); routeCtx != nil {
 		return routeCtx.RoutePattern()

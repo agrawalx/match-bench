@@ -1,3 +1,8 @@
+// Package worker implements worker behavior.
+//
+// This file is part of the IICPC benchmarking platform and keeps its
+// responsibilities local to the surrounding package. It should be read with
+// the service-level design in design.md for broader operational context.
 package worker
 
 import (
@@ -13,6 +18,8 @@ import (
 	"github.com/iicpc/score-computer/internal/store"
 )
 
+// Worker groups the state and dependencies used by this package.
+// Keep this type aligned with the runtime contract around it.
 type Worker struct {
 	store          *store.Store
 	redis          *redis.Client
@@ -21,10 +28,14 @@ type Worker struct {
 	log            *slog.Logger
 }
 
+// New performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func New(st *store.Store, redisClient *redis.Client, pub *publisher.Publisher, leaderboardKey string, log *slog.Logger) *Worker {
 	return &Worker{store: st, redis: redisClient, publisher: pub, leaderboardKey: leaderboardKey, log: log}
 }
 
+// Run applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (w *Worker) Run(ctx context.Context, ready <-chan string) {
 	for {
 		select {
@@ -39,6 +50,8 @@ func (w *Worker) Run(ctx context.Context, ready <-chan string) {
 	}
 }
 
+// Score applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (w *Worker) Score(ctx context.Context, runGroupID string) {
 	start := time.Now()
 	result := "ok"
@@ -50,6 +63,8 @@ func (w *Worker) Score(ctx context.Context, runGroupID string) {
 	metrics.Histogram("scorer_run_group_score_duration_seconds", "Score-computer run-group scoring duration in seconds.", metrics.Labels("result", result), metrics.SinceSeconds(start))
 }
 
+// score applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (w *Worker) score(ctx context.Context, runGroupID string) error {
 	in, err := w.store.LoadInput(ctx, runGroupID)
 	if err != nil {

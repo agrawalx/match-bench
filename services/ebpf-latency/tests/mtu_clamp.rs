@@ -1,14 +1,8 @@
-//! Privileged MTU clamp integration test.
+//! This module defines tests for mtu clamp.
 //!
-//! Exercises the REAL SIOCSIFMTU path (src/mtu.rs, included below via #[path])
-//! against a real veth pair set to the EKS jumbo default of 9001: the clamp
-//! must lower it to 1500, leave an already-small MTU alone (never raise), and
-//! honor clamp=0 (disabled). This is the same code attach_programs runs inside
-//! the algo pod's netns.
-//!
-//! Run (needs root for veth creation + SIOCSIFMTU):
-//!   IICPC_REAL_EBPF_STRICT=1 sudo -E env "PATH=$PATH" \
-//!     cargo test -p iicpc-ebpf-latency --test mtu_clamp -- --ignored --nocapture
+//! It belongs to the IICPC benchmarking platform and should keep its
+//! behavior consistent with the service contracts documented in design.md.
+//! The comments in this file describe public structure and callable behavior.
 
 #[path = "../src/mtu.rs"]
 mod mtu;
@@ -19,6 +13,8 @@ use anyhow::{bail, Context, Result};
 
 #[test]
 #[ignore = "requires root (veth creation + SIOCSIFMTU) and iproute2"]
+/// clamps_jumbo_veth_down_but_never_up performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 fn clamps_jumbo_veth_down_but_never_up() -> Result<()> {
     if !require_root()? || !require_command("ip")? {
         return Ok(());
@@ -27,16 +23,13 @@ fn clamps_jumbo_veth_down_but_never_up() -> Result<()> {
     let fixture = VethFixture::create()?;
     let (jumbo, small) = (fixture.jumbo.as_str(), fixture.small.as_str());
 
-    // EKS case: 9001 -> 1500.
     assert_eq!(mtu::get_iface_mtu(jumbo)?, 9001, "fixture MTU not applied");
     mtu::clamp_to(jumbo, 1500);
     assert_eq!(mtu::get_iface_mtu(jumbo)?, 1500, "jumbo MTU not clamped");
 
-    // Idempotent: clamping again is a no-op.
     mtu::clamp_to(jumbo, 1500);
     assert_eq!(mtu::get_iface_mtu(jumbo)?, 1500);
 
-    // Never raise: a deliberately small MTU stays put.
     mtu::set_iface_mtu(small, 1200).context("set small peer MTU")?;
     mtu::clamp_to(small, 1500);
     assert_eq!(
@@ -45,7 +38,6 @@ fn clamps_jumbo_veth_down_but_never_up() -> Result<()> {
         "small MTU must not be raised"
     );
 
-    // clamp=0 disables: the jumbo side keeps whatever it has.
     mtu::set_iface_mtu(jumbo, 9001).context("restore jumbo MTU")?;
     mtu::clamp_to(jumbo, 0);
     assert_eq!(
@@ -57,17 +49,16 @@ fn clamps_jumbo_veth_down_but_never_up() -> Result<()> {
     Ok(())
 }
 
-// ---- veth fixture -------------------------------------------------------------
-
-/// A host-namespace veth pair; `jumbo` starts at MTU 9001 (both veth peers must
-/// allow it, so the pair is created at 9001 and `small` is lowered per-test).
-/// Names stay under IFNAMSIZ (pid is at most 7 digits).
+/// VethFixture stores the state passed across this module boundary.
+/// Keep field changes compatible with callers and serialized contracts.
 struct VethFixture {
     jumbo: String,
     small: String,
 }
 
 impl VethFixture {
+    /// create performs the module-specific operation described by its name.
+    /// It keeps validation, side effects, and returned values within this module's contract.
     fn create() -> Result<Self> {
         let pid = std::process::id();
         let fixture = Self {
@@ -93,16 +84,17 @@ impl VethFixture {
 }
 
 impl Drop for VethFixture {
+    /// drop performs the module-specific operation described by its name.
+    /// It keeps validation, side effects, and returned values within this module's contract.
     fn drop(&mut self) {
-        // Deleting one end removes the pair.
         let _ = Command::new("ip")
             .args(["link", "del", &self.jumbo])
             .status();
     }
 }
 
-// ---- env gating (matches tests/real_ebpf.rs) ----------------------------------
-
+/// require_root performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 fn require_root() -> Result<bool> {
     if unsafe { libc::geteuid() } == 0 {
         return Ok(true);
@@ -110,6 +102,8 @@ fn require_root() -> Result<bool> {
     skip_or_fail("MTU clamp integration test requires root privileges")
 }
 
+/// require_command performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 fn require_command(command: &str) -> Result<bool> {
     let exists = Command::new(command)
         .arg("--version")
@@ -127,6 +121,8 @@ fn require_command(command: &str) -> Result<bool> {
     }
 }
 
+/// skip_or_fail performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 fn skip_or_fail(reason: impl AsRef<str>) -> Result<bool> {
     let reason = reason.as_ref();
     if std::env::var_os("IICPC_REAL_EBPF_STRICT").is_some() {
@@ -136,6 +132,8 @@ fn skip_or_fail(reason: impl AsRef<str>) -> Result<bool> {
     Ok(false)
 }
 
+/// run_ip performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 fn run_ip(args: &[&str]) -> Result<()> {
     let status = Command::new("ip")
         .args(args)

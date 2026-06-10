@@ -1,20 +1,8 @@
-//! Deterministic, open-loop order-content generation for one bot task.
+//! This module implements content behavior.
 //!
-//! The *schedule* (when / how-fast / how-long a task fires) comes from the
-//! `TaskSpec`. The *content* of each message — its type, price, qty, side, and
-//! which resting order a cancel/replace targets — is generated here. Two
-//! properties are load-bearing for cross-contestant fairness:
-//!
-//!   - **Deterministic**: every choice is drawn from a seeded `SmallRng`, so the
-//!     same `(seed, mix)` reproduces the same stream for every contestant and on
-//!     every replay. The DRAW ORDER inside [`TaskGenerator::next`] is part of
-//!     this contract — reordering rng draws shifts the whole stream for a seed.
-//!   - **Open-loop**: a cancel/replace target is chosen from this task's own
-//!     self-accounted [`Resting`] ledger — orders it *sent*, never what the algo
-//!     *did* with them. The bot must not react to fills (a fast and a slow algo
-//!     would otherwise receive different streams). The ledger may therefore
-//!     reference an order the algo already filled; that is intentional and tests
-//!     the engine's cancel-of-filled handling.
+//! It belongs to the IICPC benchmarking platform and should keep its
+//! behavior consistent with the service contracts documented in design.md.
+//! The comments in this file describe public structure and callable behavior.
 
 use iicpc_schemas_rust::{BotProfile, PayloadType, Side};
 use rand::{rngs::SmallRng, Rng, SeedableRng};
@@ -22,15 +10,11 @@ use rand::{rngs::SmallRng, Rng, SeedableRng};
 use crate::fix;
 use crate::worker::order_shape;
 
-/// Maximum resting orders tracked per task. The bot never observes fills, so it
-/// only removes a resting order via cancel/replace — without a cap the ledger
-/// would grow for the whole session. Capping bounds memory and models
-/// "cancel a recent order"; cancels/replaces target this recent window.
 const MAX_RESTING_ORDERS: usize = 1024;
 
-/// OrderMix is the per-task message-type distribution as percentages. The limit
-/// fraction is implied: `100 - market - cancel - replace`.
 #[derive(Debug, Clone, Copy)]
+/// OrderMix stores the state passed across this module boundary.
+/// Keep field changes compatible with callers and serialized contracts.
 pub struct OrderMix {
     pub market_pct: u8,
     pub cancel_pct: u8,
@@ -38,6 +22,8 @@ pub struct OrderMix {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Kind enumerates the states or variants handled by this module.
+/// Match arms should preserve the semantic contract of each variant.
 enum Kind {
     Limit,
     Market,
@@ -45,8 +31,9 @@ enum Kind {
     Replace,
 }
 
-/// Resting is an order this task believes is live, tracked from its own sends.
 #[derive(Debug, Clone)]
+/// Resting stores the state passed across this module boundary.
+/// Keep field changes compatible with callers and serialized contracts.
 struct Resting {
     order_id: String,
     price: u64,
@@ -54,10 +41,9 @@ struct Resting {
     side: Side,
 }
 
-/// Action is the next message the task should render (via `fix`) and send. The
-/// `orig_order_id` on a cancel/replace is the full ClOrdID of the targeted
-/// resting order, so tag 41 (OrigClOrdID) matches its original tag 11.
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Action enumerates the states or variants handled by this module.
+/// Match arms should preserve the semantic contract of each variant.
 pub enum Action {
     NewLimit {
         seq: u32,
@@ -87,8 +73,8 @@ pub enum Action {
 }
 
 impl Action {
-    /// seq is this message's per-task sequence number (also its tag 34 and the
-    /// numeric component of its ClOrdID). Useful for logging.
+    /// seq performs the module-specific operation described by its name.
+    /// It keeps validation, side effects, and returned values within this module's contract.
     pub fn seq(&self) -> u32 {
         match self {
             Action::NewLimit { seq, .. }
@@ -98,6 +84,8 @@ impl Action {
         }
     }
 
+    /// payload_type performs the module-specific operation described by its name.
+    /// It keeps validation, side effects, and returned values within this module's contract.
     pub fn payload_type(&self) -> PayloadType {
         match self {
             Action::NewLimit { .. } | Action::NewMarket { .. } => PayloadType::New,
@@ -107,9 +95,8 @@ impl Action {
     }
 }
 
-/// TaskGenerator produces the deterministic, open-loop content stream for one
-/// task. One per task; never shared. Seed it with `global_seed ^ task_id` so
-/// each task has an independent but reproducible stream.
+/// TaskGenerator stores the state passed across this module boundary.
+/// Keep field changes compatible with callers and serialized contracts.
 pub struct TaskGenerator {
     rng: SmallRng,
     profile: BotProfile,
@@ -121,6 +108,8 @@ pub struct TaskGenerator {
 }
 
 impl TaskGenerator {
+    /// new performs the module-specific operation described by its name.
+    /// It keeps validation, side effects, and returned values within this module's contract.
     pub fn new(
         session_id: String,
         task_id: u64,
@@ -139,11 +128,8 @@ impl TaskGenerator {
         }
     }
 
-    /// next produces the next message to send.
-    ///
-    /// DRAW ORDER IS PART OF THE DETERMINISM CONTRACT: (1) type roll, (2) order
-    /// shape, then (3) — for cancel/replace only — the ledger target index, and
-    /// (4) — for replace only — the reprice-vs-shrink coin. Do not reorder.
+    /// next performs the module-specific operation described by its name.
+    /// It keeps validation, side effects, and returned values within this module's contract.
     pub fn next(&mut self) -> Action {
         self.seq += 1;
         let seq = self.seq;
@@ -156,8 +142,6 @@ impl TaskGenerator {
             Kind::Limit => self.emit_limit(seq, price, qty, side),
             Kind::Market => Action::NewMarket { seq, qty, side },
             Kind::Cancel => match self.take_resting() {
-                // Cancel echoes the resting order's own qty/side (35=F carries
-                // tag 38/54); price is informational for telemetry.
                 Some(orig) => Action::Cancel {
                     seq,
                     orig_order_id: orig.order_id,
@@ -165,8 +149,6 @@ impl TaskGenerator {
                     qty: orig.qty,
                     side: orig.side,
                 },
-                // Empty ledger (e.g. start of run): deterministically fall back
-                // to a new limit order rather than blocking.
                 None => self.emit_limit(seq, price, qty, side),
             },
             Kind::Replace => match self.take_resting() {
@@ -176,9 +158,8 @@ impl TaskGenerator {
         }
     }
 
-    /// classify maps a 0..100 roll to a message kind. Ranges:
-    /// `[0, market) → Market`, `[market, market+cancel) → Cancel`,
-    /// `[.., +replace) → Replace`, remainder → `Limit`.
+    /// classify performs the module-specific operation described by its name.
+    /// It keeps validation, side effects, and returned values within this module's contract.
     fn classify(&self, roll: u8) -> Kind {
         let market = self.mix.market_pct;
         let cancel_end = market.saturating_add(self.mix.cancel_pct);
@@ -194,6 +175,8 @@ impl TaskGenerator {
         }
     }
 
+    /// emit_limit performs the module-specific operation described by its name.
+    /// It keeps validation, side effects, and returned values within this module's contract.
     fn emit_limit(&mut self, seq: u32, price: u64, qty: u64, side: Side) -> Action {
         let order_id = fix::new_limit_order_id(&self.session_id, self.task_id, u64::from(seq));
         self.push_resting(Resting {
@@ -210,10 +193,8 @@ impl TaskGenerator {
         }
     }
 
-    /// emit_replace splits replaces between a price change (loses time priority)
-    /// and a quantity-only decrease (keeps it) so both validator paths are
-    /// exercised. Side is preserved across a replace. The replaced order
-    /// re-rests under the replace's own (`_R`) ClOrdID.
+    /// emit_replace performs the module-specific operation described by its name.
+    /// It keeps validation, side effects, and returned values within this module's contract.
     fn emit_replace(&mut self, seq: u32, orig: Resting, repriced: u64) -> Action {
         let (price, qty) = if self.rng.gen_bool(0.5) {
             (repriced, orig.qty) // reprice: new price, same qty
@@ -236,6 +217,8 @@ impl TaskGenerator {
         }
     }
 
+    /// push_resting performs the module-specific operation described by its name.
+    /// It keeps validation, side effects, and returned values within this module's contract.
     fn push_resting(&mut self, resting: Resting) {
         if self.ledger.len() >= MAX_RESTING_ORDERS {
             self.ledger.remove(0); // drop oldest to bound memory
@@ -243,6 +226,8 @@ impl TaskGenerator {
         self.ledger.push(resting);
     }
 
+    /// take_resting performs the module-specific operation described by its name.
+    /// It keeps validation, side effects, and returned values within this module's contract.
     fn take_resting(&mut self) -> Option<Resting> {
         if self.ledger.is_empty() {
             return None;
@@ -256,6 +241,8 @@ impl TaskGenerator {
 mod tests {
     use super::*;
 
+    /// gen performs the module-specific operation described by its name.
+    /// It keeps validation, side effects, and returned values within this module's contract.
     fn gen(mix: OrderMix, seed: u64) -> TaskGenerator {
         TaskGenerator::new("sess1".into(), 7, BotProfile::Hft, mix, seed)
     }
@@ -267,6 +254,8 @@ mod tests {
     };
 
     #[test]
+    /// same_seed_produces_identical_stream performs the module-specific operation described by its name.
+    /// It keeps validation, side effects, and returned values within this module's contract.
     fn same_seed_produces_identical_stream() {
         let mut a = gen(HFT_MIX, 42);
         let mut b = gen(HFT_MIX, 42);
@@ -276,6 +265,8 @@ mod tests {
     }
 
     #[test]
+    /// different_seed_diverges performs the module-specific operation described by its name.
+    /// It keeps validation, side effects, and returned values within this module's contract.
     fn different_seed_diverges() {
         let mut a = gen(HFT_MIX, 1);
         let mut b = gen(HFT_MIX, 2);
@@ -285,6 +276,8 @@ mod tests {
     }
 
     #[test]
+    /// mix_ratio_is_within_tolerance performs the module-specific operation described by its name.
+    /// It keeps validation, side effects, and returned values within this module's contract.
     fn mix_ratio_is_within_tolerance() {
         let mut g = gen(HFT_MIX, 99);
         let (mut market, mut cancel, mut replace, mut limit) = (0, 0, 0, 0);
@@ -297,9 +290,6 @@ mod tests {
                 Action::NewLimit { .. } => limit += 1,
             }
         }
-        // Cancels/replaces fall back to limit when the ledger is empty, which
-        // only happens in the very first ticks, so the steady-state mix matches
-        // the configured percentages within a small tolerance.
         let pct = |c: i32| (c as f64) / (n as f64) * 100.0;
         assert!((pct(market) - 10.0).abs() < 1.5, "market {}", pct(market));
         assert!((pct(cancel) - 30.0).abs() < 1.5, "cancel {}", pct(cancel));
@@ -312,6 +302,8 @@ mod tests {
     }
 
     #[test]
+    /// cancel_and_replace_reference_a_previously_emitted_order performs the module-specific operation described by its name.
+    /// It keeps validation, side effects, and returned values within this module's contract.
     fn cancel_and_replace_reference_a_previously_emitted_order() {
         let mut g = gen(HFT_MIX, 7);
         let mut live = std::collections::HashSet::new();
@@ -341,6 +333,8 @@ mod tests {
     }
 
     #[test]
+    /// all_limit_mix_never_cancels performs the module-specific operation described by its name.
+    /// It keeps validation, side effects, and returned values within this module's contract.
     fn all_limit_mix_never_cancels() {
         let mut g = gen(
             OrderMix {

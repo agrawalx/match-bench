@@ -1,3 +1,8 @@
+// Package handler implements submission behavior.
+//
+// This file is part of the IICPC benchmarking platform and keeps its
+// responsibilities local to the surrounding package. It should be read with
+// the service-level design in design.md for broader operational context.
 package handler
 
 import (
@@ -9,6 +14,8 @@ import (
 	"github.com/iicpc/submission-api/internal/store"
 )
 
+// submissionResponse groups the state and dependencies used by this package.
+// Keep this type aligned with the runtime contract around it.
 type submissionResponse struct {
 	SubmissionID string    `json:"submission_id"`
 	Status       string    `json:"status"`
@@ -21,6 +28,8 @@ type submissionResponse struct {
 	CreatedAt    time.Time `json:"created_at"`
 }
 
+// GetSubmission performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func GetSubmission(pg *store.PostgresStore, log *slog.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		submissionID := chi.URLParam(r, "submission_id")

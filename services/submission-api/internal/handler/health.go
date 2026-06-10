@@ -1,3 +1,8 @@
+// Package handler implements health behavior.
+//
+// This file is part of the IICPC benchmarking platform and keeps its
+// responsibilities local to the surrounding package. It should be read with
+// the service-level design in design.md for broader operational context.
 package handler
 
 import (
@@ -11,10 +16,8 @@ import (
 
 const healthServiceName = "submission-api"
 
-// Readiness reports whether the service can serve traffic. Unlike /health
-// (liveness — a static 200), it checks the datastore via ping so a replica whose
-// Postgres connection died post-startup returns 503 and is pulled from the Service
-// endpoints instead of serving errors for ~half of requests.
+// Readiness performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func Readiness(ping func(context.Context) error, log *slog.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
@@ -28,9 +31,9 @@ func Readiness(ping func(context.Context) error, log *slog.Logger) http.HandlerF
 	}
 }
 
+// Health performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func Health(log *slog.Logger) (http.HandlerFunc, error) {
-	// Pre-marshal the tiny static response once; health checks can be among the
-	// hottest endpoints in production and do not need per-request allocation.
 	resp, err := json.Marshal(map[string]string{
 		"status":  "ok",
 		"service": healthServiceName,

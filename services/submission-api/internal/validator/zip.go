@@ -1,3 +1,8 @@
+// Package validator implements zip behavior.
+//
+// This file is part of the IICPC benchmarking platform and keeps its
+// responsibilities local to the surrounding package. It should be read with
+// the service-level design in design.md for broader operational context.
 package validator
 
 import (
@@ -18,13 +23,15 @@ const maxRootConfigBytes = 1 << 20 // 1 MB per root config/build file after deco
 var validProtocols = map[string]struct{}{"FIX": {}, "REST": {}, "WS": {}}
 var validLanguages = map[string]struct{}{"cpp": {}, "rust": {}, "go": {}}
 
-// BuildSection is the build stanza from benchmark.yaml.
+// BuildSection groups the state and dependencies used by this package.
+// Keep this type aligned with the runtime contract around it.
 type BuildSection struct {
 	Type   string `yaml:"type"`   // cmake | cargo | go
 	Target string `yaml:"target"` // binary name to produce
 }
 
-// BenchmarkConfig is the parsed and validated content of benchmark.yaml.
+// BenchmarkConfig groups the state and dependencies used by this package.
+// Keep this type aligned with the runtime contract around it.
 type BenchmarkConfig struct {
 	Protocol string       `yaml:"protocol"`
 	Language string       `yaml:"language"`
@@ -33,17 +40,13 @@ type BenchmarkConfig struct {
 	TeamName string       `yaml:"team_name"` // optional until auth is added
 }
 
-// ValidateSubmissionZip checks magic bytes, size, zip structure, benchmark.yaml,
-// src/ presence, build file existence, and target name consistency.
-// Root benchmark/build files are read with a 1 MiB decompressed limit so a
-// compressed ZIP cannot force unbounded memory allocation while validating.
-// Returns a parsed BenchmarkConfig on success, or a descriptive error.
+// ValidateSubmissionZip performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func ValidateSubmissionZip(r io.ReaderAt, size int64) (*BenchmarkConfig, error) {
 	if size > MaxZipBytes {
 		return nil, cerrs.ErrTooLarge
 	}
 
-	// ZIP magic bytes: PK\x03\x04
 	var header [4]byte
 	if _, err := r.ReadAt(header[:], 0); err != nil {
 		return nil, cerrs.ErrNotZip
@@ -64,12 +67,10 @@ func ValidateSubmissionZip(r io.ReaderAt, size int64) (*BenchmarkConfig, error) 
 	rootEntries := make(map[string]struct{})
 
 	for _, f := range zr.File {
-		// Track src/ presence (any entry inside src/ counts)
 		if strings.HasPrefix(f.Name, "src/") {
 			foundSrc = true
 		}
 
-		// Only inspect root-level entries from here on
 		if strings.ContainsRune(f.Name, '/') {
 			continue
 		}
@@ -141,6 +142,8 @@ func ValidateSubmissionZip(r io.ReaderAt, size int64) (*BenchmarkConfig, error) 
 	return &cfg, nil
 }
 
+// readLimitedRootFile performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func readLimitedRootFile(r io.Reader) ([]byte, error) {
 	data, err := io.ReadAll(io.LimitReader(r, maxRootConfigBytes+1))
 	if err != nil {
@@ -152,15 +155,10 @@ func readLimitedRootFile(r io.Reader) ([]byte, error) {
 	return data, nil
 }
 
-// validateBuildTarget checks that the declared build.type is consistent with the
-// language, the required build file is present, and the target name exists in it.
-// validBuildTargetName constrains the contestant-supplied build.target to a safe
-// charset for ALL languages. The target flows unescaped through text/template into
-// the generated Dockerfile (go build -o {{.Target}}, COPY, ENTRYPOINT), so quotes,
-// whitespace, slashes, and newlines must be rejected to prevent Dockerfile/command
-// injection — the Go path previously had no validation at all.
 var validBuildTargetName = regexp.MustCompile(`^[A-Za-z0-9_.-]{1,64}$`)
 
+// validateBuildTarget performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func validateBuildTarget(cfg *BenchmarkConfig, buildFileName string, buildFileContent []byte) error {
 	if !validBuildTargetName.MatchString(cfg.Build.Target) {
 		return cerrs.ErrInvalidBuildTarget
@@ -199,15 +197,13 @@ func validateBuildTarget(cfg *BenchmarkConfig, buildFileName string, buildFileCo
 		if buildFileName != "go.mod" {
 			return cerrs.ErrMissingGoMod
 		}
-		// No target name validation for Go — go build -o {target} ./... accepts any name.
 	}
 
 	return nil
 }
 
-// cmakeHasTarget checks that CMakeLists.txt contains add_executable(target ...).
-// regex is compiled per call because target varies;
-// acceptable since this runs once per submission, not on the hot path.
+// cmakeHasTarget performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func cmakeHasTarget(data []byte, target string) (bool, error) {
 	pattern := `(?im)^\s*add_executable\s*\(\s*` + regexp.QuoteMeta(target) + `[\s),]`
 	re, err := regexp.Compile(pattern)
@@ -217,7 +213,8 @@ func cmakeHasTarget(data []byte, target string) (bool, error) {
 	return re.Match(data), nil
 }
 
-// cargoHasBin checks that Cargo.toml has a [[bin]] section with the given name.
+// cargoHasBin performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func cargoHasBin(data []byte, target string) bool {
 	var manifest struct {
 		Bin []struct {

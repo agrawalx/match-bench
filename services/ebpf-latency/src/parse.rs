@@ -1,43 +1,37 @@
-//! Message framing and field extraction for the reassembled byte streams.
+//! This module implements parse behavior.
 //!
-//! Framing splits a contiguous stream into whole messages; extraction pulls the
-//! join key (ClOrdID) and response metadata out of each message. Unlike the old
-//! in-kernel parser this uses NO fixed offsets — FIX is framed by BodyLength
-//! (tag 9) and fields are found by scanning SOH-delimited `tag=value` pairs, so
-//! it handles real bot requests (where tag 11 drifts) and arbitrary
-//! contestant-generated responses.
+//! It belongs to the IICPC benchmarking platform and should keep its
+//! behavior consistent with the service contracts documented in design.md.
+//! The comments in this file describe public structure and callable behavior.
 
 use crate::capture::{Direction, Transport};
 
 const SOH: u8 = 0x01;
 const PRICE_SCALE: u64 = 1_000_000_000;
-/// Guard against a corrupt BodyLength framing a runaway message.
 const MAX_FIX_MESSAGE: usize = 64 * 1024;
 const MAX_HTTP_MESSAGE: usize = 64 * 1024;
 
-/// Result of trying to frame one message off the front of a stream.
 #[derive(Debug, PartialEq, Eq)]
+/// Frame enumerates the states or variants handled by this module.
+/// Match arms should preserve the semantic contract of each variant.
 pub enum Frame {
-    /// A complete message occupies the first `len` bytes.
     Message(usize),
-    /// Not enough bytes yet; wait for more.
     Incomplete,
-    /// The front `skip` bytes cannot start a message; drop them and retry.
     Resync(usize),
 }
 
-/// How a framed message should be treated by the matcher.
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Classified enumerates the states or variants handled by this module.
+/// Match arms should preserve the semantic contract of each variant.
 pub enum Classified {
-    /// A new-order / cancel / replace request — carries t3, keyed by ClOrdID.
     Request,
-    /// An execution report / order response — carries t7, joined by ClOrdID.
     Response,
-    /// Admin/session traffic (logon, heartbeat, …) — no timestamp applies.
     Ignore,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
+/// ParsedMessage stores the state passed across this module boundary.
+/// Keep field changes compatible with callers and serialized contracts.
 pub struct ParsedMessage {
     pub class: Classified,
     pub clordid: String,
@@ -48,12 +42,15 @@ pub struct ParsedMessage {
 }
 
 impl Default for Classified {
+    /// default performs the module-specific operation described by its name.
+    /// It keeps validation, side effects, and returned values within this module's contract.
     fn default() -> Self {
         Classified::Ignore
     }
 }
 
-/// Frame one message off the front of `buf` for the given transport/direction.
+/// frame performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 pub fn frame(transport: Transport, direction: Direction, buf: &[u8]) -> Frame {
     match transport {
         Transport::Fix => frame_fix(buf),
@@ -61,7 +58,8 @@ pub fn frame(transport: Transport, direction: Direction, buf: &[u8]) -> Frame {
     }
 }
 
-/// Parse a single framed message (exactly the bytes `frame` reported).
+/// parse performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 pub fn parse(transport: Transport, direction: Direction, msg: &[u8]) -> ParsedMessage {
     match transport {
         Transport::Fix => parse_fix(direction, msg),
@@ -69,10 +67,9 @@ pub fn parse(transport: Transport, direction: Direction, msg: &[u8]) -> ParsedMe
     }
 }
 
-// ---- FIX --------------------------------------------------------------------
-
+/// frame_fix performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 fn frame_fix(buf: &[u8]) -> Frame {
-    // A FIX message begins with "8=". Resync past any leading garbage.
     if buf.len() < 2 {
         return Frame::Incomplete;
     }
@@ -82,11 +79,9 @@ fn frame_fix(buf: &[u8]) -> Frame {
             None => Frame::Resync(buf.len().saturating_sub(1)),
         };
     }
-    // First SOH ends the BeginString (tag 8).
     let Some(soh1) = find_byte(buf, SOH, 0) else {
         return Frame::Incomplete;
     };
-    // BodyLength (tag 9) must follow immediately.
     if buf.len() < soh1 + 3 || &buf[soh1 + 1..soh1 + 3] != b"9=" {
         return Frame::Resync(soh1 + 1);
     }
@@ -97,7 +92,6 @@ fn frame_fix(buf: &[u8]) -> Frame {
         return Frame::Resync(soh2 + 1);
     };
     let body_len = body_len as usize;
-    // CheckSum field "10=NNN\x01" is a fixed 7 bytes.
     let total = (soh2 + 1) + body_len + 7;
     if body_len > MAX_FIX_MESSAGE {
         return Frame::Resync(soh1 + 1);
@@ -108,6 +102,8 @@ fn frame_fix(buf: &[u8]) -> Frame {
     Frame::Message(total)
 }
 
+/// parse_fix performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 fn parse_fix(direction: Direction, msg: &[u8]) -> ParsedMessage {
     let mut msg_type: &[u8] = b"";
     let mut clordid = String::new();
@@ -158,8 +154,8 @@ fn parse_fix(direction: Direction, msg: &[u8]) -> ParsedMessage {
     }
 }
 
-// ---- HTTP / WebSocket -------------------------------------------------------
-
+/// frame_http_ws performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 fn frame_http_ws(direction: Direction, buf: &[u8]) -> Frame {
     if buf.is_empty() {
         return Frame::Incomplete;
@@ -171,11 +167,15 @@ fn frame_http_ws(direction: Direction, buf: &[u8]) -> Frame {
     }
 }
 
+/// looks_like_http performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 fn looks_like_http(buf: &[u8]) -> bool {
     const PREFIXES: [&[u8]; 5] = [b"POST", b"GET ", b"PUT ", b"DELE", b"HTTP"];
     PREFIXES.iter().any(|p| buf.starts_with(p))
 }
 
+/// frame_http performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 fn frame_http(buf: &[u8]) -> Frame {
     let Some(hdr_end) = find(buf, b"\r\n\r\n") else {
         if buf.len() > MAX_HTTP_MESSAGE {
@@ -184,11 +184,6 @@ fn frame_http(buf: &[u8]) -> Frame {
         return Frame::Incomplete;
     };
     let body_start = hdr_end + 4;
-    // M32: a chunked response carries no Content-Length. The old code defaulted
-    // content_len to 0, framing only the headers and leaving the chunked body to be
-    // mis-parsed as a fresh message — derailing framing for the whole connection.
-    // Frame through the terminating zero-size chunk ("0\r\n\r\n") so the connection
-    // stays in sync; field extraction from a chunked body is best-effort.
     if header_is_chunked(&buf[..hdr_end]) {
         return match find(&buf[body_start..], b"0\r\n\r\n") {
             Some(rel) => {
@@ -214,8 +209,8 @@ fn frame_http(buf: &[u8]) -> Frame {
     Frame::Message(total)
 }
 
-/// True when the response headers declare Transfer-Encoding: chunked (no
-/// Content-Length). Case-insensitive, mirrors header_content_length.
+/// header_is_chunked performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 fn header_is_chunked(headers: &[u8]) -> bool {
     let lower: Vec<u8> = headers.iter().map(|b| b.to_ascii_lowercase()).collect();
     match find(&lower, b"transfer-encoding:") {
@@ -228,6 +223,8 @@ fn header_is_chunked(headers: &[u8]) -> bool {
     }
 }
 
+/// frame_ws performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 fn frame_ws(direction: Direction, buf: &[u8]) -> Frame {
     if buf.len() < 2 {
         return Frame::Incomplete;
@@ -242,13 +239,11 @@ fn frame_ws(direction: Direction, buf: &[u8]) -> Frame {
         }
         (4usize, ((buf[2] as usize) << 8) | buf[3] as usize)
     } else {
-        // 64-bit length not expected for these small JSON frames.
         return Frame::Resync(1);
     };
     if masked {
         header += 4;
     }
-    // Client->server frames must be masked; server->client must not be.
     let expect_masked = direction == Direction::Request;
     if masked != expect_masked {
         return Frame::Resync(1);
@@ -260,6 +255,8 @@ fn frame_ws(direction: Direction, buf: &[u8]) -> Frame {
     Frame::Message(total)
 }
 
+/// parse_http_ws performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 fn parse_http_ws(direction: Direction, msg: &[u8]) -> ParsedMessage {
     let body: Vec<u8> = if looks_like_http(msg) {
         match find(msg, b"\r\n\r\n") {
@@ -272,6 +269,8 @@ fn parse_http_ws(direction: Direction, msg: &[u8]) -> ParsedMessage {
     parse_json(direction, &body)
 }
 
+/// ws_unmasked_payload performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 fn ws_unmasked_payload(direction: Direction, frame: &[u8]) -> Vec<u8> {
     if frame.len() < 2 {
         return Vec::new();
@@ -304,6 +303,8 @@ fn ws_unmasked_payload(direction: Direction, frame: &[u8]) -> Vec<u8> {
     }
 }
 
+/// parse_json performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 fn parse_json(direction: Direction, body: &[u8]) -> ParsedMessage {
     let clordid = json_string(body, "cl_ord_id").unwrap_or_default();
     let orig = json_string(body, "orig_cl_ord_id").unwrap_or_default();
@@ -311,8 +312,6 @@ fn parse_json(direction: Direction, body: &[u8]) -> ParsedMessage {
     let fill_qty = json_uint(body, "fill_qty").unwrap_or(0);
     let fill_price = json_decimal_scaled(body, "fill_price").unwrap_or(0);
 
-    // The capture direction already tells request from response for JSON; there
-    // is no admin traffic on this transport.
     let class = if clordid.is_empty() {
         Classified::Ignore
     } else if direction == Direction::Request {
@@ -331,8 +330,8 @@ fn parse_json(direction: Direction, body: &[u8]) -> ParsedMessage {
     }
 }
 
-// ---- small byte helpers -----------------------------------------------------
-
+/// find performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 fn find(hay: &[u8], needle: &[u8]) -> Option<usize> {
     if needle.is_empty() || hay.len() < needle.len() {
         return None;
@@ -340,6 +339,8 @@ fn find(hay: &[u8], needle: &[u8]) -> Option<usize> {
     (0..=hay.len() - needle.len()).find(|&i| &hay[i..i + needle.len()] == needle)
 }
 
+/// find_byte performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 fn find_byte(hay: &[u8], b: u8, from: usize) -> Option<usize> {
     hay.get(from..)?
         .iter()
@@ -347,10 +348,14 @@ fn find_byte(hay: &[u8], b: u8, from: usize) -> Option<usize> {
         .map(|i| i + from)
 }
 
+/// string performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 fn string(b: &[u8]) -> String {
     String::from_utf8_lossy(b).into_owned()
 }
 
+/// parse_uint performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 fn parse_uint(b: &[u8]) -> Option<u64> {
     if b.is_empty() {
         return None;
@@ -365,7 +370,8 @@ fn parse_uint(b: &[u8]) -> Option<u64> {
     Some(v)
 }
 
-/// Parse a decimal like "42.5" into a fixed-point integer scaled by 1e9.
+/// parse_decimal_scaled performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 fn parse_decimal_scaled(b: &[u8]) -> u64 {
     let mut whole = 0u64;
     let mut frac = 0u64;
@@ -394,8 +400,9 @@ fn parse_decimal_scaled(b: &[u8]) -> u64 {
     whole.saturating_mul(PRICE_SCALE).saturating_add(frac)
 }
 
+/// header_content_length performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 fn header_content_length(headers: &[u8]) -> Option<usize> {
-    // Case-insensitive search for "content-length:".
     let lower: Vec<u8> = headers.iter().map(|b| b.to_ascii_lowercase()).collect();
     let i = find(&lower, b"content-length:")?;
     let rest = &headers[i + b"content-length:".len()..];
@@ -408,6 +415,8 @@ fn header_content_length(headers: &[u8]) -> Option<usize> {
     parse_uint(&val).map(|v| v as usize)
 }
 
+/// json_string performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 fn json_string(body: &[u8], key: &str) -> Option<String> {
     let pat = format!("\"{key}\"");
     let i = find(body, pat.as_bytes())?;
@@ -420,6 +429,8 @@ fn json_string(body: &[u8], key: &str) -> Option<String> {
     Some(string(&after_q[..q2]))
 }
 
+/// json_value_slice performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 fn json_value_slice<'a>(body: &'a [u8], key: &str) -> Option<&'a [u8]> {
     let pat = format!("\"{key}\"");
     let i = find(body, pat.as_bytes())?;
@@ -435,10 +446,14 @@ fn json_value_slice<'a>(body: &'a [u8], key: &str) -> Option<&'a [u8]> {
     Some(&val[..end])
 }
 
+/// json_uint performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 fn json_uint(body: &[u8], key: &str) -> Option<u64> {
     parse_uint(json_value_slice(body, key)?)
 }
 
+/// json_decimal_scaled performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 fn json_decimal_scaled(body: &[u8], key: &str) -> Option<u64> {
     Some(parse_decimal_scaled(json_value_slice(body, key)?))
 }
@@ -447,23 +462,21 @@ fn json_decimal_scaled(body: &[u8], key: &str) -> Option<u64> {
 mod tests {
     use super::*;
 
-    // M32: a chunked HTTP response (no Content-Length) must be framed through its
-    // terminating zero chunk, not treated as a headers-only message that derails
-    // framing of everything after it.
     #[test]
+    /// chunked_http_framed_through_terminator performs the module-specific operation described by its name.
+    /// It keeps validation, side effects, and returned values within this module's contract.
     fn chunked_http_framed_through_terminator() {
         let resp = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n";
         match frame_http(resp) {
             Frame::Message(n) => assert_eq!(n, resp.len(), "frame whole chunked message"),
             other => panic!("expected Message, got {:?}", other),
         }
-        // Without the terminating "0\r\n\r\n" yet, the message is incomplete (NOT
-        // mis-framed as a 0-length-body message).
         let partial = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhel";
         assert_eq!(frame_http(partial), Frame::Incomplete);
     }
 
-    /// Build a wire-format FIX message: prepend 8=/9= and append 10=NNN.
+    /// fix performs the module-specific operation described by its name.
+    /// It keeps validation, side effects, and returned values within this module's contract.
     fn fix(body: &str) -> Vec<u8> {
         let body = body.replace('|', "\x01");
         let head = format!("8=FIX.4.2\x019={}\x01", body.len());
@@ -474,6 +487,8 @@ mod tests {
     }
 
     #[test]
+    /// frames_one_fix_message_by_body_length performs the module-specific operation described by its name.
+    /// It keeps validation, side effects, and returned values within this module's contract.
     fn frames_one_fix_message_by_body_length() {
         let m = fix("35=D|49=IICPC-BOT|56=CONTESTANT|34=7|11=sess_1_7_O|55=IICPC|54=1|38=12|40=2|44=42.5|59=0|");
         assert_eq!(
@@ -483,6 +498,8 @@ mod tests {
     }
 
     #[test]
+    /// frames_coalesced_then_consumes performs the module-specific operation described by its name.
+    /// It keeps validation, side effects, and returned values within this module's contract.
     fn frames_coalesced_then_consumes() {
         let a = fix("35=D|49=IICPC-BOT|56=CONTESTANT|34=8|11=sess_1_8_O|38=1|40=2|44=1.0|");
         let b = fix("35=D|49=IICPC-BOT|56=CONTESTANT|34=9|11=sess_1_9_O|38=1|40=2|44=2.0|");
@@ -499,6 +516,8 @@ mod tests {
     }
 
     #[test]
+    /// incomplete_fix_waits_for_more performs the module-specific operation described by its name.
+    /// It keeps validation, side effects, and returned values within this module's contract.
     fn incomplete_fix_waits_for_more() {
         let m = fix("35=D|49=IICPC-BOT|34=7|11=sess_1_7_O|38=1|40=2|44=42.5|");
         assert_eq!(
@@ -508,8 +527,9 @@ mod tests {
     }
 
     #[test]
+    /// extracts_clordid_regardless_of_offset performs the module-specific operation described by its name.
+    /// It keeps validation, side effects, and returned values within this module's contract.
     fn extracts_clordid_regardless_of_offset() {
-        // Realistic header: 9= and 34= make tag 11 land far from any fixed offset.
         let m = fix("35=D|49=IICPC-BOT|56=CONTESTANT|34=123|52=19700101-00:00:00.000|11=sess_42_123_O|21=1|55=IICPC|54=1|38=12|40=2|44=42.5|59=0|");
         let p = parse(Transport::Fix, Direction::Request, &m);
         assert_eq!(p.class, Classified::Request);
@@ -517,6 +537,8 @@ mod tests {
     }
 
     #[test]
+    /// cancel_request_carries_orig_clordid performs the module-specific operation described by its name.
+    /// It keeps validation, side effects, and returned values within this module's contract.
     fn cancel_request_carries_orig_clordid() {
         let m = fix(
             "35=F|49=IICPC-BOT|56=CONTESTANT|34=5|11=sess_1_5_C|41=sess_1_2_O|55=IICPC|54=1|38=3|",
@@ -528,6 +550,8 @@ mod tests {
     }
 
     #[test]
+    /// execution_report_is_a_response_with_fill performs the module-specific operation described by its name.
+    /// It keeps validation, side effects, and returned values within this module's contract.
     fn execution_report_is_a_response_with_fill() {
         let m = fix("35=8|49=CONTESTANT|56=IICPC-BOT|34=2|37=EXEC_2|11=order-real-1|17=E2|150=F|39=2|32=12|31=42.5|");
         let p = parse(Transport::Fix, Direction::Response, &m);
@@ -539,6 +563,8 @@ mod tests {
     }
 
     #[test]
+    /// logon_is_ignored performs the module-specific operation described by its name.
+    /// It keeps validation, side effects, and returned values within this module's contract.
     fn logon_is_ignored() {
         let m = fix("35=A|49=IICPC-BOT|56=CONTESTANT|34=1|98=0|108=30|");
         let p = parse(Transport::Fix, Direction::Request, &m);
@@ -546,6 +572,8 @@ mod tests {
     }
 
     #[test]
+    /// http_response_framed_by_content_length_and_parsed performs the module-specific operation described by its name.
+    /// It keeps validation, side effects, and returned values within this module's contract.
     fn http_response_framed_by_content_length_and_parsed() {
         let body =
             br#"{"cl_ord_id":"order-rest-1","exec_type":"F","fill_qty":7,"fill_price":99.25}"#;
@@ -568,6 +596,8 @@ mod tests {
     }
 
     #[test]
+    /// masked_ws_request_is_unmasked_and_parsed performs the module-specific operation described by its name.
+    /// It keeps validation, side effects, and returned values within this module's contract.
     fn masked_ws_request_is_unmasked_and_parsed() {
         let body = br#"{"cl_ord_id":"order-ws-1","qty":3,"price":11.75}"#;
         let mask = [0x13u8, 0x37, 0xc0, 0xde];

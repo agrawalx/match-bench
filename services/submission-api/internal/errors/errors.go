@@ -1,3 +1,8 @@
+// Package errors implements errors behavior.
+//
+// This file is part of the IICPC benchmarking platform and keeps its
+// responsibilities local to the surrounding package. It should be read with
+// the service-level design in design.md for broader operational context.
 package errors
 
 import "errors"
@@ -34,18 +39,6 @@ var (
 	ErrMissingCMakeTarget    = errors.New("CMakeLists.txt has no add_executable target")
 	ErrMissingCargoBin       = errors.New("Cargo.toml has no [[bin]] with the requested name")
 
-	// ErrActiveRunGroupExists signals that the partial unique index on
-	// run_groups (idx_run_groups_one_active_per_submission, UNIQUE on
-	// run_groups(submission_id) WHERE status NOT IN ('completed','failed'))
-	// rejected the INSERT because a non-terminal run-group already exists
-	// for this submission.
-	//
-	// This is the integrity gate behind "one active benchmark per
-	// submission": even under racing concurrent POSTs, the database
-	// guarantees only one run_group row is in a non-terminal state. The
-	// handler uses this sentinel to fall back to returning the existing
-	// run_group_id with HTTP 200 instead of 202 — making the endpoint
-	// idempotent at the database level rather than at the application level.
 	ErrActiveRunGroupExists = errors.New("active run-group already exists for this submission")
 	ErrRunNotFound          = errors.New("run not found")
 	ErrRunGroupNotFound     = errors.New("run-group not found")

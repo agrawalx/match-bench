@@ -1,3 +1,8 @@
+// Package consumer defines tests for kafka integration test.
+//
+// This file is part of the IICPC benchmarking platform and keeps its
+// responsibilities local to the surrounding package. It should be read with
+// the service-level design in design.md for broader operational context.
 package consumer
 
 import (
@@ -14,6 +19,8 @@ import (
 	kafka "github.com/segmentio/kafka-go"
 )
 
+// TestKafkaConsumerIntegrationConsumesBuildRequestAndCommits performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func TestKafkaConsumerIntegrationConsumesBuildRequestAndCommits(t *testing.T) {
 	brokers := integrationBrokers(t)
 	ensureTopic(t, brokers, topics.TopicSubmissionBuildRequested, 3)
@@ -52,11 +59,15 @@ func TestKafkaConsumerIntegrationConsumesBuildRequestAndCommits(t *testing.T) {
 	}
 }
 
+// recordingHandler groups the state and dependencies used by this package.
+// Keep this type aligned with the runtime contract around it.
 type recordingHandler struct {
 	mu   sync.Mutex
 	seen chan topics.SubmissionBuildRequested
 }
 
+// Run applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (h *recordingHandler) Run(_ context.Context, msg topics.SubmissionBuildRequested) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -66,6 +77,8 @@ func (h *recordingHandler) Run(_ context.Context, msg topics.SubmissionBuildRequ
 	}
 }
 
+// integrationBrokers performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func integrationBrokers(t *testing.T) []string {
 	t.Helper()
 	raw := os.Getenv("KAFKA_BROKERS")
@@ -84,10 +97,14 @@ func integrationBrokers(t *testing.T) []string {
 	return brokers
 }
 
+// integrationSuffix performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func integrationSuffix() string {
 	return strings.ReplaceAll(time.Now().UTC().Format("20060102150405.000000000"), ".", "")
 }
 
+// ensureTopic performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func ensureTopic(t *testing.T, brokers []string, topic string, partitions int) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -113,6 +130,8 @@ func ensureTopic(t *testing.T, brokers []string, topic string, partitions int) {
 	}
 }
 
+// publishJSON performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func publishJSON(t *testing.T, brokers []string, topic, key string, value any) {
 	t.Helper()
 	payload, err := json.Marshal(value)

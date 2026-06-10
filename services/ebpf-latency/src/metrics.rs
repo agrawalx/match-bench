@@ -1,3 +1,9 @@
+//! This module implements metrics behavior.
+//!
+//! It belongs to the IICPC benchmarking platform and should keep its
+//! behavior consistent with the service contracts documented in design.md.
+//! The comments in this file describe public structure and callable behavior.
+
 use std::{
     env,
     io::{Read, Write},
@@ -18,6 +24,8 @@ use prometheus_client::{
 
 type ResultFamily = Family<[(&'static str, &'static str); 1], Counter>;
 
+/// Metrics stores the state passed across this module boundary.
+/// Keep field changes compatible with callers and serialized contracts.
 struct Metrics {
     registry: Registry,
     events_decoded: Counter,
@@ -94,6 +102,8 @@ static METRICS: LazyLock<Metrics> = LazyLock::new(|| {
     }
 });
 
+/// start_server performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 pub fn start_server() {
     let port = env::var("METRICS_PORT").unwrap_or_else(|_| "9090".to_string());
     let addr = format!("0.0.0.0:{port}");
@@ -113,6 +123,8 @@ pub fn start_server() {
     });
 }
 
+/// event_decoded performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 pub fn event_decoded(reordering: bool, retransmission_count: u32) {
     METRICS.events_decoded.inc();
     if reordering {
@@ -125,10 +137,14 @@ pub fn event_decoded(reordering: bool, retransmission_count: u32) {
     }
 }
 
+/// decode_error performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 pub fn decode_error() {
     METRICS.events_decode_errors.inc();
 }
 
+/// ringbuf_dropped performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 pub fn ringbuf_dropped(total: u64) {
     let previous = LAST_RINGBUF_DROPPED.swap(total, Ordering::Relaxed);
     if total > previous {
@@ -136,21 +152,29 @@ pub fn ringbuf_dropped(total: u64) {
     }
 }
 
+/// flushed performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 pub fn flushed(events: usize) {
     METRICS.flushes.inc();
     METRICS.events_flushed.inc_by(events as u64);
 }
 
+/// attach_ok performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 pub fn attach_ok() {
     METRICS.attach.get_or_create(&[("result", "ok")]).inc();
 }
 
+/// render performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 fn render() -> String {
     let mut out = String::new();
     let _ = encode(&mut out, &METRICS.registry);
     out
 }
 
+/// handle_client performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 fn handle_client(mut stream: TcpStream) {
     let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
     let mut buf = [0_u8; 512];

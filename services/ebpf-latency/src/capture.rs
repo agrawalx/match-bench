@@ -1,50 +1,44 @@
-//! Decoding of the kernel `CaptureRecord` ring-buffer ABI.
+//! This module implements capture behavior.
 //!
-//! The kernel (src/ebpf.rs) emits a fixed 28-byte header followed by
-//! `captured_len` payload bytes. All integer fields are written on the
-//! little-endian `bpfel` target as already-host-order values (the kernel applied
-//! `from_be` to the network fields), so userspace reads them as plain
-//! little-endian integers. Keep this in sync with `CaptureRecord` in ebpf.rs.
-
-/// Byte offset of the payload within the record (matches CAPTURE_HEADER_LEN).
+//! It belongs to the IICPC benchmarking platform and should keep its
+//! behavior consistent with the service contracts documented in design.md.
+//! The comments in this file describe public structure and callable behavior.
 pub const CAPTURE_HEADER_LEN: usize = 28;
-/// Maximum payload bytes the kernel copies per segment (matches CAPTURE_CAP).
 pub const CAPTURE_CAP: usize = 1536;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+/// Direction enumerates the states or variants handled by this module.
+/// Match arms should preserve the semantic contract of each variant.
 pub enum Direction {
-    /// XDP ingress — a request entering the algo pod (carries t3).
     Request,
-    /// tc egress — a response leaving the algo pod (carries t7).
     Response,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Transport enumerates the states or variants handled by this module.
+/// Match arms should preserve the semantic contract of each variant.
 pub enum Transport {
-    /// FIX on TCP port 9898.
     Fix,
-    /// REST/WebSocket on TCP port 8080.
     HttpWs,
 }
 
-/// Identifies one TCP connection by its client (bot) side, which the kernel
-/// reports identically on both directions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+/// FlowKey stores the state passed across this module boundary.
+/// Keep field changes compatible with callers and serialized contracts.
 pub struct FlowKey {
     pub client_ip: u32,
     pub client_port: u16,
 }
 
-/// A decoded capture: one TCP segment's worth of payload plus metadata.
 #[derive(Debug, Clone)]
+/// Capture stores the state passed across this module boundary.
+/// Keep field changes compatible with callers and serialized contracts.
 pub struct Capture<'a> {
     pub timestamp_ns: u64,
     pub flow: FlowKey,
-    /// FIX/HTTP port — informational; the transport hint is precomputed.
     #[allow(dead_code)]
     pub server_port: u16,
     pub tcp_seq: u32,
-    /// Full on-wire payload length (may exceed `payload.len()` if truncated).
     #[allow(dead_code)]
     pub payload_len: u32,
     pub direction: Direction,
@@ -53,6 +47,8 @@ pub struct Capture<'a> {
 }
 
 #[derive(Debug, PartialEq, Eq)]
+/// CaptureError enumerates the states or variants handled by this module.
+/// Match arms should preserve the semantic contract of each variant.
 pub enum CaptureError {
     TooShort { got: usize },
     BadCapturedLen { captured: usize, available: usize },
@@ -60,6 +56,8 @@ pub enum CaptureError {
 }
 
 impl core::fmt::Display for CaptureError {
+    /// fmt performs the module-specific operation described by its name.
+    /// It keeps validation, side effects, and returned values within this module's contract.
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             CaptureError::TooShort { got } => {
@@ -79,21 +77,28 @@ impl core::fmt::Display for CaptureError {
 
 impl std::error::Error for CaptureError {}
 
+/// read_u16 performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 fn read_u16(b: &[u8], off: usize) -> u16 {
     u16::from_le_bytes([b[off], b[off + 1]])
 }
 
+/// read_u32 performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 fn read_u32(b: &[u8], off: usize) -> u32 {
     u32::from_le_bytes([b[off], b[off + 1], b[off + 2], b[off + 3]])
 }
 
+/// read_u64 performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 fn read_u64(b: &[u8], off: usize) -> u64 {
     let mut a = [0u8; 8];
     a.copy_from_slice(&b[off..off + 8]);
     u64::from_le_bytes(a)
 }
 
-/// Decode one ring-buffer record. The returned `payload` borrows `bytes`.
+/// decode performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 pub fn decode(bytes: &[u8]) -> Result<Capture<'_>, CaptureError> {
     if bytes.len() < CAPTURE_HEADER_LEN {
         return Err(CaptureError::TooShort { got: bytes.len() });
@@ -145,6 +150,8 @@ pub fn decode(bytes: &[u8]) -> Result<Capture<'_>, CaptureError> {
 mod tests {
     use super::*;
 
+    /// encode performs the module-specific operation described by its name.
+    /// It keeps validation, side effects, and returned values within this module's contract.
     fn encode(
         ts: u64,
         client_ip: u32,
@@ -170,6 +177,8 @@ mod tests {
     }
 
     #[test]
+    /// decodes_a_fix_request_record performs the module-specific operation described by its name.
+    /// It keeps validation, side effects, and returned values within this module's contract.
     fn decodes_a_fix_request_record() {
         let rec = encode(42, 0x0a00_0001, 1000, 7, 51234, 9898, 0, b"8=FIX.4");
         let cap = decode(&rec).unwrap();
@@ -185,6 +194,8 @@ mod tests {
     }
 
     #[test]
+    /// decodes_an_http_response_record performs the module-specific operation described by its name.
+    /// It keeps validation, side effects, and returned values within this module's contract.
     fn decodes_an_http_response_record() {
         let rec = encode(99, 0x0a00_0002, 5, 4, 40000, 8080, 1, b"HTTP");
         let cap = decode(&rec).unwrap();
@@ -194,6 +205,8 @@ mod tests {
     }
 
     #[test]
+    /// rejects_short_record performs the module-specific operation described by its name.
+    /// It keeps validation, side effects, and returned values within this module's contract.
     fn rejects_short_record() {
         assert!(matches!(
             decode(&[0u8; 10]),
@@ -202,9 +215,10 @@ mod tests {
     }
 
     #[test]
+    /// rejects_overlong_captured_len performs the module-specific operation described by its name.
+    /// It keeps validation, side effects, and returned values within this module's contract.
     fn rejects_overlong_captured_len() {
         let mut rec = encode(1, 2, 3, 4, 5, 9898, 0, b"abc");
-        // claim 200 captured bytes while only 3 are present
         rec[24] = 200;
         rec[25] = 0;
         assert!(matches!(

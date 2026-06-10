@@ -1,3 +1,8 @@
+// Package book defines tests for book test.
+//
+// This file is part of the IICPC benchmarking platform and keeps its
+// responsibilities local to the surrounding package. It should be read with
+// the service-level design in design.md for broader operational context.
 package book
 
 import (
@@ -6,20 +11,32 @@ import (
 	"github.com/iicpc/correctness-validator/internal/model"
 )
 
+// limit performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func limit(id string, side model.Side, price int64, qty uint64) *model.Order {
 	return &model.Order{OrderID: id, Side: side, Price: price, Qty: qty, Kind: model.NewLimit}
 }
+
+// market performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func market(id string, side model.Side, qty uint64) *model.Order {
 	return &model.Order{OrderID: id, Side: side, Qty: qty, Kind: model.NewMarket}
 }
+
+// cancel performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func cancel(orig string) *model.Order {
 	return &model.Order{OrderID: orig + "_C", OrigOrderID: orig, Kind: model.Cancel}
 }
+
+// replace performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func replace(id, orig string, side model.Side, price int64, qty uint64) *model.Order {
 	return &model.Order{OrderID: id, OrigOrderID: orig, Side: side, Price: price, Qty: qty, Kind: model.Replace}
 }
 
-// filled returns total reference-filled qty per order_id.
+// filled performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func filled(e *Engine) map[string]uint64 {
 	m := map[string]uint64{}
 	for _, f := range e.Fills() {
@@ -28,8 +45,8 @@ func filled(e *Engine) map[string]uint64 {
 	return m
 }
 
-// priceOf returns the (single) price an order traded at, or -1 if it never traded
-// or traded at multiple prices.
+// priceOf performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func priceOf(e *Engine, id string) int64 {
 	price := int64(-1)
 	for _, f := range e.Fills() {
@@ -43,6 +60,8 @@ func priceOf(e *Engine, id string) int64 {
 	return price
 }
 
+// TestLimitCross performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func TestLimitCross(t *testing.T) {
 	e := NewEngine()
 	e.Process(limit("S1", model.Sell, 100, 10)) // rests
@@ -56,6 +75,8 @@ func TestLimitCross(t *testing.T) {
 	}
 }
 
+// TestMarketWalksLevelsFIFO performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func TestMarketWalksLevelsFIFO(t *testing.T) {
 	e := NewEngine()
 	e.Process(limit("S1", model.Sell, 100, 5)) // best level, first
@@ -66,7 +87,6 @@ func TestMarketWalksLevelsFIFO(t *testing.T) {
 	if f["S1"] != 5 || f["S2"] != 5 || f["S3"] != 2 || f["B"] != 12 {
 		t.Fatalf("market walk wrong: %v", f)
 	}
-	// FIFO within the 100 level: S1 must be fully consumed before S2.
 	var sawS2BeforeS1Done bool
 	s1 := uint64(0)
 	for _, fl := range e.Fills() {
@@ -82,6 +102,8 @@ func TestMarketWalksLevelsFIFO(t *testing.T) {
 	}
 }
 
+// TestPricePriorityLowestAskFirst performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func TestPricePriorityLowestAskFirst(t *testing.T) {
 	e := NewEngine()
 	e.Process(limit("Shi", model.Sell, 101, 10))
@@ -93,6 +115,8 @@ func TestPricePriorityLowestAskFirst(t *testing.T) {
 	}
 }
 
+// TestNonMarketableLimitRestsThenFills performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func TestNonMarketableLimitRestsThenFills(t *testing.T) {
 	e := NewEngine()
 	e.Process(limit("Sask", model.Sell, 100, 10))
@@ -107,6 +131,8 @@ func TestNonMarketableLimitRestsThenFills(t *testing.T) {
 	}
 }
 
+// TestPartialFillKeepsMakerFront performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func TestPartialFillKeepsMakerFront(t *testing.T) {
 	e := NewEngine()
 	e.Process(limit("S1", model.Sell, 100, 10))
@@ -118,6 +144,8 @@ func TestPartialFillKeepsMakerFront(t *testing.T) {
 	}
 }
 
+// TestCancelRemovesResting performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func TestCancelRemovesResting(t *testing.T) {
 	e := NewEngine()
 	e.Process(limit("S1", model.Sell, 100, 10))
@@ -128,6 +156,8 @@ func TestCancelRemovesResting(t *testing.T) {
 	}
 }
 
+// TestReplacePriceChangeMovesLevel performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func TestReplacePriceChangeMovesLevel(t *testing.T) {
 	e := NewEngine()
 	e.Process(limit("B1", model.Buy, 100, 10))          // bid @100
@@ -143,6 +173,8 @@ func TestReplacePriceChangeMovesLevel(t *testing.T) {
 	}
 }
 
+// TestReplaceQtyDecreaseKeepsPriority performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func TestReplaceQtyDecreaseKeepsPriority(t *testing.T) {
 	e := NewEngine()
 	e.Process(limit("S1", model.Sell, 100, 10))
@@ -155,12 +187,8 @@ func TestReplaceQtyDecreaseKeepsPriority(t *testing.T) {
 	}
 }
 
-// A qty-decrease replace re-keys the order to its new ClOrdID but KEEPS queue
-// position, so the new id must inherit the original FIFO arrival rank. Without
-// that, SeqOf(new id) misses and queueJump can't classify a later violation
-// involving this order as time-priority / cancel-replace-loss (the fill stays
-// flagged, but with the wrong violation type). The fill-order test above passes
-// regardless (the FIFO slice is intact) — this guards the seqByOrder map.
+// TestReplaceQtyDecreaseCarriesFIFORank performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func TestReplaceQtyDecreaseCarriesFIFORank(t *testing.T) {
 	e := NewEngine()
 	e.Process(limit("A", model.Sell, 100, 10)) // rests first

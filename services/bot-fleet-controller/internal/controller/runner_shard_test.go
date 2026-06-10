@@ -1,3 +1,8 @@
+// Package controller defines tests for runner shard test.
+//
+// This file is part of the IICPC benchmarking platform and keeps its
+// responsibilities local to the surrounding package. It should be read with
+// the service-level design in design.md for broader operational context.
 package controller
 
 import (
@@ -6,6 +11,8 @@ import (
 	"github.com/iicpc/schemas/topics"
 )
 
+// TestComputeWorkerCount performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func TestComputeWorkerCount(t *testing.T) {
 	cases := []struct {
 		totalTasks int
@@ -29,8 +36,6 @@ func TestComputeWorkerCount(t *testing.T) {
 		}
 	}
 
-	// A custom MAX_TASKS_PER_WORKER changes fan-out: pin everything to one pod
-	// (huge ceiling) or spread thinly (small ceiling).
 	if got := computeWorkerCount(2555, 100000); got != 1 {
 		t.Errorf("pin-to-one-pod: computeWorkerCount(2555, 100000) = %d, want 1", got)
 	}
@@ -42,11 +47,9 @@ func TestComputeWorkerCount(t *testing.T) {
 	}
 }
 
-// TestRoundRobinShard verifies that buildWorkloadSpecs distributes tasks
-// across worker pods round-robin by task_id, keeping each worker's profile
-// distribution close to the scenario's overall mix.
+// TestRoundRobinShard performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func TestRoundRobinShard(t *testing.T) {
-	// 12 tasks across 3 workers → 4 per worker.
 	tasks := make([]topics.TaskSpec, 12)
 	for i := range tasks {
 		tasks[i] = topics.TaskSpec{TaskID: uint32(i)}

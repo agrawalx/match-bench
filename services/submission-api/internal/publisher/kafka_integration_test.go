@@ -1,3 +1,8 @@
+// Package publisher defines tests for kafka integration test.
+//
+// This file is part of the IICPC benchmarking platform and keeps its
+// responsibilities local to the surrounding package. It should be read with
+// the service-level design in design.md for broader operational context.
 package publisher
 
 import (
@@ -13,6 +18,8 @@ import (
 	kafka "github.com/segmentio/kafka-go"
 )
 
+// TestKafkaPublisherIntegrationPublishesBuildAndBenchmarkRequests performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func TestKafkaPublisherIntegrationPublishesBuildAndBenchmarkRequests(t *testing.T) {
 	brokers := integrationBrokers(t)
 	ensureTopic(t, brokers, topics.TopicSubmissionBuildRequested, 3)
@@ -59,8 +66,6 @@ func TestKafkaPublisherIntegrationPublishesBuildAndBenchmarkRequests(t *testing.
 		t.Fatalf("unexpected build request: %+v", build)
 	}
 
-	// benchmark.requested is keyed by run_group_id (not session_id) so one
-	// group's sibling sessions serialize on a single partition.
 	var benchmark topics.BenchmarkRequested
 	consumeJSONByKey(t, brokers, topics.TopicBenchmarkRequested, "group-"+suffix, &benchmark)
 	if benchmark.SessionID != benchID || benchmark.RunGroupID != "group-"+suffix {
@@ -68,6 +73,8 @@ func TestKafkaPublisherIntegrationPublishesBuildAndBenchmarkRequests(t *testing.
 	}
 }
 
+// integrationBrokers performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func integrationBrokers(t *testing.T) []string {
 	t.Helper()
 	raw := os.Getenv("KAFKA_BROKERS")
@@ -86,10 +93,14 @@ func integrationBrokers(t *testing.T) []string {
 	return brokers
 }
 
+// integrationSuffix performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func integrationSuffix() string {
 	return strings.ReplaceAll(time.Now().UTC().Format("20060102150405.000000000"), ".", "")
 }
 
+// ensureTopic performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func ensureTopic(t *testing.T, brokers []string, topic string, partitions int) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -115,6 +126,8 @@ func ensureTopic(t *testing.T, brokers []string, topic string, partitions int) {
 	}
 }
 
+// consumeJSONByKey performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func consumeJSONByKey[T any](t *testing.T, brokers []string, topic, key string, dst *T) {
 	t.Helper()
 	reader := kafka.NewReader(kafka.ReaderConfig{

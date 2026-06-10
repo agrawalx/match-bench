@@ -1,6 +1,8 @@
-// Package store persists the validator's output: a per-session correctness
-// summary (the idempotency marker) and the full violation log for judge review.
-// Mirrors the platform's pattern: createTableSQL Exec'd on startup, no migrations.
+// Package store implements postgres behavior.
+//
+// This file is part of the IICPC benchmarking platform and keeps its
+// responsibilities local to the surrounding package. It should be read with
+// the service-level design in design.md for broader operational context.
 package store
 
 import (
@@ -14,13 +16,6 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// Status values for a correctness_summary row. StatusScored marks a REAL
-// validation verdict and is immutable once written. StatusTimedOut marks the
-// placeholder the VALIDATION_TIMEOUT fallback writes when a session could not
-// be validated within budget: zero fills, zero violations — internally
-// consistent, NOT a fabricated phantom fill. A timed_out row may be overwritten
-// by a later real score (never the reverse), and the trigger path re-runs the
-// validation when it sees one instead of treating the session as done.
 const (
 	StatusScored   = "scored"
 	StatusTimedOut = "timed_out"
@@ -70,12 +65,8 @@ CREATE TABLE IF NOT EXISTS correctness_violations (
 CREATE INDEX IF NOT EXISTS idx_cviol_session ON correctness_violations (session_id);
 `
 
-// Record is everything persisted for one validated session. Status is
-// StatusScored or StatusTimedOut; empty is normalized to StatusScored so
-// pre-status callers keep their old semantics. SentCount/AckedCount/
-// MatchedCount are the telemetry-completeness counters from the drain
-// (pipeline.Counts); a timed_out placeholder leaves them zero — the drain
-// never completed, so the counters are unknown, not "measured empty".
+// Record groups the state and dependencies used by this package.
+// Keep this type aligned with the runtime contract around it.
 type Record struct {
 	SessionID    string
 	ContestantID string
@@ -87,10 +78,14 @@ type Record struct {
 	ComputedAtNS uint64
 }
 
+// Store groups the state and dependencies used by this package.
+// Keep this type aligned with the runtime contract around it.
 type Store struct {
 	pool *pgxpool.Pool
 }
 
+// New performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func New(ctx context.Context, dsn string) (*Store, error) {
 	pool, err := pgxpool.New(ctx, dsn)
 	if err != nil {
@@ -103,16 +98,16 @@ func New(ctx context.Context, dsn string) (*Store, error) {
 	return &Store{pool: pool}, nil
 }
 
+// Close applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (s *Store) Close() { s.pool.Close() }
 
+// Healthcheck applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (s *Store) Healthcheck(ctx context.Context) error { return s.pool.Ping(ctx) }
 
-// SummaryStatus returns the persisted summary status for a session
-// (StatusScored or StatusTimedOut) and whether a summary row exists at all.
-// The trigger path uses it to decide between re-publishing a real score and
-// RE-RUNNING the validation: a timed_out placeholder must not satisfy the
-// idempotency guard, or one slow drain would permanently freeze the
-// contestant's correctness at the placeholder.
+// SummaryStatus applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (s *Store) SummaryStatus(ctx context.Context, sessionID string) (string, bool, error) {
 	var status string
 	err := s.pool.QueryRow(ctx,
@@ -127,15 +122,8 @@ func (s *Store) SummaryStatus(ctx context.Context, sessionID string) (string, bo
 	return status, true, nil
 }
 
-// Save atomically CLAIMS a session and writes its summary + violation log in one
-// transaction. It returns claimed=true when THIS call either created the summary
-// row or replaced a timed_out placeholder with a real scored result — the two
-// cases where the caller owns publishing the score. The conditional upsert is
-// one-way: a real score may overwrite a timeout placeholder, but NOTHING ever
-// overwrites a scored row, so a fabricated timeout can never beat a concurrent
-// real validation to the permanent verdict. This claim closes the check-then-act
-// TOCTOU between the SummaryStatus precheck and the write, so exactly one worker
-// publishes the score for a session even with VALIDATOR_CONCURRENCY > 1.
+// Save applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (s *Store) Save(ctx context.Context, rec Record) (bool, error) {
 	status := rec.Status
 	if status == "" {
@@ -179,13 +167,8 @@ WHERE correctness_summary.status = 'timed_out' AND EXCLUDED.status = 'scored'`,
 		return false, fmt.Errorf("insert summary: %w", err)
 	}
 	if tag.RowsAffected() == 0 {
-		// Conflict and the guard refused the update: an immutable scored row (or
-		// a same-status placeholder) already exists. Not ours to publish.
 		return false, tx.Commit(ctx)
 	}
-	// RowsAffected()==1 covers both the fresh insert and the
-	// scored-over-timed_out overwrite. A timed_out placeholder never writes
-	// violations, so the violation log below cannot double up on the overwrite.
 
 	if len(rec.Report.Violations) > 0 {
 		rows := make([][]any, 0, len(rec.Report.Violations))
@@ -206,9 +189,8 @@ WHERE correctness_summary.status = 'timed_out' AND EXCLUDED.status = 'scored'`,
 	return true, tx.Commit(ctx)
 }
 
-// LoadScore rebuilds the published CorrectnessScoreEvent from a stored summary.
-// Used to re-publish at-least-once when a redelivery finds the summary already
-// persisted (e.g. the original publish failed after the summary was committed).
+// LoadScore applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (s *Store) LoadScore(ctx context.Context, sessionID string) (topics.CorrectnessScoreEvent, bool, error) {
 	var (
 		ev                             topics.CorrectnessScoreEvent

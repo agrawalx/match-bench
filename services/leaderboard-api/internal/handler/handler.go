@@ -1,3 +1,8 @@
+// Package handler implements handler behavior.
+//
+// This file is part of the IICPC benchmarking platform and keeps its
+// responsibilities local to the surrounding package. It should be read with
+// the service-level design in design.md for broader operational context.
 package handler
 
 import (
@@ -10,6 +15,8 @@ import (
 	"github.com/iicpc/leaderboard-api/internal/read"
 )
 
+// Reader defines the behavior expected by this package boundary.
+// Implementations should preserve the caller-visible contract.
 type Reader interface {
 	Leaderboard(context.Context, read.LeaderboardQuery) (read.LeaderboardResponse, error)
 	RunDetail(context.Context, string) (read.RunDetail, error)
@@ -17,15 +24,21 @@ type Reader interface {
 	ActiveRuns(context.Context) ([]read.ActiveRun, error)
 }
 
+// Handler groups the state and dependencies used by this package.
+// Keep this type aligned with the runtime contract around it.
 type Handler struct {
 	reader        Reader
 	prometheusURL string
 }
 
+// New performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func New(reader Reader, prometheusURL string) *Handler {
 	return &Handler{reader: reader, prometheusURL: prometheusURL}
 }
 
+// Leaderboard applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (h *Handler) Leaderboard(w http.ResponseWriter, r *http.Request) {
 	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
 	resp, err := h.reader.Leaderboard(r.Context(), read.LeaderboardQuery{
@@ -42,6 +55,8 @@ func (h *Handler) Leaderboard(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, resp, err)
 }
 
+// RunDetail applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (h *Handler) RunDetail(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "run_group_id")
 	if id == "" {
@@ -52,6 +67,8 @@ func (h *Handler) RunDetail(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, resp, err)
 }
 
+// Chart applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (h *Handler) Chart(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "session_id")
 	if id == "" {
@@ -62,6 +79,8 @@ func (h *Handler) Chart(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]any{"session_id": id, "points": resp}, err)
 }
 
+// LiveRuns applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (h *Handler) LiveRuns(w http.ResponseWriter, r *http.Request) {
 	runs, err := h.reader.ActiveRuns(r.Context())
 	if runs == nil {
@@ -70,6 +89,8 @@ func (h *Handler) LiveRuns(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]any{"runs": runs}, err)
 }
 
+// HealthPanel applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (h *Handler) HealthPanel(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, map[string]any{
 		"source":         "prometheus",
@@ -83,6 +104,8 @@ func (h *Handler) HealthPanel(w http.ResponseWriter, _ *http.Request) {
 	}, nil)
 }
 
+// writeJSON performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func writeJSON(w http.ResponseWriter, v any, err error) {
 	w.Header().Set("Content-Type", "application/json")
 	if err != nil {

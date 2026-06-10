@@ -1,3 +1,8 @@
+// Package consumer defines tests for kafka integration test.
+//
+// This file is part of the IICPC benchmarking platform and keeps its
+// responsibilities local to the surrounding package. It should be read with
+// the service-level design in design.md for broader operational context.
 package consumer
 
 import (
@@ -14,6 +19,8 @@ import (
 	kafka "github.com/segmentio/kafka-go"
 )
 
+// TestBenchmarkStatusConsumerIntegrationConsumesStatusFromKafka performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func TestBenchmarkStatusConsumerIntegrationConsumesStatusFromKafka(t *testing.T) {
 	brokers := integrationBrokers(t)
 	ensureTopic(t, brokers, topics.TopicBenchmarkStatusUpdated, 3)
@@ -54,6 +61,8 @@ func TestBenchmarkStatusConsumerIntegrationConsumesStatusFromKafka(t *testing.T)
 	}
 }
 
+// integrationBrokers performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func integrationBrokers(t *testing.T) []string {
 	t.Helper()
 	raw := os.Getenv("KAFKA_BROKERS")
@@ -72,10 +81,14 @@ func integrationBrokers(t *testing.T) []string {
 	return brokers
 }
 
+// integrationSuffix performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func integrationSuffix() string {
 	return strings.ReplaceAll(time.Now().UTC().Format("20060102150405.000000000"), ".", "")
 }
 
+// ensureTopic performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func ensureTopic(t *testing.T, brokers []string, topic string, partitions int) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -101,6 +114,8 @@ func ensureTopic(t *testing.T, brokers []string, topic string, partitions int) {
 	}
 }
 
+// publishJSON performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func publishJSON[T any](t *testing.T, brokers []string, topic, key string, value T) {
 	t.Helper()
 	payload, err := json.Marshal(value)
@@ -123,12 +138,16 @@ func publishJSON[T any](t *testing.T, brokers []string, topic, key string, value
 	}
 }
 
+// runStatusUpdate groups the state and dependencies used by this package.
+// Keep this type aligned with the runtime contract around it.
 type runStatusUpdate struct {
 	sessionID string
 	status    string
 	message   string
 }
 
+// recordingRunStatusStore groups the state and dependencies used by this package.
+// Keep this type aligned with the runtime contract around it.
 type recordingRunStatusStore struct {
 	targetSessionID string
 	updates         chan runStatusUpdate
@@ -136,6 +155,8 @@ type recordingRunStatusStore struct {
 	rollups         []string
 }
 
+// newRecordingRunStatusStore performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func newRecordingRunStatusStore(targetSessionID string) *recordingRunStatusStore {
 	return &recordingRunStatusStore{
 		targetSessionID: targetSessionID,
@@ -143,6 +164,8 @@ func newRecordingRunStatusStore(targetSessionID string) *recordingRunStatusStore
 	}
 }
 
+// UpdateRunStatus applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (s *recordingRunStatusStore) UpdateRunStatus(_ context.Context, sessionID, status, message string) error {
 	if sessionID == s.targetSessionID {
 		s.updates <- runStatusUpdate{sessionID: sessionID, status: status, message: message}
@@ -150,6 +173,8 @@ func (s *recordingRunStatusStore) UpdateRunStatus(_ context.Context, sessionID, 
 	return nil
 }
 
+// RecomputeRunGroupStatus applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (s *recordingRunStatusStore) RecomputeRunGroupStatus(_ context.Context, runGroupID string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()

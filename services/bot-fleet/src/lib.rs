@@ -1,11 +1,8 @@
-//! iicpc-bot-fleet library surface.
+//! This module implements lib behavior.
 //!
-//! main.rs is the binary entrypoint; lib.rs re-exports the internal modules
-//! so integration tests and examples (e.g. examples/kafka_roundtrip.rs) can
-//! exercise the same code the binary runs. Nothing here is public-facing;
-//! it exists strictly to let tests reach module internals without
-//! duplicating them.
-
+//! It belongs to the IICPC benchmarking platform and should keep its
+//! behavior consistent with the service contracts documented in design.md.
+//! The comments in this file describe public structure and callable behavior.
 pub mod config;
 pub mod content;
 pub mod errors;

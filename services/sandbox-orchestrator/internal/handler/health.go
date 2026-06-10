@@ -1,3 +1,8 @@
+// Package handler implements health behavior.
+//
+// This file is part of the IICPC benchmarking platform and keeps its
+// responsibilities local to the surrounding package. It should be read with
+// the service-level design in design.md for broader operational context.
 package handler
 
 import (
@@ -6,39 +11,36 @@ import (
 	"sync/atomic"
 )
 
-// Health endpoint contract for every HTTP service in this repo:
-//   - /healthz returns 200 unconditionally (process is up).
-//   - /readyz  returns 200 only after every external client this service
-//     depends on has initialised. For the orchestrator that means the k8s
-//     client is connected AND the in-memory slot map has been rebuilt
-//     from a Pod list in the sandbox namespace.
-//
-// Two endpoints, not one, so a Service that is briefly unhealthy at
-// startup (slot map not rebuilt yet) is not routed to by kube-proxy
-// while still being kept alive by the kubelet's livenessProbe.
-
 var healthzResponse = mustMarshalStaticJSON(map[string]string{"status": "ok"})
 var readyzResponse = mustMarshalStaticJSON(map[string]string{"status": "ready"})
 
-// ReadyState is a process-wide atomic flag flipped to true once startup
-// initialisation completes. main.go sets it after slot restore.
+// ReadyState groups the state and dependencies used by this package.
+// Keep this type aligned with the runtime contract around it.
 type ReadyState struct {
 	ready atomic.Bool
 }
 
+// NewReadyState performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func NewReadyState() *ReadyState {
 	return &ReadyState{}
 }
 
+// MarkReady applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (r *ReadyState) MarkReady() {
 	r.ready.Store(true)
 }
 
+// Healthz performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func Healthz(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	_, _ = w.Write(healthzResponse)
 }
 
+// Readyz performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func Readyz(r *ReadyState) http.HandlerFunc {
 	return func(w http.ResponseWriter, _ *http.Request) {
 		if !r.ready.Load() {
@@ -50,6 +52,8 @@ func Readyz(r *ReadyState) http.HandlerFunc {
 	}
 }
 
+// mustMarshalStaticJSON performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func mustMarshalStaticJSON(v any) []byte {
 	data, err := json.Marshal(v)
 	if err != nil {

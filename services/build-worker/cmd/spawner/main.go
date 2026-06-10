@@ -1,6 +1,8 @@
-// spawner is the production entry point.
-// It consumes Kafka and orchestrates 3 k8s Jobs per submission:
-// build (Kaniko → Harbor staging) → scan + sbom (parallel) → promote staging→production.
+// Package main starts the spawner service.
+//
+// This file is part of the IICPC benchmarking platform and keeps its
+// responsibilities local to the surrounding package. It should be read with
+// the service-level design in design.md for broader operational context.
 package main
 
 import (
@@ -19,6 +21,8 @@ import (
 	"github.com/iicpc/libs/metrics"
 )
 
+// main performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func main() {
 	logCfg := logger.DefaultConfig()
 	logCfg.ServiceName = "build-worker"
@@ -100,13 +104,7 @@ func main() {
 		HarborUser:               mustEnv("HARBOR_USER"),
 		HarborPassword:           mustEnv("HARBOR_PASSWORD"),
 
-		// "" (default) = push-to-create registry (Harbor/ghcr); "ecr" = pre-create
-		// repositories via the ECR API (default AWS chain / IRSA) before kaniko
-		// pushes and crane promotes — ECR has no push-to-create.
 		RegistryProvider: os.Getenv("REGISTRY_PROVIDER"),
-		// Explicit plain-HTTP/skip-TLS opt-in for local dev registries only.
-		// Loopback/kind-registry endpoints are auto-insecure regardless; private
-		// RFC1918 endpoints are NOT (EKS CIDRs live there).
 		RegistryInsecure: os.Getenv("REGISTRY_INSECURE") == "true",
 	}
 
@@ -119,28 +117,37 @@ func main() {
 	defer cons.Close()
 
 	log.Info("build-worker (spawner) started")
-	// start kafka
 	cons.Start(ctx)
 	log.Info("spawner stopped")
 }
 
+// statusUpdater groups the state and dependencies used by this package.
+// Keep this type aligned with the runtime contract around it.
 type statusUpdater struct {
 	pub *publisher.Publisher
 	pg  *store.PostgresStore
 }
 
+// PublishStatus applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (u *statusUpdater) PublishStatus(ctx context.Context, submissionID, status, message string) error {
 	return u.pub.PublishStatus(ctx, submissionID, status, message)
 }
 
+// UpdateDBStatus applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (u *statusUpdater) UpdateDBStatus(ctx context.Context, submissionID, status, message string) error {
 	return u.pg.UpdateStatus(ctx, submissionID, status, message)
 }
 
+// UpdateImageRef applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (u *statusUpdater) UpdateImageRef(ctx context.Context, submissionID, imageRef string) error {
 	return u.pg.UpdateImageRef(ctx, submissionID, imageRef)
 }
 
+// envOr performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func envOr(key, def string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
@@ -148,6 +155,8 @@ func envOr(key, def string) string {
 	return def
 }
 
+// mustEnv performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func mustEnv(key string) string {
 	v := os.Getenv(key)
 	if v == "" {

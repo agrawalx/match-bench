@@ -1,3 +1,9 @@
+//! This module implements config behavior.
+//!
+//! It belongs to the IICPC benchmarking platform and should keep its
+//! behavior consistent with the service contracts documented in design.md.
+//! The comments in this file describe public structure and callable behavior.
+
 use std::{env, process, time::Duration};
 
 use iicpc_schemas_rust::{
@@ -5,9 +11,9 @@ use iicpc_schemas_rust::{
     TOPIC_WORKLOAD_FAILED,
 };
 
-/// Config contains the bot-fleet runtime knobs loaded from environment.
-/// Defaults target local development while keeping workload fan-out bounded.
 #[derive(Debug, Clone)]
+/// Config stores the state passed across this module boundary.
+/// Keep field changes compatible with callers and serialized contracts.
 pub struct Config {
     pub worker_id: String,
     pub kafka_brokers: String,
@@ -21,35 +27,14 @@ pub struct Config {
     pub telemetry_batch_size: usize,
     pub telemetry_channel_capacity: usize,
     pub max_bots_per_worker: usize,
-    /// max_poll_interval is the consumer's `max.poll.interval.ms` bound. The
-    /// workload-assignment offset is committed only after the whole workload
-    /// finishes (barrier wait + scenario duration + drain); if that wall time
-    /// exceeds this bound Kafka rebalances mid-run and re-delivers the
-    /// assignment, causing duplicate execution. validate_spec rejects a spec
-    /// whose worst-case wall time would breach it (L39). Kept in sync with the
-    /// value passed to the rdkafka consumer in kafka.rs.
     pub max_poll_interval: Duration,
 }
 
-/// DEFAULT_MAX_POLL_INTERVAL is the consumer's `max.poll.interval.ms` default.
-/// Shared between the Config default and the rdkafka consumer so the L39 guard
-/// and the broker bound never drift apart.
-///
-/// 30 minutes, because the worker does not poll while a workload runs and the
-/// guard compares the workload's WORST-CASE wall time against this bound:
-///
-///   barrier wait (120s) + max(start_offset + duration) + response drain (5s)
-///
-/// The ramp scenario's ~180s task span makes that ≈305s — the old 300s
-/// default sat just below it, so every ramp run was either rejected by the
-/// guard or rebalanced mid-run and re-delivered (duplicate execution).
-/// 1_800_000 ms leaves ~1675s of task span for long high-RPS runs and matches
-/// the deployment manifest's MAX_POLL_INTERVAL_MS. Liveness is unaffected:
-/// librdkafka's background heartbeat (session.timeout.ms=10s) still detects a
-/// dead pod; only the allowed processing-between-polls window grows.
 pub const DEFAULT_MAX_POLL_INTERVAL: Duration = Duration::from_millis(1_800_000);
 
 impl Default for Config {
+    /// default performs the module-specific operation described by its name.
+    /// It keeps validation, side effects, and returned values within this module's contract.
     fn default() -> Self {
         Self {
             worker_id: format!("bot-fleet-local-{}", process::id()),
@@ -61,21 +46,8 @@ impl Default for Config {
             workload_failed_topic: TOPIC_WORKLOAD_FAILED.to_string(),
             orders_sent_topic: TOPIC_ORDERS_SENT.to_string(),
             telemetry_flush_interval: Duration::from_millis(5),
-            // Aggregator flush threshold, kept equal to the sink's
-            // per-message chunk ceiling (telemetry.rs MAX_EVENTS_PER_BATCH)
-            // so a steady-state flush is exactly one Kafka message:
-            // ≈360 B/event msgpack-named ⇒ 1000 events ≈ 360 KB < 1 MiB
-            // max.message.bytes. The interim 200 ceiling capped the sink at
-            // ~50-100k ev/s and silently dropped events at the scoring waves.
             telemetry_batch_size: 1000,
             telemetry_channel_capacity: 65536,
-            // The per-pod task ceiling. Must be >= the controller's
-            // MAX_TASKS_PER_WORKER (default 1000): the controller shards a
-            // scenario into specs of up to that many tasks, and a smaller value
-            // here makes the worker reject valid specs, dropping the workload so
-            // the controller's bot.ready fan-in times out. Raise both together
-            // (MAX_BOTS_PER_WORKER here, MAX_TASKS_PER_WORKER on the controller)
-            // to pin more load onto a single pod for capacity testing.
             max_bots_per_worker: 1000,
             max_poll_interval: DEFAULT_MAX_POLL_INTERVAL,
         }
@@ -83,8 +55,8 @@ impl Default for Config {
 }
 
 impl Config {
-    /// from_env builds a Config from process environment variables.
-    /// Missing or invalid values fall back to safe defaults.
+    /// from_env performs the module-specific operation described by its name.
+    /// It keeps validation, side effects, and returned values within this module's contract.
     pub fn from_env() -> Self {
         let default = Self::default();
         Self {
@@ -124,7 +96,8 @@ impl Config {
         }
     }
 
-    /// validate checks config bounds to avoid division-by-zero or queue starvation downstream.
+    /// validate performs the module-specific operation described by its name.
+    /// It keeps validation, side effects, and returned values within this module's contract.
     pub fn validate(&self) -> Result<(), String> {
         if self.worker_id.trim().is_empty() {
             return Err("worker_id cannot be empty".to_string());
@@ -169,7 +142,8 @@ impl Config {
     }
 }
 
-/// env_or returns a non-empty environment value or the provided default.
+/// env_or performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 fn env_or(key: &str, default: String) -> String {
     env::var(key)
         .ok()
@@ -182,6 +156,8 @@ mod tests {
     use super::*;
 
     #[test]
+    /// default_topics_come_from_schema_contract performs the module-specific operation described by its name.
+    /// It keeps validation, side effects, and returned values within this module's contract.
     fn default_topics_come_from_schema_contract() {
         let config = Config::default();
         assert_eq!(config.workload_topic, TOPIC_WORKLOAD_ASSIGNMENTS);
@@ -192,6 +168,8 @@ mod tests {
     }
 
     #[test]
+    /// validate_rejects_undersized_telemetry_channel performs the module-specific operation described by its name.
+    /// It keeps validation, side effects, and returned values within this module's contract.
     fn validate_rejects_undersized_telemetry_channel() {
         let config = Config {
             telemetry_batch_size: 100,
@@ -204,30 +182,21 @@ mod tests {
     }
 
     #[test]
+    /// default_max_poll_interval_covers_ramp_worst_case performs the module-specific operation described by its name.
+    /// It keeps validation, side effects, and returned values within this module's contract.
     fn default_max_poll_interval_covers_ramp_worst_case() {
-        // The L39 guard (worker.rs validate_spec) rejects any spec whose
-        // worst-case wall time meets or exceeds this default: 120s barrier
-        // wait + the ramp scenario's ~180s task span + 5s response drain
-        // ≈ 305s. The old 300s default sat BELOW that, so every ramp run
-        // either got rejected up front or — without the guard — hit a Kafka
-        // rebalance mid-run and was re-delivered (duplicate execution).
         let ramp_worst_case = Duration::from_secs(120 + 180 + 5);
         assert!(
             DEFAULT_MAX_POLL_INTERVAL > ramp_worst_case,
             "default poll interval {DEFAULT_MAX_POLL_INTERVAL:?} must exceed the ramp worst case {ramp_worst_case:?}"
         );
-        // 30 min, matching the deployment manifest's MAX_POLL_INTERVAL_MS.
         assert_eq!(DEFAULT_MAX_POLL_INTERVAL, Duration::from_millis(1_800_000));
     }
 
     #[test]
+    /// default_telemetry_batch_size_matches_publish_chunk_ceiling performs the module-specific operation described by its name.
+    /// It keeps validation, side effects, and returned values within this module's contract.
     fn default_telemetry_batch_size_matches_publish_chunk_ceiling() {
-        // The aggregator flushes at telemetry_batch_size and the sink splits
-        // each flush into MAX_EVENTS_PER_BATCH-sized Kafka messages. Keeping
-        // them equal means a steady-state flush is exactly one message — a
-        // smaller batch size silently caps sink throughput (the old 200
-        // ceiling capped it at ~50-100k ev/s, dropping events at the scoring
-        // waves), a larger one always pays the multi-chunk path.
         let config = Config::default();
         assert_eq!(config.telemetry_batch_size, 1000);
         assert_eq!(

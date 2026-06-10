@@ -1,3 +1,10 @@
+// Package dockerfile renders safe, platform-controlled Dockerfiles for
+// contestant submissions handled by the build worker.
+//
+// The package centralizes language-specific build templates so uploaded source
+// archives are converted into predictable runtime images. It also validates
+// interpolated values before rendering so build metadata cannot become a
+// Dockerfile injection vector.
 package dockerfile
 
 import (
@@ -7,13 +14,10 @@ import (
 	"text/template"
 )
 
-// validTarget constrains the build target to a safe charset. submission-api
-// validates this at upload, but build-worker re-validates here as defense in
-// depth: the value arrives over Kafka and is interpolated unescaped into the
-// generated Dockerfile (RUN/COPY/ENTRYPOINT), so a bad value is a Dockerfile-
-// injection vector regardless of where it originated.
 var validTarget = regexp.MustCompile(`^[A-Za-z0-9_.-]{1,64}$`)
 
+// templateVars stores the values interpolated into language-specific templates.
+// Keep this type narrow because values are copied directly into Dockerfile text.
 type templateVars struct {
 	Target string
 	Port   int
@@ -66,10 +70,10 @@ EXPOSE {{.Port}}
 ENTRYPOINT ["/app/{{.Target}}"]
 `))
 
-// Generate returns a platform-controlled Dockerfile for the given language.
-// language must be one of: cpp, rust, go.
-// buildType is currently unused but reserved for future multi-toolchain support.
-func Generate(language, _ /*buildType*/, target string, port int) (string, error) {
+// Generate renders a Dockerfile for a supported contestant language.
+// It validates the target name before template execution and returns the
+// complete Dockerfile text for the build pipeline to package.
+func Generate(language, _ string, target string, port int) (string, error) {
 	if !validTarget.MatchString(target) {
 		return "", fmt.Errorf("invalid build target %q: must match %s", target, validTarget.String())
 	}

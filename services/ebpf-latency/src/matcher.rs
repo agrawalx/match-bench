@@ -1,22 +1,17 @@
-//! Request→response matching by ClOrdID, with per-response emission.
+//! This module implements matcher behavior.
 //!
-//! Modeled on the bot's `PendingOrder` map (`bot-fleet/src/worker.rs`): each
-//! request inserts its `t3`; each response looks the order up by ClOrdID and
-//! emits an event. Unlike the bot — and unlike the old kernel matcher — this does
-//! NOT drop the entry on the first response, so every ExecutionReport for an
-//! order (ACK, then partial fills, then fill) produces its own event sharing the
-//! request's `t3`. This is the component responsible for emitting one event per
-//! response. Entries are evicted after an idle period to bound memory.
+//! It belongs to the IICPC benchmarking platform and should keep its
+//! behavior consistent with the service contracts documented in design.md.
+//! The comments in this file describe public structure and callable behavior.
 
 use std::collections::HashMap;
 
-/// Drop an in-flight order this long after its last activity (request or any
-/// response). Mirrors the telemetry ingester's 5 s join window.
 pub const DEFAULT_IDLE_NS: u64 = 5_000_000_000;
-/// Hard cap on tracked orders; oldest are evicted past this.
 const MAX_INFLIGHT: usize = 1_000_000;
 
 #[derive(Debug, Clone)]
+/// Inflight stores the state passed across this module boundary.
+/// Keep field changes compatible with callers and serialized contracts.
 struct Inflight {
     t3_ns: u64,
     client_ip: u32,
@@ -27,8 +22,9 @@ struct Inflight {
     last_activity_ns: u64,
 }
 
-/// One emitted measurement, ready to map onto `OrderAckedEvent`.
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// MatchedEvent stores the state passed across this module boundary.
+/// Keep field changes compatible with callers and serialized contracts.
 pub struct MatchedEvent {
     pub order_id: String,
     pub src_ip: u32,
@@ -46,19 +42,22 @@ pub struct MatchedEvent {
 }
 
 #[derive(Debug, Default)]
+/// Matcher stores the state passed across this module boundary.
+/// Keep field changes compatible with callers and serialized contracts.
 pub struct Matcher {
     inflight: HashMap<String, Inflight>,
-    /// Responses that arrived with no matching request (capture gap / out of order).
     pub unmatched_responses: u64,
 }
 
 impl Matcher {
+    /// new performs the module-specific operation described by its name.
+    /// It keeps validation, side effects, and returned values within this module's contract.
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Record a request (`t3`). Keeps the first `t3` and bumps the retransmission
-    /// count if the same ClOrdID is sent again.
+    /// on_request performs the module-specific operation described by its name.
+    /// It keeps validation, side effects, and returned values within this module's contract.
     pub fn on_request(
         &mut self,
         clordid: &str,
@@ -97,9 +96,9 @@ impl Matcher {
         }
     }
 
-    /// Record a response (`t7`) and emit an event if its request was seen. The
-    /// entry is retained so later responses for the same order also emit.
     #[allow(clippy::too_many_arguments)]
+    /// on_response performs the module-specific operation described by its name.
+    /// It keeps validation, side effects, and returned values within this module's contract.
     pub fn on_response(
         &mut self,
         clordid: &str,
@@ -134,7 +133,8 @@ impl Matcher {
         })
     }
 
-    /// Remove orders idle for `>= idle_ns` as of `now_ns`. Returns evicted count.
+    /// evict_idle performs the module-specific operation described by its name.
+    /// It keeps validation, side effects, and returned values within this module's contract.
     pub fn evict_idle(&mut self, now_ns: u64, idle_ns: u64) -> usize {
         let before = self.inflight.len();
         self.inflight
@@ -142,6 +142,8 @@ impl Matcher {
         before - self.inflight.len()
     }
 
+    /// evict_oldest performs the module-specific operation described by its name.
+    /// It keeps validation, side effects, and returned values within this module's contract.
     fn evict_oldest(&mut self) {
         if let Some(key) = self
             .inflight
@@ -159,6 +161,8 @@ mod tests {
     use super::*;
 
     #[test]
+    /// two_responses_per_order_emit_two_events_sharing_t3 performs the module-specific operation described by its name.
+    /// It keeps validation, side effects, and returned values within this module's contract.
     fn two_responses_per_order_emit_two_events_sharing_t3() {
         let mut m = Matcher::new();
         m.on_request("o1", 100, 0x0a00_0001, 50000, 1, false);
@@ -180,8 +184,9 @@ mod tests {
     }
 
     #[test]
+    /// per_clordid_isolation_across_pipelined_orders performs the module-specific operation described by its name.
+    /// It keeps validation, side effects, and returned values within this module's contract.
     fn per_clordid_isolation_across_pipelined_orders() {
-        // The EBPF-10 case: two orders on one flow, responses matched per-ClOrdID.
         let mut m = Matcher::new();
         m.on_request("A", 100, 1, 5, 10, false);
         m.on_request("B", 130, 1, 5, 20, false); // same flow, later request
@@ -196,6 +201,8 @@ mod tests {
     }
 
     #[test]
+    /// response_without_request_is_unmatched performs the module-specific operation described by its name.
+    /// It keeps validation, side effects, and returned values within this module's contract.
     fn response_without_request_is_unmatched() {
         let mut m = Matcher::new();
         assert!(m.on_response("ghost", 200, "0", 0, 0, "", false).is_none());
@@ -203,6 +210,8 @@ mod tests {
     }
 
     #[test]
+    /// duplicate_request_bumps_retransmission_and_keeps_first_t3 performs the module-specific operation described by its name.
+    /// It keeps validation, side effects, and returned values within this module's contract.
     fn duplicate_request_bumps_retransmission_and_keeps_first_t3() {
         let mut m = Matcher::new();
         m.on_request("o1", 100, 1, 5, 10, false);
@@ -213,6 +222,8 @@ mod tests {
     }
 
     #[test]
+    /// idle_orders_are_evicted performs the module-specific operation described by its name.
+    /// It keeps validation, side effects, and returned values within this module's contract.
     fn idle_orders_are_evicted() {
         let mut m = Matcher::new();
         m.on_request("old", 100, 1, 5, 10, false);

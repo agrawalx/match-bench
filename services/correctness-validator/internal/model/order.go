@@ -1,16 +1,19 @@
-// Package model holds the validator's in-memory domain types: a per-order record
-// joined from orders.sent (price/qty/side/type) and orders.acked (flow/t3/fills),
-// the reference order book's view of an order, and the violation types.
+// Package model implements order behavior.
+//
+// This file is part of the IICPC benchmarking platform and keeps its
+// responsibilities local to the surrounding package. It should be read with
+// the service-level design in design.md for broader operational context.
 package model
 
-// Flow identifies one TCP connection by the bot (client) tuple — the same on both
-// directions, as the eBPF capture reports it.
+// Flow groups the state and dependencies used by this package.
+// Keep this type aligned with the runtime contract around it.
 type Flow struct {
 	SrcIP   uint32
 	SrcPort uint16
 }
 
-// Less gives a deterministic total order over flows for the replay tiebreaker.
+// Less applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (f Flow) Less(o Flow) bool {
 	if f.SrcIP != o.SrcIP {
 		return f.SrcIP < o.SrcIP
@@ -25,6 +28,8 @@ const (
 	Sell
 )
 
+// SideFrom performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func SideFrom(s string) Side {
 	if s == "SELL" {
 		return Sell
@@ -32,7 +37,6 @@ func SideFrom(s string) Side {
 	return Buy
 }
 
-// Kind is the request type, derived from payload_type × ord_type.
 type Kind int
 
 const (
@@ -42,8 +46,8 @@ const (
 	Replace
 )
 
-// KindFrom maps the wire enums (payload_type "NEW"|"CANCEL"|"REPLACE",
-// ord_type "LIMIT"|"MARKET") to a request Kind.
+// KindFrom performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func KindFrom(payloadType, ordType string) Kind {
 	switch payloadType {
 	case "CANCEL":
@@ -58,6 +62,8 @@ func KindFrom(payloadType, ordType string) Kind {
 	}
 }
 
+// String applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (k Kind) String() string {
 	switch k {
 	case NewLimit:
@@ -73,8 +79,8 @@ func (k Kind) String() string {
 	}
 }
 
-// Response is one contestant-reported execution report for an order, from
-// orders.acked. exec_type is the raw FIX tag 150/39 value ("0","1","2","4","8","F").
+// Response groups the state and dependencies used by this package.
+// Keep this type aligned with the runtime contract around it.
 type Response struct {
 	ExecType  string
 	FillQty   uint64
@@ -82,7 +88,8 @@ type Response struct {
 	T7Ns      uint64
 }
 
-// Order is one logical order, joined from its sent event and its acked events.
+// Order groups the state and dependencies used by this package.
+// Keep this type aligned with the runtime contract around it.
 type Order struct {
 	OrderID     string
 	Flow        Flow

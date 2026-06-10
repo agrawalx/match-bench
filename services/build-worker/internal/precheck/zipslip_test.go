@@ -1,3 +1,8 @@
+// Package precheck defines tests for zipslip test.
+//
+// This file is part of the IICPC benchmarking platform and keeps its
+// responsibilities local to the surrounding package. It should be read with
+// the service-level design in design.md for broader operational context.
 package precheck
 
 import (
@@ -6,8 +11,8 @@ import (
 	"testing"
 )
 
-// buildZip creates an in-memory ZIP. Each entry in files is name→content.
-// Use buildZipRaw when you need to set file header names directly (e.g. for path traversal).
+// buildZip performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func buildZip(t *testing.T, files map[string]string) []byte {
 	t.Helper()
 	var buf bytes.Buffer
@@ -25,7 +30,8 @@ func buildZip(t *testing.T, files map[string]string) []byte {
 	return buf.Bytes()
 }
 
-// buildZipRaw creates a ZIP with exact header names, bypassing any path cleaning.
+// buildZipRaw performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func buildZipRaw(t *testing.T, names []string) []byte {
 	t.Helper()
 	var buf bytes.Buffer
@@ -44,8 +50,8 @@ func buildZipRaw(t *testing.T, names []string) []byte {
 	return buf.Bytes()
 }
 
-// ── Happy paths ──────────────────────────────────────────────────────────────
-
+// TestCheckZipSlip_Clean performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func TestCheckZipSlip_Clean(t *testing.T) {
 	data := buildZip(t, map[string]string{
 		"src/main.go":    "package main",
@@ -57,6 +63,8 @@ func TestCheckZipSlip_Clean(t *testing.T) {
 	}
 }
 
+// TestCheckZipSlip_NestedPaths performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func TestCheckZipSlip_NestedPaths(t *testing.T) {
 	data := buildZip(t, map[string]string{
 		"src/a/b/c/main.go": "package main",
@@ -67,6 +75,8 @@ func TestCheckZipSlip_NestedPaths(t *testing.T) {
 	}
 }
 
+// TestCheckZipSlip_EmptyZip performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func TestCheckZipSlip_EmptyZip(t *testing.T) {
 	data := buildZip(t, map[string]string{})
 	if err := CheckZipSlip(data); err != nil {
@@ -74,8 +84,8 @@ func TestCheckZipSlip_EmptyZip(t *testing.T) {
 	}
 }
 
-// ── Path traversal attacks ───────────────────────────────────────────────────
-
+// TestCheckZipSlip_DotDot performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func TestCheckZipSlip_DotDot(t *testing.T) {
 	data := buildZipRaw(t, []string{"../escape.txt"})
 	if err := CheckZipSlip(data); err == nil {
@@ -83,6 +93,8 @@ func TestCheckZipSlip_DotDot(t *testing.T) {
 	}
 }
 
+// TestCheckZipSlip_DotDotNested performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func TestCheckZipSlip_DotDotNested(t *testing.T) {
 	data := buildZipRaw(t, []string{"safe/../../escape.txt"})
 	if err := CheckZipSlip(data); err == nil {
@@ -90,32 +102,34 @@ func TestCheckZipSlip_DotDotNested(t *testing.T) {
 	}
 }
 
+// TestCheckZipSlip_AbsolutePath performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func TestCheckZipSlip_AbsolutePath(t *testing.T) {
-	// filepath.Join("/safe", "/etc/passwd") = "/safe/etc/passwd" in Go —
-	// subsequent absolute paths are absorbed, not substituted.
-	// So absolute ZIP entry names are safe and should not be rejected.
 	data := buildZipRaw(t, []string{"/etc/passwd"})
 	if err := CheckZipSlip(data); err != nil {
 		t.Errorf("absolute path should be safe (filepath.Join absorbs it), got error: %v", err)
 	}
 }
 
+// TestCheckZipSlip_MixedCleanAndEvil performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func TestCheckZipSlip_MixedCleanAndEvil(t *testing.T) {
-	// One clean entry, one malicious — the whole ZIP should be rejected.
 	data := buildZipRaw(t, []string{"src/main.go", "../escape.txt"})
 	if err := CheckZipSlip(data); err == nil {
 		t.Error("expected error when any entry escapes, got nil")
 	}
 }
 
-// ── Invalid input ────────────────────────────────────────────────────────────
-
+// TestCheckZipSlip_NotAZip performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func TestCheckZipSlip_NotAZip(t *testing.T) {
 	if err := CheckZipSlip([]byte("not a zip")); err == nil {
 		t.Error("expected error for non-zip data, got nil")
 	}
 }
 
+// TestCheckZipSlip_Empty performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func TestCheckZipSlip_Empty(t *testing.T) {
 	if err := CheckZipSlip([]byte{}); err == nil {
 		t.Error("expected error for empty input, got nil")

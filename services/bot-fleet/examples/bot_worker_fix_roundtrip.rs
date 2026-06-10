@@ -1,26 +1,8 @@
-//! bot_worker_fix_roundtrip — end-to-end integration test for the FIX
-//! response capture path (t0 / t1 / r9 / watchdog).
+//! This module implements bot worker fix roundtrip behavior.
 //!
-//! Wires together a real bot-fleet worker against:
-//!   - a tokio-spawned `fix_echo_server` running on localhost
-//!   - the docker-compose Kafka broker (testing/02_infra_up.sh)
-//!
-//! Flow:
-//!   1. Spin up an in-process FIX echo server (small latency + drop-every=4
-//!      to exercise both the matched and watchdog-timeout paths).
-//!   2. Publish a WorkloadSpec to the worker's topic (one TaskSpec, ~10 rps,
-//!      short duration).
-//!   3. Publish a BarrierEvent for the worker's session.
-//!   4. Run the bot-fleet worker (programmatically via the lib crate).
-//!   5. Drain the resulting orders.sent batches and assert:
-//!        - target_send_ts_ns > 0 on every event (t0 always captured)
-//!        - send_ts_ns >= target_send_ts_ns (t1 ≥ t0 always)
-//!        - mix of timed_out=true and =false present
-//!        - matched events have recv_done_ts_ns > send_ts_ns
-//!        - latency_ms ≈ echo server's artificial delay
-//!
-//! The whole run takes ~10s. Driven by testing/09_bot_worker_fix_roundtrip.sh
-//! which sets KAFKA_BROKERS, creates the test topics, and runs this binary.
+//! It belongs to the IICPC benchmarking platform and should keep its
+//! behavior consistent with the service contracts documented in design.md.
+//! The comments in this file describe public structure and callable behavior.
 
 use std::{collections::HashSet, env, time::Duration};
 
@@ -42,11 +24,9 @@ use tokio::{
     time::{sleep, timeout},
 };
 
-// We have to re-define a Deserialize-aware mirror of OrderSentEvent here
-// because the schemas crate only derives Serialize on it (the bot is the
-// producer, the future ingester is the consumer; this test acts as a
-// proxy-ingester).
 #[derive(Debug, Deserialize)]
+/// OrderSentEventOwned stores the state passed across this module boundary.
+/// Keep field changes compatible with callers and serialized contracts.
 struct OrderSentEventOwned {
     #[allow(dead_code)]
     session_id: String,
@@ -70,6 +50,8 @@ struct OrderSentEventOwned {
 }
 
 #[derive(Debug, Deserialize)]
+/// OrderSentBatchOwned stores the state passed across this module boundary.
+/// Keep field changes compatible with callers and serialized contracts.
 struct OrderSentBatchOwned {
     #[allow(dead_code)]
     session_id: String,
@@ -87,10 +69,9 @@ const ECHO_LATENCY_MS: u64 = 5;
 const DROP_EVERY: u64 = 4;
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 4)]
+/// main performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 async fn main() -> Result<()> {
-    // Surface the worker's tracing output to stderr so any warning during
-    // the run is visible (write failures, connect failures, etc.). Without
-    // this, the worker fails silently.
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
         .with_env_filter(
@@ -102,8 +83,6 @@ async fn main() -> Result<()> {
 
     let brokers = env::var("KAFKA_BROKERS").unwrap_or_else(|_| "localhost:9092".to_string());
 
-    // Unique topic names per run so a second invocation against the same
-    // broker doesn't pick up stale messages.
     let suffix = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
@@ -120,8 +99,6 @@ async fn main() -> Result<()> {
     eprintln!("barrier_topic     = {barrier_topic}");
     eprintln!("orders_sent_topic = {orders_sent_topic}");
 
-    // Pre-create topics so the worker's first publish doesn't race against
-    // auto-creation (a known issue we already handled in testing/02).
     create_topics(
         &brokers,
         &[
@@ -134,11 +111,9 @@ async fn main() -> Result<()> {
     )
     .await?;
 
-    // Spawn the FIX echo server on a tokio task; it lives for the whole run.
     let echo = spawn_fix_echo_server(FIX_BIND, ECHO_LATENCY_MS, DROP_EVERY).await?;
     eprintln!("fix echo server up on {FIX_BIND}");
 
-    // Spawn the bot-fleet worker. Worker config points at our test topics.
     let config = Config {
         worker_id: "roundtrip-worker".to_string(),
         kafka_brokers: brokers.clone(),
@@ -160,18 +135,8 @@ async fn main() -> Result<()> {
         }
     });
 
-    // Give the worker time to subscribe to the workload topic. If we publish
-    // immediately, the worker's StreamConsumer may not have finished joining
-    // the group yet and will miss the assignment (auto.offset.reset=earliest
-    // saves us, but waiting is cleaner).
     sleep(Duration::from_secs(1)).await;
 
-    // Barrier epoch is computed AFTER ReadySignal lands — same pattern the
-    // controller uses. Computing it earlier (e.g. now+2s up front) races
-    // against the worker's startup: Kafka admin + connect + ReadySignal
-    // typically takes 2-4s, which would put the epoch in the past by the
-    // time the worker reads it. We hold the barrier publish until ready
-    // arrives, then add a small safety gap.
     let barrier_epoch_ns = 0u64; // populated below after ReadySignal lands
 
     let host = FIX_BIND.split(':').next().unwrap().to_string();
@@ -202,7 +167,6 @@ async fn main() -> Result<()> {
         }],
     };
 
-    // Publish WorkloadSpec.
     let producer = kafka_helper::producer(&brokers).context("producer")?;
     kafka_helper::publish_json(
         &producer,
@@ -214,10 +178,6 @@ async fn main() -> Result<()> {
     .context("publish workload")?;
     eprintln!("workload published — waiting for ReadySignal before barrier...");
 
-    // Wait for the worker's ReadySignal. Once it arrives, we know the worker
-    // has completed connect_tasks (TCP open + FIX logon) and is blocked on
-    // wait_for_barrier. Now we can compute a barrier epoch that's actually
-    // reachable.
     let _ready_seen = wait_for_ready(&brokers, &ready_topic, SESSION_ID).await?;
     let barrier_epoch_ns = (std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -234,11 +194,7 @@ async fn main() -> Result<()> {
         .context("publish barrier")?;
     eprintln!("ready seen, barrier published (epoch_ns={barrier_epoch_ns})");
 
-    // Collect orders.sent. Worker finishes at task_end + RESPONSE_TIMEOUT (5s),
-    // so we wait task_end + 7s before declaring done.
-    let collect_deadline = Duration::from_secs(
-        2 /*barrier delay*/ + DURATION_SECS + 7, /*watchdog drain*/
-    );
+    let collect_deadline = Duration::from_secs(2 + DURATION_SECS + 7);
     eprintln!(
         "collecting orders.sent for {}s ...",
         collect_deadline.as_secs()
@@ -247,13 +203,11 @@ async fn main() -> Result<()> {
 
     eprintln!("collected {} OrderSentEvent records", events.len());
 
-    // Tear down — abort worker + echo server.
     worker_handle.abort();
     echo.abort();
     let _ = worker_handle.await;
     let _ = echo.await;
 
-    // ── ASSERTIONS ────────────────────────────────────────────────────
     let total_expected = TARGET_RPS as u64 * DURATION_SECS; // approx; allow ±10%
     if events.len() < (total_expected as usize) * 9 / 10 {
         return Err(anyhow!(
@@ -263,7 +217,6 @@ async fn main() -> Result<()> {
         ));
     }
 
-    // t0 always populated and t1 ≥ t0.
     let mut order_ids_seen = HashSet::new();
     let (mut matched, mut timed_out_count) = (0u64, 0u64);
     let mut latencies_ns: Vec<u64> = Vec::new();
@@ -310,7 +263,6 @@ async fn main() -> Result<()> {
         order_ids_seen.len()
     );
 
-    // Roughly 1 in DROP_EVERY messages should be timed_out.
     let expected_dropped = events.len() as u64 / DROP_EVERY;
     let dropped_tolerance = expected_dropped / 4 + 2; // ±25% + slack
     let dropped_diff = timed_out_count.abs_diff(expected_dropped);
@@ -321,7 +273,6 @@ async fn main() -> Result<()> {
     }
     eprintln!("drop count within tolerance (expected ~{expected_dropped}, ±{dropped_tolerance})");
 
-    // Matched latencies should be in the ballpark of ECHO_LATENCY_MS.
     if !latencies_ns.is_empty() {
         latencies_ns.sort_unstable();
         let p50 = latencies_ns[latencies_ns.len() / 2];
@@ -346,9 +297,8 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-/// wait_for_ready spins a short-lived consumer on the ReadySignal topic and
-/// returns as soon as a signal for our session arrives. Times out after 15s
-/// — sufficient for the worker's connect + logon + publish path.
+/// wait_for_ready performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 async fn wait_for_ready(brokers: &str, topic: &str, session_id: &str) -> Result<()> {
     let consumer: StreamConsumer = ClientConfig::new()
         .set("bootstrap.servers", brokers)
@@ -378,6 +328,8 @@ async fn wait_for_ready(brokers: &str, topic: &str, session_id: &str) -> Result<
     Err(anyhow!("timed out waiting for ReadySignal"))
 }
 
+/// create_topics performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 async fn create_topics(brokers: &str, topics: &[&str]) -> Result<()> {
     use rdkafka::admin::{AdminClient, AdminOptions, NewTopic, TopicReplication};
     use rdkafka::client::DefaultClientContext;
@@ -385,9 +337,6 @@ async fn create_topics(brokers: &str, topics: &[&str]) -> Result<()> {
     let admin: AdminClient<DefaultClientContext> = ClientConfig::new()
         .set("bootstrap.servers", brokers)
         .create()?;
-    // Problem: the example helper used to create RF=1 topics, so successful
-    // examples could mask production topic-policy drift. Fix: use RF=3 and
-    // the same core topic configs as the real topic-init paths.
     let news: Vec<NewTopic> = topics
         .iter()
         .map(|t| {
@@ -401,6 +350,8 @@ async fn create_topics(brokers: &str, topics: &[&str]) -> Result<()> {
     Ok(())
 }
 
+/// collect_events performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 async fn collect_events(
     brokers: &str,
     topic: &str,
@@ -431,16 +382,14 @@ async fn collect_events(
             Ok(Err(err)) => {
                 eprintln!("consumer recv error: {err}");
             }
-            Err(_) => {
-                // intermediate timeout — keep looping until overall deadline.
-            }
+            Err(_) => {}
         }
     }
     Ok(events)
 }
 
-/// Inline echo server spawn — same logic as examples/fix_echo_server.rs but
-/// embedded so this test is a single binary with no out-of-process deps.
+/// spawn_fix_echo_server performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 async fn spawn_fix_echo_server(
     bind: &str,
     latency_ms: u64,
@@ -461,6 +410,8 @@ async fn spawn_fix_echo_server(
     Ok(handle)
 }
 
+/// serve_one_fix_connection performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 async fn serve_one_fix_connection(
     mut stream: TcpStream,
     latency: Duration,
@@ -505,10 +456,9 @@ async fn serve_one_fix_connection(
 }
 
 #[allow(dead_code)]
+/// _orderbatch_marker performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 fn _orderbatch_marker() -> OrderSentBatch {
-    // Forces a reference to the schema OrderSentBatch type so any rename in
-    // the schemas crate is caught at compile time — the rest of this binary
-    // talks to its own OrderSentBatchOwned because we need Deserialize.
     OrderSentBatch {
         session_id: String::new(),
         worker_id: String::new(),

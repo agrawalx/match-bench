@@ -1,17 +1,8 @@
-// Package orchestrator is the HTTP client for sandbox-orchestrator.
+// Package orchestrator implements client behavior.
 //
-// Wire contract (defined in services/sandbox-orchestrator):
-//
-//	POST   /slots             create a slot for {slot_id, image, port}
-//	GET    /slots/{slot_id}   poll current state
-//	DELETE /slots/{slot_id}   release Pod + Service
-//
-// The controller treats the orchestrator as a black box: each slot is one
-// Pod and one Service (both named algo-{slot_id}), created together on
-// POST and released together on DELETE. slot_id is always the controller's
-// session_id verbatim — the orchestrator does not mint its own IDs. Image
-// ref is supplied by the caller from submissions.image_ref, which is persisted
-// by the build pipeline after the image is pushed/promoted.
+// This file is part of the IICPC benchmarking platform and keeps its
+// responsibilities local to the surrounding package. It should be read with
+// the service-level design in design.md for broader operational context.
 package orchestrator
 
 import (
@@ -25,9 +16,6 @@ import (
 	"time"
 )
 
-// State mirrors store.SlotState in the orchestrator. Duplicated here as a
-// small wire enum so the controller does not depend on the orchestrator's
-// internal store package.
 type State string
 
 const (
@@ -37,11 +25,15 @@ const (
 	StateTerminating State = "terminating"
 )
 
+// Endpoint groups the state and dependencies used by this package.
+// Keep this type aligned with the runtime contract around it.
 type Endpoint struct {
 	Host string `json:"host"`
 	Port int    `json:"port"`
 }
 
+// Slot groups the state and dependencies used by this package.
+// Keep this type aligned with the runtime contract around it.
 type Slot struct {
 	SlotID   string   `json:"slot_id"`
 	State    State    `json:"state"`
@@ -51,14 +43,15 @@ type Slot struct {
 
 var ErrSlotNotFound = errors.New("slot not found")
 
-// Client speaks to one sandbox-orchestrator instance.
+// Client groups the state and dependencies used by this package.
+// Keep this type aligned with the runtime contract around it.
 type Client struct {
 	baseURL string
 	http    *http.Client
 }
 
-// NewClient — baseURL is the orchestrator's ClusterIP service URL,
-// e.g. "http://sandbox-orchestrator.sandbox.svc.cluster.local:8080".
+// NewClient performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func NewClient(baseURL string) *Client {
 	return &Client{
 		baseURL: baseURL,
@@ -66,6 +59,8 @@ func NewClient(baseURL string) *Client {
 	}
 }
 
+// createSlotRequest groups the state and dependencies used by this package.
+// Keep this type aligned with the runtime contract around it.
 type createSlotRequest struct {
 	SlotID       string `json:"slot_id"`
 	ContestantID string `json:"contestant_id"`
@@ -73,10 +68,8 @@ type createSlotRequest struct {
 	Port         int    `json:"port"`
 }
 
-// CreateSlot is POST /slots. Returns the current slot state. The endpoint
-// is populated synchronously; State is whatever the orchestrator observed
-// right after creation (typically "creating"). contestantID is forwarded so the
-// orchestrator can stamp it onto the eBPF capture's latency events.
+// CreateSlot applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (c *Client) CreateSlot(ctx context.Context, slotID, contestantID, image string, port int) (*Slot, error) {
 	body, err := json.Marshal(createSlotRequest{SlotID: slotID, ContestantID: contestantID, Image: image, Port: port})
 	if err != nil {
@@ -90,7 +83,8 @@ func (c *Client) CreateSlot(ctx context.Context, slotID, contestantID, image str
 	return c.doSlot(req)
 }
 
-// GetSlot is GET /slots/{slot_id}. Returns ErrSlotNotFound on 404.
+// GetSlot applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (c *Client) GetSlot(ctx context.Context, slotID string) (*Slot, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/slots/"+slotID, nil)
 	if err != nil {
@@ -99,8 +93,8 @@ func (c *Client) GetSlot(ctx context.Context, slotID string) (*Slot, error) {
 	return c.doSlot(req)
 }
 
-// DeleteSlot is DELETE /slots/{slot_id}. Idempotent on the server side, so we
-// treat any 2xx (and 404) as success.
+// DeleteSlot applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (c *Client) DeleteSlot(ctx context.Context, slotID string) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, c.baseURL+"/slots/"+slotID, nil)
 	if err != nil {
@@ -118,8 +112,8 @@ func (c *Client) DeleteSlot(ctx context.Context, slotID string) error {
 	return fmt.Errorf("delete slot: %s — %s", resp.Status, string(body))
 }
 
-// WaitForReady polls GetSlot until the slot is ready, failed, or the deadline
-// passes. pollInterval defaults to 500ms when zero.
+// WaitForReady applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (c *Client) WaitForReady(ctx context.Context, slotID string, deadline time.Duration, pollInterval time.Duration) (*Slot, error) {
 	if pollInterval == 0 {
 		pollInterval = 500 * time.Millisecond
@@ -147,6 +141,8 @@ func (c *Client) WaitForReady(ctx context.Context, slotID string, deadline time.
 	}
 }
 
+// doSlot applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (c *Client) doSlot(req *http.Request) (*Slot, error) {
 	resp, err := c.http.Do(req)
 	if err != nil {

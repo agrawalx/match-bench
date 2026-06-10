@@ -1,23 +1,8 @@
-// Integration test for the correctness-validator I/O layer. Env-gated: it talks
-// to a real Kafka cluster and Postgres, so it only runs when both are configured.
+// Package main defines tests for main integration test.
 //
-//	docker compose up -d
-//	KAFKA_BROKERS=localhost:9092 \
-//	DATABASE_URL='postgres://iicpc:iicpc@localhost:5433/iicpc?sslmode=disable' \
-//	  go test ./... -run Integration -v
-//
-// It produces a synthetic session (orders.sent + orders.acked as MessagePack
-// named batches) plus a completed status, then exercises:
-//   - source.DrainSession  (read every event for the session off all partitions)
-//   - pipeline.Run         (assemble -> order by effective_t3 -> validate)
-//   - store.Save           (summary + violation log in one tx)
-//   - publisher.Publish     (CorrectnessScoreEvent on scores.correctness)
-//   - runTriggerConsumer    (benchmark.status.updated -> dispatch on `completed`)
-//
-// The session is built so the report is fully predictable: M1 (SELL 100x10) rests,
-// T1 (BUY 100x10) crosses -> two valid fills; T1 over-reports a 3rd fill (overfill);
-// a phantom fill is reported for an order that was never sent. So: 4 total fills,
-// 2 valid, 1 overfill, 1 phantom, score 0.5, 2 violations.
+// This file is part of the IICPC benchmarking platform and keeps its
+// responsibilities local to the surrounding package. It should be read with
+// the service-level design in design.md for broader operational context.
 package main
 
 import (
@@ -39,12 +24,18 @@ import (
 	"github.com/vmihailenco/msgpack/v5"
 )
 
+// itEnv performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func itEnv(key string) string { return strings.TrimSpace(os.Getenv(key)) }
 
+// discardLogger performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func discardLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
 }
 
+// TestIntegration_ValidateSession performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func TestIntegration_ValidateSession(t *testing.T) {
 	brokersCSV := itEnv("KAFKA_BROKERS")
 	dbURL := itEnv("DATABASE_URL")
@@ -58,7 +49,6 @@ func TestIntegration_ValidateSession(t *testing.T) {
 
 	produceSession(ctx, t, brokers, sessionID, contestant)
 
-	// Snapshot scores.correctness before we publish so we can read only our event.
 	since := snapshotOffsets(ctx, t, brokers, topics.TopicScoresCorrectness)
 
 	st, err := store.New(ctx, dbURL)
@@ -80,7 +70,6 @@ func TestIntegration_ValidateSession(t *testing.T) {
 		t.Fatalf("validateSession: %v", err)
 	}
 
-	// ---- assert the Postgres summary ----
 	pool, err := pgxpool.New(ctx, dbURL)
 	if err != nil {
 		t.Fatalf("pgxpool: %v", err)
@@ -113,14 +102,11 @@ FROM correctness_summary WHERE session_id=$1`, sessionID).
 	if score < 0.49 || score > 0.51 {
 		t.Errorf("correctness_score = %v, want ~0.5", score)
 	}
-	// Completeness counters from the fixture drain: 2 orders.sent events (M1, T1),
-	// 6 orders.acked events (2×M1, 3×T1, 1×PH), 2 matched orders (PH never sent).
 	if sentCount != 2 || ackedCount != 6 || matchedCount != 2 {
 		t.Errorf("summary completeness = sent %d acked %d matched %d; want 2/6/2",
 			sentCount, ackedCount, matchedCount)
 	}
 
-	// ---- assert the violation log ----
 	rows, err := pool.Query(ctx,
 		"SELECT violation_type, order_id FROM correctness_violations WHERE session_id=$1 ORDER BY violation_type", sessionID)
 	if err != nil {
@@ -145,7 +131,6 @@ FROM correctness_summary WHERE session_id=$1`, sessionID).
 		t.Errorf("phantom violation order = %q, want PH", viol["phantom"])
 	}
 
-	// ---- assert the published CorrectnessScoreEvent ----
 	ev, ok := readNewScore(ctx, t, brokers, since, sessionID)
 	if !ok {
 		t.Fatal("CorrectnessScoreEvent not found on scores.correctness")
@@ -161,19 +146,14 @@ FROM correctness_summary WHERE session_id=$1`, sessionID).
 			ev.SentCount, ev.AckedCount, ev.MatchedCount)
 	}
 
-	// ---- idempotency: a second run must short-circuit (scored-status guard) ----
 	status, done, err := st.SummaryStatus(ctx, sessionID)
 	if err != nil || !done || status != store.StatusScored {
 		t.Errorf("SummaryStatus after save = (%q,%v,%v), want (%q,true,nil)", status, done, err, store.StatusScored)
 	}
 }
 
-// TestIntegration_TriggerConsumer drives the real runStatusConsumer end to end:
-// a `completed` benchmark.status.updated event must trigger drain -> validate ->
-// durable persist (M21: the offset commits only after the summary lands, so the
-// session is never silently dropped). We assert the summary row appears.
-//
-// Env-gated: needs KAFKA_BROKERS + DATABASE_URL.
+// TestIntegration_TriggerConsumer performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func TestIntegration_TriggerConsumer(t *testing.T) {
 	brokersCSV := itEnv("KAFKA_BROKERS")
 	dbURL := itEnv("DATABASE_URL")
@@ -217,8 +197,8 @@ func TestIntegration_TriggerConsumer(t *testing.T) {
 	}
 }
 
-// ---- producers -------------------------------------------------------------
-
+// produceSession performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func produceSession(ctx context.Context, t *testing.T, brokers []string, sessionID, contestant string) {
 	t.Helper()
 	sent := topics.OrderSentBatch{
@@ -233,14 +213,11 @@ func produceSession(ctx context.Context, t *testing.T, brokers []string, session
 		SessionID:    sessionID,
 		ContestantID: contestant,
 		Events: []topics.OrderAckedEvent{
-			// M1 rests first (smallest t3), then reports its fill.
 			{SessionID: sessionID, ContestantID: contestant, OrderID: "M1", SrcIP: 1, SrcPort: 1000, TCPSeq: 1, T3XDPIngressNS: 1000, T7XDPEgressNS: 1500, ExecType: "0"},
 			{SessionID: sessionID, ContestantID: contestant, OrderID: "M1", SrcIP: 1, SrcPort: 1000, TCPSeq: 1, T3XDPIngressNS: 1000, T7XDPEgressNS: 1600, ExecType: "2", FillQty: 10, FillPrice: 100 * topics.TelemetryPriceScale},
-			// T1 crosses; reports two legit fills then an over-reported third.
 			{SessionID: sessionID, ContestantID: contestant, OrderID: "T1", SrcIP: 2, SrcPort: 2000, TCPSeq: 1, T3XDPIngressNS: 2000, T7XDPEgressNS: 2500, ExecType: "0"},
 			{SessionID: sessionID, ContestantID: contestant, OrderID: "T1", SrcIP: 2, SrcPort: 2000, TCPSeq: 1, T3XDPIngressNS: 2000, T7XDPEgressNS: 2600, ExecType: "2", FillQty: 10, FillPrice: 100 * topics.TelemetryPriceScale},
 			{SessionID: sessionID, ContestantID: contestant, OrderID: "T1", SrcIP: 2, SrcPort: 2000, TCPSeq: 1, T3XDPIngressNS: 2000, T7XDPEgressNS: 2700, ExecType: "2", FillQty: 5, FillPrice: 100 * topics.TelemetryPriceScale},
-			// PH: a fill reported for an order that was never sent.
 			{SessionID: sessionID, ContestantID: contestant, OrderID: "PH", SrcIP: 3, SrcPort: 3000, TCPSeq: 1, T3XDPIngressNS: 3000, T7XDPEgressNS: 3100, ExecType: "2", FillQty: 3, FillPrice: 100 * topics.TelemetryPriceScale},
 		},
 	}
@@ -248,6 +225,8 @@ func produceSession(ctx context.Context, t *testing.T, brokers []string, session
 	writeMsgpack(ctx, t, brokers, topics.TopicOrdersAcked, sessionID, acked)
 }
 
+// writeMsgpack performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func writeMsgpack(ctx context.Context, t *testing.T, brokers []string, topic, key string, v any) {
 	t.Helper()
 	payload, err := msgpack.Marshal(v) // named maps, matching the Rust rmp_serde::to_vec_named producers
@@ -266,6 +245,8 @@ func writeMsgpack(ctx context.Context, t *testing.T, brokers []string, topic, ke
 	}
 }
 
+// produceStatus performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func produceStatus(ctx context.Context, t *testing.T, brokers []string, sessionID, status string) {
 	t.Helper()
 	payload, err := json.Marshal(topics.BenchmarkStatusUpdated{SessionID: sessionID, Status: status})
@@ -284,8 +265,8 @@ func produceStatus(ctx context.Context, t *testing.T, brokers []string, sessionI
 	}
 }
 
-// ---- scores.correctness read-back ------------------------------------------
-
+// snapshotOffsets performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func snapshotOffsets(ctx context.Context, t *testing.T, brokers []string, topic string) map[int]int64 {
 	t.Helper()
 	conn, err := kafka.DialContext(ctx, "tcp", brokers[0])
@@ -313,6 +294,8 @@ func snapshotOffsets(ctx context.Context, t *testing.T, brokers []string, topic 
 	return out
 }
 
+// readNewScore performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func readNewScore(ctx context.Context, t *testing.T, brokers []string, since map[int]int64, sessionID string) (*topics.CorrectnessScoreEvent, bool) {
 	t.Helper()
 	for pid, start := range since {

@@ -1,3 +1,8 @@
+// Package store defines tests for claim integration test.
+//
+// This file is part of the IICPC benchmarking platform and keeps its
+// responsibilities local to the surrounding package. It should be read with
+// the service-level design in design.md for broader operational context.
 package store
 
 import (
@@ -9,14 +14,8 @@ import (
 	"time"
 )
 
-// TestIntegration_ClaimSubmissionContestantIfEmpty pins the claim-race
-// contract: the UPDATE ... WHERE contestant_id = ” is the atomic
-// first-writer-wins gate, and callers can only distinguish "I won" from
-// "someone else owns this" via the claimed return derived from RowsAffected.
-// The pre-fix signature returned only error, so racing callers both assumed
-// ownership and the loser operated on another contestant's submission.
-//
-// Env-gated: needs a live Postgres (DATABASE_URL).
+// TestIntegration_ClaimSubmissionContestantIfEmpty performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func TestIntegration_ClaimSubmissionContestantIfEmpty(t *testing.T) {
 	dsn := strings.TrimSpace(os.Getenv("DATABASE_URL"))
 	if dsn == "" {
@@ -38,7 +37,6 @@ func TestIntegration_ClaimSubmissionContestantIfEmpty(t *testing.T) {
 		t.Fatalf("insert: %v", err)
 	}
 
-	// First claim on an unowned row wins.
 	claimed, err := st.ClaimSubmissionContestantIfEmpty(ctx, id, "winner")
 	if err != nil {
 		t.Fatalf("claim by winner: %v", err)
@@ -47,8 +45,6 @@ func TestIntegration_ClaimSubmissionContestantIfEmpty(t *testing.T) {
 		t.Fatal("claim by winner on unowned row: claimed = false, want true")
 	}
 
-	// A second contestant loses the race — claimed must be false, and the
-	// DB row must still belong to the winner.
 	claimed, err = st.ClaimSubmissionContestantIfEmpty(ctx, id, "loser")
 	if err != nil {
 		t.Fatalf("claim by loser: %v", err)
@@ -64,9 +60,6 @@ func TestIntegration_ClaimSubmissionContestantIfEmpty(t *testing.T) {
 		t.Fatalf("contestant_id after losing claim = %q, want winner", meta.ContestantID)
 	}
 
-	// Re-claim by the existing owner is also not a fresh claim (the guard is
-	// contestant_id = '', not idempotent-per-owner) — callers must re-read
-	// and compare against the DB value, which the handler helper does.
 	claimed, err = st.ClaimSubmissionContestantIfEmpty(ctx, id, "winner")
 	if err != nil {
 		t.Fatalf("re-claim by winner: %v", err)
@@ -75,7 +68,6 @@ func TestIntegration_ClaimSubmissionContestantIfEmpty(t *testing.T) {
 		t.Fatal("re-claim by existing owner: claimed = true, want false")
 	}
 
-	// Empty contestant ID is a no-op, never a claim.
 	claimed, err = st.ClaimSubmissionContestantIfEmpty(ctx, id, "")
 	if err != nil {
 		t.Fatalf("claim with empty contestant: %v", err)

@@ -1,3 +1,8 @@
+// Package store implements postgres behavior.
+//
+// This file is part of the IICPC benchmarking platform and keeps its
+// responsibilities local to the surrounding package. It should be read with
+// the service-level design in design.md for broader operational context.
 package store
 
 import (
@@ -10,24 +15,18 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// startupSchemaSQL mirrors submission-api's idempotent image_ref migration.
-// The column was previously owned solely by submission-api's startup DDL,
-// which made build-worker's UpdateImageRef a deploy-order trap: against a
-// database whose submissions table pre-dates the column, the UPDATE failed
-// and the build went sticky-'failed'. Running the same ADD COLUMN IF NOT
-// EXISTS here makes either service sufficient to migrate the column.
-//
-// ALTER TABLE IF EXISTS: on a fresh database the submissions table does not
-// exist until submission-api boots and runs its CREATE TABLE (which already
-// includes image_ref) — build-worker must not crashloop on that window.
 const startupSchemaSQL = `
 ALTER TABLE IF EXISTS submissions ADD COLUMN IF NOT EXISTS image_ref TEXT NOT NULL DEFAULT '';
 `
 
+// PostgresStore groups the state and dependencies used by this package.
+// Keep this type aligned with the runtime contract around it.
 type PostgresStore struct {
 	pool *pgxpool.Pool
 }
 
+// NewPostgresStore performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func NewPostgresStore(ctx context.Context, dsn string) (*PostgresStore, error) {
 	start := time.Now()
 	pool, err := pgxpool.New(ctx, dsn)
@@ -45,10 +44,14 @@ func NewPostgresStore(ctx context.Context, dsn string) (*PostgresStore, error) {
 	return &PostgresStore{pool: pool}, nil
 }
 
+// Close applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (s *PostgresStore) Close() {
 	s.pool.Close()
 }
 
+// UpdateStatus applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (s *PostgresStore) UpdateStatus(ctx context.Context, submissionID, status, message string) error {
 	start := time.Now()
 	if !validSubmissionStatus(status) {
@@ -97,6 +100,8 @@ func (s *PostgresStore) UpdateStatus(ctx context.Context, submissionID, status, 
 	return nil
 }
 
+// UpdateImageRef applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (s *PostgresStore) UpdateImageRef(ctx context.Context, submissionID, imageRef string) error {
 	start := time.Now()
 	if imageRef == "" {
@@ -118,6 +123,8 @@ func (s *PostgresStore) UpdateImageRef(ctx context.Context, submissionID, imageR
 	return nil
 }
 
+// RecordPoolStats applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (s *PostgresStore) RecordPoolStats() {
 	stats := s.pool.Stat()
 	labels := metrics.Labels("service", "build-worker")
@@ -129,7 +136,8 @@ func (s *PostgresStore) RecordPoolStats() {
 	metrics.Gauge("pgxpool_canceled_acquire_total", "pgxpool canceled acquire count.", labels, float64(stats.CanceledAcquireCount()))
 }
 
-// recordDB makes build pipeline database pressure visible to Prometheus.
+// recordDB performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func recordDB(operation string, start time.Time, err error) {
 	labels := metrics.Labels("service", "build-worker", "operation", operation)
 	metrics.Histogram("db_query_duration_seconds", "PostgreSQL query duration in seconds.", labels, metrics.SinceSeconds(start))
@@ -140,6 +148,8 @@ func recordDB(operation string, start time.Time, err error) {
 	metrics.Counter("db_query_total", "PostgreSQL queries by operation and result.", metrics.Labels("service", "build-worker", "operation", operation, "result", result), 1)
 }
 
+// validSubmissionStatus performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func validSubmissionStatus(status string) bool {
 	switch status {
 	case topics.StatusUploaded,

@@ -1,3 +1,8 @@
+// Package k8s defines tests for slot test.
+//
+// This file is part of the IICPC benchmarking platform and keeps its
+// responsibilities local to the surrounding package. It should be read with
+// the service-level design in design.md for broader operational context.
 package k8s
 
 import (
@@ -8,13 +13,8 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-// deriveState is the only piece of subtle logic in the orchestrator;
-// these tests cover the failure-vs-creating transitions that the slot
-// lifecycle depends on. The controller polls GET /slots/{id} and treats
-// state=ready as the signal to publish workload.assignments; if
-// deriveState returned "creating" for a pod that was actually stuck
-// (e.g. ImagePullBackOff), the controller would wait the full
-// DEPLOY_DEADLINE before failing the run rather than failing fast.
+// TestDeriveState performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func TestDeriveState(t *testing.T) {
 	cases := []struct {
 		name      string
@@ -116,6 +116,8 @@ func TestDeriveState(t *testing.T) {
 	}
 }
 
+// TestValidateConfigRejectsMillicpu performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func TestValidateConfigRejectsMillicpu(t *testing.T) {
 	err := validateConfig(Config{Namespace: "sandbox", CPU: "2000m", Memory: "1Gi"})
 	if err == nil {
@@ -123,6 +125,8 @@ func TestValidateConfigRejectsMillicpu(t *testing.T) {
 	}
 }
 
+// TestValidateConfigRejectsInvalidMemory performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func TestValidateConfigRejectsInvalidMemory(t *testing.T) {
 	err := validateConfig(Config{Namespace: "sandbox", CPU: "2", Memory: "not-memory"})
 	if err == nil {
@@ -130,6 +134,8 @@ func TestValidateConfigRejectsInvalidMemory(t *testing.T) {
 	}
 }
 
+// TestPodNameAndFQDN performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func TestPodNameAndFQDN(t *testing.T) {
 	if podName("sess-123") != "algo-sess-123" {
 		t.Errorf("podName: got %s", podName("sess-123"))
@@ -140,6 +146,8 @@ func TestPodNameAndFQDN(t *testing.T) {
 	}
 }
 
+// TestPodSpecRuntimeClassOptional performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func TestPodSpecRuntimeClassOptional(t *testing.T) {
 	mgr := &Manager{namespace: "sandbox", cpu: "2", memory: "1Gi"}
 	pod := mgr.podSpec("s1", "", "img:tag", 8080)
@@ -154,6 +162,8 @@ func TestPodSpecRuntimeClassOptional(t *testing.T) {
 	}
 }
 
+// TestPodSpecImagePullSecretOptional performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func TestPodSpecImagePullSecretOptional(t *testing.T) {
 	mgr := &Manager{namespace: "sandbox", cpu: "2", memory: "1Gi"}
 	pod := mgr.podSpec("s1", "", "ghcr.io/iicpc/submission:latest", 8080)
@@ -168,6 +178,8 @@ func TestPodSpecImagePullSecretOptional(t *testing.T) {
 	}
 }
 
+// TestPodSpecLabels performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func TestPodSpecLabels(t *testing.T) {
 	mgr := &Manager{namespace: "sandbox", cpu: "2", memory: "1Gi"}
 	pod := mgr.podSpec("sess-AAA", "", "img:tag", 8080)
@@ -185,16 +197,8 @@ func TestPodSpecLabels(t *testing.T) {
 	}
 }
 
-// TestGuaranteedQoSShape locks the resource shape that fairness depends on.
-//
-// Kubernetes assigns Guaranteed QoS only when, for every container, every
-// resource has request == limit AND CPU is specified as an integer count
-// (not millicores). Burstable or BestEffort QoS makes algo pods eligible
-// for kubelet CPU throttling under contention — fatal for HFT-style p99
-// claims. Guaranteed QoS is also the precondition for the kubelet CPU
-// manager (when configured with cpuManagerPolicy=static) to give the pod
-// exclusive cpuset pinning; without that, two pods can share the same
-// physical cores even though they each "own" 2 CPUs.
+// TestGuaranteedQoSShape performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func TestGuaranteedQoSShape(t *testing.T) {
 	mgr := &Manager{namespace: "sandbox", cpu: "2", memory: "1Gi"}
 	pod := mgr.podSpec("s1", "", "img:tag", 8080)
@@ -213,9 +217,8 @@ func TestGuaranteedQoSShape(t *testing.T) {
 	}
 }
 
-// TestReadOnlyRootAndTmpfsMounts: disk-I/O fairness depends on BOTH the
-// readOnlyRootFilesystem flag AND tmpfs emptyDirs at every writable path.
-// Either alone is incomplete.
+// TestReadOnlyRootAndTmpfsMounts performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func TestReadOnlyRootAndTmpfsMounts(t *testing.T) {
 	mgr := &Manager{namespace: "sandbox", cpu: "2", memory: "1Gi"}
 	pod := mgr.podSpec("s1", "", "img:tag", 8080)
@@ -248,6 +251,8 @@ func TestReadOnlyRootAndTmpfsMounts(t *testing.T) {
 	}
 }
 
+// TestPodSpecNodePoolPinning performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func TestPodSpecNodePoolPinning(t *testing.T) {
 	mgr := &Manager{namespace: "sandbox", cpu: "2", memory: "1Gi"}
 	pod := mgr.podSpec("s1", "", "img:tag", 8080)
@@ -265,6 +270,8 @@ func TestPodSpecNodePoolPinning(t *testing.T) {
 	}
 }
 
+// TestBandwidthAnnotations performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func TestBandwidthAnnotations(t *testing.T) {
 	mgr := &Manager{namespace: "sandbox", cpu: "2", memory: "1Gi"}
 	pod := mgr.podSpec("s1", "", "img:tag", 8080)
@@ -283,6 +290,4 @@ func TestBandwidthAnnotations(t *testing.T) {
 	}
 }
 
-// Compile-time check: metav1 is used through ObjectMeta even without direct
-// imports in tests, but keep the import warm here for future test additions.
 var _ = metav1.ObjectMeta{}

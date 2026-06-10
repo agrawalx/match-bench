@@ -9,7 +9,9 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"os"
 	"os/exec"
+	"strings"
 
 	"github.com/moby/moby/client"
 )
@@ -17,15 +19,21 @@ import (
 // LocalRunner uses the Docker daemon for build and docker run for trivy/syft.
 // Intended for local development only.
 type LocalRunner struct {
-	log *slog.Logger
+	log              *slog.Logger
+	registryEndpoint string
+	registryProject  string
 }
 
 func NewLocalRunner(log *slog.Logger) *LocalRunner {
-	return &LocalRunner{log: log}
+	return &LocalRunner{
+		log:              log,
+		registryEndpoint: envOr("HARBOR_PRODUCTION_ENDPOINT", "localhost:5000"),
+		registryProject:  envOr("HARBOR_PROJECT", "iicpc"),
+	}
 }
 
 func (r *LocalRunner) Build(ctx context.Context, submissionID string, zipData []byte) (string, []byte, error) {
-	imageTag := fmt.Sprintf("iicpc-%s:latest", submissionID)
+	imageTag := r.imageRef(submissionID)
 
 	cli, err := client.NewClientWithOpts(client.FromEnv, client.WithAPIVersionNegotiation())
 	if err != nil {
@@ -53,6 +61,15 @@ func (r *LocalRunner) Build(ctx context.Context, submissionID string, zipData []
 		return "", buildLog, fmt.Errorf("build failed: %w", err)
 	}
 	return imageTag, buildLog, nil
+}
+
+func (r *LocalRunner) imageRef(submissionID string) string {
+	endpoint := strings.TrimSuffix(r.registryEndpoint, "/")
+	project := strings.Trim(strings.TrimSpace(r.registryProject), "/")
+	if endpoint == "" || project == "" {
+		return fmt.Sprintf("iicpc-%s:latest", submissionID)
+	}
+	return fmt.Sprintf("%s/%s/%s:latest", endpoint, project, submissionID)
 }
 
 func (r *LocalRunner) Scan(ctx context.Context, imageRef string) ([]byte, error) {
@@ -84,12 +101,28 @@ func (r *LocalRunner) SBOM(ctx context.Context, imageRef string) ([]byte, error)
 	return out, nil
 }
 
-func (r *LocalRunner) Push(_ context.Context, _ string) error {
-	r.log.Info("push step: stub (Harbor not configured)")
+func (r *LocalRunner) Push(ctx context.Context, imageRef string) error {
+	if r.registryEndpoint == "" {
+		r.log.Info("push step skipped: HARBOR_PRODUCTION_ENDPOINT is empty", "image", imageRef)
+		return nil
+	}
+	cmd := exec.CommandContext(ctx, "docker", "push", imageRef)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("docker push %s: %w: %s", imageRef, err, strings.TrimSpace(string(out)))
+	}
+	r.log.Info("pushed image", "ref", imageRef)
 	return nil
 }
 
 func (r *LocalRunner) Cleanup(_ context.Context, _ string) {}
+
+func envOr(key, def string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return def
+}
 
 // zipToTar converts a ZIP archive into a tar stream for Docker's build context.
 func zipToTar(zipData []byte) (io.Reader, error) {

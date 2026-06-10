@@ -128,6 +128,37 @@ func Run(ordered []*model.Order, phantoms []ReportedFill) Report {
 		orderByID[o.OrderID] = o
 	}
 
+	// Aggressive-fill tolerance index. A LIVE in-sandbox engine processes orders
+	// in socket-arrival order, not the offline effective_t3 order the reference
+	// replays, so a market/crossing-limit order legitimately matches liquidity at
+	// a slightly different instant. When AggressiveFillToleranceNs > 0, a reported
+	// aggressive fill at price P is accepted if NON-SELF opposite liquidity at P
+	// was genuinely resting within ±tolerance of the aggressor's effective_t3 —
+	// the fairness analog of the resting-order cross-flow tie tolerance. Default 0
+	// preserves strict behavior. Overfill and self-trade are never tolerated.
+	availByLevel := make(map[levelKey][]book.Availability)
+	if AggressiveFillToleranceNs > 0 {
+		for _, a := range engine.Availability() {
+			k := levelKey{a.Side, a.Price}
+			availByLevel[k] = append(availByLevel[k], a)
+		}
+	}
+	tolerated := func(o *model.Order, price int64) bool {
+		if AggressiveFillToleranceNs == 0 {
+			return false
+		}
+		me := model.ParticipantOf(o.OrderID)
+		for _, a := range availByLevel[levelKey{oppositeOf(o.Side), price}] {
+			if a.Participant == me {
+				continue
+			}
+			if windowsOverlap(a.EnterT3, a.ExitT3, o.EffectiveT3, AggressiveFillToleranceNs) {
+				return true
+			}
+		}
+		return false
+	}
+
 	var rep Report
 
 	for _, o := range ordered {
@@ -157,6 +188,8 @@ func Run(ordered []*model.Order, phantoms []ReportedFill) Report {
 				// the fill simply shouldn't have happened (price/liquidity break).
 				if jumper, ok := queueJump(engine, orderByID, o, price); ok {
 					rep.flagJump(engine, o, jumper, resp.FillQty, price)
+				} else if tolerated(o, price) {
+					rep.ValidFills++
 				} else {
 					rep.PriceViolations++
 					rep.add(Price, o.OrderID, resp.FillQty, price,
@@ -164,9 +197,13 @@ func Run(ordered []*model.Order, phantoms []ReportedFill) Report {
 				}
 
 			case !priceAllowed(ref[o.OrderID], price):
-				rep.PriceViolations++
-				rep.add(Price, o.OrderID, resp.FillQty, price,
-					"reported fill price not produced by the reference engine for this order")
+				if tolerated(o, price) {
+					rep.ValidFills++
+				} else {
+					rep.PriceViolations++
+					rep.add(Price, o.OrderID, resp.FillQty, price,
+						"reported fill price not produced by the reference engine for this order")
+				}
 
 			case cumReported > ref[o.OrderID].qty:
 				// Reported beyond what the reference gave this order at a valid price.
@@ -174,6 +211,8 @@ func Run(ordered []*model.Order, phantoms []ReportedFill) Report {
 				// quantity, it is a queue jump; otherwise an over-reported price break.
 				if jumper, ok := queueJump(engine, orderByID, o, price); ok {
 					rep.flagJump(engine, o, jumper, resp.FillQty, price)
+				} else if tolerated(o, price) {
+					rep.ValidFills++
 				} else {
 					rep.PriceViolations++
 					rep.add(Price, o.OrderID, resp.FillQty, price,
@@ -270,4 +309,39 @@ func queueJump(e *book.Engine, orderByID map[string]*model.Order, o *model.Order
 func priceAllowed(r *refFills, price int64) bool {
 	_, ok := r.prices[price]
 	return ok
+}
+
+// AggressiveFillToleranceNs is the ±window (effective_t3 nanoseconds) within which
+// a market/crossing-limit fill is accepted if it matched genuine non-self opposite
+// liquidity at the reported price. 0 = strict (no tolerance), preserving the
+// original behavior. The validator's main sets it from AGGRESSIVE_FILL_TOLERANCE_NS.
+// It exists because a live in-sandbox engine processes in socket-arrival order, not
+// the reference's offline effective_t3 order, so aggressive fills are otherwise
+// penalized for an ordering the contestant could not observe. Resting-order time
+// priority keeps its own (tighter) cross-flow tie tolerance in internal/replay.
+var AggressiveFillToleranceNs uint64
+
+// levelKey indexes the reference liquidity timeline by (side, price).
+type levelKey struct {
+	side  model.Side
+	price int64
+}
+
+func oppositeOf(s model.Side) model.Side {
+	if s == model.Buy {
+		return model.Sell
+	}
+	return model.Buy
+}
+
+// windowsOverlap reports whether a resting order's availability window
+// [enter, exit] overlaps the aggressor's tolerance window [t3-tol, t3+tol],
+// guarding against unsigned underflow on t3-tol.
+func windowsOverlap(enter, exit, t3, tol uint64) bool {
+	lo := uint64(0)
+	if t3 > tol {
+		lo = t3 - tol
+	}
+	hi := t3 + tol
+	return enter <= hi && exit >= lo
 }

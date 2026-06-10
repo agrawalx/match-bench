@@ -27,15 +27,31 @@ spec:
           ports:
             - name: http
               containerPort: 8080
+          # Upstream hosts/ports for the envsubst-rendered nginx config. These
+          # are the in-namespace Services; submission-api serves http on
+          # service port 80 (8080 on that Service is the metrics port).
+          env:
+            - name: LEADERBOARD_API_HOST
+              value: leaderboard-api
+            - name: LEADERBOARD_API_PORT
+              value: "8080"
+            - name: SUBMISSION_API_HOST
+              value: submission-api
+            - name: SUBMISSION_API_PORT
+              value: "80"
+            - name: AUTH_API_HOST
+              value: auth-api
+            - name: AUTH_API_PORT
+              value: "8080"
           readinessProbe:
             httpGet:
-              path: /index.html
+              path: /healthz
               port: http
             initialDelaySeconds: 3
             periodSeconds: 10
           livenessProbe:
             httpGet:
-              path: /index.html
+              path: /healthz
               port: http
             initialDelaySeconds: 5
             periodSeconds: 20
@@ -46,12 +62,16 @@ spec:
             capabilities:
               drop:
                 - ALL
-          # nginx writable paths (root fs is read-only).
+          # nginx writable paths (root fs is read-only): pid file under /tmp,
+          # temp paths under /var/cache/nginx, and the envsubst render target
+          # at /etc/nginx/conf.d.
           volumeMounts:
             - name: tmp
               mountPath: /tmp
             - name: cache
               mountPath: /var/cache/nginx
+            - name: nginx-conf
+              mountPath: /etc/nginx/conf.d
           resources:
             requests:
               cpu: 50m
@@ -63,4 +83,6 @@ spec:
         - name: tmp
           emptyDir: {}
         - name: cache
+          emptyDir: {}
+        - name: nginx-conf
           emptyDir: {}

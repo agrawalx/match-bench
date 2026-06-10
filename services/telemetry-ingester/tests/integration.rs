@@ -171,6 +171,10 @@ fn aggregate_synthetic(session: &str, contestant: &str) -> (Vec<Snapshot>, Expec
     (agg.snapshot(now_ns(), 1.0), exp)
 }
 
+fn redis_snapshot_key(contestant: &str, session: &str, wave_index: u32) -> String {
+    format!("contestant:{contestant}:{session}:{wave_index}")
+}
+
 // ---- Test A: TimescaleDB store round-trip ----------------------------------
 
 #[tokio::test]
@@ -232,7 +236,7 @@ async fn redis_roundtrip_writes_contestant_hash() {
         .await
         .expect("redis conn");
     let map: std::collections::HashMap<String, String> = redis::cmd("HGETALL")
-        .arg(format!("contestant:{contestant}"))
+        .arg(redis_snapshot_key(&contestant, &session, 0))
         .query_async(&mut conn)
         .await
         .expect("HGETALL");
@@ -489,7 +493,7 @@ async fn full_pipeline_kafka_to_timescale_and_redis() {
     let rclient = redis::Client::open(rurl).unwrap();
     let mut rconn = rclient.get_multiplexed_async_connection().await.unwrap();
     let map: std::collections::HashMap<String, String> = redis::cmd("HGETALL")
-        .arg(format!("contestant:{contestant}"))
+        .arg(redis_snapshot_key(&contestant, &session, 0))
         .query_async(&mut rconn)
         .await
         .unwrap();

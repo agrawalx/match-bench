@@ -10,6 +10,20 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+// startupSchemaSQL mirrors submission-api's idempotent image_ref migration.
+// The column was previously owned solely by submission-api's startup DDL,
+// which made build-worker's UpdateImageRef a deploy-order trap: against a
+// database whose submissions table pre-dates the column, the UPDATE failed
+// and the build went sticky-'failed'. Running the same ADD COLUMN IF NOT
+// EXISTS here makes either service sufficient to migrate the column.
+//
+// ALTER TABLE IF EXISTS: on a fresh database the submissions table does not
+// exist until submission-api boots and runs its CREATE TABLE (which already
+// includes image_ref) — build-worker must not crashloop on that window.
+const startupSchemaSQL = `
+ALTER TABLE IF EXISTS submissions ADD COLUMN IF NOT EXISTS image_ref TEXT NOT NULL DEFAULT '';
+`
+
 type PostgresStore struct {
 	pool *pgxpool.Pool
 }
@@ -22,6 +36,12 @@ func NewPostgresStore(ctx context.Context, dsn string) (*PostgresStore, error) {
 		return nil, fmt.Errorf("pgx pool: %w", err)
 	}
 	recordDB("connect", start, nil)
+
+	if _, err := pool.Exec(ctx, startupSchemaSQL); err != nil {
+		recordDB("startup_schema_migration", start, err)
+		return nil, fmt.Errorf("startup schema migration: %w", err)
+	}
+	recordDB("startup_schema_migration", start, nil)
 	return &PostgresStore{pool: pool}, nil
 }
 
@@ -74,6 +94,27 @@ func (s *PostgresStore) UpdateStatus(ctx context.Context, submissionID, status, 
 		return fmt.Errorf("update status: %w", err)
 	}
 	recordDB("update_submission_status", start, nil)
+	return nil
+}
+
+func (s *PostgresStore) UpdateImageRef(ctx context.Context, submissionID, imageRef string) error {
+	start := time.Now()
+	if imageRef == "" {
+		err := fmt.Errorf("empty image ref")
+		recordDB("update_submission_image_ref", start, err)
+		return err
+	}
+	_, err := s.pool.Exec(ctx,
+		`UPDATE submissions
+		    SET image_ref = $2
+		  WHERE submission_id = $1`,
+		submissionID, imageRef,
+	)
+	if err != nil {
+		recordDB("update_submission_image_ref", start, err)
+		return fmt.Errorf("update image ref: %w", err)
+	}
+	recordDB("update_submission_image_ref", start, nil)
 	return nil
 }
 

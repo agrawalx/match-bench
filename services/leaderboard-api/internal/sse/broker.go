@@ -5,21 +5,27 @@ import (
 	"encoding/json"
 	"net/http"
 	"sync"
+	"time"
 
 	"github.com/iicpc/libs/metrics"
 	"github.com/iicpc/schemas/topics"
 )
 
+// heartbeatInterval is how often an SSE comment is written to each client so
+// idle streams survive the ALB default 60s idle timeout.
+const heartbeatInterval = 15 * time.Second
+
 type SnapshotFunc func(context.Context) (any, error)
 
 type Broker struct {
-	mu       sync.Mutex
-	clients  map[chan []byte]struct{}
-	snapshot SnapshotFunc
+	mu        sync.Mutex
+	clients   map[chan []byte]struct{}
+	snapshot  SnapshotFunc
+	heartbeat time.Duration
 }
 
 func New(snapshot SnapshotFunc) *Broker {
-	return &Broker{clients: make(map[chan []byte]struct{}), snapshot: snapshot}
+	return &Broker{clients: make(map[chan []byte]struct{}), snapshot: snapshot, heartbeat: heartbeatInterval}
 }
 
 func (b *Broker) Broadcast(ev topics.LeaderboardUpdateEvent) {
@@ -75,10 +81,19 @@ func (b *Broker) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeEvent(w, "snapshot", snap)
 		flusher.Flush()
 	}
+	// Heartbeats are written by this per-client goroutine, not via the
+	// broadcast channel, so they never count against the slow-client drop.
+	keepalive := time.NewTicker(b.heartbeat)
+	defer keepalive.Stop()
 	for {
 		select {
 		case <-r.Context().Done():
 			return
+		case <-keepalive.C:
+			if _, err := w.Write([]byte(": keepalive\n\n")); err != nil {
+				return
+			}
+			flusher.Flush()
 		case payload, ok := <-ch:
 			if !ok {
 				return

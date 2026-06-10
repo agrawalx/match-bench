@@ -1,8 +1,9 @@
 # The platform namespace is default-deny. The frontend is a static SPA + nginx
 # proxy: it only needs to (1) be reachable on 8080 (from the ingress controller
-# and, for the proxy hop, intra-namespace), and (2) reach leaderboard-api (/api)
-# AND submission-api (/sapi) in the same namespace, plus DNS. It touches no
-# database, Kafka, or Redis directly — the APIs it proxies to do that.
+# and, for the proxy hop, intra-namespace), and (2) reach leaderboard-api
+# (/api/leaderboard), submission-api (/api/submission) AND auth-api (/api/auth)
+# in the same namespace, plus DNS. It touches no database, Kafka, or Redis
+# directly — the APIs it proxies to do that.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -27,8 +28,9 @@ spec:
         - port: 8080
           protocol: TCP
   egress:
-    # Proxy hops to the two platform APIs (same namespace, port 8080):
-    #   /api/*  -> leaderboard-api,  /sapi/* -> submission-api.
+    # Proxy hops to the three platform APIs (same namespace, pod port 8080):
+    #   /api/leaderboard/* -> leaderboard-api, /api/submission/* -> submission-api,
+    #   /api/auth/* -> auth-api.
     - to:
         - podSelector:
             matchLabels:
@@ -36,6 +38,9 @@ spec:
         - podSelector:
             matchLabels:
               app: submission-api
+        - podSelector:
+            matchLabels:
+              app: auth-api
       ports:
         - port: 8080
           protocol: TCP

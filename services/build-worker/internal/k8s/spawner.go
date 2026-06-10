@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -40,6 +41,7 @@ const (
 type StatusUpdater interface {
 	PublishStatus(ctx context.Context, submissionID, status, message string) error
 	UpdateDBStatus(ctx context.Context, submissionID, status, message string) error
+	UpdateImageRef(ctx context.Context, submissionID, imageRef string) error
 }
 
 // MinioClient provides artifact IO for per-submission build jobs.
@@ -70,16 +72,48 @@ type JobConfig struct {
 	HarborUser               string
 	HarborPassword           string
 
+	// RegistryProvider selects registry-specific behavior. "" (default) means a
+	// push-to-create registry (Harbor/ghcr) and nothing extra happens. "ecr"
+	// pre-creates the staging and production repositories via the ECR API before
+	// the kaniko Job pushes and before crane promotes — ECR has no
+	// push-to-create, so without this every first push to
+	// <endpoint>/<project>/<submissionID> fails outright.
+	RegistryProvider string
+
+	// RegistryInsecure, when true, downgrades registry access to plain HTTP /
+	// skip-TLS in kaniko, trivy, syft, and crane. Explicit opt-in for local dev
+	// registries only — never set it in production. Loopback and kind-registry
+	// endpoints are always treated as insecure for dev convenience regardless
+	// of this flag.
+	RegistryInsecure bool
+
 	// BuildNodePool, when non-empty, pins Job pods to nodes with pool=<value> label
 	// and adds the build=true:NoSchedule toleration. Leave empty for single-node dev.
 	BuildNodePool string
 }
+
+// ECRRepositoryClient is the narrow surface of the ECR API the spawner needs
+// when RegistryProvider is "ecr": create a repository ahead of a push. The
+// concrete implementation wraps the aws-sdk-go-v2 ecr client built from the
+// default AWS credential chain (IRSA in-cluster) and must return SDK errors
+// unwrapped so ensureRepository can match RepositoryAlreadyExistsException.
+// Faked in tests the same way kubernetes.Interface is.
+type ECRRepositoryClient interface {
+	CreateRepository(ctx context.Context, repositoryName string) error
+}
+
+// newECRClient builds the ECRRepositoryClient used when REGISTRY_PROVIDER=ecr.
+// It is a package variable so tests can stub it; the production value is the
+// aws-sdk-go-v2 adapter in ecr_aws.go (default AWS credential chain — IRSA
+// in-cluster).
+var newECRClient = newAWSECRClient
 
 type Spawner struct {
 	client  kubernetes.Interface
 	cfg     JobConfig
 	minio   MinioClient
 	updater StatusUpdater
+	ecr     ECRRepositoryClient // nil unless cfg.RegistryProvider == "ecr"
 	log     *slog.Logger
 }
 
@@ -90,6 +124,19 @@ func NewSpawner(cfg JobConfig, minio MinioClient, updater StatusUpdater, log *sl
 	if cfg.JobSecretName == "" {
 		return nil, fmt.Errorf("job secret name is required")
 	}
+	var ecrClient ECRRepositoryClient
+	switch cfg.RegistryProvider {
+	case "":
+		// push-to-create registry (Harbor/ghcr) — nothing to pre-create
+	case "ecr":
+		c, err := newECRClient(context.Background())
+		if err != nil {
+			return nil, fmt.Errorf("ecr client: %w", err)
+		}
+		ecrClient = c
+	default:
+		return nil, fmt.Errorf("unknown REGISTRY_PROVIDER %q (supported: \"\" or \"ecr\")", cfg.RegistryProvider)
+	}
 	k8sCfg, err := loadK8sConfig()
 	if err != nil {
 		return nil, fmt.Errorf("k8s config: %w", err)
@@ -98,7 +145,7 @@ func NewSpawner(cfg JobConfig, minio MinioClient, updater StatusUpdater, log *sl
 	if err != nil {
 		return nil, fmt.Errorf("k8s client: %w", err)
 	}
-	return &Spawner{client: client, cfg: cfg, minio: minio, updater: updater, log: log}, nil
+	return &Spawner{client: client, cfg: cfg, minio: minio, updater: updater, ecr: ecrClient, log: log}, nil
 }
 
 func (s *Spawner) Run(ctx context.Context, msg topics.SubmissionBuildRequested) {
@@ -141,6 +188,16 @@ func (s *Spawner) Run(ctx context.Context, msg topics.SubmissionBuildRequested) 
 	// Phase 1: fetcher init container extracts ZIP → kaniko builds and pushes to Harbor staging
 	buildJobName := resourceName("build", id)
 	phaseStart = time.Now()
+	s.setStatus(ctx, id, topics.StatusBuilding, "building image")
+	// ECR has no push-to-create: the staging repository must exist before the
+	// kaniko Job pushes to it. No-op for push-to-create registries (Harbor).
+	if err := s.ensureRepository(ctx, stagingRef); err != nil {
+		recordBuildPhase("build", phaseStart, "error")
+		recordBuildRequest("error")
+		log.Error("ensure staging repository failed", "error", err)
+		s.setStatus(ctx, id, topics.StatusFailed, fmt.Sprintf("ensure staging repository: %v", err))
+		return
+	}
 	if err := s.createJob(ctx, s.buildJobSpec(buildJobName, msg, stagingRef, dockerfileB64)); err != nil {
 		recordBuildPhase("build", phaseStart, "error")
 		recordBuildRequest("error")
@@ -163,7 +220,6 @@ func (s *Spawner) Run(ctx context.Context, msg topics.SubmissionBuildRequested) 
 		return
 	}
 	recordBuildPhase("build", phaseStart, "ok")
-	s.setStatus(ctx, id, topics.StatusBuilding, "image built and pushed to staging")
 	log.Info("phase 1 complete")
 
 	// Phase 2: Trivy scan + Syft SBOM run in parallel against the staging registry image
@@ -242,11 +298,23 @@ func (s *Spawner) Run(ctx context.Context, msg topics.SubmissionBuildRequested) 
 	// Phase 3: promote staging → production via crane.Copy (no extra Job)
 	productionRef := fmt.Sprintf("%s/%s/%s:latest", s.cfg.HarborProductionEndpoint, s.cfg.HarborProject, id)
 	phaseStart = time.Now()
+	// ECR again: the production repository must exist before crane copies into it.
+	if err := s.ensureRepository(ctx, productionRef); err != nil {
+		recordBuildPhase("promote", phaseStart, "error")
+		recordBuildRequest("error")
+		log.Error("ensure production repository failed", "error", err)
+		s.setStatus(ctx, id, topics.StatusFailed, fmt.Sprintf("ensure production repository: %v", err))
+		return
+	}
 	auth := crane.WithAuth(authn.FromConfig(authn.AuthConfig{
 		Username: s.cfg.HarborUser,
 		Password: s.cfg.HarborPassword,
 	}))
-	if err := crane.Copy(stagingRef, productionRef, auth, crane.WithContext(ctx)); err != nil {
+	copyOptions := []crane.Option{auth, crane.WithContext(ctx)}
+	if s.registryInsecure(s.cfg.HarborStagingEndpoint) || s.registryInsecure(s.cfg.HarborProductionEndpoint) {
+		copyOptions = append(copyOptions, crane.Insecure)
+	}
+	if err := crane.Copy(stagingRef, productionRef, copyOptions...); err != nil {
 		recordBuildPhase("promote", phaseStart, "error")
 		metrics.Counter("harbor_promote_total", "Harbor image promotions by result.", metrics.Labels("result", "error"), 1)
 		recordBuildRequest("error")
@@ -257,6 +325,13 @@ func (s *Spawner) Run(ctx context.Context, msg topics.SubmissionBuildRequested) 
 	recordBuildPhase("promote", phaseStart, "ok")
 	metrics.Counter("harbor_promote_total", "Harbor image promotions by result.", metrics.Labels("result", "ok"), 1)
 	log.Info("image promoted to production", "ref", productionRef)
+
+	if err := s.updater.UpdateImageRef(ctx, id, productionRef); err != nil {
+		recordBuildRequest("error")
+		log.Error("persist image ref failed", "error", err)
+		s.setStatus(ctx, id, topics.StatusFailed, fmt.Sprintf("persist image ref: %v", err))
+		return
+	}
 
 	s.setStatus(ctx, id, topics.StatusReady, "image ready")
 	recordBuildRequest("ok")
@@ -358,6 +433,19 @@ func (s *Spawner) buildJobSpec(jobName string, msg topics.SubmissionBuildRequest
 	ttl := jobTTL
 	deadline := buildDeadline
 	backoff := int32(0)
+	kanikoArgs := []string{
+		"--context=dir:///workspace",
+		"--dockerfile=/workspace/Dockerfile",
+		"--destination=" + stagingRef,
+		// Some Kubernetes/containerd nodes expose /product_uuid inside the
+		// executor rootfs. Kaniko can compile successfully, then fail cleaning
+		// a multi-stage build with "device or resource busy" unless this host
+		// path is excluded from snapshots and stage cleanup.
+		"--ignore-path=/product_uuid",
+	}
+	if s.registryInsecure(s.cfg.HarborStagingEndpoint) {
+		kanikoArgs = append(kanikoArgs, "--insecure-registry="+s.cfg.HarborStagingEndpoint)
+	}
 
 	return &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{
@@ -411,13 +499,9 @@ func (s *Spawner) buildJobSpec(jobName string, msg topics.SubmissionBuildRequest
 					},
 					Containers: []corev1.Container{
 						{
-							Name:  "build",
-							Image: s.cfg.KanikoImage,
-							Args: []string{
-								"--context=dir:///workspace",
-								"--dockerfile=/workspace/Dockerfile",
-								"--destination=" + stagingRef,
-							},
+							Name:            "build",
+							Image:           s.cfg.KanikoImage,
+							Args:            kanikoArgs,
 							SecurityContext: kanikoSecurityContext(),
 							VolumeMounts: []corev1.VolumeMount{
 								{Name: "workspace", MountPath: "/workspace"},
@@ -437,6 +521,15 @@ func (s *Spawner) scanJobSpec(jobName, submissionID, stagingRef string) *batchv1
 	ttl := jobTTL
 	deadline := scanDeadline
 	backoff := int32(0)
+	scanArgs := []string{
+		"image",
+		"--format", "json",
+		"--quiet",
+	}
+	if s.registryInsecure(s.cfg.HarborStagingEndpoint) {
+		scanArgs = append(scanArgs, "--insecure")
+	}
+	scanArgs = append(scanArgs, stagingRef)
 
 	return &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{
@@ -467,12 +560,7 @@ func (s *Spawner) scanJobSpec(jobName, submissionID, stagingRef string) *batchv1
 						{
 							Name:  "scan",
 							Image: s.cfg.TrivyImage,
-							Args: []string{
-								"image",
-								"--format", "json",
-								"--quiet",
-								stagingRef,
-							},
+							Args:  scanArgs,
 							Env: []corev1.EnvVar{
 								{Name: "TRIVY_USERNAME", ValueFrom: s.secretKeyRef("harbor-user")},
 								{Name: "TRIVY_PASSWORD", ValueFrom: s.secretKeyRef("harbor-password")},
@@ -497,6 +585,19 @@ func (s *Spawner) sbomJobSpec(jobName, submissionID, stagingRef string) *batchv1
 	deadline := sbomDeadline
 	backoff := int32(0)
 	authority := strings.SplitN(stagingRef, "/", 2)[0]
+	sbomEnv := []corev1.EnvVar{
+		{Name: "SYFT_REGISTRY_AUTH_AUTHORITY", Value: authority},
+		{Name: "SYFT_REGISTRY_AUTH_USERNAME", ValueFrom: s.secretKeyRef("harbor-user")},
+		{Name: "SYFT_REGISTRY_AUTH_PASSWORD", ValueFrom: s.secretKeyRef("harbor-password")},
+		{Name: "TMPDIR", Value: "/tmp"},
+		{Name: "XDG_CACHE_HOME", Value: "/tmp/.cache"},
+	}
+	if s.registryInsecure(s.cfg.HarborStagingEndpoint) {
+		sbomEnv = append(sbomEnv,
+			corev1.EnvVar{Name: "SYFT_REGISTRY_INSECURE_USE_HTTP", Value: "true"},
+			corev1.EnvVar{Name: "SYFT_REGISTRY_INSECURE_SKIP_TLS_VERIFY", Value: "true"},
+		)
+	}
 
 	return &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{
@@ -531,13 +632,7 @@ func (s *Spawner) sbomJobSpec(jobName, submissionID, stagingRef string) *batchv1
 								"-o", "spdx-json",
 								"-q",
 							},
-							Env: []corev1.EnvVar{
-								{Name: "SYFT_REGISTRY_AUTH_AUTHORITY", Value: authority},
-								{Name: "SYFT_REGISTRY_AUTH_USERNAME", ValueFrom: s.secretKeyRef("harbor-user")},
-								{Name: "SYFT_REGISTRY_AUTH_PASSWORD", ValueFrom: s.secretKeyRef("harbor-password")},
-								{Name: "TMPDIR", Value: "/tmp"},
-								{Name: "XDG_CACHE_HOME", Value: "/tmp/.cache"},
-							},
+							Env: sbomEnv,
 							VolumeMounts: []corev1.VolumeMount{
 								{Name: "tmp", MountPath: "/tmp"},
 							},
@@ -745,6 +840,72 @@ func boolPtr(v bool) *bool {
 
 func int64Ptr(v int64) *int64 {
 	return &v
+}
+
+// registryInsecure reports whether registry access for endpoint may downgrade
+// to plain HTTP / skipped TLS verification (kaniko --insecure-registry, trivy
+// --insecure, syft SYFT_REGISTRY_INSECURE_*, crane.Insecure). Downgrading is
+// an explicit opt-in via REGISTRY_INSECURE, plus loopback/kind-registry
+// convenience matches ONLY. The old 10.*/172.*/192.168.* heuristic is gone
+// deliberately: EKS pod/service CIDRs (and most in-VPC registries) live in
+// exactly those ranges, so the heuristic silently stripped TLS in production.
+func (s *Spawner) registryInsecure(endpoint string) bool {
+	return s.cfg.RegistryInsecure || isLocalRegistry(endpoint)
+}
+
+func isLocalRegistry(endpoint string) bool {
+	endpoint = strings.TrimSpace(strings.TrimPrefix(strings.TrimPrefix(endpoint, "http://"), "https://"))
+	return strings.HasPrefix(endpoint, "localhost:") ||
+		strings.HasPrefix(endpoint, "127.0.0.1:") ||
+		strings.Contains(endpoint, "kind-registry")
+}
+
+// ensureRepository pre-creates the repository behind imageRef when the
+// registry provider requires it. ECR has no push-to-create: a kaniko push or
+// crane copy into a nonexistent repository fails outright, so the spawner
+// creates <project>/<submissionID> ahead of both. RepositoryAlreadyExists is
+// success — refs are deterministic, so every rebuild of a submission hits an
+// existing repository. No-op when REGISTRY_PROVIDER is unset (push-to-create
+// registries like Harbor need nothing).
+func (s *Spawner) ensureRepository(ctx context.Context, imageRef string) error {
+	if s.ecr == nil {
+		return nil
+	}
+	repo := ecrRepositoryName(imageRef)
+	if err := s.ecr.CreateRepository(ctx, repo); err != nil {
+		if isECRRepositoryAlreadyExists(err) {
+			s.log.Info("ecr repository already exists; adopting", "repository", repo)
+			return nil
+		}
+		return fmt.Errorf("create ecr repository %s: %w", repo, err)
+	}
+	s.log.Info("ecr repository created", "repository", repo)
+	return nil
+}
+
+// ecrRepositoryName derives the ECR repositoryName from an image ref the
+// spawner composed (<endpoint>/<project>/<submissionID>[:tag]): drop the
+// registry host (first path segment) and the tag. The tag colon is only
+// stripped when it appears after the last slash, so registry ports
+// (localhost:5000/...) never eat into the path.
+func ecrRepositoryName(imageRef string) string {
+	path := imageRef
+	if i := strings.Index(path, "/"); i >= 0 {
+		path = path[i+1:]
+	}
+	if i := strings.LastIndex(path, ":"); i > strings.LastIndex(path, "/") {
+		path = path[:i]
+	}
+	return path
+}
+
+// isECRRepositoryAlreadyExists matches aws-sdk-go-v2's
+// types.RepositoryAlreadyExistsException without importing the SDK here: all
+// AWS API errors implement smithy APIError's ErrorCode, and the exception's
+// code is its type name.
+func isECRRepositoryAlreadyExists(err error) bool {
+	var apiErr interface{ ErrorCode() string }
+	return errors.As(err, &apiErr) && apiErr.ErrorCode() == "RepositoryAlreadyExistsException"
 }
 
 // recordBuildPhase and recordBuildRequest expose build pipeline health.

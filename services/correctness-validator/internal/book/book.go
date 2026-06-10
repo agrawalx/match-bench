@@ -8,6 +8,8 @@
 package book
 
 import (
+	"math"
+
 	"github.com/google/btree"
 	"github.com/iicpc/correctness-validator/internal/model"
 )
@@ -54,6 +56,23 @@ type restingOrder struct {
 	price     int64
 	remaining uint64
 	seq       uint64 // arrival rank (FIFO/time priority within a level)
+	availIdx  int    // index into Engine.avail for this resting order's window
+}
+
+// Availability is the effective_t3 window during which one order rested at a
+// (side, price) level with liquidity. EnterT3 is the order's own effective_t3;
+// ExitT3 is the effective_t3 of whatever fully consumed/cancelled it (or
+// math.MaxUint64 if still resting at end of replay). The validator uses these
+// windows to decide whether an aggressive (market/crossing-limit) fill matched
+// liquidity that genuinely existed near the aggressor's arrival — the fairness
+// analog of the resting-order cross-flow tie tolerance, since a LIVE engine
+// processes in socket-arrival order, not the offline effective_t3 order.
+type Availability struct {
+	Side        model.Side
+	Price       int64
+	Participant string
+	EnterT3     uint64
+	ExitT3      uint64
 }
 
 type priceLevel struct {
@@ -79,6 +98,10 @@ type Engine struct {
 	// seqByOrder[a] < seqByOrder[b] mean a arrived (and must fill) before b — the
 	// ground truth for time-priority and cancel-replace queue-position checks.
 	seqByOrder map[string]uint64
+	// avail is the liquidity timeline: one record per order that ever rested,
+	// with the effective_t3 window it was available. Drives the aggressive-fill
+	// tolerance in the validator.
+	avail []Availability
 }
 
 func NewEngine() *Engine {
@@ -136,7 +159,7 @@ func (e *Engine) Process(o *model.Order) {
 	case model.NewMarket:
 		e.matchAndRest(o, false)
 	case model.Cancel:
-		e.remove(o.OrigOrderID)
+		e.remove(o.OrigOrderID, o.EffectiveT3)
 	case model.Replace:
 		e.replace(o)
 	}
@@ -179,6 +202,7 @@ func (e *Engine) matchAndRest(o *model.Order, rest bool) {
 			if maker.remaining == 0 {
 				level.orders = level.orders[1:]
 				delete(e.index, maker.orderID)
+				e.closeAvail(maker, o.EffectiveT3) // maker fully consumed at the aggressor's t3
 			}
 		}
 		if len(level.orders) == 0 {
@@ -194,6 +218,13 @@ func (e *Engine) matchAndRest(o *model.Order, rest bool) {
 func (e *Engine) insert(o *model.Order, remaining uint64) {
 	e.seq++
 	ro := &restingOrder{orderID: o.OrderID, side: o.Side, price: o.Price, remaining: remaining, seq: e.seq}
+	// Open this order's availability window at its own effective_t3; ExitT3 stays
+	// "open" (MaxUint64) until it is fully consumed or cancelled.
+	ro.availIdx = len(e.avail)
+	e.avail = append(e.avail, Availability{
+		Side: o.Side, Price: o.Price, Participant: model.ParticipantOf(o.OrderID),
+		EnterT3: o.EffectiveT3, ExitT3: math.MaxUint64,
+	})
 	e.index[o.OrderID] = ro
 	e.seqByOrder[o.OrderID] = e.seq
 	tree := e.tree(o.Side)
@@ -206,11 +237,26 @@ func (e *Engine) insert(o *model.Order, remaining uint64) {
 	}
 }
 
-func (e *Engine) remove(orderID string) {
+// closeAvail stamps a resting order's availability window with the effective_t3
+// at which it left the book (consumed or cancelled). Idempotent — only the first
+// close sticks; orders still resting at end keep ExitT3 = MaxUint64.
+func (e *Engine) closeAvail(ro *restingOrder, exitT3 uint64) {
+	if ro.availIdx >= 0 && ro.availIdx < len(e.avail) && e.avail[ro.availIdx].ExitT3 == math.MaxUint64 {
+		e.avail[ro.availIdx].ExitT3 = exitT3
+	}
+}
+
+// Availability returns every resting order's (side, price, participant, t3-window)
+// record from the replay — the liquidity timeline the validator uses for the
+// aggressive-fill tolerance check.
+func (e *Engine) Availability() []Availability { return e.avail }
+
+func (e *Engine) remove(orderID string, exitT3 uint64) {
 	ro, ok := e.index[orderID]
 	if !ok {
 		return
 	}
+	e.closeAvail(ro, exitT3)
 	tree := e.tree(ro.side)
 	if level, ok := tree.Get(&priceLevel{price: ro.price}); ok {
 		for i, x := range level.orders {
@@ -260,7 +306,7 @@ func (e *Engine) replace(o *model.Order) {
 	if o.Price != ro.price {
 		e.repriced[orReplaceID(o)] = true
 	}
-	e.remove(o.OrigOrderID)
+	e.remove(o.OrigOrderID, o.EffectiveT3)
 	e.insert(&model.Order{OrderID: orReplaceID(o), Side: o.Side, Price: o.Price}, o.Qty)
 }
 

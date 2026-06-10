@@ -59,8 +59,10 @@ func TestKafkaPublisherIntegrationPublishesBuildAndBenchmarkRequests(t *testing.
 		t.Fatalf("unexpected build request: %+v", build)
 	}
 
+	// benchmark.requested is keyed by run_group_id (not session_id) so one
+	// group's sibling sessions serialize on a single partition.
 	var benchmark topics.BenchmarkRequested
-	consumeJSONByKey(t, brokers, topics.TopicBenchmarkRequested, benchID, &benchmark)
+	consumeJSONByKey(t, brokers, topics.TopicBenchmarkRequested, "group-"+suffix, &benchmark)
 	if benchmark.SessionID != benchID || benchmark.RunGroupID != "group-"+suffix {
 		t.Fatalf("unexpected benchmark request: %+v", benchmark)
 	}

@@ -1,0 +1,38 @@
+.rules {
+  margin: 0 0 16px;
+  border: 1px solid var(--border, #2a2a35);
+  border-radius: 8px;
+  background: var(--surface, #14141c);
+  padding: 10px 14px;
+  font-size: 13px;
+}
+
+.rules > summary {
+  cursor: pointer;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--text-strong, #e8e8f0);
+  user-select: none;
+}
+
+.body {
+  margin-top: 10px;
+  display: grid;
+  gap: 8px;
+  color: var(--text-muted, #b6b6c4);
+  line-height: 1.5;
+}
+
+.body code {
+  background: rgba(255, 255, 255, 0.06);
+  padding: 1px 5px;
+  border-radius: 4px;
+  font-size: 12px;
+}
+
+.note {
+  opacity: 0.8;
+  font-size: 12px;
+  border-top: 1px dashed var(--border, #2a2a35);
+  padding-top: 8px;
+}

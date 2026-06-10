@@ -52,6 +52,14 @@ spec:
               value: "true"
             - name: KAFKA_BROKERS
               value: kafka.data.svc.cluster.local:9092
+            # JWT verification (AUTH_REQUIRED defaults true): the Google client
+            # ID is the token audience check. Sourced from auth-api-secret so
+            # auth-api and submission-api can never disagree on the audience.
+            - name: GOOGLE_CLIENT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: auth-api-secret
+                  key: google-client-id
             - name: ENVIRONMENT
               value: prod
             - name: METRICS_PORT
@@ -88,8 +96,9 @@ spec:
               port: 8080
             initialDelaySeconds: 5
             periodSeconds: 10
-          # Readiness: /ready pings Postgres, so a replica whose DB connection
-          # died is pulled from the Service endpoints instead of serving errors.
+          # Readiness: /ready pings Postgres (handler.Readiness over
+          # pgStore.Ping), so a replica that loses its DB connection drops out
+          # of rotation instead of serving 500s while still "ready".
           readinessProbe:
             httpGet:
               path: /ready
@@ -115,6 +124,9 @@ spec:
               memory: 256Mi
       securityContext:
         runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
       volumes:
         - name: tmp
           emptyDir: {}

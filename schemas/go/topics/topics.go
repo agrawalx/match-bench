@@ -105,6 +105,17 @@ type BenchmarkStatusUpdated struct {
 // CorrectnessScoreEvent is published to "scores.correctness" (JSON) by the
 // correctness-validator after the post-run order-book replay. Consumed by the
 // scoring service for the hard correctness gate. Key: session_id.
+//
+// SentCount/AckedCount/MatchedCount are the telemetry-completeness counters
+// behind the verdict (additive, per the field-add-only schema-evolution rule):
+// how many orders.sent events the validator's drain returned, how many
+// orders.acked events survived dedup, and how many distinct orders appeared in
+// BOTH streams — the replay's actual inputs. Live delivery of orders.sent has
+// been observed as low as ~76%, so a verdict must carry how complete its
+// inputs were: score-computer derives a coverage ratio from these and refuses
+// to apply violation-based disqualification when the inputs were incomplete.
+// All three zero means the counters are unknown (pre-gate producer or
+// timed_out placeholder), never "measured empty with fills present".
 type CorrectnessScoreEvent struct {
 	SessionID        string  `json:"session_id"`
 	ContestantID     string  `json:"contestant_id"`
@@ -113,6 +124,9 @@ type CorrectnessScoreEvent struct {
 	CorrectnessScore float64 `json:"correctness_score"` // valid_fills / total_fills
 	ViolationCount   uint32  `json:"violation_count"`
 	ComputedAtNS     uint64  `json:"computed_at_ns"`
+	SentCount        uint64  `json:"sent_count"`    // orders.sent events drained for the session
+	AckedCount       uint64  `json:"acked_count"`   // orders.acked events drained (post-dedup)
+	MatchedCount     uint64  `json:"matched_count"` // distinct orders present in both streams
 }
 
 // LeaderboardUpdateEvent is published to "leaderboard.updates" (JSON) by

@@ -48,8 +48,17 @@ pub struct Snapshot {
     pub rt_p99_ns: u64,
     pub tps_1s: f64,
     pub error_rate: f64,
-    /// V2-deflate-serialized cumulative service-time histogram (offline analysis).
+    /// V2-deflate-serialized cumulative service-time (t7-t3) histogram — the
+    /// scored metric, for offline analysis and the frontend percentile chart.
     pub hdr_encoded: Vec<u8>,
+    /// V2-deflate-serialized cumulative response-time (r9-t0) histogram — the
+    /// bot-side round trip including coordinated-omission/queueing delay. Empty
+    /// when no order in this window got a response (e.g. all timed out).
+    pub rt_hdr_encoded: Vec<u8>,
+    /// V2-deflate-serialized cumulative schedule-slip (t1-t0) histogram — how
+    /// far the bot's write fell behind its intended send schedule: the pure
+    /// back-pressure / coordinated-omission signal (all protocols).
+    pub slip_hdr_encoded: Vec<u8>,
 }
 
 struct Window {
@@ -252,6 +261,8 @@ impl Aggregator {
                     tps_1s: w.responded as f64 / interval,
                     error_rate,
                     hdr_encoded: serialize_hist(&w.service_time),
+                    rt_hdr_encoded: serialize_hist(&w.response_time),
+                    slip_hdr_encoded: serialize_hist(&w.schedule_slip),
                 });
             }
             w.offered = 0;

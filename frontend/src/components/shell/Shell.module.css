@@ -1,0 +1,24 @@
+.layout {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  min-height: 100vh;
+  flex-direction: column;
+  background: rgba(10, 10, 10, 0.93);
+}
+
+.body {
+  flex: 1;
+}
+
+.content {
+  flex: 1;
+  min-width: 0;
+  padding: var(--space-6);
+}
+
+@media (max-width: 720px) {
+  .content {
+    padding: var(--space-4);
+  }
+}

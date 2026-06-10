@@ -46,7 +46,7 @@ func TestEndToEndCleanSessionWithPhantomAndExcludedOrder(t *testing.T) {
 		t.Fatalf("expected 1 phantom (ghost), got %+v", phantoms)
 	}
 
-	report, contestant := Run(sents, ackeds)
+	report, _, contestant := Run(sents, ackeds)
 	if contestant != "c1" {
 		t.Fatalf("contestant_id = %q, want c1", contestant)
 	}
@@ -55,6 +55,41 @@ func TestEndToEndCleanSessionWithPhantomAndExcludedOrder(t *testing.T) {
 	}
 	if got := report.CorrectnessScore(); got < 0.66 || got > 0.67 {
 		t.Fatalf("expected score ~0.667, got %v", got)
+	}
+}
+
+// TestRunCountsTelemetryCompleteness pins the completeness counters the
+// pipeline reports alongside the verdict: SentEvents = orders.sent events
+// drained, AckedEvents = orders.acked events drained (post-dedup, the caller's
+// slice), MatchedOrders = distinct orders present in BOTH streams (the
+// replay's actual inputs). A sent order with no ack (NOACK) and an acked order
+// never sent (ghost) must each count in their own stream but NOT in matched —
+// the gap between SentEvents and MatchedOrders is exactly the signal
+// score-computer's coverage gate consumes.
+func TestRunCountsTelemetryCompleteness(t *testing.T) {
+	fp := 100 * topics.TelemetryPriceScale
+	sents := []topics.OrderSentEvent{
+		sent("B1", "BUY", "NEW", "LIMIT", 100, 10),
+		sent("S1", "SELL", "NEW", "LIMIT", 100, 10),
+		sent("NOACK", "BUY", "NEW", "LIMIT", 100, 5), // lost/absent ack -> not matched
+	}
+	ackeds := []topics.OrderAckedEvent{
+		acked("B1", 5, 1, 10, "0", 0, 0), // two responses for B1: one order, two acked events
+		acked("B1", 5, 1, 10, "2", 10, fp),
+		acked("S1", 5, 2, 10, "2", 10, fp),
+		acked("ghost", 5, 3, 10, "2", 5, fp), // never sent -> counted as acked, not matched
+	}
+
+	_, counts, _ := Run(sents, ackeds)
+	want := Counts{SentEvents: 3, AckedEvents: 4, MatchedOrders: 2}
+	if counts != want {
+		t.Fatalf("Run counts = %+v, want %+v", counts, want)
+	}
+
+	// Empty drain: all-zero counts (downstream treats that as "unknown", and a
+	// session with zero telemetry has nothing to gate anyway).
+	if _, counts, _ := Run(nil, nil); counts != (Counts{}) {
+		t.Fatalf("Run(nil, nil) counts = %+v, want zero", counts)
 	}
 }
 
@@ -75,7 +110,7 @@ func TestRunScaledPriceDomain(t *testing.T) {
 		acked("MK", 5, 1, 10, "2", 10, scaled), // maker rests, then fills @ scaled price
 		acked("TK", 5, 2, 20, "2", 10, scaled), // taker crosses, fills @ scaled price
 	}
-	report, _ := Run(sents, ackeds)
+	report, _, _ := Run(sents, ackeds)
 	if report.TotalFills != 2 {
 		t.Fatalf("expected 2 reported fills, got %d (%+v)", report.TotalFills, report)
 	}

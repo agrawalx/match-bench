@@ -4,10 +4,12 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -18,6 +20,12 @@ const (
 	defaultLeaderboardRows = 100
 	maxLeaderboardOffset   = 100000
 )
+
+// rankedOrder is the canonical ranking order for the ROW_NUMBER() subqueries,
+// mirroring score-computer's rankOrderBy. disqualified ASC must stay the
+// leading term: DQ'd results retain their measured peak for transparency, so
+// a DQ-blind ordering would let a cheating engine rank #1.
+const rankedOrder = `disqualified ASC, peak_sustained_tps DESC, p99_at_peak_ns ASC, spike_recovery_ns ASC, total_correctness DESC, run_group_id ASC`
 
 type Store struct {
 	meta      *pgxpool.Pool
@@ -107,10 +115,7 @@ SELECT rank, run_group_id, submission_id, contestant_id, team_name, peak_sustain
        p99_at_peak_ns, spike_recovery_ns, total_correctness, disqualified,
        disqualification_code, COALESCE(rank_delta,0), computed_at
   FROM (
-	SELECT ROW_NUMBER() OVER (
-	           ORDER BY peak_sustained_tps DESC, p99_at_peak_ns ASC, spike_recovery_ns ASC,
-	                    total_correctness DESC, run_group_id ASC
-	       ) AS rank,
+	SELECT ROW_NUMBER() OVER (ORDER BY `+rankedOrder+`) AS rank,
 	       run_group_id, submission_id, contestant_id, team_name, peak_sustained_tps,
 	       p99_at_peak_ns, spike_recovery_ns, total_correctness, disqualified,
 	       disqualification_code, rank_delta, computed_at
@@ -123,6 +128,9 @@ SELECT rank, run_group_id, submission_id, contestant_id, team_name, peak_sustain
  ORDER BY `+orderBy+`
  LIMIT $5 OFFSET $6`, q.RunGroupID, q.SubmissionID, contestantFilter, q.TeamName, limit+1, offset)
 	if err != nil {
+		if isUndefinedTable(err) {
+			return LeaderboardResponse{Source: "frozen", Rows: []LeaderboardRow{}}, nil
+		}
 		return LeaderboardResponse{}, err
 	}
 	defer rows.Close()
@@ -155,6 +163,11 @@ SELECT rank, run_group_id, submission_id, contestant_id, team_name, peak_sustain
 	return resp, nil
 }
 
+func isUndefinedTable(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == "42P01"
+}
+
 type leaderboardCursor struct {
 	Offset int `json:"offset"`
 }
@@ -174,11 +187,11 @@ type SessionDetail struct {
 }
 
 type MetricPoint struct {
-	TimeUnixNS int64   `json:"time_unix_ns"`
-	WaveIndex  int     `json:"wave_index"`
-	P50NS      uint64  `json:"p50_ns"`
-	P90NS      uint64  `json:"p90_ns"`
-	P99NS      uint64  `json:"p99_ns"`
+	TimeUnixNS int64  `json:"time_unix_ns"`
+	WaveIndex  int    `json:"wave_index"`
+	P50NS      uint64 `json:"p50_ns"`
+	P90NS      uint64 `json:"p90_ns"`
+	P99NS      uint64 `json:"p99_ns"`
 	// response_time = r9 - t0: the bot-side round trip including coordinated-
 	// omission delay (vs service_time = t7 - t3, the algo-side processing only).
 	RTP50NS    uint64  `json:"rt_p50_ns"`
@@ -186,7 +199,12 @@ type MetricPoint struct {
 	RTP99NS    uint64  `json:"rt_p99_ns"`
 	TPS1S      float64 `json:"tps_1s"`
 	ErrorRate  float64 `json:"error_rate"`
-	HDREncoded string  `json:"hdr_encoded,omitempty"`
+	// V2-deflate HDR histograms (base64): service_time (t7-t3, scored),
+	// response_time (r9-t0, client round trip), schedule_slip (t1-t0, the
+	// back-pressure signal). The frontend decodes and overlays them.
+	HDREncoded     string `json:"hdr_encoded,omitempty"`
+	RTHDREncoded   string `json:"rt_hdr_encoded,omitempty"`
+	SlipHDREncoded string `json:"slip_hdr_encoded,omitempty"`
 }
 
 type ViolationEntry struct {
@@ -249,7 +267,7 @@ func (s *Store) Chart(ctx context.Context, sessionID string) ([]MetricPoint, err
 SELECT EXTRACT(EPOCH FROM time) * 1000000000, wave_index,
        COALESCE(p50_ns,0), COALESCE(p90_ns,0), COALESCE(p99_ns,0),
        COALESCE(rt_p50_ns,0), COALESCE(rt_p90_ns,0), COALESCE(rt_p99_ns,0),
-       COALESCE(tps_1s,0), COALESCE(error_rate,0), hdr_encoded
+       COALESCE(tps_1s,0), COALESCE(error_rate,0), hdr_encoded, rt_hdr_encoded, slip_hdr_encoded
   FROM metrics
  WHERE session_id=$1
  ORDER BY time
@@ -263,8 +281,8 @@ SELECT EXTRACT(EPOCH FROM time) * 1000000000, wave_index,
 		var p MetricPoint
 		var p50, p90, p99, rt50, rt90, rt99 int64
 		var nsFloat float64
-		var hdr []byte
-		if err := rows.Scan(&nsFloat, &p.WaveIndex, &p50, &p90, &p99, &rt50, &rt90, &rt99, &p.TPS1S, &p.ErrorRate, &hdr); err != nil {
+		var hdr, rtHdr, slipHdr []byte
+		if err := rows.Scan(&nsFloat, &p.WaveIndex, &p50, &p90, &p99, &rt50, &rt90, &rt99, &p.TPS1S, &p.ErrorRate, &hdr, &rtHdr, &slipHdr); err != nil {
 			return nil, err
 		}
 		p.TimeUnixNS = int64(nsFloat)
@@ -272,6 +290,12 @@ SELECT EXTRACT(EPOCH FROM time) * 1000000000, wave_index,
 		p.RTP50NS, p.RTP90NS, p.RTP99NS = nonNegativeUint64(rt50), nonNegativeUint64(rt90), nonNegativeUint64(rt99)
 		if len(hdr) > 0 {
 			p.HDREncoded = base64.StdEncoding.EncodeToString(hdr)
+		}
+		if len(rtHdr) > 0 {
+			p.RTHDREncoded = base64.StdEncoding.EncodeToString(rtHdr)
+		}
+		if len(slipHdr) > 0 {
+			p.SlipHDREncoded = base64.StdEncoding.EncodeToString(slipHdr)
 		}
 		out = append(out, p)
 	}
@@ -364,10 +388,7 @@ SELECT rank, run_group_id, submission_id, contestant_id, team_name, peak_sustain
        p99_at_peak_ns, spike_recovery_ns, total_correctness, disqualified,
        disqualification_code, COALESCE(rank_delta,0), computed_at
   FROM (
-	SELECT ROW_NUMBER() OVER (
-	           ORDER BY peak_sustained_tps DESC, p99_at_peak_ns ASC, spike_recovery_ns ASC,
-	                    total_correctness DESC, run_group_id ASC
-	       ) AS rank,
+	SELECT ROW_NUMBER() OVER (ORDER BY `+rankedOrder+`) AS rank,
 	       run_group_id, submission_id, contestant_id, team_name, peak_sustained_tps,
 	       p99_at_peak_ns, spike_recovery_ns, total_correctness, disqualified,
 	       disqualification_code, rank_delta, computed_at
@@ -441,7 +462,9 @@ func leaderboardOrderBy(sortField, order string) string {
 	case "desc":
 		dir = "DESC"
 	}
-	return spec.column + " " + dir + ", " + spec.tiebreak
+	// disqualified ASC always leads so user-selectable sorts stay secondary;
+	// otherwise ?sort=peak_tps would re-rank DQ'd retained peaks to the top.
+	return "disqualified ASC, " + spec.column + " " + dir + ", " + spec.tiebreak
 }
 
 func encodeLeaderboardCursor(offset int) string {

@@ -14,7 +14,8 @@ import (
 )
 
 // SubmissionInfo holds the fields the controller needs from a submission row
-// to assemble a WorkloadSpec: protocol, port, and the harbor image ref.
+// to assemble a WorkloadSpec: protocol, port, and the image ref produced by
+// the build pipeline.
 // The controller does not own the submissions table — submission-api does.
 // We only read.
 type SubmissionInfo struct {
@@ -22,6 +23,7 @@ type SubmissionInfo struct {
 	ContestantID string
 	Protocol     string
 	Port         int
+	ImageRef     string
 }
 
 type Store struct {
@@ -46,12 +48,12 @@ func (s *Store) Close() { s.pool.Close() }
 func (s *Store) GetSubmission(ctx context.Context, submissionID string) (*SubmissionInfo, error) {
 	start := time.Now()
 	row := s.pool.QueryRow(ctx,
-		`SELECT submission_id, contestant_id, protocol, port
+		`SELECT submission_id, contestant_id, protocol, port, image_ref
 		   FROM submissions WHERE submission_id = $1`,
 		submissionID,
 	)
 	var info SubmissionInfo
-	if err := row.Scan(&info.SubmissionID, &info.ContestantID, &info.Protocol, &info.Port); err != nil {
+	if err := row.Scan(&info.SubmissionID, &info.ContestantID, &info.Protocol, &info.Port, &info.ImageRef); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			recordDB("get_submission", start, nil)
 			return nil, nil

@@ -1,0 +1,85 @@
+.wrap {
+  display: flex;
+  min-height: 100%;
+  flex-direction: column;
+}
+
+.zone {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  min-height: 360px;
+  flex: 1;
+  gap: var(--space-2);
+  color: var(--color-text-tertiary);
+  background: var(--color-surface-1);
+  border: 1px dashed #2a2a2a;
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  transition:
+    background var(--duration-base) var(--ease-std),
+    border-color var(--duration-base) var(--ease-std),
+    color var(--duration-base) var(--ease-std);
+}
+
+.zone:hover {
+  color: var(--color-text-secondary);
+  border-color: #3b3b3b;
+}
+
+.active {
+  border-color: var(--color-accent);
+  background: rgba(0, 229, 255, 0.03);
+}
+
+.icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 56px;
+  height: 56px;
+  color: var(--color-accent);
+  background: var(--color-accent-subtle);
+  border: 1px solid var(--color-accent-dim);
+  border-radius: var(--radius-md);
+}
+
+.zone small {
+  color: var(--color-text-muted);
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+
+.file {
+  max-width: min(520px, 84vw);
+  overflow: hidden;
+  color: var(--color-text-primary);
+  font-family: var(--font-mono);
+  font-size: 14px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.clear {
+  position: absolute;
+  top: 10px;
+  right: 12px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--color-text-secondary);
+}
+
+.input {
+  display: none;
+}
+
+.error {
+  margin: 8px 0 0;
+  color: var(--color-error);
+  font-family: var(--font-mono);
+  font-size: 12px;
+}

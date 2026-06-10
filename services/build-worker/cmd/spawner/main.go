@@ -99,6 +99,15 @@ func main() {
 		HarborProject:            envOr("HARBOR_PROJECT", "iicpc"),
 		HarborUser:               mustEnv("HARBOR_USER"),
 		HarborPassword:           mustEnv("HARBOR_PASSWORD"),
+
+		// "" (default) = push-to-create registry (Harbor/ghcr); "ecr" = pre-create
+		// repositories via the ECR API (default AWS chain / IRSA) before kaniko
+		// pushes and crane promotes — ECR has no push-to-create.
+		RegistryProvider: os.Getenv("REGISTRY_PROVIDER"),
+		// Explicit plain-HTTP/skip-TLS opt-in for local dev registries only.
+		// Loopback/kind-registry endpoints are auto-insecure regardless; private
+		// RFC1918 endpoints are NOT (EKS CIDRs live there).
+		RegistryInsecure: os.Getenv("REGISTRY_INSECURE") == "true",
 	}
 
 	spawner, err := k8sspawner.NewSpawner(jobCfg, minioStore, updater, log)
@@ -126,6 +135,10 @@ func (u *statusUpdater) PublishStatus(ctx context.Context, submissionID, status,
 
 func (u *statusUpdater) UpdateDBStatus(ctx context.Context, submissionID, status, message string) error {
 	return u.pg.UpdateStatus(ctx, submissionID, status, message)
+}
+
+func (u *statusUpdater) UpdateImageRef(ctx context.Context, submissionID, imageRef string) error {
+	return u.pg.UpdateImageRef(ctx, submissionID, imageRef)
 }
 
 func envOr(key, def string) string {

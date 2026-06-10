@@ -101,8 +101,9 @@ func NewKafkaPublisher(brokers string, log *slog.Logger) *KafkaPublisher {
 	bench := &kafka.Writer{
 		Addr:  addr,
 		Topic: topics.TopicBenchmarkRequested,
-		// Hash so the Key (session_id) maps deterministically to one partition,
-		// keeping a session's events ordered on a single partition.
+		// Hash so the Key (run_group_id — see benchmarkMessageKey) maps
+		// deterministically to one partition, keeping one run-group's child
+		// sessions ordered on a single partition.
 		Balancer:               &kafka.Hash{},
 		RequiredAcks:           kafka.RequireAll,
 		Async:                  false,
@@ -175,11 +176,28 @@ func (p *KafkaPublisher) PublishBenchmarkRequested(ctx context.Context, meta Ben
 	defer cancel()
 
 	err = p.benchmarkWriter.WriteMessages(writeCtx, kafka.Message{
-		Key:   []byte(meta.SessionID),
+		Key:   benchmarkMessageKey(meta),
 		Value: payload,
 	})
 	recordProduce(topics.TopicBenchmarkRequested, start, err)
 	return err
+}
+
+// benchmarkMessageKey selects the Kafka partition key for benchmark.requested.
+//
+// Keyed by run_group_id, not session_id: the topic has 3 partitions and one
+// "click benchmark" publishes 3 sibling sessions. Keyed per-session they
+// hashed onto different partitions and could be consumed out of publish
+// order, racing the group's scenarios against each other. Keyed per-group
+// all of a group's messages land on ONE partition and serialize.
+//
+// Legacy single-session messages without a run_group_id fall back to
+// session_id so the key is never empty.
+func benchmarkMessageKey(meta BenchmarkMeta) []byte {
+	if meta.RunGroupID != "" {
+		return []byte(meta.RunGroupID)
+	}
+	return []byte(meta.SessionID)
 }
 
 func (p *KafkaPublisher) Close() error {

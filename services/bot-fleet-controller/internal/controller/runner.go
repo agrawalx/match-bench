@@ -3,7 +3,6 @@ package controller
 import (
 	"context"
 	"errors"
-	"fmt"
 	"log/slog"
 	"time"
 
@@ -23,9 +22,14 @@ import (
 // This is the operator's per-pod-concentration knob: raise it (e.g. above a
 // scenario's total task count) to pin ALL load on a single bot pod and measure
 // that pod's raw generation ceiling; lower it to fan the load across more pods.
-// Note the hard coupling: WorkerCount must be <= the bot-fleet replica count,
-// because each pod runs assignments serially — if WorkerCount exceeds the number
-// of pods, some pod is handed two assignments and the second misses its barrier.
+// Two hard couplings:
+//   - WorkerCount must be <= the workload.assignments partition count (24 per
+//     topic-init): each spec is pinned to partition worker_index%N, and
+//     PublishWorkloadSpec fails the run outright if WorkerCount exceeds N.
+//   - WorkerCount must be <= the bot-fleet replica count, because each pod
+//     runs assignments serially — if WorkerCount exceeds the number of pods,
+//     some pod is handed two assignments and the second misses its barrier.
+//     Pre-scale the fleet (KEDA minReplicaCount) for multi-worker scenarios.
 const DefaultMaxTasksPerWorker = 1000
 
 // RunConfig holds the deployment-wide operational deadlines that are not part
@@ -47,18 +51,6 @@ type RunConfig struct {
 	// defaults to DefaultMaxTasksPerWorker. See DefaultMaxTasksPerWorker for the
 	// WorkerCount<=replicas coupling.
 	MaxTasksPerWorker int
-}
-
-// HarborConfig produces the production image ref for a submission.
-// Mirrors services/build-worker/internal/k8s/spawner.go:202 — the controller
-// must use the same naming scheme the spawner pushed under.
-type HarborConfig struct {
-	Endpoint string // e.g. ghcr.io or harbor.example.com
-	Project  string // e.g. iicpc or your ghcr username
-}
-
-func (h HarborConfig) ImageRef(submissionID string) string {
-	return fmt.Sprintf("%s/%s/%s:latest", h.Endpoint, h.Project, submissionID)
 }
 
 // Runner drives one session through the benchmark lifecycle. Each
@@ -98,18 +90,16 @@ type Runner struct {
 	orch      *orchestrator.Client
 	producer  *Producer
 	runConfig RunConfig
-	harbor    HarborConfig
 	log       *slog.Logger
 }
 
-func NewRunner(sessions *SessionManager, st *store.Store, orch *orchestrator.Client, producer *Producer, runConfig RunConfig, harbor HarborConfig, log *slog.Logger) *Runner {
+func NewRunner(sessions *SessionManager, st *store.Store, orch *orchestrator.Client, producer *Producer, runConfig RunConfig, log *slog.Logger) *Runner {
 	return &Runner{
 		sessions:  sessions,
 		store:     st,
 		orch:      orch,
 		producer:  producer,
 		runConfig: runConfig,
-		harbor:    harbor,
 		log:       log,
 	}
 }
@@ -215,10 +205,14 @@ func (r *Runner) runSession(
 		r.fail(ctx, sess, "submission not found", log)
 		return
 	}
+	if sub.ImageRef == "" {
+		r.fail(ctx, sess, "submission has no built image ref", log)
+		return
+	}
 
 	// Step 2 — allocate sandbox slot.
 	r.transition(ctx, sess, topics.RunStatusDeploying, "allocating sandbox slot", log)
-	image := r.harbor.ImageRef(sess.SubmissionID)
+	image := sub.ImageRef
 	stageStart = time.Now()
 	if _, err := r.orch.CreateSlot(ctx, sess.SessionID, sess.ContestantID, image, sub.Port); err != nil {
 		recordSessionStage("create_slot", stageStart, err)

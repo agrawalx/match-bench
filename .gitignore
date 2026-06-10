@@ -8,6 +8,10 @@ vendor/
 /fetcher
 /spawner
 /worker
+
+# Stray local build output (79 MB binary) — never commit
+services/submission-api/submission-api
+
 # Rust
 target/
 
@@ -28,3 +32,6 @@ target/
 
 # Real secret values (bootstrap) — never commit
 bootstrap/secrets-live/
+/auth-api
+services/auth-api/auth-api
+deploy-local/

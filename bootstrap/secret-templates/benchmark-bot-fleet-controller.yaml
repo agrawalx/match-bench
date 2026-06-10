@@ -7,4 +7,3 @@ metadata:
 type: Opaque
 data:
   database-url: ""
-  harbor-production-endpoint: ""

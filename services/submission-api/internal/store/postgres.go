@@ -25,9 +25,12 @@ CREATE TABLE IF NOT EXISTS submissions (
 	port           INT  NOT NULL,
 	team_name      TEXT NOT NULL DEFAULT '',
 	artifact_path  TEXT NOT NULL,
+	image_ref      TEXT NOT NULL DEFAULT '',
 	status         TEXT NOT NULL DEFAULT 'uploaded',
 	created_at     TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+ALTER TABLE submissions ADD COLUMN IF NOT EXISTS image_ref TEXT NOT NULL DEFAULT '';
 
 -- A "scenario" is one named load pattern (constant / spike / ramp). Its
 -- task_specs JSONB is the full task list — every TaskSpec is one tokio task
@@ -129,6 +132,7 @@ type SubmissionMeta struct {
 	Port         int
 	TeamName     string
 	ArtifactPath string
+	ImageRef     string
 	Status       string
 	CreatedAt    time.Time
 }
@@ -176,6 +180,12 @@ type RunGroupMeta struct {
 	Status       string
 	CreatedAt    time.Time
 	UpdatedAt    time.Time
+}
+
+type RunGroupListFilter struct {
+	ContestantID  string
+	SubmissionIDs []string
+	Limit         int
 }
 
 // ScenarioRow is the in-memory shape of one row of the scenarios table.
@@ -236,6 +246,54 @@ func (s *PostgresStore) GetRunGroup(ctx context.Context, runGroupID string) (*Ru
 	}
 	recordDB("submission-api", "get_run_group", start, nil)
 	return &g, nil
+}
+
+func (s *PostgresStore) ListRunGroups(ctx context.Context, filter RunGroupListFilter) ([]RunGroupMeta, error) {
+	start := time.Now()
+	limit := filter.Limit
+	if limit <= 0 || limit > 200 {
+		limit = 100
+	}
+	// pgx encodes a nil slice as SQL NULL, and cardinality(NULL::text[]) is
+	// NULL — not 0 — which made the filter clause never-true and the
+	// unfiltered listing permanently empty. Normalize nil to an empty array
+	// here AND coalesce in SQL so neither side can reintroduce the bug alone.
+	submissionIDs := filter.SubmissionIDs
+	if submissionIDs == nil {
+		submissionIDs = []string{}
+	}
+	rows, err := s.pool.Query(ctx, `
+		SELECT run_group_id, submission_id, contestant_id, status, created_at, updated_at
+		  FROM run_groups
+		 WHERE contestant_id = $1
+		   AND (cardinality(COALESCE($2::text[], ARRAY[]::text[])) = 0
+		        OR submission_id = ANY($2::text[]))
+		 ORDER BY created_at DESC
+		 LIMIT $3`,
+		filter.ContestantID,
+		submissionIDs,
+		limit,
+	)
+	if err != nil {
+		recordDB("submission-api", "list_run_groups", start, err)
+		return nil, fmt.Errorf("%w: list run-groups: %v", cerrs.ErrStoreDatabaseFailed, err)
+	}
+	defer rows.Close()
+	var out []RunGroupMeta
+	for rows.Next() {
+		var g RunGroupMeta
+		if err := rows.Scan(&g.RunGroupID, &g.SubmissionID, &g.ContestantID, &g.Status, &g.CreatedAt, &g.UpdatedAt); err != nil {
+			recordDB("submission-api", "list_run_groups", start, err)
+			return nil, fmt.Errorf("%w: scan run-group: %v", cerrs.ErrStoreDatabaseFailed, err)
+		}
+		out = append(out, g)
+	}
+	if err := rows.Err(); err != nil {
+		recordDB("submission-api", "list_run_groups", start, err)
+		return nil, fmt.Errorf("%w: list run-groups rows: %v", cerrs.ErrStoreDatabaseFailed, err)
+	}
+	recordDB("submission-api", "list_run_groups", start, nil)
+	return out, nil
 }
 
 // GetRun fetches one run by session_id. Returns (nil, nil) when not found.
@@ -612,7 +670,7 @@ func (s *PostgresStore) GetByID(ctx context.Context, submissionID string) (*Subm
 	start := time.Now()
 	row := s.pool.QueryRow(ctx,
 		`SELECT submission_id, contestant_id, sha256, language, protocol, port,
-		        team_name, artifact_path, status, created_at
+		        team_name, artifact_path, image_ref, status, created_at
 		 FROM submissions WHERE submission_id = $1`,
 		submissionID,
 	)
@@ -621,7 +679,7 @@ func (s *PostgresStore) GetByID(ctx context.Context, submissionID string) (*Subm
 	err := row.Scan(
 		&m.SubmissionID, &m.ContestantID, &m.SHA256, &m.Language,
 		&m.Protocol, &m.Port, &m.TeamName, &m.ArtifactPath,
-		&m.Status, &m.CreatedAt,
+		&m.ImageRef, &m.Status, &m.CreatedAt,
 	)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -641,11 +699,11 @@ func (s *PostgresStore) Insert(ctx context.Context, m SubmissionMeta) error {
 	_, err := s.pool.Exec(ctx,
 		`INSERT INTO submissions
 			(submission_id, contestant_id, sha256, language, protocol, port,
-			 team_name, artifact_path, status, created_at)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+			 team_name, artifact_path, image_ref, status, created_at)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
 		m.SubmissionID, m.ContestantID, m.SHA256, m.Language,
 		m.Protocol, m.Port, m.TeamName, m.ArtifactPath,
-		m.Status, m.CreatedAt,
+		m.ImageRef, m.Status, m.CreatedAt,
 	)
 	if err != nil {
 		var pgErr *pgconn.PgError
@@ -658,6 +716,33 @@ func (s *PostgresStore) Insert(ctx context.Context, m SubmissionMeta) error {
 	}
 	recordDB("submission-api", "insert_submission", start, nil)
 	return nil
+}
+
+// ClaimSubmissionContestantIfEmpty atomically binds an unowned submission to
+// contestantID. The WHERE contestant_id = ” clause is the race gate: under
+// concurrent claims exactly one UPDATE matches a row. claimed reports whether
+// THIS call won — RowsAffected == 0 means another writer got there first (or
+// the row never existed), and the caller must re-read the row and enforce
+// ownership against the database value instead of assuming the claim took.
+func (s *PostgresStore) ClaimSubmissionContestantIfEmpty(ctx context.Context, submissionID, contestantID string) (claimed bool, err error) {
+	if contestantID == "" {
+		return false, nil
+	}
+	start := time.Now()
+	tag, err := s.pool.Exec(ctx,
+		`UPDATE submissions
+		    SET contestant_id = $2
+		  WHERE submission_id = $1
+		    AND contestant_id = ''`,
+		submissionID,
+		contestantID,
+	)
+	if err != nil {
+		recordDB("submission-api", "claim_submission_contestant", start, err)
+		return false, fmt.Errorf("%w: claim submission contestant: %v", cerrs.ErrStoreDatabaseFailed, err)
+	}
+	recordDB("submission-api", "claim_submission_contestant", start, nil)
+	return tag.RowsAffected() == 1, nil
 }
 
 // recordDB emits low-cardinality DB metrics for store methods.

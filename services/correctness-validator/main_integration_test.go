@@ -90,13 +90,16 @@ func TestIntegration_ValidateSession(t *testing.T) {
 	var (
 		gotContestant                                      string
 		total, valid, vcount, phantom, overfill, priceViol int64
+		sentCount, ackedCount, matchedCount                int64
 		score                                              float64
 	)
 	err = pool.QueryRow(ctx, `
 SELECT contestant_id, total_fills, valid_fills, violation_count,
-       phantom_fills, overfills, price_violations, correctness_score
+       phantom_fills, overfills, price_violations, correctness_score,
+       sent_count, acked_count, matched_count
 FROM correctness_summary WHERE session_id=$1`, sessionID).
-		Scan(&gotContestant, &total, &valid, &vcount, &phantom, &overfill, &priceViol, &score)
+		Scan(&gotContestant, &total, &valid, &vcount, &phantom, &overfill, &priceViol, &score,
+			&sentCount, &ackedCount, &matchedCount)
 	if err != nil {
 		t.Fatalf("query summary: %v", err)
 	}
@@ -109,6 +112,12 @@ FROM correctness_summary WHERE session_id=$1`, sessionID).
 	}
 	if score < 0.49 || score > 0.51 {
 		t.Errorf("correctness_score = %v, want ~0.5", score)
+	}
+	// Completeness counters from the fixture drain: 2 orders.sent events (M1, T1),
+	// 6 orders.acked events (2×M1, 3×T1, 1×PH), 2 matched orders (PH never sent).
+	if sentCount != 2 || ackedCount != 6 || matchedCount != 2 {
+		t.Errorf("summary completeness = sent %d acked %d matched %d; want 2/6/2",
+			sentCount, ackedCount, matchedCount)
 	}
 
 	// ---- assert the violation log ----
@@ -147,11 +156,15 @@ FROM correctness_summary WHERE session_id=$1`, sessionID).
 	if ev.CorrectnessScore < 0.49 || ev.CorrectnessScore > 0.51 {
 		t.Errorf("published score = %v, want ~0.5", ev.CorrectnessScore)
 	}
+	if ev.SentCount != 2 || ev.AckedCount != 6 || ev.MatchedCount != 2 {
+		t.Errorf("published completeness = sent %d acked %d matched %d; want 2/6/2",
+			ev.SentCount, ev.AckedCount, ev.MatchedCount)
+	}
 
-	// ---- idempotency: a second run must short-circuit (HasSummary guard) ----
-	done, err := st.HasSummary(ctx, sessionID)
-	if err != nil || !done {
-		t.Errorf("HasSummary after save = (%v,%v), want (true,nil)", done, err)
+	// ---- idempotency: a second run must short-circuit (scored-status guard) ----
+	status, done, err := st.SummaryStatus(ctx, sessionID)
+	if err != nil || !done || status != store.StatusScored {
+		t.Errorf("SummaryStatus after save = (%q,%v,%v), want (%q,true,nil)", status, done, err, store.StatusScored)
 	}
 }
 
@@ -195,8 +208,8 @@ func TestIntegration_TriggerConsumer(t *testing.T) {
 	for {
 		select {
 		case <-tick.C:
-			if done, _ := st.HasSummary(ctx, sessionID); done {
-				return // consumer triggered validation and durably persisted the score
+			if status, done, _ := st.SummaryStatus(ctx, sessionID); done && status == store.StatusScored {
+				return // consumer triggered validation and durably persisted a REAL score
 			}
 		case <-deadline:
 			t.Fatal("timed out waiting for the completed session to be validated")

@@ -34,7 +34,20 @@ pub struct Config {
 /// DEFAULT_MAX_POLL_INTERVAL is the consumer's `max.poll.interval.ms` default.
 /// Shared between the Config default and the rdkafka consumer so the L39 guard
 /// and the broker bound never drift apart.
-pub const DEFAULT_MAX_POLL_INTERVAL: Duration = Duration::from_secs(300);
+///
+/// 30 minutes, because the worker does not poll while a workload runs and the
+/// guard compares the workload's WORST-CASE wall time against this bound:
+///
+///   barrier wait (120s) + max(start_offset + duration) + response drain (5s)
+///
+/// The ramp scenario's ~180s task span makes that ≈305s — the old 300s
+/// default sat just below it, so every ramp run was either rejected by the
+/// guard or rebalanced mid-run and re-delivered (duplicate execution).
+/// 1_800_000 ms leaves ~1675s of task span for long high-RPS runs and matches
+/// the deployment manifest's MAX_POLL_INTERVAL_MS. Liveness is unaffected:
+/// librdkafka's background heartbeat (session.timeout.ms=10s) still detects a
+/// dead pod; only the allowed processing-between-polls window grows.
+pub const DEFAULT_MAX_POLL_INTERVAL: Duration = Duration::from_millis(1_800_000);
 
 impl Default for Config {
     fn default() -> Self {
@@ -48,7 +61,13 @@ impl Default for Config {
             workload_failed_topic: TOPIC_WORKLOAD_FAILED.to_string(),
             orders_sent_topic: TOPIC_ORDERS_SENT.to_string(),
             telemetry_flush_interval: Duration::from_millis(5),
-            telemetry_batch_size: 4096,
+            // Aggregator flush threshold, kept equal to the sink's
+            // per-message chunk ceiling (telemetry.rs MAX_EVENTS_PER_BATCH)
+            // so a steady-state flush is exactly one Kafka message:
+            // ≈360 B/event msgpack-named ⇒ 1000 events ≈ 360 KB < 1 MiB
+            // max.message.bytes. The interim 200 ceiling capped the sink at
+            // ~50-100k ev/s and silently dropped events at the scoring waves.
+            telemetry_batch_size: 1000,
             telemetry_channel_capacity: 65536,
             // The per-pod task ceiling. Must be >= the controller's
             // MAX_TASKS_PER_WORKER (default 1000): the controller shards a
@@ -182,5 +201,39 @@ mod tests {
 
         let err = config.validate().expect_err("config should be rejected");
         assert!(err.contains("telemetry_channel_capacity"));
+    }
+
+    #[test]
+    fn default_max_poll_interval_covers_ramp_worst_case() {
+        // The L39 guard (worker.rs validate_spec) rejects any spec whose
+        // worst-case wall time meets or exceeds this default: 120s barrier
+        // wait + the ramp scenario's ~180s task span + 5s response drain
+        // ≈ 305s. The old 300s default sat BELOW that, so every ramp run
+        // either got rejected up front or — without the guard — hit a Kafka
+        // rebalance mid-run and was re-delivered (duplicate execution).
+        let ramp_worst_case = Duration::from_secs(120 + 180 + 5);
+        assert!(
+            DEFAULT_MAX_POLL_INTERVAL > ramp_worst_case,
+            "default poll interval {DEFAULT_MAX_POLL_INTERVAL:?} must exceed the ramp worst case {ramp_worst_case:?}"
+        );
+        // 30 min, matching the deployment manifest's MAX_POLL_INTERVAL_MS.
+        assert_eq!(DEFAULT_MAX_POLL_INTERVAL, Duration::from_millis(1_800_000));
+    }
+
+    #[test]
+    fn default_telemetry_batch_size_matches_publish_chunk_ceiling() {
+        // The aggregator flushes at telemetry_batch_size and the sink splits
+        // each flush into MAX_EVENTS_PER_BATCH-sized Kafka messages. Keeping
+        // them equal means a steady-state flush is exactly one message — a
+        // smaller batch size silently caps sink throughput (the old 200
+        // ceiling capped it at ~50-100k ev/s, dropping events at the scoring
+        // waves), a larger one always pays the multi-chunk path.
+        let config = Config::default();
+        assert_eq!(config.telemetry_batch_size, 1000);
+        assert_eq!(
+            config.telemetry_batch_size,
+            crate::telemetry::MAX_EVENTS_PER_BATCH
+        );
+        assert!(config.telemetry_channel_capacity >= config.telemetry_batch_size);
     }
 }

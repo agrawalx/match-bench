@@ -1,0 +1,11 @@
+.row {
+  height: 52px;
+}
+
+.cell {
+  height: 16px;
+  width: 100%;
+  background: var(--color-surface-2);
+  border-radius: var(--radius-sm);
+  animation: brightness-pulse 1.4s ease-in-out infinite;
+}

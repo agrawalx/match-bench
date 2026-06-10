@@ -55,6 +55,14 @@ spec:
         - port: 443
           protocol: TCP
 
+    # Local Kind registry used by the production-shaped local stack.
+    - to:
+        - ipBlock:
+            cidr: 172.20.0.0/16
+      ports:
+        - port: 5000
+          protocol: TCP
+
     # DNS
     - to:
         - namespaceSelector:
@@ -124,6 +132,14 @@ spec:
               - 192.168.0.0/16
       ports:
         - port: 443
+          protocol: TCP
+
+    # Local Kind registry used by the production-shaped local stack.
+    - to:
+        - ipBlock:
+            cidr: 172.20.0.0/16
+      ports:
+        - port: 5000
           protocol: TCP
 
     # DNS

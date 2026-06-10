@@ -2,6 +2,7 @@ package score
 
 import (
 	"errors"
+	"fmt"
 	"math"
 	"sort"
 
@@ -9,11 +10,16 @@ import (
 )
 
 const (
-	DefaultCorrectnessDQThreshold = 0.99
+	DefaultCorrectnessDQThreshold = 0.95
 	DefaultMaxErrorRate           = 0.01
 	DefaultMaxP99NS               = uint64(1_000_000)
 	DefaultWaveDurationNS         = uint64(20_000_000_000)
 	DefaultMaxScheduledWaves      = uint64(10_000)
+	// DefaultMinCoverage is the telemetry-completeness threshold: the minimum
+	// per-session matched/sent coverage below which violation-based DQ is
+	// suppressed and the run is flagged IncompleteTelemetry. 0.90 mirrors the
+	// scoring_config seed.
+	DefaultMinCoverage = 0.90
 )
 
 type Config struct {
@@ -21,6 +27,7 @@ type Config struct {
 	MaxErrorRate           float64
 	MaxP99NS               uint64
 	WaveDurationNS         uint64
+	MinCoverage            float64
 }
 
 func (c Config) WithDefaults() Config {
@@ -36,6 +43,9 @@ func (c Config) WithDefaults() Config {
 	if c.WaveDurationNS == 0 {
 		c.WaveDurationNS = DefaultWaveDurationNS
 	}
+	if !isPositiveFinite(c.MinCoverage) || c.MinCoverage > 1 {
+		c.MinCoverage = DefaultMinCoverage
+	}
 	return c
 }
 
@@ -48,6 +58,14 @@ type Correctness struct {
 	ValidFills     uint64
 	TotalFills     uint64
 	ViolationCount uint64
+	// Telemetry-completeness counters from the validator's drain. SentCount is
+	// orders.sent events drained, AckedCount is orders.acked events (post-
+	// dedup), MatchedCount is distinct orders present in BOTH streams — the
+	// replay's actual inputs. All zero = unknown (pre-counter rows or timed_out
+	// placeholders), which the coverage gate treats as ungateable.
+	SentCount    uint64
+	AckedCount   uint64
+	MatchedCount uint64
 }
 
 type MetricRow struct {
@@ -84,17 +102,23 @@ type WaveResult struct {
 }
 
 type Result struct {
-	RunGroupID           string       `json:"run_group_id"`
-	SubmissionID         string       `json:"submission_id"`
-	ContestantID         string       `json:"contestant_id"`
-	TeamName             string       `json:"team_name"`
-	PeakSustainedTPS     uint64       `json:"peak_sustained_tps"`
-	P99AtPeakNS          uint64       `json:"p99_at_peak_ns"`
-	SpikeRecoveryNS      uint64       `json:"spike_recovery_ns"`
-	TotalCorrectness     float64      `json:"total_correctness"`
-	Disqualified         bool         `json:"disqualified"`
-	DisqualificationCode string       `json:"disqualification_code,omitempty"`
-	Waves                []WaveResult `json:"waves,omitempty"`
+	RunGroupID           string  `json:"run_group_id"`
+	SubmissionID         string  `json:"submission_id"`
+	ContestantID         string  `json:"contestant_id"`
+	TeamName             string  `json:"team_name"`
+	PeakSustainedTPS     uint64  `json:"peak_sustained_tps"`
+	P99AtPeakNS          uint64  `json:"p99_at_peak_ns"`
+	SpikeRecoveryNS      uint64  `json:"spike_recovery_ns"`
+	TotalCorrectness     float64 `json:"total_correctness"`
+	Disqualified         bool    `json:"disqualified"`
+	DisqualificationCode string  `json:"disqualification_code,omitempty"`
+	// IncompleteTelemetry marks a verdict whose correctness inputs failed the
+	// per-session coverage gate (matched/sent below scoring_config.min_coverage).
+	// Violation-based DQ is suppressed for such runs; the reason names the first
+	// offending session so the leaderboard can surface it from score_detail.
+	IncompleteTelemetry       bool         `json:"incomplete_telemetry"`
+	IncompleteTelemetryReason string       `json:"incomplete_telemetry_reason,omitempty"`
+	Waves                     []WaveResult `json:"waves,omitempty"`
 }
 
 var ErrMissingRampSession = errors.New("missing ramp session")
@@ -109,22 +133,56 @@ func Compute(in Input) (Result, error) {
 		TotalCorrectness: aggregateCorrectness(in.Sessions),
 	}
 
-	if res.TotalCorrectness < cfg.CorrectnessDQThreshold {
-		res.Disqualified = true
-		res.DisqualificationCode = "correctness_below_threshold"
-		return res, nil
+	// Telemetry-completeness gate (v1). Coverage is matched_count/sent_count:
+	// of the orders the bot fleet reports firing (orders.sent is the bot-side
+	// ground truth of what existed), the fraction the validator could join with
+	// at least one kernel-side orders.acked response — the orders that actually
+	// entered the replay. This is the most defensible ratio the validator can
+	// measure: a lost acked event removes its order from matched_count directly
+	// (the silent-exclusion failure this gate exists to catch), while
+	// acked_count/sent_count would be distorted by multi-response orders
+	// (partial fills emit several acked events per order). The ratio is
+	// conservative toward the contestant: genuine non-response also lowers it,
+	// but a false flag only suppresses violation DQ — it never improves a score.
+	// sent_count==0 means the counters are unknown (rows written before the
+	// counters existed, or a timed_out placeholder whose drain never ran), so
+	// coverage is unknowable and the gate must not retroactively reflag those
+	// runs. The first offending session (deterministic LoadInput order) names
+	// the reason persisted in score_detail.
+	for i := range in.Sessions {
+		c := in.Sessions[i].Correct
+		if c.SentCount == 0 {
+			continue
+		}
+		coverage := min(float64(c.MatchedCount)/float64(c.SentCount), 1.0)
+		if coverage < cfg.MinCoverage {
+			res.IncompleteTelemetry = true
+			res.IncompleteTelemetryReason = fmt.Sprintf(
+				"session %s telemetry coverage %.4f (matched %d / sent %d) below min_coverage %g",
+				in.Sessions[i].SessionID, coverage, c.MatchedCount, c.SentCount, cfg.MinCoverage)
+			break
+		}
 	}
 
 	var ramp *Session
+	disqualificationCode := ""
+	// The correctness-RATIO gates below stay active even when the run is
+	// flagged IncompleteTelemetry: valid/total is a ratio over the fills that
+	// WERE observed, so uniform telemetry loss leaves it roughly unbiased.
+	// Caveat: non-uniform loss (e.g. one worker's flushes dropped wholesale)
+	// can still skew the ratio — v1 accepts that, because suppressing the
+	// correctness gate entirely would let a cheating engine hide behind lossy
+	// telemetry.
+	if res.TotalCorrectness < cfg.CorrectnessDQThreshold {
+		disqualificationCode = "correctness_below_threshold"
+	}
 	for i := range in.Sessions {
 		s := &in.Sessions[i]
 		if s.Correct.TotalFills > 0 {
 			sessionCorrectness := float64(s.Correct.ValidFills) / float64(s.Correct.TotalFills)
 			sessionCorrectness = min(sessionCorrectness, 1.0)
-			if sessionCorrectness < cfg.CorrectnessDQThreshold {
-				res.Disqualified = true
-				res.DisqualificationCode = "session_correctness_below_threshold"
-				return res, nil
+			if sessionCorrectness < cfg.CorrectnessDQThreshold && disqualificationCode == "" {
+				disqualificationCode = "session_correctness_below_threshold"
 			}
 		}
 		if s.Scenario == "ramp" {
@@ -132,21 +190,38 @@ func Compute(in Input) (Result, error) {
 		}
 	}
 	if ramp == nil {
+		// A disqualified run-group without a ramp session is still a terminal
+		// result: surface the DQ instead of an error, otherwise no scores row is
+		// ever written and PendingRunGroups re-enqueues the group forever.
+		if disqualificationCode != "" {
+			res.Disqualified = true
+			res.DisqualificationCode = disqualificationCode
+			return res, nil
+		}
 		return res, ErrMissingRampSession
 	}
-	if ramp.Correct.ViolationCount > 0 {
-		// v1 approximation from ROADMAP.md: session-level correctness gate is
-		// applied to every wave until correctness_violations carries wave buckets.
-		res.Disqualified = true
-		res.DisqualificationCode = "ramp_session_violation"
-		return res, nil
-	}
+	// The ramp session's correctness is gated by the per-session correctness-ratio
+	// check above (the ramp IS a session), so there is no separate ramp gate. The
+	// earlier binary "any ramp violation -> DQ" rule was removed: a handful of
+	// order-dependent violations out of tens of thousands of fills (a live engine
+	// cannot reproduce the offline effective_t3 order exactly — see the validator's
+	// aggressive-fill tolerance) must not disqualify a correct engine. Only a ramp
+	// whose correctness RATIO falls below the threshold is disqualified, which the
+	// per-session gate already enforces.
 
 	res.SpikeRecoveryNS = spikeRecoveryNS(in.Sessions, cfg.WaveDurationNS)
 
 	schedule := WaveSchedule(ramp.TaskSpecs, cfg.WaveDurationNS)
 	metrics := summarizeMetrics(ramp.Metrics)
 	for _, wave := range schedule {
+		// Wave 0 is the warmup wave: the first seconds after the barrier are
+		// dominated by TCP/connection, cache, and JIT cold-start (tens of ms even
+		// on a healthy node), which is not representative of the engine's sustained
+		// latency. Per the scoring contract the climb is walked from wave 1; wave 0
+		// is the baseline and never gates or contributes to peak.
+		if wave.WaveIndex == 0 {
+			continue
+		}
 		wr := WaveResult{WaveIndex: wave.WaveIndex, OfferedRPS: wave.OfferedRPS}
 		m, ok := metrics[wave.WaveIndex]
 		if !ok || m.Count == 0 {
@@ -155,11 +230,11 @@ func Compute(in Input) (Result, error) {
 			res.Waves = append(res.Waves, wr)
 			break
 		}
-		wr.P99NS = m.MaxP99NS
+		wr.P99NS = m.StableP99NS
 		switch {
 		case m.MaxErrorRate > cfg.MaxErrorRate:
 			wr.Reason = "error_rate"
-		case m.MaxP99NS > cfg.MaxP99NS:
+		case m.StableP99NS > cfg.MaxP99NS:
 			wr.Reason = "p99_latency"
 		default:
 			wr.Passed = true
@@ -170,6 +245,10 @@ func Compute(in Input) (Result, error) {
 		if !wr.Passed {
 			break
 		}
+	}
+	if disqualificationCode != "" {
+		res.Disqualified = true
+		res.DisqualificationCode = disqualificationCode
 	}
 	return res, nil
 }
@@ -249,22 +328,48 @@ func overlapNS(aStart, aEnd, bStart, bEnd uint64) uint64 {
 
 type MetricSummary struct {
 	Count        int
-	MaxP99NS     uint64
+	MaxP99NS     uint64 // worst single second (diagnostic; retained for visibility)
+	StableP99NS  uint64 // median of per-second p99 — the gate metric (see below)
 	MaxErrorRate float64
+	p99Samples   []uint64
 }
 
+// summarizeMetrics aggregates the per-second metric rows of a wave. The latency
+// gate uses StableP99NS — the MEDIAN of the wave's per-second p99 values — not the
+// worst single second. A wave's first second after the barrier is dominated by
+// connection/cache/JIT warmup (often tens of ms) and an occasional second carries
+// a GC/scheduling transient; gating on the max would fail an otherwise-healthy
+// wave on one unrepresentative second. The median is the wave's sustained p99 —
+// the "stable window" the scoring contract intends. MaxP99NS is kept for the
+// dashboard. Error rate stays a max: a sustained error second is a real fault.
 func summarizeMetrics(rows []MetricRow) map[int]MetricSummary {
 	out := make(map[int]MetricSummary)
 	for _, row := range rows {
 		m := out[row.WaveIndex]
 		m.Count++
 		m.MaxP99NS = max(m.MaxP99NS, row.P99NS)
+		m.p99Samples = append(m.p99Samples, row.P99NS)
 		if row.ErrorRate > m.MaxErrorRate {
 			m.MaxErrorRate = row.ErrorRate
 		}
 		out[row.WaveIndex] = m
 	}
+	for idx, m := range out {
+		m.StableP99NS = medianU64(m.p99Samples)
+		out[idx] = m
+	}
 	return out
+}
+
+// medianU64 returns the median of the samples (0 if empty). Sorts a copy so the
+// caller's slice order is preserved.
+func medianU64(samples []uint64) uint64 {
+	if len(samples) == 0 {
+		return 0
+	}
+	s := append([]uint64(nil), samples...)
+	sort.Slice(s, func(i, j int) bool { return s[i] < s[j] })
+	return s[len(s)/2]
 }
 
 // spikeRecoveryNS estimates the Session-2 (spike) p99 recovery time: the elapsed
@@ -328,6 +433,11 @@ func spikeRecoveryNS(sessions []Session, waveDurationNS uint64) uint64 {
 func SortResults(results []Result) {
 	sort.SliceStable(results, func(i, j int) bool {
 		a, b := results[i], results[j]
+		// Disqualified results keep their measured peak for transparency but
+		// must never outrank a clean result, so DQ is the primary key.
+		if a.Disqualified != b.Disqualified {
+			return b.Disqualified
+		}
 		if a.PeakSustainedTPS != b.PeakSustainedTPS {
 			return a.PeakSustainedTPS > b.PeakSustainedTPS
 		}

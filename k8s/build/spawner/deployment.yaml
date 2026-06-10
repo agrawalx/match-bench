@@ -83,6 +83,24 @@ spec:
                 secretKeyRef:
                   name: spawner-secret
                   key: harbor-password
+            # REGISTRY_PROVIDER=ecr makes the spawner pre-create the staging and
+            # production repositories via the ECR API before kaniko pushes and
+            # before crane promotes — ECR has no push-to-create, so without this
+            # every contestant's first push fails. Credentials come from the
+            # default AWS chain: on EKS, annotate the build-spawner
+            # ServiceAccount with an IAM role allowed to call
+            # ecr:CreateRepository (IRSA). Leave unset/commented for
+            # push-to-create registries (Harbor/ghcr).
+            # - name: REGISTRY_PROVIDER
+            #   value: ecr
+            # REGISTRY_INSECURE=true downgrades kaniko/trivy/syft/crane to plain
+            # HTTP / skipped TLS verification for the registry endpoints. Only
+            # flip this for a local dev registry served over plain HTTP. The old
+            # behavior of auto-downgrading any 10.*/172.*/192.168.* endpoint is
+            # gone (those are EKS VPC CIDRs); loopback and kind-registry
+            # endpoints remain auto-insecure for dev convenience.
+            - name: REGISTRY_INSECURE
+              value: "false"
           securityContext:
             readOnlyRootFilesystem: true
             allowPrivilegeEscalation: false
@@ -99,3 +117,6 @@ spec:
               memory: 256Mi
       securityContext:
         runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532

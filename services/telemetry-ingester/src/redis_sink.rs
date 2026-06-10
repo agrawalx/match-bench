@@ -1,5 +1,5 @@
-//! Redis sink — the hot per-contestant snapshot the leaderboard API reads
-//! without a DB round-trip. One hash per contestant holds the latest values.
+//! Redis sink — hot per-contestant/per-window snapshots for live telemetry.
+//! One hash per contestant/session/wave holds the latest values for that window.
 
 use anyhow::{Context, Result};
 use redis::aio::MultiplexedConnection;
@@ -21,8 +21,8 @@ impl RedisSink {
         Ok(Self { conn })
     }
 
-    /// For each snapshot, HSET the contestant's hot hash with the latest p99/tps/
-    /// error_rate/wave (keeps the newest write per contestant per tick).
+    /// For each snapshot, HSET the contestant/session/wave hot hash with the
+    /// latest p99/tps/error_rate/wave values.
     pub async fn write(&self, snaps: &[Snapshot]) -> Result<()> {
         let mut conn = self.conn.clone();
         for s in snaps {
@@ -79,6 +79,8 @@ mod tests {
             tps_1s: 0.0,
             error_rate: 0.0,
             hdr_encoded: Vec::new(),
+            rt_hdr_encoded: Vec::new(),
+            slip_hdr_encoded: Vec::new(),
         }
     }
 

@@ -88,9 +88,10 @@ type Manager struct {
 	// eBPF latency capture. When captureEnabled, every slot that reaches Ready
 	// gets a per-pod capture Job (see ensureCapture). Off by default so the
 	// slot lifecycle is unchanged until a deployment opts in.
-	captureEnabled bool
-	captureImage   string // image with the baked BPF object + userspace binary
-	kafkaBrokers   string // passed to the capture so it can publish orders.acked
+	captureEnabled      bool
+	captureImage        string // image with the baked BPF object + userspace binary
+	kafkaBrokers        string // passed to the capture so it can publish orders.acked
+	imagePullSecretName string // optional registry credentials for contestant images
 }
 
 type Config struct {
@@ -125,6 +126,11 @@ type Config struct {
 	CaptureEnabled bool
 	CaptureImage   string
 	KafkaBrokers   string
+
+	// ImagePullSecretName, when non-empty, is attached to every algo Pod so
+	// private contestant image refs (GHCR/Harbor/ECR token secrets) can be pulled
+	// by kubelet in the sandbox namespace.
+	ImagePullSecretName string
 }
 
 // Namespace returns the sandbox namespace this manager operates in.
@@ -136,17 +142,18 @@ func NewManager(client kubernetes.Interface, cfg Config) (*Manager, error) {
 		return nil, err
 	}
 	return &Manager{
-		client:         client,
-		namespace:      cfg.Namespace,
-		runtimeClass:   cfg.RuntimeClass,
-		cpu:            cfg.CPU,
-		memory:         cfg.Memory,
-		nodePool:       cfg.NodePool,
-		egressBwBps:    cfg.EgressBandwidth,
-		ingressBwBps:   cfg.IngressBandwidth,
-		captureEnabled: cfg.CaptureEnabled,
-		captureImage:   cfg.CaptureImage,
-		kafkaBrokers:   cfg.KafkaBrokers,
+		client:              client,
+		namespace:           cfg.Namespace,
+		runtimeClass:        cfg.RuntimeClass,
+		cpu:                 cfg.CPU,
+		memory:              cfg.Memory,
+		nodePool:            cfg.NodePool,
+		egressBwBps:         cfg.EgressBandwidth,
+		ingressBwBps:        cfg.IngressBandwidth,
+		captureEnabled:      cfg.CaptureEnabled,
+		captureImage:        cfg.CaptureImage,
+		kafkaBrokers:        cfg.KafkaBrokers,
+		imagePullSecretName: cfg.ImagePullSecretName,
 	}, nil
 }
 
@@ -439,9 +446,10 @@ func (m *Manager) podSpec(slotID, contestantID, image string, port int) *corev1.
 			// own allocation instead of hitting node disk.
 			Volumes: writableVolumes(),
 			Containers: []corev1.Container{{
-				Name:  "algo",
-				Image: image,
-				Ports: []corev1.ContainerPort{{ContainerPort: int32(port), Protocol: corev1.ProtocolTCP}},
+				Name:            "algo",
+				Image:           image,
+				ImagePullPolicy: corev1.PullIfNotPresent,
+				Ports:           []corev1.ContainerPort{{ContainerPort: int32(port), Protocol: corev1.ProtocolTCP}},
 				ReadinessProbe: &corev1.Probe{
 					ProbeHandler: corev1.ProbeHandler{
 						TCPSocket: &corev1.TCPSocketAction{Port: intstr.FromInt(port)},
@@ -466,6 +474,12 @@ func (m *Manager) podSpec(slotID, contestantID, image string, port int) *corev1.
 				VolumeMounts: writableMounts(),
 			}},
 		},
+	}
+
+	if m.imagePullSecretName != "" {
+		pod.Spec.ImagePullSecrets = []corev1.LocalObjectReference{{
+			Name: m.imagePullSecretName,
+		}}
 	}
 
 	if m.runtimeClass != "" {
@@ -672,9 +686,10 @@ func (m *Manager) captureJobSpec(slotID, contestantID, nodeName, podUID, contain
 						},
 					}},
 					Containers: []corev1.Container{{
-						Name:  "capture",
-						Image: m.captureImage,
-						Env:   env,
+						Name:            "capture",
+						Image:           m.captureImage,
+						ImagePullPolicy: corev1.PullIfNotPresent,
+						Env:             env,
 						SecurityContext: &corev1.SecurityContext{
 							Privileged: &privileged,
 							Capabilities: &corev1.Capabilities{

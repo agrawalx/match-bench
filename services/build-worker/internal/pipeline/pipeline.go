@@ -1,16 +1,21 @@
 package pipeline
 
 import (
+	"archive/zip"
+	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"log/slog"
 
+	"github.com/iicpc/build-worker/internal/dockerfile"
 	"github.com/iicpc/schemas/topics"
 )
 
 type StatusUpdater interface {
 	PublishStatus(ctx context.Context, submissionID, status, message string) error
 	UpdateDBStatus(ctx context.Context, submissionID, status, message string) error
+	UpdateImageRef(ctx context.Context, submissionID, imageRef string) error
 }
 
 type MinioClient interface {
@@ -49,7 +54,11 @@ func (p *Pipeline) run(ctx context.Context, msg topics.SubmissionBuildRequested,
 	p.setStatus(ctx, msg.SubmissionID, topics.StatusBuilding, "building image")
 	log.Info("building image")
 
-	imageRef, buildLog, err := p.runner.Build(ctx, msg.SubmissionID, zipData)
+	buildZip, err := withGeneratedDockerfile(zipData, msg)
+	if err != nil {
+		return fmt.Errorf("generate dockerfile: %w", err)
+	}
+	imageRef, buildLog, err := p.runner.Build(ctx, msg.SubmissionID, buildZip)
 
 	_ = p.minio.UploadBytes(ctx,
 		fmt.Sprintf("submissions/%s/build.log", msg.SubmissionID),
@@ -90,9 +99,62 @@ func (p *Pipeline) run(ctx context.Context, msg topics.SubmissionBuildRequested,
 	if err := p.runner.Push(ctx, imageRef); err != nil {
 		return fmt.Errorf("push: %w", err)
 	}
+	if err := p.updater.UpdateImageRef(ctx, msg.SubmissionID, imageRef); err != nil {
+		return fmt.Errorf("persist image ref: %w", err)
+	}
 	p.setStatus(ctx, msg.SubmissionID, topics.StatusReady, "image ready")
 	log.Info("pipeline complete")
 	return nil
+}
+
+func withGeneratedDockerfile(zipData []byte, msg topics.SubmissionBuildRequested) ([]byte, error) {
+	content, err := dockerfile.Generate(msg.Language, msg.BuildType, msg.BuildTarget, msg.Port)
+	if err != nil {
+		return nil, err
+	}
+
+	zr, err := zip.NewReader(bytes.NewReader(zipData), int64(len(zipData)))
+	if err != nil {
+		return nil, fmt.Errorf("open zip: %w", err)
+	}
+
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	for _, f := range zr.File {
+		if f.Name == "Dockerfile" {
+			continue
+		}
+		rc, err := f.Open()
+		if err != nil {
+			zw.Close()
+			return nil, err
+		}
+		w, err := zw.CreateHeader(&f.FileHeader)
+		if err != nil {
+			rc.Close()
+			zw.Close()
+			return nil, err
+		}
+		_, copyErr := io.Copy(w, rc)
+		rc.Close()
+		if copyErr != nil {
+			zw.Close()
+			return nil, copyErr
+		}
+	}
+	w, err := zw.Create("Dockerfile")
+	if err != nil {
+		zw.Close()
+		return nil, err
+	}
+	if _, err := w.Write([]byte(content)); err != nil {
+		zw.Close()
+		return nil, err
+	}
+	if err := zw.Close(); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
 }
 
 func (p *Pipeline) setStatus(ctx context.Context, submissionID, status, message string) {

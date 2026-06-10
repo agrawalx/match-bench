@@ -68,11 +68,12 @@ spec:
             # high-RPS scenario onto a single pod for capacity testing.
             - name: MAX_BOTS_PER_WORKER
               value: "1000"
-            # Keep orders.sent messages below Kafka's default max.message.bytes.
-            # Telemetry is high-volume and loss-tolerant; oversized batches must
-            # not keep a worker stuck on a completed assignment.
+            # Keep orders.sent messages below Kafka's default max.message.bytes:
+            # 1000 events x ~360 B msgpack-named ≈ 360 KiB < 1 MiB. 1000 matches
+            # the eBPF acked-side chunk size; smaller values starve the sink at
+            # ramp-peak rates (the aggregator awaits one delivery per chunk).
             - name: TELEMETRY_BATCH_SIZE
-              value: "200"
+              value: "1000"
             # Kafka max.poll.interval.ms AND the L39 wall-time guard (kept equal).
             # The worker doesn't poll while a workload runs (barrier + duration +
             # drain), so this must exceed that whole wall time or Kafka rebalances

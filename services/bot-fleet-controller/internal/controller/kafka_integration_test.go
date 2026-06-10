@@ -64,9 +64,15 @@ func TestProducerIntegrationPublishesControllerTopics(t *testing.T) {
 	}
 
 	var gotSpec topics.WorkloadSpec
-	consumeJSONByKey(t, brokers, topics.TopicWorkloadAssignments, workloadKey, &gotSpec)
+	specPartition := consumeJSONByKey(t, brokers, topics.TopicWorkloadAssignments, workloadKey, &gotSpec)
 	if gotSpec.SessionID != sessionID || gotSpec.WorkerIndex != 7 || len(gotSpec.Tasks) != 1 {
 		t.Fatalf("unexpected workload spec: %+v", gotSpec)
+	}
+	// Explicit 1:1 spec→partition assignment: worker_index 7 on the
+	// 24-partition topic MUST land on partition 7 (workerIndexBalancer),
+	// not wherever the key happens to hash.
+	if specPartition != 7 {
+		t.Fatalf("workload spec for worker_index 7 landed on partition %d, want 7", specPartition)
 	}
 
 	var barrier topics.BarrierEvent
@@ -194,7 +200,10 @@ func publishJSON[T any](t *testing.T, brokers []string, topic, key string, value
 	}
 }
 
-func consumeJSONByKey[T any](t *testing.T, brokers []string, topic, key string, dst *T) {
+// consumeJSONByKey fetches the first message with the given key, decodes its
+// value into dst, and returns the partition the message was read from so
+// callers can assert explicit partition placement.
+func consumeJSONByKey[T any](t *testing.T, brokers []string, topic, key string, dst *T) int {
 	t.Helper()
 	reader := kafka.NewReader(kafka.ReaderConfig{
 		Brokers:        brokers,
@@ -220,7 +229,7 @@ func consumeJSONByKey[T any](t *testing.T, brokers []string, topic, key string, 
 				t.Fatalf("decode %s key %s: %v", topic, key, err)
 			}
 			_ = reader.CommitMessages(context.Background(), msg)
-			return
+			return msg.Partition
 		}
 		_ = reader.CommitMessages(context.Background(), msg)
 	}

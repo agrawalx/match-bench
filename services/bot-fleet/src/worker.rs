@@ -258,10 +258,15 @@ async fn run_workload(
         config.max_poll_interval,
     )?;
 
+    // worker_index/worker_count make under-provisioned fleets diagnosable
+    // from worker logs alone: if two specs of one session log from the SAME
+    // pod, replicas < worker_count (the second spec will miss the barrier).
     info!(
         session_id = %spec.session_id,
         protocol = ?spec.protocol,
         task_count = spec.tasks.len(),
+        worker_index = spec.worker_index,
+        worker_count = spec.worker_count,
         "preparing workload"
     );
     metrics::tasks_assigned(spec.tasks.len());

@@ -184,13 +184,27 @@ pub fn producer(brokers: &str) -> Result<KafkaProducer> {
 ///     attached.
 ///   - `session.timeout.ms=10000` keeps rebalances tight when KEDA scales
 ///     the worker pool.
+///   - `partition.assignment.strategy=roundrobin`: REQUIRED for the 1:1
+///     WorkloadSpec→pod mapping — see consumer_client_config.
 pub fn consumer(
     brokers: &str,
     group: &str,
     topics: &[&str],
     max_poll_interval: Duration,
 ) -> Result<KafkaConsumer> {
-    let inner: StreamConsumer = ClientConfig::new()
+    let inner: StreamConsumer = consumer_client_config(brokers, group, max_poll_interval)
+        .create()
+        .context("create kafka consumer")?;
+    inner.subscribe(topics).context("subscribe to topics")?;
+    Ok(KafkaConsumer { inner })
+}
+
+/// consumer_client_config builds the rdkafka ClientConfig for the worker's
+/// consumers. Factored out of consumer() so the settings the workload
+/// contract depends on are unit-testable without a broker.
+fn consumer_client_config(brokers: &str, group: &str, max_poll_interval: Duration) -> ClientConfig {
+    let mut config = ClientConfig::new();
+    config
         .set("bootstrap.servers", brokers)
         .set("group.id", group)
         .set("enable.auto.commit", "false")
@@ -209,10 +223,23 @@ pub fn consumer(
             max_poll_interval.as_millis().to_string(),
         )
         .set("session.timeout.ms", "10000")
-        .create()
-        .context("create kafka consumer")?;
-    inner.subscribe(topics).context("subscribe to topics")?;
-    Ok(KafkaConsumer { inner })
+        // ==================== 1:1 WORKLOADSPEC→POD MAPPING ====================
+        // The controller pins the spec for worker_index i to partition i of
+        // workload.assignments (24 partitions). For every spec to reach a
+        // DISTINCT pod, the group must spread consecutive partitions across
+        // members: roundrobin assigns partition i to consumer (i mod replicas),
+        // so partitions 0..worker_count-1 land on worker_count distinct pods
+        // whenever replicas >= worker_count. The librdkafka default is
+        // "range,roundrobin" — range wins, and range hands one pod a CONTIGUOUS
+        // block (e.g. 8 replicas × 24 partitions ⇒ pod 0 owns partitions 0-2 ⇒
+        // three specs run serially on one pod, two of them missing the
+        // barrier). Do not change this without changing the controller's
+        // partition assignment scheme in lockstep. KEDA scales on lag AFTER
+        // specs are published — pre-scale (minReplicaCount >= the largest
+        // scenario's worker count) for deterministic multi-worker runs.
+        // ======================================================================
+        .set("partition.assignment.strategy", "roundrobin");
+    config
 }
 
 /// publish_json serializes a value as JSON and publishes it with the provided key.
@@ -343,4 +370,33 @@ pub async fn recv_payload(consumer: &KafkaConsumer) -> Result<Option<Vec<u8>>> {
     let payload = message.payload.clone();
     commit_message(consumer, &message)?;
     Ok(payload)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // The 1:1 WorkloadSpec→pod mapping depends on the roundrobin assignor:
+    // the controller pins the spec for worker_index i to partition i, and
+    // roundrobin hands partition i to consumer (i mod replicas) — distinct
+    // pods for every loaded partition when replicas >= worker_count. The
+    // librdkafka default ("range,roundrobin" — range wins) hands one pod a
+    // CONTIGUOUS block of partitions, concentrating several specs on one pod
+    // (serial execution, missed barriers). This test guards the strategy and
+    // the poll-interval plumbing against silent regression.
+    #[test]
+    fn consumer_config_spreads_partitions_roundrobin() {
+        let config = consumer_client_config(
+            "localhost:9092",
+            "bot-fleet",
+            Duration::from_millis(1_800_000),
+        );
+        assert_eq!(
+            config.get("partition.assignment.strategy"),
+            Some("roundrobin")
+        );
+        assert_eq!(config.get("max.poll.interval.ms"), Some("1800000"));
+        assert_eq!(config.get("enable.auto.commit"), Some("false"));
+        assert_eq!(config.get("auto.offset.reset"), Some("earliest"));
+    }
 }

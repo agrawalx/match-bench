@@ -1,6 +1,6 @@
 # IICPC
 
-> Fair, repeatable benchmarking for high-frequency trading algorithms.
+> **Fair, repeatable benchmarking for high-frequency trading algorithms.**
 
 IICPC lets participants upload trading algorithms, runs each submission in an isolated environment, sends every participant the same deterministic market workload, measures latency outside the participant's code, validates correctness, and publishes scores on a live leaderboard.
 

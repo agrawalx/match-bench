@@ -1,3 +1,10 @@
+# docker-compose.observability.yml
+#
+# This file defines the local Docker Compose stack for docker compose.observability.
+# It is part of the IICPC platform configuration and should remain
+# aligned with the deployment and operations guidance in the README.
+# Keep comments at the file header so resource bodies stay declarative.
+
 services:
   postgres-exporter:
     image: quay.io/prometheuscommunity/postgres-exporter:v0.15.0

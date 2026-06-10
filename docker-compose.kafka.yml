@@ -1,3 +1,10 @@
+# docker-compose.kafka.yml
+#
+# This file defines the local Docker Compose stack for docker compose.kafka.
+# It is part of the IICPC platform configuration and should remain
+# aligned with the deployment and operations guidance in the README.
+# Keep comments at the file header so resource bodies stay declarative.
+
 x-kafka-common-env: &kafka-common-env
   KAFKA_PROCESS_ROLES: "broker,controller"
   KAFKA_LISTENERS: "PLAINTEXT://:9092,CONTROLLER://:9093,EXTERNAL://:9094"
@@ -26,7 +33,7 @@ services:
       KAFKA_NODE_ID: "0"
       KAFKA_ADVERTISED_LISTENERS: "PLAINTEXT://kafka-1:9092,EXTERNAL://${KAFKA_EXTERNAL_HOST:-localhost}:9092"
     ports:
-      - "9092:9094"   # reach Kafka from host at localhost:9092
+      - "9092:9094"
     volumes:
       - kafka_1_data:/var/lib/kafka/data
     healthcheck: *kafka-healthcheck

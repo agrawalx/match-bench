@@ -1351,7 +1351,10 @@ async fn rw_write_loop(
                     .expect("pending map poisoned")
                     .remove(&frame.order_id);
                 metrics::order_write_error();
-                warn!(task_id = task.task_id, seq, "REST/WS write timeout; writer exiting");
+                warn!(
+                    task_id = task.task_id,
+                    seq, "REST/WS write timeout; writer exiting"
+                );
                 return Ok(sent);
             }
         }
@@ -1411,7 +1414,9 @@ fn clordid_from_json(body: &[u8]) -> Option<String> {
     struct Resp {
         cl_ord_id: Option<String>,
     }
-    serde_json::from_slice::<Resp>(body).ok().and_then(|r| r.cl_ord_id)
+    serde_json::from_slice::<Resp>(body)
+        .ok()
+        .and_then(|r| r.cl_ord_id)
 }
 
 /// next_http_response frames one HTTP/1.1 response from the buffer head and
@@ -1517,7 +1522,13 @@ async fn rest_read_loop(
         while let Some((clord, consumed)) = next_http_response(&buf) {
             if let Some(clord_id) = clord {
                 emit_response(
-                    &telemetry, &pending, &session_id, &submission_id, &worker_id, task_id, &clord_id,
+                    &telemetry,
+                    &pending,
+                    &session_id,
+                    &submission_id,
+                    &worker_id,
+                    task_id,
+                    &clord_id,
                 )
                 .await;
             }
@@ -1569,7 +1580,13 @@ async fn ws_read_loop(
         };
         if let Some(clord_id) = clordid_from_json(&body) {
             emit_response(
-                &telemetry, &pending, &session_id, &submission_id, &worker_id, task_id, &clord_id,
+                &telemetry,
+                &pending,
+                &session_id,
+                &submission_id,
+                &worker_id,
+                task_id,
+                &clord_id,
             )
             .await;
         }

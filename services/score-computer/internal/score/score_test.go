@@ -49,7 +49,7 @@ func TestComputePassingClimbStopsAtFirstFail(t *testing.T) {
 	if res.PeakSustainedTPS != 20_000 || res.P99AtPeakNS != 700_000 {
 		t.Fatalf("peak=(%d,%d), want (20000,700000)", res.PeakSustainedTPS, res.P99AtPeakNS)
 	}
-	if len(res.Waves) != 3 || res.Waves[2].Passed || res.Waves[2].Reason != "p99_latency" {
+	if len(res.Waves) != 2 || res.Waves[1].Passed || res.Waves[1].Reason != "p99_latency" {
 		t.Fatalf("bad wave walk: %#v", res.Waves)
 	}
 }
@@ -68,12 +68,17 @@ func TestComputeCorrectnessDQ(t *testing.T) {
 
 func TestComputeAbsentWaveFails(t *testing.T) {
 	in := baseInput()
-	in.Sessions[2].Metrics = []MetricRow{{WaveIndex: 0, P99NS: 500_000, ErrorRate: 0}}
+	// wave 0 is warmup (skipped); wave 1 passes, wave 2 has no metrics -> the
+	// climb stops at the missing wave with peak = wave 1's offered RPS.
+	in.Sessions[2].Metrics = []MetricRow{
+		{WaveIndex: 0, P99NS: 500_000, ErrorRate: 0},
+		{WaveIndex: 1, P99NS: 500_000, ErrorRate: 0},
+	}
 	res, err := Compute(in)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if res.PeakSustainedTPS != 10_000 || len(res.Waves) != 2 || res.Waves[1].Reason != "missing_metrics" {
+	if res.PeakSustainedTPS != 20_000 || len(res.Waves) != 2 || res.Waves[1].Reason != "missing_metrics" {
 		t.Fatalf("unexpected absent-wave result: %#v", res)
 	}
 }

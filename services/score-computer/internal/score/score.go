@@ -214,6 +214,14 @@ func Compute(in Input) (Result, error) {
 	schedule := WaveSchedule(ramp.TaskSpecs, cfg.WaveDurationNS)
 	metrics := summarizeMetrics(ramp.Metrics)
 	for _, wave := range schedule {
+		// Wave 0 is the warmup wave: the first seconds after the barrier are
+		// dominated by TCP/connection, cache, and JIT cold-start (tens of ms even
+		// on a healthy node), which is not representative of the engine's sustained
+		// latency. Per the scoring contract the climb is walked from wave 1; wave 0
+		// is the baseline and never gates or contributes to peak.
+		if wave.WaveIndex == 0 {
+			continue
+		}
 		wr := WaveResult{WaveIndex: wave.WaveIndex, OfferedRPS: wave.OfferedRPS}
 		m, ok := metrics[wave.WaveIndex]
 		if !ok || m.Count == 0 {
@@ -222,11 +230,11 @@ func Compute(in Input) (Result, error) {
 			res.Waves = append(res.Waves, wr)
 			break
 		}
-		wr.P99NS = m.MaxP99NS
+		wr.P99NS = m.StableP99NS
 		switch {
 		case m.MaxErrorRate > cfg.MaxErrorRate:
 			wr.Reason = "error_rate"
-		case m.MaxP99NS > cfg.MaxP99NS:
+		case m.StableP99NS > cfg.MaxP99NS:
 			wr.Reason = "p99_latency"
 		default:
 			wr.Passed = true
@@ -320,22 +328,48 @@ func overlapNS(aStart, aEnd, bStart, bEnd uint64) uint64 {
 
 type MetricSummary struct {
 	Count        int
-	MaxP99NS     uint64
+	MaxP99NS     uint64 // worst single second (diagnostic; retained for visibility)
+	StableP99NS  uint64 // median of per-second p99 — the gate metric (see below)
 	MaxErrorRate float64
+	p99Samples   []uint64
 }
 
+// summarizeMetrics aggregates the per-second metric rows of a wave. The latency
+// gate uses StableP99NS — the MEDIAN of the wave's per-second p99 values — not the
+// worst single second. A wave's first second after the barrier is dominated by
+// connection/cache/JIT warmup (often tens of ms) and an occasional second carries
+// a GC/scheduling transient; gating on the max would fail an otherwise-healthy
+// wave on one unrepresentative second. The median is the wave's sustained p99 —
+// the "stable window" the scoring contract intends. MaxP99NS is kept for the
+// dashboard. Error rate stays a max: a sustained error second is a real fault.
 func summarizeMetrics(rows []MetricRow) map[int]MetricSummary {
 	out := make(map[int]MetricSummary)
 	for _, row := range rows {
 		m := out[row.WaveIndex]
 		m.Count++
 		m.MaxP99NS = max(m.MaxP99NS, row.P99NS)
+		m.p99Samples = append(m.p99Samples, row.P99NS)
 		if row.ErrorRate > m.MaxErrorRate {
 			m.MaxErrorRate = row.ErrorRate
 		}
 		out[row.WaveIndex] = m
 	}
+	for idx, m := range out {
+		m.StableP99NS = medianU64(m.p99Samples)
+		out[idx] = m
+	}
 	return out
+}
+
+// medianU64 returns the median of the samples (0 if empty). Sorts a copy so the
+// caller's slice order is preserved.
+func medianU64(samples []uint64) uint64 {
+	if len(samples) == 0 {
+		return 0
+	}
+	s := append([]uint64(nil), samples...)
+	sort.Slice(s, func(i, j int) bool { return s[i] < s[j] })
+	return s[len(s)/2]
 }
 
 // spikeRecoveryNS estimates the Session-2 (spike) p99 recovery time: the elapsed

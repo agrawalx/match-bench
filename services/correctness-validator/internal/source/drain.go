@@ -205,19 +205,36 @@ func partitionOffsets(ctx context.Context, broker, topic string, partition int, 
 	if err != nil {
 		return 0, 0, fmt.Errorf("start offset %s/%d: %w", topic, partition, err)
 	}
-	if start == kafka.FirstOffset {
-		// Non-UUIDv7 id: fall back to the partition's earliest offset so no event
-		// is ever missed. ReadOffset(zero time) would mean "epoch", which Kafka
-		// also resolves to earliest, but ReadFirstOffset is the explicit primitive.
-		if start, err = conn.ReadFirstOffset(); err != nil {
-			return 0, 0, fmt.Errorf("read first offset %s/%d: %w", topic, partition, err)
-		}
-	}
 	last, err := conn.ReadLastOffset()
 	if err != nil {
 		return 0, 0, fmt.Errorf("read last offset %s/%d: %w", topic, partition, err)
 	}
-	return start, last, nil
+	if start == kafka.FirstOffset {
+		// Non-UUIDv7 id: fall back to the partition's earliest offset so no event
+		// is ever missed. ReadOffset(zero time) would mean "epoch", which Kafka
+		// also resolves to earliest, but ReadFirstOffset is the explicit primitive.
+		earliest, err := conn.ReadFirstOffset()
+		if err != nil {
+			return 0, 0, fmt.Errorf("read first offset %s/%d: %w", topic, partition, err)
+		}
+		return earliest, last, nil
+	}
+	return resolveStart(start, last), last, nil
+}
+
+// resolveStart turns the raw ReadOffset (time-lookup) result into a concrete
+// start offset for the [start,last) scan. Kafka's ListOffsets returns -1 when no
+// message in the partition has a timestamp at-or-after the requested time — i.e.
+// the session produced nothing in this partition (it holds only older runs' data
+// on a shared, retained topic). That must map to an EMPTY range (start=last), not
+// fall through to SetOffset(-1)=LastOffset, which made the reader block on the
+// high watermark until the validation deadline and drain zero events for the
+// whole session (spurious timeout / zero-correctness verdict).
+func resolveStart(seek, last int64) int64 {
+	if seek < 0 {
+		return last
+	}
+	return seek
 }
 
 // startOffsetForSession returns the offset to begin reading a partition from for

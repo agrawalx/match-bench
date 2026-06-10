@@ -264,3 +264,19 @@ func writeSent(ctx context.Context, t *testing.T, brokers []string, sid string, 
 		t.Fatalf("write orders.sent: %v", err)
 	}
 }
+
+// TestResolveStart_NoSessionEventsInPartition pins the fix for the silent
+// drain-zero bug: Kafka's time lookup returns -1 for a partition with no
+// message at-or-after the session window; that must yield an empty [start,last)
+// range, never SetOffset(-1)=LastOffset (which blocked the reader to deadline).
+func TestResolveStart(t *testing.T) {
+	if got := resolveStart(-1, 591); got != 591 {
+		t.Fatalf("seek=-1 (no session events) must map to last=591, got %d", got)
+	}
+	if got := resolveStart(0, 297); got != 0 {
+		t.Fatalf("seek=0 must be honored, got %d", got)
+	}
+	if got := resolveStart(42, 1197); got != 42 {
+		t.Fatalf("seek=42 must be honored, got %d", got)
+	}
+}

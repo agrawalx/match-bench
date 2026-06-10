@@ -177,7 +177,14 @@ func TestIntegration_TriggerConsumer(t *testing.T) {
 	defer st.Close()
 	pub := publisher.New(brokersCSV)
 	defer pub.Close()
-	v := &validator{log: discardLogger(), brokers: brokers, store: st, pub: pub, settleDelay: 0}
+	v := &validator{
+		log:               discardLogger(),
+		brokers:           brokers,
+		store:             st,
+		pub:               pub,
+		settleDelay:       0,
+		validationTimeout: 30 * time.Second,
+	}
 
 	group := fmt.Sprintf("itest-validator-%d", time.Now().UnixNano())
 	go v.runStatusConsumer(ctx, brokers, group)

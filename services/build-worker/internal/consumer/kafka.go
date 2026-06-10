@@ -42,6 +42,7 @@ func NewKafkaConsumer(brokers, groupID string, handler Handler, log *slog.Logger
 		MaxBytes:       1 << 20,
 		MaxWait:        100 * time.Millisecond,
 		CommitInterval: 0,
+		StartOffset:    kafka.FirstOffset,
 	})
 	return &Consumer{reader: r, handler: handler, log: log}
 }
@@ -66,7 +67,7 @@ func (c *Consumer) Start(ctx context.Context) {
 		if err := json.Unmarshal(m.Value, &msg); err != nil {
 			recordConsume("decode_error", metrics.SinceSeconds(start))
 			c.log.Error("unmarshal failed", "error", err)
-			recordCommit(c.reader.CommitMessages(ctx, m))
+			recordCommit(c.commitMessage(m))
 			continue
 		}
 
@@ -74,13 +75,21 @@ func (c *Consumer) Start(ctx context.Context) {
 		c.handler.Run(ctx, msg)
 		recordConsume("ok", metrics.SinceSeconds(start))
 
-		if err := c.reader.CommitMessages(ctx, m); err != nil {
+		if err := c.commitMessage(m); err != nil {
 			recordCommit(err)
 			c.log.Warn("commit failed", "error", err)
 		} else {
 			recordCommit(nil)
 		}
 	}
+}
+
+// commitMessage records that a fetched message has been handled. It uses a
+// bounded background context so shutdown cannot cancel a commit after work ran.
+func (c *Consumer) commitMessage(m kafka.Message) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	return c.reader.CommitMessages(ctx, m)
 }
 
 // Close applies behavior for its receiver performs the package-specific operation described by its name.

@@ -309,6 +309,7 @@ func (v *validator) runStatusConsumer(ctx context.Context, brokers []string, gro
 		MaxBytes:       1 << 20,
 		MaxWait:        200 * time.Millisecond,
 		CommitInterval: 0, // manual commit
+		StartOffset:    kafka.FirstOffset,
 	})
 	defer reader.Close()
 	v.log.Info("benchmark.status.updated consumer started", "group", group)

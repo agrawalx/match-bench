@@ -28,8 +28,8 @@ docker compose -f docker-compose.yml -f docker-compose.kafka.yml up -d
 Then export:
 
 ```bash
-export DATABASE_URL='postgres://iicpc:iicpc@localhost:5433/iicpc?sslmode=disable'
-export TIMESCALE_URL='postgres://iicpc:iicpc@localhost:5434/metrics'
+export DATABASE_URL='postgres://<db-user>:<db-password>@localhost:5433/iicpc?sslmode=disable'
+export TIMESCALE_URL='postgres://<metrics-user>:<metrics-password>@localhost:5434/metrics'
 export REDIS_ADDR='localhost:6379'
 export REDIS_URL='redis://localhost:6379'
 export KAFKA_BROKERS='localhost:9092,localhost:9095,localhost:9096'
@@ -78,7 +78,7 @@ Correctness validator integration:
 
 ```bash
 KAFKA_BROKERS=localhost:9092,localhost:9095,localhost:9096 \
-DATABASE_URL='postgres://iicpc:iicpc@localhost:5433/iicpc?sslmode=disable' \
+DATABASE_URL='postgres://<db-user>:<db-password>@localhost:5433/iicpc?sslmode=disable' \
 go test \
   ./services/correctness-validator \
   ./services/correctness-validator/internal/source \
@@ -90,8 +90,8 @@ Score computer integration:
 
 ```bash
 IICPC_INTEGRATION=1 \
-DATABASE_URL='postgres://iicpc:iicpc@localhost:5433/iicpc?sslmode=disable' \
-TIMESCALE_URL='postgres://iicpc:iicpc@localhost:5434/metrics' \
+DATABASE_URL='postgres://<db-user>:<db-password>@localhost:5433/iicpc?sslmode=disable' \
+TIMESCALE_URL='postgres://<metrics-user>:<metrics-password>@localhost:5434/metrics' \
 REDIS_ADDR=localhost:6379 \
 KAFKA_BROKERS=localhost:9092,localhost:9095,localhost:9096 \
 go test ./services/score-computer -v
@@ -101,8 +101,8 @@ Leaderboard API integration:
 
 ```bash
 IICPC_INTEGRATION=1 \
-DATABASE_URL='postgres://iicpc:iicpc@localhost:5433/iicpc?sslmode=disable' \
-TIMESCALE_URL='postgres://iicpc:iicpc@localhost:5434/metrics' \
+DATABASE_URL='postgres://<db-user>:<db-password>@localhost:5433/iicpc?sslmode=disable' \
+TIMESCALE_URL='postgres://<metrics-user>:<metrics-password>@localhost:5434/metrics' \
 REDIS_ADDR=localhost:6379 \
 KAFKA_BROKERS=localhost:9092,localhost:9095,localhost:9096 \
 go test ./services/leaderboard-api -v
@@ -134,7 +134,7 @@ Telemetry ingester integration:
 
 ```bash
 KAFKA_BROKERS=localhost:9092 \
-TIMESCALE_URL='postgres://iicpc:iicpc@localhost:5434/metrics' \
+TIMESCALE_URL='postgres://<metrics-user>:<metrics-password>@localhost:5434/metrics' \
 REDIS_URL=redis://localhost:6379 \
 cargo test -p iicpc-telemetry-ingester --test integration -- --nocapture
 ```

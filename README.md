@@ -162,7 +162,7 @@ Suggested target:
 
 The detailed system design is documented in [design.md](./design.md). It explains the measurement model, deterministic workload generation, sandboxing strategy, telemetry pipeline, correctness validation, and scoring model.
 
-### Development Team
+## Development Team
 
 - [@agrawalx](https://github.com/agrawalx)
 - [@akronim26](https://github.com/akronim26)

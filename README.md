@@ -11,9 +11,9 @@ The platform is built for one principle:
 ## Table Of Contents
 
 - [Overview](#overview)
+- [Benchmark Snapshot](#benchmark-snapshot)
 - [Key Features](#key-features)
 - [How It Works](#how-it-works)
-- [Benchmark Snapshot](#benchmark-snapshot)
 - [Architecture](#architecture)
 - [Tech Stack](#tech-stack)
 - [Repository Layout](#repository-layout)
@@ -27,6 +27,22 @@ The platform is built for one principle:
 ## Overview
 
 IICPC is a multi-service benchmark platform for evaluating untrusted trading algorithms. A submitted algorithm is built into a container, deployed into a locked-down Kubernetes pod, driven by deterministic benchmark traffic, measured at the Linux network boundary, checked against a correctness model, and scored.
+
+## Benchmark Snapshot
+
+Initial local benchmarking shows the load-generation path is not the bottleneck for realistic contest-scale runs.
+
+| Environment / assumption | Observed or projected throughput |
+|---|---:|
+| Laptop, single core test | ~68,000 orders/sec |
+| CPU usage during local single-core test | ~0.74% of one core |
+| EKS paid worker node assumption | 4 cores |
+| Projected throughput per worker on 4-core node | ~360,000 orders/sec |
+| Projected throughput per worker per minute | ~21 million orders/min |
+| Projected 2-3 node capacity | ~1 million orders/sec |
+| Concurrent run planning note | Designed to support multiple simultaneous runs; current planning target mentioned in benchmarking notes is 10 at a time |
+
+These numbers useful because they show the platform has room to scale before the load generator becomes the limiting component. Production numbers should be revalidated on the exact EKS node type, kernel, networking mode, Kafka settings, and workload mix used for the event.
 
 ## Key Features
 
@@ -53,22 +69,6 @@ For each submission, IICPC follows this flow:
 8. The score computer produces the final leaderboard score.
 
 The important detail is where measurement happens. IICPC does not ask the submitted algorithm how fast it was. It observes network traffic from outside the algorithm and computes latency from those observations.
-
-## Benchmark Snapshot
-
-Initial local benchmarking shows the load-generation path is not the bottleneck for realistic contest-scale runs.
-
-| Environment / assumption | Observed or projected throughput |
-|---|---:|
-| Laptop, single core test | ~68,000 orders/sec |
-| CPU usage during local single-core test | ~0.74% of one core |
-| EKS paid worker node assumption | 4 cores |
-| Projected throughput per worker on 4-core node | ~360,000 orders/sec |
-| Projected throughput per worker per minute | ~21 million orders/min |
-| Projected 2-3 node capacity | ~1 million orders/sec |
-| Concurrent run planning note | Designed to support multiple simultaneous runs; current planning target mentioned in benchmarking notes is 10 at a time |
-
-These numbers useful because they show the platform has room to scale before the load generator becomes the limiting component. Production numbers should be revalidated on the exact EKS node type, kernel, networking mode, Kafka settings, and workload mix used for the event.
 
 ## Architecture
 

@@ -14,11 +14,17 @@ spec:
     metadata:
       labels:
         app: auth-api
+      # No prometheus.io/scrape annotations: auth-api exposes no /metrics
+      # endpoint (only /health, /ready, /token, /refresh, /logout). Add the
+      # annotations together with a metrics server in main.go, not before.
     spec:
+      automountServiceAccountToken: false
       containers:
         - name: auth-api
-          image: iicpc/auth-api:latest
-          imagePullPolicy: IfNotPresent
+          # Dev-tag placeholder, same convention as the other platform
+          # deployments — point at your registry at deploy time:
+          #   kubectl set image deployment/auth-api auth-api=ghcr.io/<user>/auth-api:dev -n platform
+          image: ghcr.io/agrawalx/auth-api:dev
           ports:
             - name: http
               containerPort: 8080
@@ -56,3 +62,24 @@ spec:
               port: http
             initialDelaySeconds: 10
             periodSeconds: 20
+          # Image is distroless nonroot: static Go binary, no shell, no writes
+          # to the root filesystem, runs as UID 65532 by design.
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            capabilities:
+              drop:
+                - ALL
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532

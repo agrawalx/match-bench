@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -11,7 +12,9 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -109,10 +112,34 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+
+	// Graceful shutdown: on SIGTERM (kubelet) or SIGINT, stop accepting new
+	// connections and drain in-flight token exchanges before exiting, so a
+	// rolling deploy never cuts off a login mid-exchange.
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
+	defer stop()
+
+	serveErr := make(chan error, 1)
+	go func() {
+		serveErr <- httpServer.Serve(listener)
+	}()
 	log.Printf("auth-api listening on %s", listener.Addr())
-	if err := httpServer.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
-		log.Fatal(err)
+
+	select {
+	case err := <-serveErr:
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Fatal(err)
+		}
+	case <-ctx.Done():
+		stop()
+		log.Printf("shutdown signal received; draining connections")
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		if err := httpServer.Shutdown(shutdownCtx); err != nil {
+			log.Printf("graceful shutdown failed: %v", err)
+		}
 	}
+	log.Printf("auth-api stopped")
 }
 
 func (s *server) handleToken(w http.ResponseWriter, r *http.Request) {
@@ -279,10 +306,11 @@ func parseClaims(idToken string) (idTokenClaims, error) {
 	return claims, nil
 }
 
+// redirectAllowed is fail-closed: loadConfig guarantees a non-empty allowlist,
+// and an empty set here (a zero-value config that bypassed loadConfig) must
+// reject every redirect_uri rather than forward arbitrary attacker-chosen
+// values into the token exchange.
 func (s *server) redirectAllowed(redirectURI string) bool {
-	if len(s.cfg.allowedRedirects) == 0 {
-		return true
-	}
 	_, ok := s.cfg.allowedRedirects[redirectURI]
 	return ok
 }
@@ -335,6 +363,9 @@ func loadConfig() (config, error) {
 	}
 	if cfg.clientSecret == "" {
 		return cfg, errors.New("GOOGLE_CLIENT_SECRET or OAUTH_CLIENT_SECRET is required")
+	}
+	if len(cfg.allowedRedirects) == 0 {
+		return cfg, errors.New("GOOGLE_ALLOWED_REDIRECT_URIS or OAUTH_ALLOWED_REDIRECT_URIS is required")
 	}
 	return cfg, nil
 }

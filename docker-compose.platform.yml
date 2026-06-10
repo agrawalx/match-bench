@@ -42,6 +42,9 @@ services:
       MINIO_BUCKET: submissions
       MINIO_CREATE_BUCKET_IF_MISSING: "true"
       KAFKA_BROKERS: kafka-1:9092,kafka-2:9092,kafka-3:9092
+      # Local stack runs without Google JWT verification; flip to true and
+      # set GOOGLE_CLIENT_ID to exercise the real auth path locally.
+      AUTH_REQUIRED: "false"
     ports:
       - "8082:8080"
     depends_on:

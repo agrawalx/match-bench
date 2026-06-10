@@ -33,6 +33,20 @@ spec:
       ports:
         - port: 9092
           protocol: TCP
+    # KEDA operator (keda namespace): the kafka scaler for bot-fleet-worker
+    # reads consumer-group lag on workload.assignments straight from the broker.
+    # Without this rule the scaler's metadata requests are default-denied, lag
+    # always reads as unknown, and the fleet never scales up. Broker port ONLY,
+    # like the sandbox rule above. The keda namespace is helm-managed, so match
+    # the automatic kubernetes.io/metadata.name label instead of a hand-applied
+    # name label.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: keda
+      ports:
+        - port: 9092
+          protocol: TCP
     # Intra-namespace Kafka: the 3-node KRaft quorum talks broker-to-broker on
     # 9093 (controller) and 9092 (broker), and the kafka-topic-init Job connects
     # to a broker on 9092. Without this rule those flows are default-denied by

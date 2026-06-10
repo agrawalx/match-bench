@@ -42,9 +42,21 @@ The kernel stamps `CLOCK_MONOTONIC` (`bpf_ktime_get_ns`). Userspace samples a
   segments (no 64 KB GSO super-segments) and `captured_len == payload_len`:
   `ethtool -K <veth> tso off gso off gro off lro off`. Pairs with `TCP_NODELAY`
   on the bot for a clean `t3`. The `TRUNCATED_CAPTURES` counter stays 0 when this
-  is set.
+  is set. The loader runs this itself at attach time (best-effort).
+- The loader also clamps the capture interface MTU to `CAPTURE_CLAMP_MTU`
+  (default 1500, `0` disables) at attach time, via raw `SIOCGIFMTU`/`SIOCSIFMTU`
+  ioctls (no iproute2 needed in the image). Offloads off only bounds segments by
+  the MTU — on EKS the pod veth inherits the node ENI's 9001-byte jumbo MTU, so
+  a single full-MTU segment would still exceed the kernel's 1536-byte
+  `CAPTURE_CAP` and force a lossy flow reset. The clamp only ever lowers the
+  MTU (old -> new is logged) and is best-effort: failure logs loudly but never
+  aborts the capture.
+- Shutdown: SIGTERM (how Kubernetes stops the per-slot Job) and SIGINT both
+  flush the buffered `orders.acked` tail and exit 0, so teardown loses no
+  events and the Job completes Succeeded.
 - In Kubernetes, set `EBPF_NETNS_PATH=/proc/<algo-pid>/ns/net` and
-  `EBPF_IFACE=eth0`; the loader enters that netns to attach.
+  `EBPF_IFACE=eth0`; the loader enters that netns to attach (the offload
+  disable and MTU clamp run inside it too).
 
 ## CaptureRecord ABI
 
@@ -74,6 +86,8 @@ struct capture_record {
 - `ORDERS_ACKED_TOPIC` (default `orders.acked`)
 - `EBPF_NETNS_PATH`, `EBPF_XDP_INGRESS_PROGRAM`, `EBPF_TC_EGRESS_PROGRAM`,
   `EBPF_RINGBUF_MAP`, `EBPF_FLUSH_INTERVAL_MS`, `EBPF_BATCH_SIZE`
+- `CAPTURE_CLAMP_MTU` (default `1500`; `0` disables the attach-time MTU clamp;
+  valid range otherwise 68–65535)
 
 ## Tests
 
@@ -98,4 +112,13 @@ pipeline. Needs root + `bpf-linker`/nightly (or `EBPF_OBJECT_PATH`):
 ```bash
 IICPC_REAL_EBPF_STRICT=1 sudo -E env "PATH=$PATH" \
   cargo test -p iicpc-ebpf-latency --test real_ebpf -- --ignored --nocapture
+```
+
+MTU clamp integration test — creates a real veth pair at the EKS jumbo default
+(9001) and verifies the `SIOCSIFMTU` clamp lowers it to 1500, never raises a
+smaller MTU, and honors `CAPTURE_CLAMP_MTU=0`. Needs root + iproute2:
+
+```bash
+IICPC_REAL_EBPF_STRICT=1 sudo -E env "PATH=$PATH" \
+  cargo test -p iicpc-ebpf-latency --test mtu_clamp -- --ignored --nocapture
 ```

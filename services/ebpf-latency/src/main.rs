@@ -9,6 +9,7 @@
 
 mod capture;
 mod matcher;
+mod mtu;
 mod netns;
 mod parse;
 mod pipeline;
@@ -28,6 +29,7 @@ use aya::{
 use iicpc_bot_fleet::kafka::{self, KafkaProducer};
 use iicpc_logger_rust::loki;
 use iicpc_schemas_rust::{OrderAckedBatchRef, OrderAckedEventRef, TOPIC_ORDERS_ACKED};
+use tokio::signal::unix::{signal, Signal, SignalKind};
 use tokio::time;
 use tracing::{info, warn};
 
@@ -52,6 +54,12 @@ const MAX_PENDING_EVENTS: usize = 100_000;
 /// ~300+ bytes (repeated field names), so this keeps each message well under the
 /// 1 MiB topic max.message.bytes; larger backlogs are split across messages.
 const MAX_EVENTS_PER_BATCH: usize = 1000;
+/// Default MTU clamp for the capture interface (see src/mtu.rs). EKS pod veths
+/// inherit the node ENI's 9001-byte jumbo MTU; a single super-MTU segment
+/// exceeds the kernel's CAPTURE_CAP copy window and forces a lossy flow reset,
+/// so the interface is clamped to classic Ethernet at attach time. Override
+/// with CAPTURE_CLAMP_MTU (0 disables the clamp).
+const DEFAULT_CLAMP_MTU: usize = 1500;
 
 #[derive(Debug, Clone)]
 struct Config {
@@ -67,6 +75,7 @@ struct Config {
     ringbuf_map: String,
     flush_interval: Duration,
     batch_size: usize,
+    clamp_mtu: usize,
 }
 
 impl Config {
@@ -109,6 +118,7 @@ impl Config {
             ringbuf_map: env_or("EBPF_RINGBUF_MAP", DEFAULT_RINGBUF_MAP),
             flush_interval: env_duration_ms("EBPF_FLUSH_INTERVAL_MS", DEFAULT_FLUSH_INTERVAL),
             batch_size: env_usize("EBPF_BATCH_SIZE", DEFAULT_BATCH_SIZE),
+            clamp_mtu: env_usize("CAPTURE_CLAMP_MTU", DEFAULT_CLAMP_MTU),
         })
     }
 
@@ -118,6 +128,11 @@ impl Config {
         }
         if self.flush_interval.is_zero() {
             bail!("EBPF_FLUSH_INTERVAL_MS must be greater than zero");
+        }
+        // 68 is the IPv4 minimum MTU; a sub-minimum clamp would break the algo
+        // pod's networking outright, and >65535 is not a valid interface MTU.
+        if self.clamp_mtu != 0 && !(68..=65_535).contains(&self.clamp_mtu) {
+            bail!("CAPTURE_CLAMP_MTU must be 0 (disabled) or between 68 and 65535");
         }
         Ok(())
     }
@@ -163,10 +178,12 @@ async fn run(config: Config, producer: KafkaProducer) -> Result<()> {
     let mut evict_ticker = time::interval(EVICT_INTERVAL);
     let mut last_dropped = 0u64;
     let mut last_truncated = 0u64;
+    let mut shutdown = ShutdownSignal::new()?;
 
     loop {
         tokio::select! {
-            _ = tokio::signal::ctrl_c() => {
+            sig = shutdown.recv() => {
+                info!(signal = sig, "shutdown signal received; flushing buffered orders.acked tail");
                 flush(&producer, &config, &mut events).await?;
                 return Ok(());
             }
@@ -179,6 +196,32 @@ async fn run(config: Config, producer: KafkaProducer) -> Result<()> {
             _ = evict_ticker.tick() => {
                 pipeline.evict_idle();
             }
+        }
+    }
+}
+
+/// Resolves when the process receives SIGTERM or SIGINT. Kubernetes stops the
+/// per-slot capture Job with SIGTERM (ctrl-C in local runs sends SIGINT); both
+/// must take the same graceful path — flush the buffered orders.acked tail and
+/// exit 0 — or the tail is lost on every slot teardown and the Job ends Failed.
+struct ShutdownSignal {
+    sigterm: Signal,
+    sigint: Signal,
+}
+
+impl ShutdownSignal {
+    fn new() -> Result<Self> {
+        Ok(Self {
+            sigterm: signal(SignalKind::terminate()).context("install SIGTERM handler")?,
+            sigint: signal(SignalKind::interrupt()).context("install SIGINT handler")?,
+        })
+    }
+
+    /// Wait for the next shutdown signal; returns its name for logging.
+    async fn recv(&mut self) -> &'static str {
+        tokio::select! {
+            _ = self.sigterm.recv() => "SIGTERM",
+            _ = self.sigint.recv() => "SIGINT",
         }
     }
 }
@@ -308,8 +351,13 @@ fn report_counter(map: &Option<PerCpuArray<MapData, u64>>, last: &mut u64, msg: 
 fn attach_programs(bpf: &mut Ebpf, config: &Config) -> Result<()> {
     let mut attach = || -> Result<()> {
         // Runs inside the algo netns (when netns_path is set), so this disables
-        // offloads on the algo pod's interface before the hooks attach.
+        // offloads and clamps the MTU on the algo pod's interface before the
+        // hooks attach. Both are needed for the one-packet=one-order contract:
+        // offloads off bounds segments by the MTU, and the clamp bounds the MTU
+        // itself by CAPTURE_CAP (EKS veths inherit the node ENI's 9001-byte
+        // jumbo MTU, which would truncate every full-MTU segment).
         disable_offloads(&config.iface);
+        mtu::clamp_to(&config.iface, config.clamp_mtu);
         attach_xdp_ingress(bpf, &config.xdp_ingress_program, &config.iface)?;
         attach_tc_egress(bpf, &config.tc_egress_program, &config.iface)
     };
@@ -507,6 +555,7 @@ mod tests {
         "EBPF_RINGBUF_MAP",
         "EBPF_FLUSH_INTERVAL_MS",
         "EBPF_BATCH_SIZE",
+        "CAPTURE_CLAMP_MTU",
     ];
 
     fn env_lock() -> std::sync::MutexGuard<'static, ()> {
@@ -567,6 +616,7 @@ mod tests {
             ringbuf_map: DEFAULT_RINGBUF_MAP.to_string(),
             flush_interval: DEFAULT_FLUSH_INTERVAL,
             batch_size: DEFAULT_BATCH_SIZE,
+            clamp_mtu: DEFAULT_CLAMP_MTU,
         };
         let mut events = vec![MatchedEvent {
             order_id: format!("order-{suffix}"),
@@ -649,8 +699,83 @@ mod tests {
         assert_eq!(config.netns_path, None);
         assert_eq!(config.flush_interval, DEFAULT_FLUSH_INTERVAL);
         assert_eq!(config.batch_size, DEFAULT_BATCH_SIZE);
+        assert_eq!(config.clamp_mtu, DEFAULT_CLAMP_MTU);
         config.validate().unwrap();
         clear_test_env();
+    }
+
+    #[test]
+    fn config_from_env_parses_capture_clamp_mtu() {
+        let _guard = env_lock();
+        // (env value, expected clamp)
+        let cases: &[(&str, usize)] = &[
+            ("9001", 9001),                      // explicit override
+            ("0", 0),                            // explicit disable
+            ("", DEFAULT_CLAMP_MTU),             // empty -> default
+            ("not-a-number", DEFAULT_CLAMP_MTU), // invalid -> default (warn)
+        ];
+        for &(value, want) in cases {
+            clear_test_env();
+            set_env("SESSION_ID", "session-a");
+            set_env("CONTESTANT_ID", "contestant-a");
+            set_env("EBPF_IFACE", "eth0");
+            set_env("EBPF_OBJECT_PATH", "/tmp/latency.o");
+            set_env("CAPTURE_CLAMP_MTU", value);
+            let config = Config::from_env().unwrap();
+            assert_eq!(config.clamp_mtu, want, "CAPTURE_CLAMP_MTU={value:?}");
+        }
+        clear_test_env();
+    }
+
+    #[test]
+    fn config_validate_rejects_out_of_range_clamp_mtu() {
+        let _guard = env_lock();
+        // (env value, passes validate). 68 is the IPv4 minimum MTU; a sub-minimum
+        // clamp would break the algo pod's networking outright, and anything past
+        // 65535 cannot be a valid interface MTU.
+        let cases: &[(&str, bool)] = &[
+            ("0", true), // disabled
+            ("68", true),
+            ("1500", true),
+            ("65535", true),
+            ("67", false),
+            ("65536", false),
+        ];
+        for &(value, valid) in cases {
+            clear_test_env();
+            set_env("SESSION_ID", "session-a");
+            set_env("CONTESTANT_ID", "contestant-a");
+            set_env("EBPF_IFACE", "eth0");
+            set_env("EBPF_OBJECT_PATH", "/tmp/latency.o");
+            set_env("CAPTURE_CLAMP_MTU", value);
+            let config = Config::from_env().unwrap();
+            assert_eq!(
+                config.validate().is_ok(),
+                valid,
+                "CAPTURE_CLAMP_MTU={value}"
+            );
+        }
+        clear_test_env();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn shutdown_signal_resolves_on_sigterm_and_sigint() {
+        // Installing the tokio handlers FIRST means the signals raised below are
+        // routed to the streams instead of killing the test binary. raise()
+        // signals only this process, never the cargo parent.
+        let mut shutdown = ShutdownSignal::new().expect("install signal handlers");
+
+        unsafe { libc::raise(libc::SIGTERM) };
+        let name = time::timeout(Duration::from_secs(5), shutdown.recv())
+            .await
+            .expect("SIGTERM not observed within 5s");
+        assert_eq!(name, "SIGTERM");
+
+        unsafe { libc::raise(libc::SIGINT) };
+        let name = time::timeout(Duration::from_secs(5), shutdown.recv())
+            .await
+            .expect("SIGINT not observed within 5s");
+        assert_eq!(name, "SIGINT");
     }
 
     #[test]

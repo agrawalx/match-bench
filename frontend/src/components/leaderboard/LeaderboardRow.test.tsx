@@ -1,7 +1,10 @@
 import { render, screen } from '@testing-library/react';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import type { LeaderboardEntry } from '@/types/leaderboard';
 import { LeaderboardRow } from './LeaderboardRow';
+
+// LeaderboardRow now uses useRouter to link to the public run-detail page.
+vi.mock('next/navigation', () => ({ useRouter: () => ({ push: vi.fn() }) }));
 
 const entry: LeaderboardEntry = {
   rank: 1,

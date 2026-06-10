@@ -840,11 +840,18 @@ async fn fix_write_loop(
         // grows monotonically; that gap is the CO signal.
         let target_send_ts_ns = next_send_ns;
 
-        // Race the inter-send sleep against cancellation so a SIGTERM during a
-        // low-rps pacing gap stops the loop promptly instead of after the gap.
-        tokio::select! {
-            _ = time::sleep_until(instant_from_unix_nanos(next_send_ns)) => {}
-            _ = cancel.cancelled() => break,
+        // Coordinated-omission catch-up pacing (see rw_write_loop for the rationale):
+        // only park on the timer when AHEAD of schedule. When behind (deadline already
+        // passed) send immediately rather than incur tokio's ~1ms timer-wheel
+        // quantization, which would pin the task near ~1k/s. target_send_ts_ns stays
+        // the fixed schedule so the CO signal (send_ts_ns - target_send_ts_ns) is
+        // unaffected. Racing against cancellation keeps SIGTERM responsive in the
+        // ahead-of-schedule (sleeping) case; should_stop_sending covers the behind case.
+        if next_send_ns > unix_nanos() {
+            tokio::select! {
+                _ = time::sleep_until(instant_from_unix_nanos(next_send_ns)) => {}
+                _ = cancel.cancelled() => break,
+            }
         }
 
         let action = generator.next();
@@ -1289,9 +1296,21 @@ async fn rw_write_loop(
             break;
         }
         let target_send_ts_ns = next_send_ns;
-        tokio::select! {
-            _ = time::sleep_until(instant_from_unix_nanos(next_send_ns)) => {}
-            _ = cancel.cancelled() => break,
+        // Coordinated-omission catch-up pacing: only park on the timer when genuinely
+        // AHEAD of schedule. If the deadline has already passed (we're behind), send
+        // the due order immediately instead of sleeping. tokio's timer wheel quantizes
+        // every sleep to ~1ms — even past-due ones — which otherwise pins each task
+        // near ~1k/s and, with many tasks contending the timer driver, collapses
+        // aggregate throughput while CPU sits idle. Sending due orders immediately is
+        // the *correct* CO behaviour: target_send_ts_ns stays the fixed schedule, so
+        // schedule_slip / response_time still measure real lateness (engine/network
+        // backpressure), not a load-generator timer artifact. should_stop_sending at
+        // the loop head keeps cancel/task-end responsive without the sleep.
+        if next_send_ns > unix_nanos() {
+            tokio::select! {
+                _ = time::sleep_until(instant_from_unix_nanos(next_send_ns)) => {}
+                _ = cancel.cancelled() => break,
+            }
         }
 
         let action = generator.next();

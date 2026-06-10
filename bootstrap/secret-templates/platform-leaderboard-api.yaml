@@ -1,3 +1,10 @@
+# Placeholder shape only — never commit real values. Same connection strings as
+# score-computer-secret, but in the platform namespace:
+#   kubectl -n platform create secret generic leaderboard-api-secret \
+#     --from-literal=database-url='postgres://iicpc:<pg_pw>@postgres.data.svc.cluster.local:5432/iicpc' \
+#     --from-literal=timescale-url='postgres://iicpc:<ts_pw>@timescaledb.data.svc.cluster.local:5432/metrics' \
+#     --from-literal=kafka-brokers='kafka-0.kafka.data.svc.cluster.local:9092,kafka-1...:9092,kafka-2...:9092' \
+#     --from-literal=redis-addr='redis.data.svc.cluster.local:6379'
 apiVersion: v1
 kind: Secret
 metadata:

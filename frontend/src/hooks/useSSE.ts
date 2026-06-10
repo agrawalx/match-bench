@@ -6,13 +6,17 @@ import type { SSEEvent } from '@/types/leaderboard';
 export type SSEStatus = 'connecting' | 'open' | 'closed' | 'error';
 
 interface SSEOptions {
-  token?: string | null;
   enabled?: boolean;
   onMessage: (event: SSEEvent) => void;
   onStatusChange?: (status: SSEStatus) => void;
 }
 
-export function useSSE(url: string, { token, enabled = true, onMessage, onStatusChange }: SSEOptions) {
+// Connects to the leaderboard-api SSE endpoint. The broker emits named events
+// ("snapshot" on connect, "update" per change), so we must register listeners
+// per event name — the default onmessage handler never fires for named events.
+// The endpoint is unauthenticated; never append tokens to the URL (they would
+// land in nginx access logs).
+export function useSSE(url: string, { enabled = true, onMessage, onStatusChange }: SSEOptions) {
   const messageRef = useRef(onMessage);
   const statusRef = useRef(onStatusChange);
 
@@ -22,26 +26,33 @@ export function useSSE(url: string, { token, enabled = true, onMessage, onStatus
   }, [onMessage, onStatusChange]);
 
   useEffect(() => {
+    if (!enabled) {
+      statusRef.current?.('closed');
+      return;
+    }
+
     let source: EventSource | null = null;
     let reconnect: ReturnType<typeof setTimeout> | null = null;
     let closed = false;
     let attempt = 0;
 
+    const dispatch = (type: SSEEvent['type'], raw: string) => {
+      try {
+        messageRef.current({ type, data: JSON.parse(raw) } as SSEEvent);
+      } catch {
+        // Ignore malformed events; the stream stays alive.
+      }
+    };
+
     const connect = () => {
       statusRef.current?.('connecting');
-      const separator = url.includes('?') ? '&' : '?';
-      source = new EventSource(token ? `${url}${separator}token=${encodeURIComponent(token)}` : url);
+      source = new EventSource(url);
       source.onopen = () => {
         attempt = 0;
         statusRef.current?.('open');
       };
-      source.onmessage = (event) => {
-        try {
-          messageRef.current(JSON.parse(event.data) as SSEEvent);
-        } catch {
-          // Ignore malformed events; the stream stays alive.
-        }
-      };
+      source.addEventListener('snapshot', (event) => dispatch('snapshot', (event as MessageEvent).data));
+      source.addEventListener('update', (event) => dispatch('update', (event as MessageEvent).data));
       source.onerror = () => {
         statusRef.current?.('error');
         source?.close();
@@ -62,5 +73,5 @@ export function useSSE(url: string, { token, enabled = true, onMessage, onStatus
       source?.close();
       if (reconnect) clearTimeout(reconnect);
     };
-  }, [url, token, enabled]);
+  }, [url, enabled]);
 }

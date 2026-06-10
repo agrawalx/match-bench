@@ -27,6 +27,12 @@ export function uploadSubmission(
           return;
         }
       }
+      if (xhr.status === 413) {
+        // nginx rejects oversized bodies with an HTML 413 page; surface a
+        // friendly message instead of the raw markup.
+        reject(new Error('Submission is too large: the platform accepts uploads up to 100 MB.'));
+        return;
+      }
       if (xhr.status < 200 || xhr.status >= 300) {
         const body = parseUploadError(xhr.responseText);
         reject(new Error(body.error ?? body.message ?? 'Upload failed'));

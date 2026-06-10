@@ -21,6 +21,12 @@ const (
 	maxLeaderboardOffset   = 100000
 )
 
+// rankedOrder is the canonical ranking order for the ROW_NUMBER() subqueries,
+// mirroring score-computer's rankOrderBy. disqualified ASC must stay the
+// leading term: DQ'd results retain their measured peak for transparency, so
+// a DQ-blind ordering would let a cheating engine rank #1.
+const rankedOrder = `disqualified ASC, peak_sustained_tps DESC, p99_at_peak_ns ASC, spike_recovery_ns ASC, total_correctness DESC, run_group_id ASC`
+
 type Store struct {
 	meta      *pgxpool.Pool
 	timescale *pgxpool.Pool
@@ -109,10 +115,7 @@ SELECT rank, run_group_id, submission_id, contestant_id, team_name, peak_sustain
        p99_at_peak_ns, spike_recovery_ns, total_correctness, disqualified,
        disqualification_code, COALESCE(rank_delta,0), computed_at
   FROM (
-	SELECT ROW_NUMBER() OVER (
-	           ORDER BY peak_sustained_tps DESC, p99_at_peak_ns ASC, spike_recovery_ns ASC,
-	                    total_correctness DESC, run_group_id ASC
-	       ) AS rank,
+	SELECT ROW_NUMBER() OVER (ORDER BY `+rankedOrder+`) AS rank,
 	       run_group_id, submission_id, contestant_id, team_name, peak_sustained_tps,
 	       p99_at_peak_ns, spike_recovery_ns, total_correctness, disqualified,
 	       disqualification_code, rank_delta, computed_at
@@ -374,10 +377,7 @@ SELECT rank, run_group_id, submission_id, contestant_id, team_name, peak_sustain
        p99_at_peak_ns, spike_recovery_ns, total_correctness, disqualified,
        disqualification_code, COALESCE(rank_delta,0), computed_at
   FROM (
-	SELECT ROW_NUMBER() OVER (
-	           ORDER BY peak_sustained_tps DESC, p99_at_peak_ns ASC, spike_recovery_ns ASC,
-	                    total_correctness DESC, run_group_id ASC
-	       ) AS rank,
+	SELECT ROW_NUMBER() OVER (ORDER BY `+rankedOrder+`) AS rank,
 	       run_group_id, submission_id, contestant_id, team_name, peak_sustained_tps,
 	       p99_at_peak_ns, spike_recovery_ns, total_correctness, disqualified,
 	       disqualification_code, rank_delta, computed_at
@@ -451,7 +451,9 @@ func leaderboardOrderBy(sortField, order string) string {
 	case "desc":
 		dir = "DESC"
 	}
-	return spec.column + " " + dir + ", " + spec.tiebreak
+	// disqualified ASC always leads so user-selectable sorts stay secondary;
+	// otherwise ?sort=peak_tps would re-rank DQ'd retained peaks to the top.
+	return "disqualified ASC, " + spec.column + " " + dir + ", " + spec.tiebreak
 }
 
 func encodeLeaderboardCursor(offset int) string {

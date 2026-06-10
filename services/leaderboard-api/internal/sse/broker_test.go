@@ -36,6 +36,33 @@ func TestSSESendsSnapshotThenUpdate(t *testing.T) {
 	}
 }
 
+func TestHeartbeatKeepalive(t *testing.T) {
+	b := New(nil)
+	b.heartbeat = 10 * time.Millisecond
+	req := httptest.NewRequest("GET", "/api/events", nil)
+	ctx, cancel := context.WithCancel(req.Context())
+	defer cancel()
+	req = req.WithContext(ctx)
+	rec := httptest.NewRecorder()
+	done := make(chan struct{})
+	go func() {
+		b.ServeHTTP(rec, req)
+		close(done)
+	}()
+	time.Sleep(60 * time.Millisecond)
+	b.Broadcast(topics.LeaderboardUpdateEvent{RunGroupID: "rg"})
+	time.Sleep(20 * time.Millisecond)
+	cancel()
+	<-done
+	body := rec.Body.String()
+	if !strings.Contains(body, ": keepalive\n\n") {
+		t.Fatalf("missing keepalive comment in %q", body)
+	}
+	if !strings.Contains(body, "event: update") {
+		t.Fatalf("heartbeat must not break update delivery, body %q", body)
+	}
+}
+
 func TestSlowClientDrop(t *testing.T) {
 	b := New(nil)
 	ch := make(chan []byte, 1)

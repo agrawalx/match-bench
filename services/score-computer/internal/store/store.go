@@ -26,9 +26,19 @@ CREATE TABLE IF NOT EXISTS score_progress (
 	correctness_score DOUBLE PRECISION,
 	violation_count   BIGINT,
 	correctness_at_ns BIGINT,
+	sent_count        BIGINT,
+	acked_count       BIGINT,
+	matched_count     BIGINT,
 	updated_at        TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS idx_score_progress_group ON score_progress(run_group_id);
+-- Telemetry-completeness counters mirrored from CorrectnessScoreEvent
+-- (sent/acked events the validator drained, orders matched across both
+-- streams). Idempotent migration for tables created before the counters
+-- existed; NULL/0 means UNKNOWN, which the coverage gate treats as ungateable.
+ALTER TABLE score_progress ADD COLUMN IF NOT EXISTS sent_count BIGINT;
+ALTER TABLE score_progress ADD COLUMN IF NOT EXISTS acked_count BIGINT;
+ALTER TABLE score_progress ADD COLUMN IF NOT EXISTS matched_count BIGINT;
 
 CREATE TABLE IF NOT EXISTS scoring_config (
 	config_id                    TEXT PRIMARY KEY,
@@ -36,11 +46,18 @@ CREATE TABLE IF NOT EXISTS scoring_config (
 	max_error_rate               DOUBLE PRECISION NOT NULL,
 	max_p99_ns                   BIGINT NOT NULL,
 	wave_duration_ns             BIGINT NOT NULL,
+	min_coverage                 DOUBLE PRECISION NOT NULL DEFAULT 0.90,
 	updated_at                   TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+-- min_coverage: the telemetry-completeness threshold — minimum per-session
+-- matched/sent coverage below which violation-based DQ is suppressed and the
+-- run is flagged incomplete_telemetry. Must run before the seed INSERT below
+-- references the column on pre-existing tables; the DEFAULT seeds existing
+-- config rows at 0.90, judge-tunable like the other knobs.
+ALTER TABLE scoring_config ADD COLUMN IF NOT EXISTS min_coverage DOUBLE PRECISION NOT NULL DEFAULT 0.90;
 
-INSERT INTO scoring_config(config_id, correctness_dq_threshold, max_error_rate, max_p99_ns, wave_duration_ns)
-VALUES ('v1', 0.99, 0.01, 1000000, 20000000000)
+INSERT INTO scoring_config(config_id, correctness_dq_threshold, max_error_rate, max_p99_ns, wave_duration_ns, min_coverage)
+VALUES ('v1', 0.99, 0.01, 1000000, 20000000000, 0.90)
 ON CONFLICT (config_id) DO NOTHING;
 
 CREATE TABLE IF NOT EXISTS scores (
@@ -56,15 +73,28 @@ CREATE TABLE IF NOT EXISTS scores (
 	disqualification_code     TEXT NOT NULL DEFAULT '',
 	rank                      BIGINT,
 	rank_delta                BIGINT,
+	incomplete_telemetry      BOOLEAN NOT NULL DEFAULT false,
 	score_detail              JSONB NOT NULL DEFAULT '{}'::jsonb,
 	computed_at               TIMESTAMPTZ NOT NULL DEFAULT now(),
 	published_at              TIMESTAMPTZ
 );
-CREATE INDEX IF NOT EXISTS idx_scores_sort_v2 ON scores
-	(peak_sustained_tps DESC, p99_at_peak_ns ASC, spike_recovery_ns ASC, total_correctness DESC, run_group_id ASC);
+-- incomplete_telemetry: the run's correctness inputs failed the coverage gate
+-- (see scoring_config.min_coverage); persisted on the row so the leaderboard
+-- can surface it without parsing score_detail. Idempotent migration; the
+-- false default is correct for historical rows (the gate never fired on them).
+ALTER TABLE scores ADD COLUMN IF NOT EXISTS incomplete_telemetry BOOLEAN NOT NULL DEFAULT false;
+DROP INDEX IF EXISTS idx_scores_sort_v2;
+CREATE INDEX IF NOT EXISTS idx_scores_sort_v3 ON scores
+	(disqualified ASC, peak_sustained_tps DESC, p99_at_peak_ns ASC, spike_recovery_ns ASC, total_correctness DESC, run_group_id ASC);
 CREATE INDEX IF NOT EXISTS idx_scores_contestant ON scores(contestant_id, computed_at DESC);
 CREATE INDEX IF NOT EXISTS idx_scores_submission ON scores(submission_id, computed_at DESC);
 `
+
+// rankOrderBy is the canonical leaderboard ordering, mirrored by
+// score.SortResults and leaderboard-api's ranked subquery. disqualified ASC
+// must stay the leading term: DQ'd results retain their measured peak for
+// transparency, so a DQ-blind ordering would let a cheating engine rank #1.
+const rankOrderBy = `disqualified ASC, peak_sustained_tps DESC, p99_at_peak_ns ASC, spike_recovery_ns ASC, total_correctness DESC, run_group_id ASC`
 
 type Store struct {
 	meta      *pgxpool.Pool
@@ -104,9 +134,9 @@ func (s *Store) Config(ctx context.Context) (score.Config, error) {
 	var cfg score.Config
 	var maxP99, waveDuration int64
 	err := s.meta.QueryRow(ctx, `
-SELECT correctness_dq_threshold, max_error_rate, max_p99_ns, wave_duration_ns
+SELECT correctness_dq_threshold, max_error_rate, max_p99_ns, wave_duration_ns, min_coverage
   FROM scoring_config WHERE config_id='v1'`).
-		Scan(&cfg.CorrectnessDQThreshold, &cfg.MaxErrorRate, &maxP99, &waveDuration)
+		Scan(&cfg.CorrectnessDQThreshold, &cfg.MaxErrorRate, &maxP99, &waveDuration, &cfg.MinCoverage)
 	if err != nil {
 		return cfg, err
 	}
@@ -164,8 +194,8 @@ func (s *Store) RecordCorrectness(ctx context.Context, ev topics.CorrectnessScor
 	_, err = s.meta.Exec(ctx, `
 INSERT INTO score_progress
 	(run_group_id, session_id, submission_id, contestant_id, valid_fills, total_fills,
-	 correctness_score, violation_count, correctness_at_ns)
-VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+	 correctness_score, violation_count, correctness_at_ns, sent_count, acked_count, matched_count)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
 ON CONFLICT (session_id) DO UPDATE SET
 	run_group_id=EXCLUDED.run_group_id,
 	submission_id=EXCLUDED.submission_id,
@@ -175,9 +205,13 @@ ON CONFLICT (session_id) DO UPDATE SET
 	correctness_score=EXCLUDED.correctness_score,
 	violation_count=EXCLUDED.violation_count,
 	correctness_at_ns=EXCLUDED.correctness_at_ns,
+	sent_count=EXCLUDED.sent_count,
+	acked_count=EXCLUDED.acked_count,
+	matched_count=EXCLUDED.matched_count,
 	updated_at=now()`,
 		runGroupID, ev.SessionID, submissionID, contestantID, int64(ev.ValidFills), int64(ev.TotalFills),
-		ev.CorrectnessScore, int64(ev.ViolationCount), int64(ev.ComputedAtNS))
+		ev.CorrectnessScore, int64(ev.ViolationCount), int64(ev.ComputedAtNS),
+		int64(ev.SentCount), int64(ev.AckedCount), int64(ev.MatchedCount))
 	if err != nil {
 		return nil, err
 	}
@@ -280,7 +314,8 @@ SELECT g.submission_id, g.contestant_id, COALESCE(sub.team_name, '')
 	}
 	rows, err := s.meta.Query(ctx, `
 SELECT r.session_id, r.contestant_id, sc.name, sc.duration_ns, sc.task_specs,
-       p.valid_fills, p.total_fills, p.violation_count
+       p.valid_fills, p.total_fills, p.violation_count,
+       COALESCE(p.sent_count, 0), COALESCE(p.acked_count, 0), COALESCE(p.matched_count, 0)
   FROM runs r
   JOIN scenarios sc ON sc.scenario_id=r.scenario_id
   JOIN score_progress p ON p.session_id=r.session_id
@@ -295,9 +330,11 @@ SELECT r.session_id, r.contestant_id, sc.name, sc.duration_ns, sc.task_specs,
 			sess                            score.Session
 			taskJSON                        []byte
 			valid, total, violations, durNS int64
+			sent, acked, matched            int64
 			contestantID                    string
 		)
-		if err := rows.Scan(&sess.SessionID, &contestantID, &sess.Scenario, &durNS, &taskJSON, &valid, &total, &violations); err != nil {
+		if err := rows.Scan(&sess.SessionID, &contestantID, &sess.Scenario, &durNS, &taskJSON, &valid, &total, &violations,
+			&sent, &acked, &matched); err != nil {
 			return in, err
 		}
 		if in.ContestantID == "" {
@@ -312,6 +349,11 @@ SELECT r.session_id, r.contestant_id, sc.name, sc.duration_ns, sc.task_specs,
 			ValidFills:     nonNegativeUint64(valid),
 			TotalFills:     nonNegativeUint64(total),
 			ViolationCount: nonNegativeUint64(violations),
+			// NULL counters (rows written before the completeness gate) load
+			// as 0 = coverage unknown; score.Compute skips gating those.
+			SentCount:    nonNegativeUint64(sent),
+			AckedCount:   nonNegativeUint64(acked),
+			MatchedCount: nonNegativeUint64(matched),
 		}
 		sess.Metrics, err = s.loadMetrics(ctx, sess.SessionID, in.ContestantID)
 		if err != nil {
@@ -369,12 +411,13 @@ func (s *Store) SaveScore(ctx context.Context, res score.Result) (bool, error) {
 	tag, err := s.meta.Exec(ctx, `
 INSERT INTO scores
 	(run_group_id, submission_id, contestant_id, team_name, peak_sustained_tps, p99_at_peak_ns,
-	 spike_recovery_ns, total_correctness, disqualified, disqualification_code, score_detail, computed_at)
-VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,now())
+	 spike_recovery_ns, total_correctness, disqualified, disqualification_code, incomplete_telemetry,
+	 score_detail, computed_at)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,now())
 ON CONFLICT (run_group_id) DO NOTHING`,
 		res.RunGroupID, res.SubmissionID, res.ContestantID, res.TeamName, peak,
 		p99, recovery, res.TotalCorrectness, res.Disqualified,
-		res.DisqualificationCode, detail)
+		res.DisqualificationCode, res.IncompleteTelemetry, detail)
 	if err != nil {
 		return false, err
 	}
@@ -393,10 +436,7 @@ func (s *Store) RankForRunGroup(ctx context.Context, runGroupID string) (int64, 
 	err := s.meta.QueryRow(ctx, `
 SELECT rank FROM (
 	SELECT run_group_id,
-	       ROW_NUMBER() OVER (
-	           ORDER BY peak_sustained_tps DESC, p99_at_peak_ns ASC, spike_recovery_ns ASC,
-	                    total_correctness DESC, run_group_id ASC
-	       ) AS rank
+	       ROW_NUMBER() OVER (ORDER BY `+rankOrderBy+`) AS rank
 	  FROM scores
 ) ranked
  WHERE run_group_id=$1`, runGroupID).Scan(&rank)

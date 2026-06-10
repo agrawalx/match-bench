@@ -3,7 +3,6 @@ package consumer
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"log/slog"
 
 	"github.com/iicpc/leaderboard-api/internal/sse"
@@ -24,13 +23,20 @@ func New(brokers []string, group string, broker *sse.Broker, log *slog.Logger) *
 }
 
 func (c *Consumer) Run(ctx context.Context) {
+	// c.group is unique per pod (POD_NAME suffix) so every replica receives
+	// every update — the SSE broker only fans out to its own clients. These
+	// groups are transient fan-out groups: offsets are never committed (there
+	// is no resume semantic — the snapshot endpoint covers reconnect state) and
+	// StartOffset=LastOffset attaches a fresh pod at the log tail instead of
+	// replaying stale updates. With no committed offsets, empty groups are
+	// garbage-collected by the broker instead of accumulating per pod churn.
 	r := kafka.NewReader(kafka.ReaderConfig{
-		Brokers:        c.brokers,
-		GroupID:        c.group,
-		Topic:          topics.TopicLeaderboardUpdates,
-		CommitInterval: 0,
-		MinBytes:       1,
-		MaxBytes:       1 << 20,
+		Brokers:     c.brokers,
+		GroupID:     c.group,
+		Topic:       topics.TopicLeaderboardUpdates,
+		StartOffset: kafka.LastOffset,
+		MinBytes:    1,
+		MaxBytes:    1 << 20,
 	})
 	defer r.Close()
 	for {
@@ -47,31 +53,10 @@ func (c *Consumer) Run(ctx context.Context) {
 		if err := json.Unmarshal(msg.Value, &ev); err != nil {
 			result = "error"
 			c.log.Warn("decode leaderboard update failed", "error", err)
-			if isDecodeError(err) {
-				if err := r.CommitMessages(ctx, msg); err != nil {
-					c.log.Warn("commit malformed leaderboard update failed", "error", err)
-				}
-			}
 		} else {
 			c.broker.Broadcast(ev)
-			if err := r.CommitMessages(ctx, msg); err != nil {
-				result = "error"
-				c.log.Warn("commit leaderboard update failed", "error", err)
-			}
 		}
 		metrics.Counter("leaderboard_api_events_consumed_total", "Leaderboard update events consumed by result.", metrics.Labels("result", result), 1)
 		metrics.Counter("kafka_messages_consumed_total", "Kafka messages consumed by topic and result.", metrics.Labels("service", "leaderboard-api", "topic", topics.TopicLeaderboardUpdates, "result", result), 1)
 	}
-}
-
-func isDecodeError(err error) bool {
-	if err == nil {
-		return false
-	}
-	var syntaxErr *json.SyntaxError
-	if errors.As(err, &syntaxErr) {
-		return true
-	}
-	var typeErr *json.UnmarshalTypeError
-	return errors.As(err, &typeErr)
 }

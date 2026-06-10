@@ -254,15 +254,24 @@ func (s *PostgresStore) ListRunGroups(ctx context.Context, filter RunGroupListFi
 	if limit <= 0 || limit > 200 {
 		limit = 100
 	}
+	// pgx encodes a nil slice as SQL NULL, and cardinality(NULL::text[]) is
+	// NULL — not 0 — which made the filter clause never-true and the
+	// unfiltered listing permanently empty. Normalize nil to an empty array
+	// here AND coalesce in SQL so neither side can reintroduce the bug alone.
+	submissionIDs := filter.SubmissionIDs
+	if submissionIDs == nil {
+		submissionIDs = []string{}
+	}
 	rows, err := s.pool.Query(ctx, `
 		SELECT run_group_id, submission_id, contestant_id, status, created_at, updated_at
 		  FROM run_groups
 		 WHERE contestant_id = $1
-		   AND (cardinality($2::text[]) = 0 OR submission_id = ANY($2::text[]))
+		   AND (cardinality(COALESCE($2::text[], ARRAY[]::text[])) = 0
+		        OR submission_id = ANY($2::text[]))
 		 ORDER BY created_at DESC
 		 LIMIT $3`,
 		filter.ContestantID,
-		filter.SubmissionIDs,
+		submissionIDs,
 		limit,
 	)
 	if err != nil {
@@ -709,12 +718,18 @@ func (s *PostgresStore) Insert(ctx context.Context, m SubmissionMeta) error {
 	return nil
 }
 
-func (s *PostgresStore) ClaimSubmissionContestantIfEmpty(ctx context.Context, submissionID, contestantID string) error {
+// ClaimSubmissionContestantIfEmpty atomically binds an unowned submission to
+// contestantID. The WHERE contestant_id = ” clause is the race gate: under
+// concurrent claims exactly one UPDATE matches a row. claimed reports whether
+// THIS call won — RowsAffected == 0 means another writer got there first (or
+// the row never existed), and the caller must re-read the row and enforce
+// ownership against the database value instead of assuming the claim took.
+func (s *PostgresStore) ClaimSubmissionContestantIfEmpty(ctx context.Context, submissionID, contestantID string) (claimed bool, err error) {
 	if contestantID == "" {
-		return nil
+		return false, nil
 	}
 	start := time.Now()
-	_, err := s.pool.Exec(ctx,
+	tag, err := s.pool.Exec(ctx,
 		`UPDATE submissions
 		    SET contestant_id = $2
 		  WHERE submission_id = $1
@@ -724,10 +739,10 @@ func (s *PostgresStore) ClaimSubmissionContestantIfEmpty(ctx context.Context, su
 	)
 	if err != nil {
 		recordDB("submission-api", "claim_submission_contestant", start, err)
-		return fmt.Errorf("%w: claim submission contestant: %v", cerrs.ErrStoreDatabaseFailed, err)
+		return false, fmt.Errorf("%w: claim submission contestant: %v", cerrs.ErrStoreDatabaseFailed, err)
 	}
 	recordDB("submission-api", "claim_submission_contestant", start, nil)
-	return nil
+	return tag.RowsAffected() == 1, nil
 }
 
 // recordDB emits low-cardinality DB metrics for store methods.

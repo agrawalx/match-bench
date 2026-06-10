@@ -76,3 +76,64 @@ func TestIntegration_RecomputeRunGroupStatus(t *testing.T) {
 		t.Fatalf("group status with all terminal + one failed = %q, want failed", gm.Status)
 	}
 }
+
+// TestIntegration_ListRunGroupsNilFilter reproduces the High finding on
+// GET /run-groups: a nil SubmissionIDs slice is sent by pgx as SQL NULL, and
+// cardinality(NULL::text[]) is NULL — not 0 — so the WHERE clause was never
+// true and an unfiltered listing returned zero rows, always. Fresh browsers
+// saw an empty run history forever. nil, empty, and populated filters must
+// all behave.
+//
+// Env-gated: needs a live Postgres (DATABASE_URL).
+func TestIntegration_ListRunGroupsNilFilter(t *testing.T) {
+	dsn := strings.TrimSpace(os.Getenv("DATABASE_URL"))
+	if dsn == "" {
+		t.Skip("set DATABASE_URL to run the run-group list integration test")
+	}
+	ctx := context.Background()
+	st, err := NewPostgresStore(ctx, dsn)
+	if err != nil {
+		t.Fatalf("store: %v", err)
+	}
+	defer st.Close()
+
+	now := time.Now().UTC()
+	contestant := fmt.Sprintf("c-listnil-%d", now.UnixNano())
+	sub := fmt.Sprintf("sub-listnil-%d", now.UnixNano())
+	grp := fmt.Sprintf("rg-listnil-%d", now.UnixNano())
+	g := RunGroupMeta{RunGroupID: grp, SubmissionID: sub, ContestantID: contestant, Status: "requested", CreatedAt: now, UpdatedAt: now}
+	children := []RunMeta{
+		{SessionID: grp + "-A", SubmissionID: sub, RunGroupID: grp, ScenarioID: "sc-1", Status: "requested", CreatedAt: now, UpdatedAt: now},
+	}
+	if err := st.InsertRunGroupWithChildren(ctx, g, children); err != nil {
+		t.Fatalf("insert group: %v", err)
+	}
+
+	tests := []struct {
+		name          string
+		submissionIDs []string
+		wantGroups    int
+	}{
+		{name: "nil filter returns the group", submissionIDs: nil, wantGroups: 1},
+		{name: "empty filter returns the group", submissionIDs: []string{}, wantGroups: 1},
+		{name: "matching filter returns the group", submissionIDs: []string{sub}, wantGroups: 1},
+		{name: "non-matching filter returns nothing", submissionIDs: []string{"sub-other"}, wantGroups: 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			groups, err := st.ListRunGroups(ctx, RunGroupListFilter{
+				ContestantID:  contestant,
+				SubmissionIDs: tt.submissionIDs,
+			})
+			if err != nil {
+				t.Fatalf("ListRunGroups: %v", err)
+			}
+			if len(groups) != tt.wantGroups {
+				t.Fatalf("ListRunGroups returned %d groups, want %d", len(groups), tt.wantGroups)
+			}
+			if tt.wantGroups == 1 && groups[0].RunGroupID != grp {
+				t.Fatalf("ListRunGroups returned group %q, want %q", groups[0].RunGroupID, grp)
+			}
+		})
+	}
+}

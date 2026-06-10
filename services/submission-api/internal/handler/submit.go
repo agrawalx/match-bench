@@ -86,7 +86,7 @@ func Submit(ms *store.MinioStore, pg *store.PostgresStore, pub publisher.Publish
 		}
 		submissionID := id.String()
 		createdAt := time.Now().UTC()
-		contestantID := contestantIDFromRequest(r)
+		contestantID := contestantIDFromContext(r.Context())
 		if contestantID == "" {
 			writeError(w, http.StatusUnauthorized, "submission requires an authenticated contestant")
 			return
@@ -118,15 +118,22 @@ func Submit(ms *store.MinioStore, pg *store.PostgresStore, pub publisher.Publish
 				writeError(w, http.StatusInternalServerError, "lookup failed")
 				return
 			}
-			if existing != nil && existing.ContestantID != "" && existing.ContestantID != contestantID {
-				metrics.Counter("submission_duplicate_total", "Duplicate submissions detected by sha256.", nil, 1)
-				writeError(w, http.StatusConflict, "duplicate submission")
-				return
-			}
-			if err := pg.ClaimSubmissionContestantIfEmpty(r.Context(), existingID, contestantID); err != nil {
-				log.ErrorContext(r.Context(), "claim duplicate submission contestant failed", "submission_id", existingID, "error", err)
-				writeError(w, http.StatusInternalServerError, "failed to bind duplicate submission")
-				return
+			if existing != nil {
+				// Bind an unowned duplicate to this contestant, or — when
+				// the claim is lost to a concurrent request — resolve the
+				// owner from the DB row. Only the DB-confirmed owner may
+				// learn the existing submission_id below.
+				existing, err = claimOrResolveOwner(r.Context(), pg, existing, contestantID)
+				if err != nil {
+					log.ErrorContext(r.Context(), "claim duplicate submission contestant failed", "submission_id", existingID, "error", err)
+					writeError(w, http.StatusInternalServerError, "failed to bind duplicate submission")
+					return
+				}
+				if existing.ContestantID != contestantID {
+					metrics.Counter("submission_duplicate_total", "Duplicate submissions detected by sha256.", nil, 1)
+					writeError(w, http.StatusConflict, "duplicate submission")
+					return
+				}
 			}
 			metrics.Counter("submission_duplicate_total", "Duplicate submissions detected by sha256.", nil, 1)
 			writeErrorWithID(w, http.StatusConflict, "duplicate submission", existingID)
@@ -174,9 +181,20 @@ func Submit(ms *store.MinioStore, pg *store.PostgresStore, pub publisher.Publish
 					if getErr != nil {
 						log.ErrorContext(r.Context(), "duplicate owner lookup failed during race resolution", "submission_id", existingID, "error", getErr)
 					}
-					if existing != nil && existing.ContestantID != "" && existing.ContestantID != contestantID {
-						writeError(w, http.StatusConflict, "duplicate submission")
-						return
+					if existing != nil {
+						// Same claim-or-resolve as the pre-upload duplicate
+						// path: never assume the claim took — the DB row
+						// decides who may learn the existing submission_id.
+						existing, getErr = claimOrResolveOwner(r.Context(), pg, existing, contestantID)
+						if getErr != nil {
+							log.ErrorContext(r.Context(), "duplicate ownership resolution failed during race resolution", "submission_id", existingID, "error", getErr)
+							writeError(w, http.StatusConflict, "duplicate submission")
+							return
+						}
+						if existing.ContestantID != contestantID {
+							writeError(w, http.StatusConflict, "duplicate submission")
+							return
+						}
 					}
 					writeErrorWithID(w, http.StatusConflict, "duplicate submission", existingID)
 					return

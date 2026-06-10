@@ -11,6 +11,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
+	"github.com/iicpc/libs/authn"
 	"github.com/iicpc/libs/logger"
 	"github.com/iicpc/libs/metrics"
 	"github.com/iicpc/submission-api/internal/consumer"
@@ -146,17 +147,39 @@ func main() {
 	r.Get("/health", healthHandler) // liveness: static, no dependencies
 	r.Get("/ready", handler.Readiness(pgStore.Ping, log))
 	r.Handle("/metrics", metrics.Handler())
-	r.Post("/submit", handler.Submit(minioStore, pgStore, kafkaPub, log))
-	// Route param MUST match handler.GetSubmission's chi.URLParam("submission_id").
-	r.Get("/submissions/{submission_id}", handler.GetSubmission(pgStore, log))
-	// POST /submissions/{id}/benchmark mints one run-group and N child runs
-	// (one per row in the scenarios table). The legacy POST /benchmarks/{id}
-	// path is kept as an alias so older frontends do not break.
-	r.Post("/submissions/{submission_id}/benchmark", handler.StartBenchmark(pgStore, kafkaPub, log))
-	r.Post("/benchmarks/{submission_id}", handler.StartBenchmark(pgStore, kafkaPub, log))
-	r.Get("/run-groups", handler.ListRunGroups(pgStore, log))
-	r.Get("/run-groups/{run_group_id}", handler.GetRunGroup(pgStore, log))
-	r.Get("/runs/{session_id}", handler.GetRun(pgStore, log))
+
+	// Every contestant-facing route rides through the auth middleware, which
+	// verifies the Bearer token as a Google ID token (RS256 against Google's
+	// JWKS, iss/aud/exp/iat — see libs/go/authn) and puts the verified sub in
+	// the request context. AUTH_REQUIRED=false (dev/test ONLY) swaps in the
+	// insecure middleware that trusts the unverified sub claim.
+	authMW := handler.InsecureTrustSubClaim(log)
+	if envBool("AUTH_REQUIRED", true) {
+		googleClientID := mustEnv("GOOGLE_CLIENT_ID")
+		verifier, err := authn.NewVerifier(googleClientID)
+		if err != nil {
+			log.Error("token verifier init failed", "error", err)
+			os.Exit(1)
+		}
+		authMW = handler.RequireContestant(verifier, log)
+	} else {
+		log.Warn("AUTH_REQUIRED=false — bearer tokens are NOT verified; dev/test only")
+	}
+
+	r.Group(func(r chi.Router) {
+		r.Use(authMW)
+		r.Post("/submit", handler.Submit(minioStore, pgStore, kafkaPub, log))
+		// Route param MUST match handler.GetSubmission's chi.URLParam("submission_id").
+		r.Get("/submissions/{submission_id}", handler.GetSubmission(pgStore, log))
+		// POST /submissions/{id}/benchmark mints one run-group and N child runs
+		// (one per row in the scenarios table). The legacy POST /benchmarks/{id}
+		// path is kept as an alias so older frontends do not break.
+		r.Post("/submissions/{submission_id}/benchmark", handler.StartBenchmark(pgStore, kafkaPub, log))
+		r.Post("/benchmarks/{submission_id}", handler.StartBenchmark(pgStore, kafkaPub, log))
+		r.Get("/run-groups", handler.ListRunGroups(pgStore, log))
+		r.Get("/run-groups/{run_group_id}", handler.GetRunGroup(pgStore, log))
+		r.Get("/runs/{session_id}", handler.GetRun(pgStore, log))
+	})
 
 	srv := &http.Server{
 		Addr:         ":" + port,

@@ -5,6 +5,7 @@ go 1.25.0
 require (
 	github.com/BurntSushi/toml v1.4.0
 	github.com/go-chi/chi/v5 v5.3.0
+	github.com/golang-jwt/jwt/v5 v5.3.0
 	github.com/google/uuid v1.6.0
 	github.com/iicpc/libs v0.0.0
 	github.com/iicpc/schemas v0.0.0

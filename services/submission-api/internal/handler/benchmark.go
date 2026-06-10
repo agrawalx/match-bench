@@ -110,18 +110,24 @@ func StartBenchmark(pg *store.PostgresStore, pub publisher.Publisher, log *slog.
 			writeError(w, http.StatusNotFound, "submission not found")
 			return
 		}
-		contestantID := contestantIDFromRequest(r)
+		contestantID := contestantIDFromContext(r.Context())
 		if contestantID == "" {
 			writeError(w, http.StatusUnauthorized, "benchmark requires an authenticated contestant")
 			return
 		}
-		if sub.ContestantID == "" && contestantID != "" {
-			if err := pg.ClaimSubmissionContestantIfEmpty(ctx, submissionID, contestantID); err != nil {
-				log.ErrorContext(ctx, "claim submission contestant", "submission_id", submissionID, "error", err)
-				writeError(w, http.StatusInternalServerError, "failed to bind submission")
+		// Bind an unowned submission to this contestant, or — when the claim
+		// is lost to a concurrent request — resolve ownership from the DB row
+		// instead of assuming we won. The loser must see 404 below, exactly
+		// as if the submission had always belonged to someone else.
+		sub, err = claimOrResolveOwner(ctx, pg, sub, contestantID)
+		if err != nil {
+			if errors.Is(err, cerrs.ErrSubmissionNotFound) {
+				writeError(w, http.StatusNotFound, "submission not found")
 				return
 			}
-			sub.ContestantID = contestantID
+			log.ErrorContext(ctx, "claim submission contestant", "submission_id", submissionID, "error", err)
+			writeError(w, http.StatusInternalServerError, "failed to bind submission")
+			return
 		}
 		if sub.ContestantID != contestantID {
 			writeError(w, http.StatusNotFound, "submission not found")
@@ -223,11 +229,12 @@ func StartBenchmark(pg *store.PostgresStore, pub publisher.Publisher, log *slog.
 			return
 		}
 
-		// Publish one benchmark.requested per child. They are independent;
-		// the controller processes them sequentially per run-group (see the
-		// run-group orchestrator). Kafka ordering across these N messages
-		// is not required because the controller drains them via PostgreSQL
-		// queries, not Kafka offsets.
+		// Publish one benchmark.requested per child. The publisher keys all
+		// of them by run_group_id, so the group's N messages land on ONE
+		// partition and arrive at the controller in publish order — sibling
+		// sessions of one group cannot race each other across partitions.
+		// The controller still processes them sequentially per run-group
+		// (see the run-group orchestrator).
 		for _, c := range children {
 			if err := pub.PublishBenchmarkRequested(ctx, publisher.BenchmarkMeta{
 				SessionID:    c.SessionID,
@@ -267,7 +274,7 @@ func ListRunGroups(pg *store.PostgresStore, log *slog.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		q := r.URL.Query()
 		limit, _ := strconv.Atoi(q.Get("limit"))
-		contestantID := contestantIDFromRequest(r)
+		contestantID := contestantIDFromContext(r.Context())
 		if contestantID == "" {
 			writeError(w, http.StatusUnauthorized, "authentication required")
 			return
@@ -325,7 +332,7 @@ func GetRunGroup(pg *store.PostgresStore, log *slog.Logger) http.HandlerFunc {
 			writeError(w, http.StatusNotFound, "run-group not found")
 			return
 		}
-		if contestantID := contestantIDFromRequest(r); contestantID == "" {
+		if contestantID := contestantIDFromContext(r.Context()); contestantID == "" {
 			writeError(w, http.StatusUnauthorized, "authentication required")
 			return
 		} else if group.ContestantID != contestantID {
@@ -361,7 +368,7 @@ func GetRun(pg *store.PostgresStore, log *slog.Logger) http.HandlerFunc {
 			writeError(w, http.StatusNotFound, "run not found")
 			return
 		}
-		if contestantID := contestantIDFromRequest(r); contestantID == "" {
+		if contestantID := contestantIDFromContext(r.Context()); contestantID == "" {
 			writeError(w, http.StatusUnauthorized, "authentication required")
 			return
 		} else if run.ContestantID != contestantID {

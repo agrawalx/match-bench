@@ -23,7 +23,6 @@ type submissionResponse struct {
 
 func GetSubmission(pg *store.PostgresStore, log *slog.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		// TODO(auth): enforce contestant ownership before ContestantID becomes non-empty.
 		submissionID := chi.URLParam(r, "submission_id")
 		if submissionID == "" {
 			writeError(w, http.StatusBadRequest, "missing submission id")
@@ -40,7 +39,7 @@ func GetSubmission(pg *store.PostgresStore, log *slog.Logger) http.HandlerFunc {
 			writeError(w, http.StatusNotFound, "submission not found")
 			return
 		}
-		contestantID := contestantIDFromRequest(r)
+		contestantID := contestantIDFromContext(r.Context())
 		if contestantID == "" {
 			writeError(w, http.StatusUnauthorized, "authentication required")
 			return

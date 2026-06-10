@@ -111,16 +111,38 @@ func responses(acks []topics.OrderAckedEvent) []model.Response {
 	return out
 }
 
+// Counts is the telemetry volume behind one session's verdict: how many
+// orders.sent events the drain returned, how many orders.acked events survived
+// dedup, and how many distinct orders appeared in BOTH streams — the replay's
+// actual inputs. The gap between SentEvents and MatchedOrders is the
+// completeness signal: a lost acked event silently excludes its order from the
+// replay, and a lost sent flush turns its acks into false phantoms, so the
+// counters travel with the verdict (summary row + CorrectnessScoreEvent) for
+// score-computer's coverage gate.
+type Counts struct {
+	SentEvents    uint64
+	AckedEvents   uint64
+	MatchedOrders uint64
+}
+
 // Run is the deterministic core: assemble -> order by effective_t3 -> validate.
-// Returns the report and the contestant_id (from the acked events). The caller
-// stamps computed_at and builds/publishes the CorrectnessScoreEvent.
-func Run(sents []topics.OrderSentEvent, ackeds []topics.OrderAckedEvent) (validate.Report, string) {
+// Returns the report, the completeness counts, and the contestant_id (from the
+// acked events). The caller stamps computed_at and builds/publishes the
+// CorrectnessScoreEvent.
+func Run(sents []topics.OrderSentEvent, ackeds []topics.OrderAckedEvent) (validate.Report, Counts, string) {
 	orders, phantoms := Assemble(sents, ackeds)
 	ordered := replay.Order(orders)
 	report := validate.Run(ordered, phantoms)
+	// MatchedOrders is len(orders) by construction: Assemble keeps exactly the
+	// distinct sent order_ids that have at least one acked event.
+	counts := Counts{
+		SentEvents:    uint64(len(sents)),
+		AckedEvents:   uint64(len(ackeds)),
+		MatchedOrders: uint64(len(orders)),
+	}
 	contestant := ""
 	if len(ackeds) > 0 {
 		contestant = ackeds[0].ContestantID
 	}
-	return report, contestant
+	return report, counts, contestant
 }

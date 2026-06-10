@@ -149,6 +149,94 @@ func TestIntegration_DrainBoundedWindow(t *testing.T) {
 	}
 }
 
+// ackedMsg packs a batch into one drained Kafka message (msgpack named maps,
+// matching the Rust rmp_serde::to_vec_named producers).
+func ackedMsg(t *testing.T, b topics.OrderAckedBatch) kafka.Message {
+	t.Helper()
+	payload, err := msgpack.Marshal(b)
+	if err != nil {
+		t.Fatalf("msgpack marshal: %v", err)
+	}
+	return kafka.Message{Value: payload}
+}
+
+// TestAckedCollectorDedup reproduces the at-least-once inflation bug: a
+// redelivered orders.acked event — same (order_id, exec_type, t7_xdp_egress_ns)
+// — must be dropped during the drain, or the duplicated fill inflates the
+// reported cumulative quantity into a false overfill/phantom violation. Events
+// differing in ANY key component are distinct and must all be kept, in arrival
+// order (Assemble uses acks[0] for flow/t3).
+func TestAckedCollectorDedup(t *testing.T) {
+	const sid = "sess-dedup"
+	fill := topics.OrderAckedEvent{SessionID: sid, OrderID: "A", ExecType: "2", FillQty: 5, FillPrice: 100, T7XDPEgressNS: 1000}
+	otherT7 := fill
+	otherT7.T7XDPEgressNS = 2000 // second partial fill: same order+exec, later egress
+	otherExec := fill
+	otherExec.ExecType = "1"
+	otherOrder := fill
+	otherOrder.OrderID = "B"
+
+	c := newAckedCollector(sid)
+	c.handle(ackedMsg(t, topics.OrderAckedBatch{SessionID: sid, ContestantID: "team-dedup", Events: []topics.OrderAckedEvent{fill, otherT7}}))
+	// At-least-once redelivery of the SAME batch: both events are exact dupes.
+	c.handle(ackedMsg(t, topics.OrderAckedBatch{SessionID: sid, ContestantID: "team-dedup", Events: []topics.OrderAckedEvent{fill, otherT7}}))
+	// Distinct events sharing the order_id (different exec_type / order): kept.
+	c.handle(ackedMsg(t, topics.OrderAckedBatch{SessionID: sid, ContestantID: "team-dedup", Events: []topics.OrderAckedEvent{otherExec, otherOrder}}))
+	// Another session's batch: filtered entirely, never counted as duplicates.
+	c.handle(ackedMsg(t, topics.OrderAckedBatch{SessionID: "other-session", Events: []topics.OrderAckedEvent{fill}}))
+
+	if len(c.events) != 4 {
+		t.Fatalf("collected %d events, want 4 (dupes dropped, near-dupes kept): %+v", len(c.events), c.events)
+	}
+	want := []topics.OrderAckedEvent{fill, otherT7, otherExec, otherOrder}
+	for i, e := range c.events {
+		if e != want[i] {
+			t.Errorf("events[%d] = %+v, want %+v (arrival order must be preserved)", i, e, want[i])
+		}
+	}
+	if c.duplicates != 2 {
+		t.Errorf("duplicates = %d, want 2", c.duplicates)
+	}
+}
+
+// TestCollectorsCountDecodeErrors pins the decode-failure handling: a message
+// that fails msgpack decode is counted and skipped — never silently swallowed,
+// never fatal to the drain — and later valid messages still land.
+func TestCollectorsCountDecodeErrors(t *testing.T) {
+	const sid = "sess-decode"
+	// 0xc1 is the one byte the msgpack spec reserves as "never used".
+	garbage := kafka.Message{Partition: 3, Offset: 42, Value: []byte{0xc1}}
+
+	sc := &sentCollector{sessionID: sid}
+	sc.handle(garbage)
+	sentPayload, err := msgpack.Marshal(topics.OrderSentBatch{
+		SessionID: sid,
+		Events:    []topics.OrderSentEvent{{SessionID: sid, OrderID: "A", Price: 100, Qty: 10, Side: "BUY", PayloadType: "NEW", OrdType: "LIMIT"}},
+	})
+	if err != nil {
+		t.Fatalf("msgpack marshal: %v", err)
+	}
+	sc.handle(kafka.Message{Value: sentPayload})
+	if sc.decodeErrors != 1 {
+		t.Errorf("sentCollector.decodeErrors = %d, want 1", sc.decodeErrors)
+	}
+	if len(sc.events) != 1 {
+		t.Errorf("sentCollector kept %d events, want 1 (decode failure must not sink the drain)", len(sc.events))
+	}
+
+	ac := newAckedCollector(sid)
+	ac.handle(garbage)
+	ac.handle(ackedMsg(t, topics.OrderAckedBatch{SessionID: sid, Events: []topics.OrderAckedEvent{
+		{SessionID: sid, OrderID: "A", ExecType: "0", T7XDPEgressNS: 1500},
+	}}))
+	if ac.decodeErrors != 1 {
+		t.Errorf("ackedCollector.decodeErrors = %d, want 1", ac.decodeErrors)
+	}
+	if len(ac.events) != 1 {
+		t.Errorf("ackedCollector kept %d events, want 1 (decode failure must not sink the drain)", len(ac.events))
+	}
+}
+
 // newUUIDv7 builds a minimal RFC-9562 UUIDv7 string with the given creation time
 // in its first 48 bits (the rest is deterministic filler — enough for the parser).
 func newUUIDv7(at time.Time) string {

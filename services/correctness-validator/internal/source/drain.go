@@ -24,9 +24,11 @@ import (
 	"context"
 	"encoding/hex"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
+	"github.com/iicpc/libs/metrics"
 	"github.com/iicpc/schemas/topics"
 	"github.com/segmentio/kafka-go"
 	"github.com/vmihailenco/msgpack/v5"
@@ -39,32 +41,106 @@ import (
 // bounding the scan to seconds-of-data instead of the whole topic.
 const startMargin = 60 * time.Second
 
-// DrainSession returns every orders.sent + orders.acked event for sessionID.
-func DrainSession(ctx context.Context, brokers []string, sessionID string) ([]topics.OrderSentEvent, []topics.OrderAckedEvent, error) {
-	var sents []topics.OrderSentEvent
-	if err := drainTopic(ctx, brokers, topics.TopicOrdersSent, sessionID, func(v []byte) {
-		var b topics.OrderSentBatch
-		if msgpack.Unmarshal(v, &b) == nil && b.SessionID == sessionID {
-			sents = append(sents, b.Events...)
+// recordDecodeError surfaces a message that failed msgpack decode during the
+// drain: counted per stage and logged with its partition/offset so the poison
+// message can be located, then skipped — one undecodable message must not sink
+// (or silently distort) the whole session's validation.
+func recordDecodeError(topic string, m kafka.Message, err error) {
+	metrics.Counter("validator_validation_errors_total", "Correctness-validator validation errors by stage.", metrics.Labels("stage", "drain_decode"), 1)
+	slog.Warn("drain: msgpack decode failed; skipping message", "topic", topic, "partition", m.Partition, "offset", m.Offset, "error", err)
+}
+
+// sentCollector accumulates one session's orders.sent events off the drained
+// messages, counting (and skipping) msgpack decode failures.
+type sentCollector struct {
+	sessionID    string
+	events       []topics.OrderSentEvent
+	decodeErrors int
+}
+
+func (c *sentCollector) handle(m kafka.Message) {
+	var b topics.OrderSentBatch
+	if err := msgpack.Unmarshal(m.Value, &b); err != nil {
+		c.decodeErrors++
+		recordDecodeError(topics.TopicOrdersSent, m, err)
+		return
+	}
+	if b.SessionID == c.sessionID {
+		c.events = append(c.events, b.Events...)
+	}
+}
+
+// ackKey identifies one orders.acked response for dedup:
+// (order_id, exec_type, t7_xdp_egress_ns). The producers are at-least-once, so
+// the same event can land on the topic twice; t7 (per-response-packet XDP egress
+// timestamp, ns) distinguishes genuine repeat responses — e.g. two partial fills
+// with the same exec_type — from redeliveries of the same one.
+type ackKey struct {
+	orderID  string
+	execType string
+	t7NS     uint64
+}
+
+// ackedCollector accumulates one session's orders.acked events, dropping
+// redelivered duplicates by ackKey (a duplicated fill would inflate the
+// reported cumulative quantity into a false overfill/phantom violation) and
+// counting msgpack decode failures.
+type ackedCollector struct {
+	sessionID    string
+	seen         map[ackKey]struct{}
+	events       []topics.OrderAckedEvent
+	duplicates   int
+	decodeErrors int
+}
+
+func newAckedCollector(sessionID string) *ackedCollector {
+	return &ackedCollector{sessionID: sessionID, seen: make(map[ackKey]struct{})}
+}
+
+func (c *ackedCollector) handle(m kafka.Message) {
+	var b topics.OrderAckedBatch
+	if err := msgpack.Unmarshal(m.Value, &b); err != nil {
+		c.decodeErrors++
+		recordDecodeError(topics.TopicOrdersAcked, m, err)
+		return
+	}
+	if b.SessionID != c.sessionID {
+		return
+	}
+	for _, e := range b.Events {
+		k := ackKey{orderID: e.OrderID, execType: e.ExecType, t7NS: e.T7XDPEgressNS}
+		if _, dup := c.seen[k]; dup {
+			c.duplicates++
+			continue
 		}
-	}); err != nil {
+		c.seen[k] = struct{}{}
+		c.events = append(c.events, e)
+	}
+}
+
+// DrainSession returns every orders.sent + orders.acked event for sessionID,
+// with at-least-once duplicates of acked events removed before assembly.
+func DrainSession(ctx context.Context, brokers []string, sessionID string) ([]topics.OrderSentEvent, []topics.OrderAckedEvent, error) {
+	sc := &sentCollector{sessionID: sessionID}
+	if err := drainTopic(ctx, brokers, topics.TopicOrdersSent, sessionID, sc.handle); err != nil {
 		return nil, nil, fmt.Errorf("drain orders.sent: %w", err)
 	}
 
-	var ackeds []topics.OrderAckedEvent
-	if err := drainTopic(ctx, brokers, topics.TopicOrdersAcked, sessionID, func(v []byte) {
-		var b topics.OrderAckedBatch
-		if msgpack.Unmarshal(v, &b) == nil && b.SessionID == sessionID {
-			ackeds = append(ackeds, b.Events...)
-		}
-	}); err != nil {
+	ac := newAckedCollector(sessionID)
+	if err := drainTopic(ctx, brokers, topics.TopicOrdersAcked, sessionID, ac.handle); err != nil {
 		return nil, nil, fmt.Errorf("drain orders.acked: %w", err)
 	}
+	if ac.duplicates > 0 {
+		// Counted alongside the drained-events metric so total-seen = drained +
+		// duplicates; dropped here so they can never inflate fills downstream.
+		metrics.Counter("validator_events_drained_total", "Correctness-validator events drained from Kafka by topic.", metrics.Labels("topic", "orders_acked_duplicates"), float64(ac.duplicates))
+		slog.Warn("drain: dropped duplicate orders.acked events", "session_id", sessionID, "duplicates", ac.duplicates)
+	}
 
-	return sents, ackeds, nil
+	return sc.events, ac.events, nil
 }
 
-func drainTopic(ctx context.Context, brokers []string, topic, sessionID string, handle func([]byte)) error {
+func drainTopic(ctx context.Context, brokers []string, topic, sessionID string, handle func(kafka.Message)) error {
 	if len(brokers) == 0 {
 		return fmt.Errorf("no kafka brokers configured")
 	}
@@ -103,7 +179,7 @@ func drainTopic(ctx context.Context, brokers []string, topic, sessionID string, 
 				r.Close()
 				return fmt.Errorf("read %s/%d: %w", topic, p.ID, err)
 			}
-			handle(m.Value)
+			handle(m)
 			if m.Offset >= last-1 { // reached the snapshotted watermark
 				break
 			}

@@ -65,6 +65,13 @@ func main() {
 	validationTimeout := time.Duration(envInt("VALIDATION_TIMEOUT_MS", 60000)) * time.Millisecond
 	concurrency := envInt("VALIDATOR_CONCURRENCY", 4)
 	brokers := parseBrokers(kafkaBrokers)
+	// Fail fast on a timeout budget the settle delay alone would consume: every
+	// session would hit the timeout fallback and be recorded as timed_out, so a
+	// misconfigured pod must crash at startup, not corrupt scores at runtime.
+	if err := checkTimeoutConfig(validationTimeout, settleDelay); err != nil {
+		log.Error("invalid validation timeout config", "validation_timeout_ms", validationTimeout.Milliseconds(), "settle_ms", settleDelay.Milliseconds(), "error", err)
+		os.Exit(1)
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
@@ -165,8 +172,9 @@ func recordViolations(report validate.Report) {
 // Returns nil only when the result is durably persisted AND (re)published, so the
 // caller can safely commit the Kafka offset. Idempotent: the summary-row claim in
 // store.Save means exactly one worker publishes the primary score for a session,
-// while a redelivery that finds the summary already present re-publishes it
-// (at-least-once) without redoing the work.
+// while a redelivery that finds a SCORED summary re-publishes it (at-least-once)
+// without redoing the work. A timed_out placeholder does NOT short-circuit — the
+// redelivery re-runs the full validation so a real score can replace it.
 func (v *validator) validateSession(ctx context.Context, sessionID string) error {
 	log := v.log.With("session_id", sessionID)
 
@@ -178,11 +186,15 @@ func (v *validator) validateSession(ctx context.Context, sessionID string) error
 		metrics.Gauge("validator_inflight_sessions", "Correctness-validator sessions currently being validated.", nil, float64(v.inflight.Add(-1)))
 	}()
 
-	if done, err := v.store.HasSummary(ctx, sessionID); err != nil {
+	status, exists, err := v.store.SummaryStatus(ctx, sessionID)
+	if err != nil {
 		metrics.Counter("validator_validation_errors_total", "Correctness-validator validation errors by stage.", metrics.Labels("stage", "idempotency"), 1)
 		metrics.Counter("validator_sessions_validated_total", "Correctness-validator sessions processed by result.", metrics.Labels("result", "error"), 1)
 		return fmt.Errorf("idempotency check: %w", err)
-	} else if done {
+	}
+	switch {
+	case exists && status == store.StatusScored:
+		// A REAL verdict is already persisted; just re-publish (at-least-once).
 		ev, ok, err := v.store.LoadScore(ctx, sessionID)
 		if err != nil {
 			metrics.Counter("validator_validation_errors_total", "Correctness-validator validation errors by stage.", metrics.Labels("stage", "load_score"), 1)
@@ -200,6 +212,12 @@ func (v *validator) validateSession(ctx context.Context, sessionID string) error
 		metrics.Counter("validator_sessions_validated_total", "Correctness-validator sessions processed by result.", metrics.Labels("result", "skipped_done"), 1)
 		log.Info("session already validated; re-published score")
 		return nil
+	case exists && status == store.StatusTimedOut:
+		// A previous attempt only managed the timed_out placeholder — that is NOT
+		// a verdict, so fall through and RE-RUN the full validation. Save's
+		// conditional upsert lets the real score overwrite the placeholder (never
+		// the reverse), so this redelivery is the session's chance to recover.
+		log.Info("session has timed_out placeholder; re-running validation")
 	}
 
 	// Settle: let the eBPF reader flush its terminal events (> its 5s eviction)
@@ -224,22 +242,28 @@ func (v *validator) validateSession(ctx context.Context, sessionID string) error
 	metrics.Counter("validator_events_drained_total", "Correctness-validator events drained from Kafka by topic.", metrics.Labels("topic", "orders_acked"), float64(len(ackeds)))
 	metrics.Histogram("validator_session_events_buffered", "Events (orders.sent + orders.acked) buffered in memory per validated session.", nil, float64(len(sents)+len(ackeds)))
 
-	report, contestant := pipeline.Run(sents, ackeds)
+	report, counts, contestant := pipeline.Run(sents, ackeds)
 	recordViolations(report)
 	rec := store.Record{
 		SessionID:    sessionID,
 		ContestantID: contestant,
 		Report:       report,
+		Status:       store.StatusScored,
+		SentCount:    counts.SentEvents,
+		AckedCount:   counts.AckedEvents,
+		MatchedCount: counts.MatchedOrders,
 		ComputedAtNS: uint64(time.Now().UnixNano()),
 	}
-	inserted, err := v.store.Save(ctx, rec)
+	claimed, err := v.store.Save(ctx, rec)
 	if err != nil {
 		metrics.Counter("validator_validation_errors_total", "Correctness-validator validation errors by stage.", metrics.Labels("stage", "save"), 1)
 		metrics.Counter("validator_sessions_validated_total", "Correctness-validator sessions processed by result.", metrics.Labels("result", "error"), 1)
 		return fmt.Errorf("save correctness: %w", err)
 	}
-	if !inserted {
-		// Lost the claim race to a concurrent worker; it owns the publish.
+	if !claimed {
+		// Lost the claim race to a concurrent worker's REAL score; it owns the
+		// publish. (A timed_out placeholder never blocks the claim — Save
+		// overwrites it — so reaching here means a scored row already exists.)
 		metrics.Counter("validator_sessions_validated_total", "Correctness-validator sessions processed by result.", metrics.Labels("result", "skipped_claimed"), 1)
 		log.Info("session already claimed by another worker; skipping publish")
 		return nil
@@ -252,9 +276,14 @@ func (v *validator) validateSession(ctx context.Context, sessionID string) error
 		CorrectnessScore: report.CorrectnessScore(),
 		ViolationCount:   report.ViolationCount(),
 		ComputedAtNS:     rec.ComputedAtNS,
+		// Completeness counters: the verdict carries how complete its inputs
+		// were so score-computer can refuse violation-based DQ on lossy data.
+		SentCount:    counts.SentEvents,
+		AckedCount:   counts.AckedEvents,
+		MatchedCount: counts.MatchedOrders,
 	}); err != nil {
 		// Summary is persisted; leaving the offset uncommitted re-delivers and the
-		// HasSummary fast-path above re-publishes — at-least-once delivery.
+		// scored fast-path above re-publishes — at-least-once delivery.
 		metrics.Counter("validator_validation_errors_total", "Correctness-validator validation errors by stage.", metrics.Labels("stage", "publish"), 1)
 		metrics.Counter("validator_sessions_validated_total", "Correctness-validator sessions processed by result.", metrics.Labels("result", "error"), 1)
 		return fmt.Errorf("publish correctness score: %w", err)
@@ -267,57 +296,54 @@ func (v *validator) validateSession(ctx context.Context, sessionID string) error
 		"valid_fills", report.ValidFills,
 		"score", report.CorrectnessScore(),
 		"violations", report.ViolationCount(),
-		"sent", len(sents), "acked", len(ackeds))
+		"sent", len(sents), "acked", len(ackeds), "matched", counts.MatchedOrders)
 	return nil
 }
 
-func (v *validator) recordValidationTimeout(ctx context.Context, sessionID string) error {
-	if done, err := v.store.HasSummary(ctx, sessionID); err != nil {
-		return fmt.Errorf("idempotency check: %w", err)
-	} else if done {
-		ev, ok, err := v.store.LoadScore(ctx, sessionID)
-		if err != nil {
-			return err
-		}
-		if ok {
-			return v.pub.Publish(ctx, ev)
-		}
-		return nil
-	}
-
-	report := validate.Report{
-		TotalFills:   1,
-		PhantomFills: 1,
-	}
-	rec := store.Record{
+// timeoutRecord is the timed_out placeholder persisted when validation exceeds
+// its deadline: zero fills, zero violations, contestant unknown (the drain never
+// completed). Internally consistent — the status column carries the "no verdict"
+// signal, NOT fabricated counts: the 0/0 event adds nothing to score-computer's
+// aggregateCorrectness (it sums valid and total across the run's sessions), and
+// its per-session gate skips TotalFills==0, so the placeholder is neutral
+// instead of a permanent zero score.
+func timeoutRecord(sessionID string, nowNS uint64) store.Record {
+	return store.Record{
 		SessionID:    sessionID,
 		ContestantID: "",
-		Report:       report,
-		ComputedAtNS: uint64(time.Now().UnixNano()),
+		Report:       validate.Report{},
+		Status:       store.StatusTimedOut,
+		ComputedAtNS: nowNS,
 	}
-	inserted, err := v.store.Save(ctx, rec)
+}
+
+// recordValidationTimeout persists the timed_out placeholder for a session whose
+// validation blew VALIDATION_TIMEOUT, then publishes whatever the store holds
+// AFTER the claim: if a concurrent worker landed a REAL score between our Save
+// and the read-back, we publish that score, not the placeholder. The fallback
+// never overwrites an existing summary (Save's upsert only goes
+// timed_out -> scored), and a redelivery of the trigger re-RUNS the validation
+// for a timed_out session, so the placeholder is recoverable, not permanent.
+func (v *validator) recordValidationTimeout(ctx context.Context, sessionID string) error {
+	status, exists, err := v.store.SummaryStatus(ctx, sessionID)
 	if err != nil {
-		return fmt.Errorf("save timeout correctness: %w", err)
+		return fmt.Errorf("idempotency check: %w", err)
 	}
-	if !inserted {
-		ev, ok, err := v.store.LoadScore(ctx, sessionID)
-		if err != nil {
-			return err
+	if !exists {
+		if _, err := v.store.Save(ctx, timeoutRecord(sessionID, uint64(time.Now().UnixNano()))); err != nil {
+			return fmt.Errorf("save timeout placeholder: %w", err)
 		}
-		if ok {
-			return v.pub.Publish(ctx, ev)
-		}
-		return nil
+	} else {
+		v.log.Info("timeout fallback found existing summary; re-publishing it", "session_id", sessionID, "status", status)
 	}
-	return v.pub.Publish(ctx, topics.CorrectnessScoreEvent{
-		SessionID:        sessionID,
-		ContestantID:     "",
-		ValidFills:       report.ValidFills,
-		TotalFills:       report.TotalFills,
-		CorrectnessScore: report.CorrectnessScore(),
-		ViolationCount:   report.ViolationCount(),
-		ComputedAtNS:     rec.ComputedAtNS,
-	})
+	ev, ok, err := v.store.LoadScore(ctx, sessionID)
+	if err != nil {
+		return err
+	}
+	if ok {
+		return v.pub.Publish(ctx, ev)
+	}
+	return nil
 }
 
 // runStatusConsumer is one member of the benchmark.status.updated consumer group.
@@ -365,7 +391,8 @@ func (v *validator) runStatusConsumer(ctx context.Context, brokers []string, gro
 					fallbackErr := v.recordValidationTimeout(fallbackCtx, ev.SessionID)
 					fallbackCancel()
 					if fallbackErr == nil {
-						v.log.Warn("validation timed out; recorded zero-correctness fallback", "session_id", ev.SessionID, "timeout_ms", v.validationTimeout.Milliseconds())
+						metrics.Counter("validator_sessions_validated_total", "Correctness-validator sessions processed by result.", metrics.Labels("result", "timed_out"), 1)
+						v.log.Warn("validation timed out; recorded timed_out placeholder (re-validated on redelivery)", "session_id", ev.SessionID, "timeout_ms", v.validationTimeout.Milliseconds())
 						err = nil
 					} else {
 						v.log.Error("record validation timeout fallback", "session_id", ev.SessionID, "error", fallbackErr)
@@ -385,6 +412,19 @@ func (v *validator) runStatusConsumer(ctx context.Context, brokers []string, gro
 }
 
 // ---- small helpers (env) ---------------------------------------------------
+
+// checkTimeoutConfig rejects a validation timeout that cannot possibly cover a
+// validation pass: non-positive, or one the settle delay alone consumes. Either
+// way every session would hit the timeout fallback, so startup must fail fast.
+func checkTimeoutConfig(validationTimeout, settleDelay time.Duration) error {
+	if validationTimeout <= 0 {
+		return fmt.Errorf("VALIDATION_TIMEOUT_MS must be > 0, got %d", validationTimeout.Milliseconds())
+	}
+	if validationTimeout <= settleDelay {
+		return fmt.Errorf("VALIDATION_TIMEOUT_MS (%d) must exceed SETTLE_DELAY_MS (%d)", validationTimeout.Milliseconds(), settleDelay.Milliseconds())
+	}
+	return nil
+}
 
 func envOr(key, def string) string {
 	if v := strings.TrimSpace(os.Getenv(key)); v != "" {

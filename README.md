@@ -1,12 +1,13 @@
-# match-bench
+<div align="center">
+  <img src="frontend/public/logo.png" alt="match-bench logo" width="100%" />
 
-> **Fair, repeatable benchmarking for high-frequency trading algorithms.**
+  <h3>Fair, repeatable benchmarking for high-frequency trading algorithms.</h3>
+  <p><em>A benchmark is only useful if nobody can game the measurement.</em></p>
+</div>
 
-match-bench lets participants upload trading algorithms, runs each submission in an isolated environment, sends every participant the same deterministic market workload, measures latency outside the participant's code, validates correctness, and publishes scores on a live leaderboard.
+---
 
-The platform is built for one principle: 
-
-> "**A benchmark is only useful if nobody can game the measurement.**"
+**match-bench** lets participants upload trading algorithms, runs each submission in an isolated environment, sends every participant the same deterministic market workload, measures latency outside the participant's code, validates correctness, and publishes scores on a live leaderboard.
 
 ## Table Of Contents
 

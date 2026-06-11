@@ -141,11 +141,7 @@ The AWS path uses EKS, ECR, Terraform, Kubernetes manifests, IRSA, KEDA, and the
 
 ## Architecture Document
 
-TODO: Add link to the final architecture document.
-
-Suggested target:
-
-- `docs/architecture.pdf` or an externally hosted architecture review document
+- [DeepWiki](https://deepwiki.com/akronim26/match-bench)
 
 ## Demo Video
 

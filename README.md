@@ -111,7 +111,6 @@ ops/                       Prometheus, Grafana, Kafka, and operational config
 bootstrap/                 Secret templates and bootstrap notes
 docs/                      Local run and cloud deployment guides
 design.md                  Detailed engineering design
-testing_commands.md        Test command reference
 ```
 
 ## Getting Started

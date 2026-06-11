@@ -1,8 +1,8 @@
-# IICPC
+# match-bench
 
 > **Fair, repeatable benchmarking for high-frequency trading algorithms.**
 
-IICPC lets participants upload trading algorithms, runs each submission in an isolated environment, sends every participant the same deterministic market workload, measures latency outside the participant's code, validates correctness, and publishes scores on a live leaderboard.
+match-bench lets participants upload trading algorithms, runs each submission in an isolated environment, sends every participant the same deterministic market workload, measures latency outside the participant's code, validates correctness, and publishes scores on a live leaderboard.
 
 The platform is built for one principle: 
 
@@ -26,7 +26,7 @@ The platform is built for one principle:
 
 ## Overview
 
-IICPC is a multi-service benchmark platform for evaluating untrusted trading algorithms. A submitted algorithm is built into a container, deployed into a locked-down Kubernetes pod, driven by deterministic benchmark traffic, measured at the Linux network boundary, checked against a correctness model, and scored.
+match-bench is a multi-service benchmark platform for evaluating untrusted trading algorithms. A submitted algorithm is built into a container, deployed into a locked-down Kubernetes pod, driven by deterministic benchmark traffic, measured at the Linux network boundary, checked against a correctness model, and scored.
 
 ## Benchmark Snapshot
 
@@ -57,7 +57,7 @@ These numbers useful because they show the platform has room to scale before the
 
 ## How It Works
 
-For each submission, IICPC follows this flow:
+For each submission, match-bench follows this flow:
 
 1. The participant uploads an algorithm.
 2. The build system creates a runnable container image.
@@ -68,7 +68,7 @@ For each submission, IICPC follows this flow:
 7. The correctness validator checks whether the algorithm behaved correctly.
 8. The score computer produces the final leaderboard score.
 
-The important detail is where measurement happens. IICPC does not ask the submitted algorithm how fast it was. It observes network traffic from outside the algorithm and computes latency from those observations.
+The important detail is where measurement happens. match-bench does not ask the submitted algorithm how fast it was. It observes network traffic from outside the algorithm and computes latency from those observations.
 
 ## Architecture
 

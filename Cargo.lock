@@ -960,6 +960,7 @@ dependencies = [
  "aya",
  "aya-ebpf",
  "aya-ebpf-macros",
+ "futures",
  "iicpc-bot-fleet",
  "iicpc-logger-rust",
  "iicpc-schemas-rust",
@@ -987,6 +988,7 @@ dependencies = [
 name = "iicpc-schemas-rust"
 version = "0.1.0"
 dependencies = [
+ "rmp-serde",
  "serde",
  "serde_json",
 ]

@@ -116,7 +116,7 @@ fn should_stop_sending(cancel: &CancelToken, task_end_ns: u64) -> bool {
 /// run starts the bot-fleet worker loop.
 /// It consumes workload assignments, executes each one, and exits on a
 /// shutdown signal (SIGINT/Ctrl-C or SIGTERM from kubelet).
-pub async fn run(config: Config) -> Result<()> {
+pub async fn run(mut config: Config) -> Result<()> {
     kafka::ensure_topics(
         &config.kafka_brokers,
         &[
@@ -134,6 +134,16 @@ pub async fn run(config: Config) -> Result<()> {
     // back-pressuring the telemetry queue and vice-versa.
     let control_producer = kafka::control_producer(&config.kafka_brokers)?;
     let telemetry_producer = kafka::telemetry_producer(&config.kafka_brokers)?;
+    // Authoritative N for order_id sharding: the orders.sent topic's real partition
+    // count (source of truth), falling back to the configured ORDERS_PARTITIONS if
+    // metadata is unavailable. The eBPF capture derives the same N for orders.acked,
+    // so an order's sent + acked co-locate on one partition.
+    if let Some(n) = kafka::topic_partition_count(&telemetry_producer, &config.orders_sent_topic) {
+        if n != config.orders_partitions {
+            tracing::info!(env = config.orders_partitions, topic = n, "orders.sent partition count from metadata overrides ORDERS_PARTITIONS");
+        }
+        config.orders_partitions = n;
+    }
     let workload_consumer = kafka::consumer(
         &config.kafka_brokers,
         &config.consumer_group,
@@ -315,6 +325,7 @@ async fn run_workload(
         config.telemetry_channel_capacity,
         config.telemetry_flush_interval,
         config.telemetry_batch_size,
+        config.orders_partitions,
     );
 
     let result = fire_workload(
@@ -576,6 +587,10 @@ struct PendingOrder {
     orig_order_id: String,
     target_send_ts_ns: u64,
     send_ts_ns: u64,
+    /// The session's barrier epoch (unix ns), copied onto the emitted
+    /// OrderSentEvent so the ingester can bucket waves deterministically (see
+    /// OrderSentEvent::barrier_epoch_ns). Same value for every order in a session.
+    barrier_epoch_ns: u64,
     price: u64,
     qty: u64,
     side: Side,
@@ -882,6 +897,7 @@ async fn fix_write_loop(
                     orig_order_id: frame.orig_order_id.clone(),
                     target_send_ts_ns,
                     send_ts_ns: 0, // patched on successful write
+                    barrier_epoch_ns: task_start_ns.saturating_sub(task.start_offset_ns),
                     price: frame.price,
                     qty: frame.qty,
                     side: frame.side,
@@ -1028,6 +1044,7 @@ async fn fix_read_loop(
                     payload_type: p.payload_type,
                     ord_type: p.ord_type,
                     orig_order_id: p.orig_order_id,
+                    barrier_epoch_ns: p.barrier_epoch_ns,
                 })
                 .await;
         }
@@ -1123,6 +1140,7 @@ async fn watchdog_loop(
                     payload_type: p.payload_type,
                     ord_type: p.ord_type,
                     orig_order_id: p.orig_order_id,
+                    barrier_epoch_ns: p.barrier_epoch_ns,
                 })
                 .await;
         }
@@ -1333,6 +1351,7 @@ async fn rw_write_loop(
                     orig_order_id: frame.orig_order_id.clone(),
                     target_send_ts_ns,
                     send_ts_ns: 0,
+                    barrier_epoch_ns: task_start_ns.saturating_sub(task.start_offset_ns),
                     price: frame.price,
                     qty: frame.qty,
                     side: frame.side,
@@ -1421,6 +1440,7 @@ async fn emit_response(
             payload_type: p.payload_type,
             ord_type: p.ord_type,
             orig_order_id: p.orig_order_id,
+            barrier_epoch_ns: p.barrier_epoch_ns,
         })
         .await;
 }
@@ -1923,6 +1943,7 @@ mod tests {
             orig_order_id: frame.orig_order_id.clone(),
             target_send_ts_ns: 0,
             send_ts_ns: 0,
+            barrier_epoch_ns: 0,
             price: frame.price,
             qty: frame.qty,
             side: frame.side,

@@ -14,6 +14,31 @@ pub const TOPIC_SCORES_CORRECTNESS: &str = "scores.correctness";
 pub const TOPIC_LEADERBOARD_UPDATES: &str = "leaderboard.updates";
 pub const TELEMETRY_PRICE_SCALE: u64 = 1_000_000_000;
 
+/// partition_for maps an `order_id` to a Kafka partition in `[0, num_partitions)`
+/// using a stable FNV-1a hash. Both `orders.sent` (bot-fleet) and `orders.acked`
+/// (eBPF capture) producers call this with the SAME order_id so an order's two
+/// events land on the SAME partition — the co-partitioning the distributed
+/// telemetry-ingester needs to join sent⋈acked on a single consumer.
+///
+/// We set the partition EXPLICITLY (FutureRecord::partition) rather than relying
+/// on Kafka's key partitioner, because each batch carries many order_ids; the
+/// producer shards a flush into one sub-batch per partition. Any stable hash works
+/// as long as both producers agree — hence this lives in the shared schema crate.
+/// `num_partitions` must equal the topic's partition count (24, see topic-init).
+pub fn partition_for(order_id: &str, num_partitions: i32) -> i32 {
+    debug_assert!(num_partitions > 0, "num_partitions must be positive");
+    if num_partitions <= 1 {
+        return 0;
+    }
+    // FNV-1a 64-bit.
+    let mut hash: u64 = 0xcbf29ce484222325;
+    for byte in order_id.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    (hash % num_partitions as u64) as i32
+}
+
 /// Protocol identifies the transport a bot-fleet worker should use.
 /// Serialized as FIX, REST, or WS to match controller payloads.
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
@@ -201,6 +226,14 @@ pub struct OrderSentEvent {
     /// omitting or altering the cancel target. Empty for NEW orders.
     #[serde(default)]
     pub orig_order_id: String,
+    /// The session's barrier epoch (unix ns) — the authoritative session start
+    /// shared by every order in the session. The telemetry-ingester uses this as
+    /// `session_start` to compute wave_index = floor((t - session_start)/wave_ns)
+    /// IDENTICALLY on every consumer, instead of "earliest timestamp seen
+    /// locally", which diverges once a session is sharded across consumers.
+    /// #[serde(default)] keeps decoding of pre-field messages working (→ 0).
+    #[serde(default)]
+    pub barrier_epoch_ns: u64,
 }
 
 /// OrderSentBatch is MessagePack-encoded on "orders.sent".
@@ -468,5 +501,114 @@ mod tests {
         assert_eq!(value["worker_id"], "worker-1");
         assert_eq!(value["task_count"], 10);
         assert_eq!(value["ready_at_unix_nanos"], 123);
+    }
+
+    // partition_for is the co-partition contract: an order_id maps to exactly one
+    // partition in range, deterministically and identically for both producers.
+    #[test]
+    fn partition_for_is_in_range_and_deterministic() {
+        let n = 24;
+        for i in 0..10_000u32 {
+            let oid = format!("01890dd2-71f3-7abc-9def-0123456789ab_{}_{}_O", i % 200, i);
+            let p = partition_for(&oid, n);
+            assert!((0..n).contains(&p), "partition {p} out of range for {oid}");
+            // Deterministic: same input → same partition (both producers must agree).
+            assert_eq!(p, partition_for(&oid, n));
+        }
+    }
+
+    // The same order_id must hash to the same partition regardless of which producer
+    // computes it — this is what co-locates sent⋈acked on one consumer.
+    #[test]
+    fn partition_for_same_order_id_same_partition() {
+        let oid = "01890dd2-71f3-7abc-9def-0123456789ab_42_99_O";
+        assert_eq!(partition_for(oid, 24), partition_for(oid, 24));
+        // Different order ids should not all collapse to one partition.
+        let mut seen = std::collections::HashSet::new();
+        for i in 0..1000 {
+            seen.insert(partition_for(&format!("ord_{i}"), 24));
+        }
+        assert!(seen.len() > 10, "hash spreads poorly: only {} partitions used", seen.len());
+    }
+
+    // Degenerate partition counts must not panic or divide by zero.
+    #[test]
+    fn partition_for_handles_single_partition() {
+        assert_eq!(partition_for("anything", 1), 0);
+    }
+
+    // barrier_epoch_ns must round-trip through the msgpack-named wire format the
+    // producers and ingester use.
+    #[test]
+    fn order_sent_event_barrier_epoch_round_trips() {
+        let ev = OrderSentEvent {
+            session_id: "s".into(),
+            submission_id: "sub".into(),
+            worker_id: "w".into(),
+            task_id: 1,
+            order_id: "s_1_2_O".into(),
+            target_send_ts_ns: 100,
+            send_ts_ns: 110,
+            recv_done_ts_ns: 0,
+            timed_out: false,
+            price: 1,
+            qty: 1,
+            side: Side::Buy,
+            payload_type: PayloadType::New,
+            ord_type: OrdType::Limit,
+            orig_order_id: String::new(),
+            barrier_epoch_ns: 1_770_000_000_000_000_000,
+        };
+        let bytes = rmp_serde::to_vec_named(&ev).expect("encode");
+        let back: OrderSentEvent = rmp_serde::from_slice(&bytes).expect("decode");
+        assert_eq!(back.barrier_epoch_ns, ev.barrier_epoch_ns);
+        assert_eq!(back.order_id, ev.order_id);
+    }
+
+    // Deploy-compat: a message encoded WITHOUT barrier_epoch_ns (a pre-field
+    // producer) must still decode, defaulting the new field to 0 — so a rolling
+    // upgrade where old workers and new ingesters coexist does not break decoding.
+    #[test]
+    fn order_sent_event_decodes_pre_field_message() {
+        // Mirror of OrderSentEvent without the new field (an "old" producer).
+        #[derive(Serialize)]
+        struct OldOrderSentEvent {
+            session_id: String,
+            submission_id: String,
+            worker_id: String,
+            task_id: u32,
+            order_id: String,
+            target_send_ts_ns: u64,
+            send_ts_ns: u64,
+            recv_done_ts_ns: u64,
+            timed_out: bool,
+            price: u64,
+            qty: u64,
+            side: Side,
+            payload_type: PayloadType,
+            ord_type: OrdType,
+            orig_order_id: String,
+        }
+        let old = OldOrderSentEvent {
+            session_id: "s".into(),
+            submission_id: "sub".into(),
+            worker_id: "w".into(),
+            task_id: 1,
+            order_id: "s_1_2_O".into(),
+            target_send_ts_ns: 100,
+            send_ts_ns: 110,
+            recv_done_ts_ns: 0,
+            timed_out: false,
+            price: 1,
+            qty: 1,
+            side: Side::Buy,
+            payload_type: PayloadType::New,
+            ord_type: OrdType::Limit,
+            orig_order_id: String::new(),
+        };
+        let bytes = rmp_serde::to_vec_named(&old).expect("encode old");
+        let back: OrderSentEvent = rmp_serde::from_slice(&bytes).expect("decode into new");
+        assert_eq!(back.barrier_epoch_ns, 0, "missing field must default to 0");
+        assert_eq!(back.order_id, "s_1_2_O");
     }
 }

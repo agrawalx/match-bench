@@ -24,7 +24,7 @@ pub async fn run(cfg: Config) -> Result<()> {
         &cfg.consumer_group,
         &[TOPIC_ORDERS_SENT, TOPIC_ORDERS_ACKED],
     )?;
-    let store = Store::connect(&cfg.timescale_url).await?;
+    let store = Store::connect(&cfg.timescale_url, cfg.shard.clone()).await?;
     store.init_schema().await.context("init timescale schema")?;
     let redis = RedisSink::connect(&cfg.redis_url).await?;
 

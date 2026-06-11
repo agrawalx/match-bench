@@ -17,6 +17,13 @@ pub struct Config {
     pub ready_topic: String,
     pub workload_failed_topic: String,
     pub orders_sent_topic: String,
+    /// orders_partitions is the partition count of the orders.sent topic. The
+    /// telemetry flush shards each batch by partition_for(order_id, this) and
+    /// publishes each sub-batch to its explicit partition, so an order's sent
+    /// event co-locates with its acked event (eBPF capture uses the same hash) on
+    /// one consumer — the co-partitioning a multi-replica ingester needs. MUST
+    /// equal the topic's real partition count (topic-init creates 24).
+    pub orders_partitions: i32,
     pub telemetry_flush_interval: Duration,
     pub telemetry_batch_size: usize,
     pub telemetry_channel_capacity: usize,
@@ -60,6 +67,7 @@ impl Default for Config {
             ready_topic: TOPIC_BOT_READY.to_string(),
             workload_failed_topic: TOPIC_WORKLOAD_FAILED.to_string(),
             orders_sent_topic: TOPIC_ORDERS_SENT.to_string(),
+            orders_partitions: 24,
             telemetry_flush_interval: Duration::from_millis(5),
             // Aggregator flush threshold, kept equal to the sink's
             // per-message chunk ceiling (telemetry.rs MAX_EVENTS_PER_BATCH)
@@ -99,6 +107,11 @@ impl Config {
             ready_topic: env_or("READY_TOPIC", default.ready_topic),
             workload_failed_topic: env_or("WORKLOAD_FAILED_TOPIC", default.workload_failed_topic),
             orders_sent_topic: env_or("ORDERS_SENT_TOPIC", default.orders_sent_topic),
+            orders_partitions: env::var("ORDERS_PARTITIONS")
+                .ok()
+                .and_then(|v| v.parse::<i32>().ok())
+                .filter(|n| *n > 0)
+                .unwrap_or(default.orders_partitions),
             telemetry_flush_interval: env::var("TELEMETRY_FLUSH_INTERVAL_MS")
                 .ok()
                 .and_then(|v| v.parse::<u64>().ok())

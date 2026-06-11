@@ -28,7 +28,8 @@ use aya::{
 };
 use iicpc_bot_fleet::kafka::{self, KafkaProducer};
 use iicpc_logger_rust::loki;
-use iicpc_schemas_rust::{OrderAckedBatchRef, OrderAckedEventRef, TOPIC_ORDERS_ACKED};
+use iicpc_schemas_rust::{partition_for, OrderAckedBatchRef, OrderAckedEventRef, TOPIC_ORDERS_ACKED};
+use std::collections::BTreeMap;
 use tokio::signal::unix::{signal, Signal, SignalKind};
 use tokio::time;
 use tracing::{info, warn};
@@ -76,6 +77,12 @@ struct Config {
     flush_interval: Duration,
     batch_size: usize,
     clamp_mtu: usize,
+    /// Partition count of orders.acked. The flush shards each batch by
+    /// partition_for(order_id, this) — the SAME hash bot-fleet uses for
+    /// orders.sent — so an order's acked event co-locates with its sent event on
+    /// one partition (the co-partitioning the distributed ingester joins on).
+    /// MUST equal the topic's real partition count (topic-init creates 24).
+    orders_partitions: i32,
 }
 
 impl Config {
@@ -119,6 +126,7 @@ impl Config {
             flush_interval: env_duration_ms("EBPF_FLUSH_INTERVAL_MS", DEFAULT_FLUSH_INTERVAL),
             batch_size: env_usize("EBPF_BATCH_SIZE", DEFAULT_BATCH_SIZE),
             clamp_mtu: env_usize("CAPTURE_CLAMP_MTU", DEFAULT_CLAMP_MTU),
+            orders_partitions: env_usize("ORDERS_PARTITIONS", 24).max(1) as i32,
         })
     }
 
@@ -143,10 +151,16 @@ async fn main() -> Result<()> {
     let _loki_guard = loki::init("ebpf-latency");
     metrics::start_server();
 
-    let config = Config::from_env()?;
+    let mut config = Config::from_env()?;
     config.validate()?;
 
     let producer = kafka::telemetry_producer(&config.kafka_brokers)?;
+    // Authoritative N for order_id sharding: the orders.acked topic's real partition
+    // count, falling back to ORDERS_PARTITIONS. Must match the count bot-fleet uses
+    // for orders.sent so an order's sent + acked land on the same partition.
+    if let Some(n) = kafka::topic_partition_count(&producer, &config.topic) {
+        config.orders_partitions = n;
+    }
     run(config, producer).await
 }
 
@@ -257,68 +271,92 @@ async fn flush(
     if events.is_empty() {
         return Ok(());
     }
-    // Publish in size-bounded CHUNKS. A single msgpack-named OrderAckedBatch of the
-    // whole backlog can exceed the topic's max.message.bytes — each named event is
-    // ~300+ bytes (field names are repeated per event), so a few thousand events
-    // blow past 1 MiB and the broker rejects the whole message (MessageSizeTooLarge).
-    // Cap each Kafka message at MAX_EVENTS_PER_BATCH, draining only what was accepted
-    // so the unsent tail is retried next flush rather than wedging the buffer.
-    while !events.is_empty() {
-        let n = events.len().min(MAX_EVENTS_PER_BATCH);
-        let event_refs = events[..n]
-            .iter()
-            .map(|e| OrderAckedEventRef {
+    // Shard by destination partition via partition_for(order_id) — the SAME hash
+    // bot-fleet uses for orders.sent — so an order's acked event lands on the same
+    // partition as its sent event, letting a multi-replica telemetry-ingester join
+    // sent⋈acked on one consumer. Within a partition, split into size-bounded chunks:
+    // a single msgpack-named OrderAckedBatch of the whole backlog can exceed the
+    // topic's max.message.bytes (~300+ B/event, repeated field names), so each Kafka
+    // message is capped at MAX_EVENTS_PER_BATCH.
+    let mut by_part: BTreeMap<i32, Vec<MatchedEvent>> = BTreeMap::new();
+    for e in events.drain(..) {
+        by_part
+            .entry(partition_for(&e.order_id, config.orders_partitions))
+            .or_default()
+            .push(e);
+    }
+
+    // One message per (partition, chunk); each owns its events so a failed publish
+    // can be retained (H16) without re-encoding.
+    let mut msgs: Vec<(i32, Vec<u8>, Vec<MatchedEvent>)> = Vec::new();
+    for (part, mut group) in by_part {
+        while !group.is_empty() {
+            let take = group.len().min(MAX_EVENTS_PER_BATCH);
+            let chunk: Vec<MatchedEvent> = group.drain(..take).collect();
+            let event_refs = chunk
+                .iter()
+                .map(|e| OrderAckedEventRef {
+                    session_id: &config.session_id,
+                    contestant_id: &config.contestant_id,
+                    order_id: &e.order_id,
+                    src_ip: e.src_ip,
+                    src_port: e.src_port,
+                    tcp_seq: e.tcp_seq,
+                    t3_xdp_ingress_ns: e.t3_ns,
+                    t7_xdp_egress_ns: e.t7_ns,
+                    pod_service_time_ns: e.pod_service_time_ns,
+                    exec_type: &e.exec_type,
+                    fill_qty: e.fill_qty,
+                    fill_price: e.fill_price,
+                    orig_order_id: &e.orig_order_id,
+                    reordering_detected: e.reordering_detected,
+                    retransmission_count: e.retransmission_count,
+                })
+                .collect::<Vec<_>>();
+            let batch = OrderAckedBatchRef {
                 session_id: &config.session_id,
                 contestant_id: &config.contestant_id,
-                order_id: &e.order_id,
-                src_ip: e.src_ip,
-                src_port: e.src_port,
-                tcp_seq: e.tcp_seq,
-                t3_xdp_ingress_ns: e.t3_ns,
-                t7_xdp_egress_ns: e.t7_ns,
-                pod_service_time_ns: e.pod_service_time_ns,
-                exec_type: &e.exec_type,
-                fill_qty: e.fill_qty,
-                fill_price: e.fill_price,
-                orig_order_id: &e.orig_order_id,
-                reordering_detected: e.reordering_detected,
-                retransmission_count: e.retransmission_count,
-            })
-            .collect::<Vec<_>>();
-        let batch = OrderAckedBatchRef {
-            session_id: &config.session_id,
-            contestant_id: &config.contestant_id,
-            events: &event_refs,
-        };
-        let payload = rmp_serde::to_vec_named(&batch).context("encode orders.acked messagepack")?;
-        // H16: a transient publish failure must NOT kill the capture (the per-slot
-        // Job is backoffLimit=0/RestartPolicy=Never). Retain the unsent tail for the
-        // next flush; bound memory by dropping the OLDEST events past the cap.
-        match kafka::publish_bytes(producer, &config.topic, &config.contestant_id, &payload).await {
+                events: &event_refs,
+            };
+            let payload =
+                rmp_serde::to_vec_named(&batch).context("encode orders.acked messagepack")?;
+            msgs.push((part, payload, chunk));
+        }
+    }
+
+    // Pipeline every publish to its explicit partition, then await together.
+    let results = futures::future::join_all(msgs.iter().map(|(part, payload, _)| {
+        kafka::publish_to_partition(producer, &config.topic, *part, &config.contestant_id, payload)
+    }))
+    .await;
+
+    // H16: a transient publish failure must NOT kill the capture. Retain failed
+    // chunks for the next flush, count accepted ones, and bound memory.
+    let mut publish_failed = false;
+    for ((_, _, chunk), result) in msgs.into_iter().zip(results) {
+        match result {
             Ok(()) => {
-                // Record metrics only for the events Kafka actually accepted in
-                // this chunk (not the whole pending buffer), so the counters stay
-                // consistent with the H16 retain-on-failure semantics.
-                for event in events[..n].iter() {
+                for event in &chunk {
                     metrics::event_decoded(event.reordering_detected, event.retransmission_count);
                 }
-                metrics::flushed(n);
-                events.drain(0..n);
+                metrics::flushed(chunk.len());
             }
             Err(err) => {
-                warn!(error = %err, pending = events.len(), "publish orders.acked failed; retaining for retry");
-                if events.len() > MAX_PENDING_EVENTS {
-                    let drop = events.len() - MAX_PENDING_EVENTS;
-                    events.drain(0..drop);
-                    warn!(
-                        dropped = drop,
-                        "dropped oldest pending orders.acked events (publish backlog)"
-                    );
-                }
-                break; // stop this flush; retry the tail next tick
+                publish_failed = true;
+                warn!(error = %err, "publish orders.acked failed; retaining for retry");
+                events.extend(chunk);
             }
         }
     }
+    if events.len() > MAX_PENDING_EVENTS {
+        let drop = events.len() - MAX_PENDING_EVENTS;
+        events.drain(0..drop);
+        warn!(
+            dropped = drop,
+            "dropped oldest pending orders.acked events (publish backlog)"
+        );
+    }
+    let _ = publish_failed; // failures are logged + retained, never propagated (H16)
     Ok(())
 }
 
@@ -617,6 +655,7 @@ mod tests {
             flush_interval: DEFAULT_FLUSH_INTERVAL,
             batch_size: DEFAULT_BATCH_SIZE,
             clamp_mtu: DEFAULT_CLAMP_MTU,
+            orders_partitions: 24,
         };
         let mut events = vec![MatchedEvent {
             order_id: format!("order-{suffix}"),

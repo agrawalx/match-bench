@@ -26,6 +26,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/iicpc/libs/metrics"
@@ -121,14 +122,23 @@ func (c *ackedCollector) handle(m kafka.Message) {
 // DrainSession returns every orders.sent + orders.acked event for sessionID,
 // with at-least-once duplicates of acked events removed before assembly.
 func DrainSession(ctx context.Context, brokers []string, sessionID string) ([]topics.OrderSentEvent, []topics.OrderAckedEvent, error) {
+	// orders.sent and orders.acked are independent topics drained into separate
+	// collectors, so drain them concurrently — halving wall-clock, which matters
+	// because each topic's drain is already a multi-partition fan-out bounded by
+	// the validation deadline.
 	sc := &sentCollector{sessionID: sessionID}
-	if err := drainTopic(ctx, brokers, topics.TopicOrdersSent, sessionID, sc.handle); err != nil {
-		return nil, nil, fmt.Errorf("drain orders.sent: %w", err)
-	}
-
 	ac := newAckedCollector(sessionID)
-	if err := drainTopic(ctx, brokers, topics.TopicOrdersAcked, sessionID, ac.handle); err != nil {
-		return nil, nil, fmt.Errorf("drain orders.acked: %w", err)
+	var sentErr, ackedErr error
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() { defer wg.Done(); sentErr = drainTopic(ctx, brokers, topics.TopicOrdersSent, sessionID, sc.handle) }()
+	go func() { defer wg.Done(); ackedErr = drainTopic(ctx, brokers, topics.TopicOrdersAcked, sessionID, ac.handle) }()
+	wg.Wait()
+	if sentErr != nil {
+		return nil, nil, fmt.Errorf("drain orders.sent: %w", sentErr)
+	}
+	if ackedErr != nil {
+		return nil, nil, fmt.Errorf("drain orders.acked: %w", ackedErr)
 	}
 	if ac.duplicates > 0 {
 		// Counted alongside the drained-events metric so total-seen = drained +
@@ -139,6 +149,17 @@ func DrainSession(ctx context.Context, brokers []string, sessionID string) ([]to
 
 	return sc.events, ac.events, nil
 }
+
+// drainPartitionConcurrency bounds how many partition readers run at once. Each
+// kafka-go partition Reader pays a fixed connection/initial-fetch cost (~seconds)
+// independent of how few messages it returns, so draining the topic's partitions
+// sequentially makes the whole drain scale with partition count — on a
+// co-partitioned topic (orders.sent/acked are sharded across many partitions by
+// order_id) that serial cost alone blew the validation deadline. Reading the
+// partitions concurrently collapses it to ~one reader's cost. The cap keeps the
+// fan-out (sockets + buffered batches) bounded so a high-partition topic can't
+// exhaust fds or memory.
+const drainPartitionConcurrency = 12
 
 func drainTopic(ctx context.Context, brokers []string, topic, sessionID string, handle func(kafka.Message)) error {
 	if len(brokers) == 0 {
@@ -154,37 +175,87 @@ func drainTopic(ctx context.Context, brokers []string, topic, sessionID string, 
 		return fmt.Errorf("read partitions for %s: %w", topic, err)
 	}
 
-	for _, p := range parts {
-		start, last, err := partitionOffsets(ctx, brokers[0], topic, p.ID, sessionID)
-		if err != nil {
-			return err
-		}
-		if start >= last {
-			continue // nothing in [start, watermark) — empty partition or no events in the session window
-		}
-		r := kafka.NewReader(kafka.ReaderConfig{
-			Brokers:   brokers,
-			Topic:     topic,
-			Partition: p.ID,
-			MinBytes:  1,
-			MaxBytes:  10 << 20,
+	// Cancel sibling readers as soon as one fails so a single partition error
+	// doesn't leave the rest draining to the deadline.
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	// handle mutates shared collector state and is not safe for concurrent use;
+	// serialize the (cheap) per-message append behind a mutex while the (slow)
+	// network reads run in parallel.
+	var mu sync.Mutex
+	guarded := func(m kafka.Message) {
+		mu.Lock()
+		handle(m)
+		mu.Unlock()
+	}
+
+	sem := make(chan struct{}, drainPartitionConcurrency)
+	var wg sync.WaitGroup
+	var errOnce sync.Once
+	var firstErr error
+	fail := func(err error) {
+		errOnce.Do(func() {
+			firstErr = err
+			cancel()
 		})
-		if err := r.SetOffset(start); err != nil {
-			r.Close()
-			return fmt.Errorf("set offset %s/%d: %w", topic, p.ID, err)
+	}
+
+	for _, p := range parts {
+		select {
+		case sem <- struct{}{}:
+		case <-ctx.Done():
 		}
-		for {
-			m, err := r.ReadMessage(ctx)
-			if err != nil {
-				r.Close()
-				return fmt.Errorf("read %s/%d: %w", topic, p.ID, err)
-			}
-			handle(m)
-			if m.Offset >= last-1 { // reached the snapshotted watermark
-				break
-			}
+		if ctx.Err() != nil {
+			break
 		}
-		r.Close()
+		wg.Add(1)
+		go func(partition int) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			if err := drainPartition(ctx, brokers, topic, partition, sessionID, guarded); err != nil {
+				fail(err)
+			}
+		}(p.ID)
+	}
+	wg.Wait()
+	if firstErr != nil {
+		return firstErr
+	}
+	return ctx.Err()
+}
+
+// drainPartition reads one partition's [start, watermark) window and feeds every
+// message to handle. handle must be safe to call from this goroutine (the caller
+// serializes it); the network read itself is the part that runs concurrently.
+func drainPartition(ctx context.Context, brokers []string, topic string, partition int, sessionID string, handle func(kafka.Message)) error {
+	start, last, err := partitionOffsets(ctx, brokers[0], topic, partition, sessionID)
+	if err != nil {
+		return err
+	}
+	if start >= last {
+		return nil // nothing in [start, watermark) — empty partition or no events in the session window
+	}
+	r := kafka.NewReader(kafka.ReaderConfig{
+		Brokers:   brokers,
+		Topic:     topic,
+		Partition: partition,
+		MinBytes:  1,
+		MaxBytes:  10 << 20,
+	})
+	defer r.Close()
+	if err := r.SetOffset(start); err != nil {
+		return fmt.Errorf("set offset %s/%d: %w", topic, partition, err)
+	}
+	for {
+		m, err := r.ReadMessage(ctx)
+		if err != nil {
+			return fmt.Errorf("read %s/%d: %w", topic, partition, err)
+		}
+		handle(m)
+		if m.Offset >= last-1 { // reached the snapshotted watermark
+			break
+		}
 	}
 	return nil
 }

@@ -8,6 +8,7 @@ ebpf = []
 
 [target.'cfg(not(target_arch = "bpf"))'.dependencies]
 anyhow = "1.0"
+futures = "0.3"
 aya = "0.13.1"
 iicpc-bot-fleet = { path = "../bot-fleet" }
 iicpc-logger-rust = { path = "../../libs/rust/logger" }

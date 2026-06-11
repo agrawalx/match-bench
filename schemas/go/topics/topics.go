@@ -294,6 +294,12 @@ type OrderSentEvent struct {
 	// orders.acked, so a contestant cannot steer the reference book by omitting or
 	// altering the cancel target. Empty for NEW orders.
 	OrigOrderID string `json:"orig_order_id" msgpack:"orig_order_id"`
+	// BarrierEpochNs is the session's barrier epoch (unix ns) — the authoritative
+	// session start shared by every order in the session. The telemetry-ingester
+	// uses it to compute wave_index identically on every (sharded) consumer. The
+	// correctness-validator does not need it (it replays by effective_t3), but the
+	// field is carried here so the Go decoder stays in sync with the Rust producer.
+	BarrierEpochNs uint64 `json:"barrier_epoch_ns" msgpack:"barrier_epoch_ns"`
 }
 
 // OrderAckedBatch is MessagePack-encoded on "orders.acked" by the eBPF

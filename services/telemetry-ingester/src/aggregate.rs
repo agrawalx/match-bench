@@ -48,6 +48,11 @@ pub struct Snapshot {
     pub rt_p99_ns: u64,
     pub tps_1s: f64,
     pub error_rate: f64,
+    /// Per-interval offered count and error count (timed_out + rejected). Stored
+    /// in metrics_partial so the rollup can merge error_rate across shards as
+    /// Σerrors/Σoffered (a ratio cannot be averaged); tps_1s sums directly.
+    pub offered: u64,
+    pub errors: u64,
     /// V2-deflate-serialized cumulative service-time (t7-t3) histogram — the
     /// scored metric, for offline analysis and the frontend percentile chart.
     pub hdr_encoded: Vec<u8>,
@@ -100,7 +105,7 @@ impl Window {
     }
 }
 
-fn new_hist() -> Histogram<u64> {
+pub fn new_hist() -> Histogram<u64> {
     Histogram::<u64>::new_with_bounds(1, HDR_MAX_NS, HDR_SIGFIG)
         .expect("valid HDR bounds (1..=60s, 3 sig figs)")
 }
@@ -153,6 +158,15 @@ impl Aggregator {
     }
 
     pub fn observe_sent(&mut self, e: &OrderSentEvent) {
+        // Authoritative session start: the barrier epoch is identical for every
+        // order in the session, so every consumer computes the same wave_index even
+        // when the session is sharded across consumers. Overrides the
+        // earliest-timestamp-seen-locally fallback (which diverges per consumer).
+        // barrier_epoch_ns == 0 means a pre-field producer → keep the fallback.
+        if e.barrier_epoch_ns > 0 {
+            self.session_start
+                .insert(e.session_id.clone(), e.barrier_epoch_ns);
+        }
         let t0 = e.target_send_ts_ns;
         let t1 = e.send_ts_ns;
         let r9 = e.recv_done_ts_ns;
@@ -260,6 +274,8 @@ impl Aggregator {
                     rt_p99_ns: w.response_time.value_at_quantile(0.99),
                     tps_1s: w.responded as f64 / interval,
                     error_rate,
+                    offered: w.offered,
+                    errors: w.timed_out + w.rejected,
                     hdr_encoded: serialize_hist(&w.service_time),
                     rt_hdr_encoded: serialize_hist(&w.response_time),
                     slip_hdr_encoded: serialize_hist(&w.schedule_slip),
@@ -303,7 +319,7 @@ impl Aggregator {
     }
 }
 
-fn serialize_hist(hist: &Histogram<u64>) -> Vec<u8> {
+pub fn serialize_hist(hist: &Histogram<u64>) -> Vec<u8> {
     let mut buf = Vec::new();
     let _ = V2DeflateSerializer::new().serialize(hist, &mut buf);
     buf
@@ -365,7 +381,39 @@ mod tests {
             payload_type: PayloadType::New,
             ord_type: OrdType::Limit,
             orig_order_id: String::new(),
+            barrier_epoch_ns: 0, // legacy/earliest-seen fallback for existing tests
         }
+    }
+
+    // Deterministic wave bucketing: with an authoritative barrier_epoch_ns, the wave
+    // index depends ONLY on the order's timestamp relative to the barrier — NOT on
+    // which events a consumer happens to see first. Two aggregators fed disjoint
+    // subsets of the same session (as distributed shards would be) must agree on the
+    // wave of any given order.
+    #[test]
+    fn barrier_epoch_makes_wave_index_consumer_independent() {
+        let barrier = 1_000_000_000_000u64;
+        let wave_ns = DEFAULT_WAVE_NS;
+        // An order sent 1.5 waves into the run.
+        let t0 = barrier + wave_ns + wave_ns / 2;
+        let mut ev = sent("sess", "sess_0_0_O", t0, t0, 0, false);
+        ev.barrier_epoch_ns = barrier;
+
+        // Shard A sees an EARLIER order first; shard B sees only this one. Without
+        // the barrier, A and B would anchor session_start differently.
+        let mut a = Aggregator::new(wave_ns);
+        let mut earlier = sent("sess", "sess_0_1_O", barrier + 10, barrier + 10, 0, false);
+        earlier.barrier_epoch_ns = barrier;
+        a.observe_sent(&earlier);
+        a.observe_sent(&ev);
+
+        let mut b = Aggregator::new(wave_ns);
+        b.observe_sent(&ev);
+
+        // Both must bucket `ev` into wave 1 (floor(1.5) = 1), regardless of history.
+        assert_eq!(a.wave_of("sess", t0), 1);
+        assert_eq!(b.wave_of("sess", t0), 1);
+        assert_eq!(a.wave_of("sess", t0), b.wave_of("sess", t0));
     }
 
     #[test]

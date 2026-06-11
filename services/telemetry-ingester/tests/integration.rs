@@ -88,6 +88,7 @@ fn sent(session: &str, order: &str, t0: u64, t1: u64, r9: u64, timed_out: bool) 
         payload_type: PayloadType::New,
         ord_type: OrdType::Limit,
         orig_order_id: String::new(),
+        barrier_epoch_ns: 0,
     }
 }
 
@@ -186,7 +187,7 @@ async fn store_roundtrip_writes_and_reads_metrics() {
     let session = format!("itest-store-{}", unique_suffix());
     let contestant = format!("c-{}", unique_suffix());
 
-    let store = Store::connect(&url).await.expect("connect timescale");
+    let store = Store::connect(&url, "test-shard-0".to_string()).await.expect("connect timescale");
     store.init_schema().await.expect("init schema");
     let (snaps, exp) = aggregate_synthetic(&session, &contestant);
     assert!(!snaps.is_empty(), "aggregator produced a snapshot");
@@ -201,7 +202,7 @@ async fn store_roundtrip_writes_and_reads_metrics() {
     });
     let row = client
         .query_one(
-            "SELECT count(*)::bigint, max(tps_1s), max(p99_ns)::bigint FROM metrics WHERE session_id = $1",
+            "SELECT count(*)::bigint, max(tps_1s), max(p99_ns)::bigint FROM metrics_partial WHERE session_id = $1",
             &[&session],
         )
         .await
@@ -462,7 +463,7 @@ async fn full_pipeline_kafka_to_timescale_and_redis() {
 
     // Snapshot + sink to both stores.
     let snaps = agg.snapshot(now_ns(), 1.0);
-    let store = Store::connect(&turl).await.unwrap();
+    let store = Store::connect(&turl, "test-shard-0".to_string()).await.unwrap();
     store.init_schema().await.unwrap();
     store.write(&snaps).await.unwrap();
     let redis = RedisSink::connect(&rurl).await.unwrap();
@@ -477,7 +478,7 @@ async fn full_pipeline_kafka_to_timescale_and_redis() {
     });
     let row = client
         .query_one(
-            "SELECT max(tps_1s), max(error_rate), max(p99_ns)::bigint FROM metrics WHERE session_id=$1",
+            "SELECT max(tps_1s), max(error_rate), max(p99_ns)::bigint FROM metrics_partial WHERE session_id=$1",
             &[&session],
         )
         .await

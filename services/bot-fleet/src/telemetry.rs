@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeMap,
     sync::{Arc, Mutex},
     time::Duration,
 };
@@ -12,7 +13,7 @@ use tokio::{
 };
 use tracing::{error, warn};
 
-use iicpc_schemas_rust::OrderSentEvent;
+use iicpc_schemas_rust::{partition_for, OrderSentEvent};
 
 use crate::{
     kafka::{self, KafkaProducer},
@@ -38,6 +39,7 @@ impl TelemetrySink {
         capacity: usize,
         flush_interval: Duration,
         batch_size: usize,
+        num_partitions: i32,
     ) -> Self {
         let (tx, rx) = mpsc::channel(capacity);
         let handle = tokio::spawn(run_aggregator(
@@ -48,6 +50,7 @@ impl TelemetrySink {
             worker_id,
             flush_interval,
             batch_size,
+            num_partitions,
         ));
         Self {
             tx,
@@ -105,6 +108,7 @@ async fn run_aggregator(
     worker_id: String,
     flush_interval: Duration,
     batch_size: usize,
+    num_partitions: i32,
 ) -> Result<()> {
     let mut ticker = time::interval(flush_interval);
     let mut events = Vec::with_capacity(batch_size);
@@ -119,13 +123,13 @@ async fn run_aggregator(
                     Some(event) => {
                         events.push(event);
                         if events.len() >= batch_size {
-                            if let Err(err) = flush(&producer, &topic, &session_id, &worker_id, &mut events).await {
+                            if let Err(err) = flush(&producer, &topic, &session_id, &worker_id, num_partitions, &mut events).await {
                                 error!(error = %err, "failed to flush telemetry batch");
                             }
                         }
                     }
                     None => {
-                        if let Err(err) = flush(&producer, &topic, &session_id, &worker_id, &mut events).await {
+                        if let Err(err) = flush(&producer, &topic, &session_id, &worker_id, num_partitions, &mut events).await {
                             error!(error = %err, "failed to flush final telemetry batch");
                             metrics::telemetry_dropped();
                             events.clear();
@@ -135,7 +139,7 @@ async fn run_aggregator(
                 }
             }
             _ = ticker.tick() => {
-                if let Err(err) = flush(&producer, &topic, &session_id, &worker_id, &mut events).await {
+                if let Err(err) = flush(&producer, &topic, &session_id, &worker_id, num_partitions, &mut events).await {
                     error!(error = %err, "failed to flush telemetry batch");
                 }
             }
@@ -152,90 +156,93 @@ struct OrderSentBatchRef<'a> {
     events: &'a [OrderSentEvent],
 }
 
-/// flush publishes the current telemetry batch and only clears what Kafka
-/// accepted.
+/// flush shards the batch by destination partition and publishes one sub-batch
+/// per partition to its EXPLICIT partition. partition_for(order_id) is the same
+/// hash the eBPF capture uses for orders.acked, so an order's sent event lands on
+/// the same partition as its acked event — the co-partitioning a multi-replica
+/// telemetry-ingester needs to join sent⋈acked on a single consumer.
 ///
-/// The batch is split into size-bounded chunks so a large accumulated buffer
-/// cannot exceed the topic's max.message.bytes, and the chunk publishes are
-/// PIPELINED: every delivery future is fired before any is awaited
-/// (join_all), so one flush pays roughly one broker RTT instead of one per
-/// chunk. The old one-await-per-chunk loop serialized those RTTs and capped
-/// the sink at ~50-100k ev/s — silent drops exactly at the scoring waves.
+/// Within a partition, events are split into size-bounded chunks (one Kafka
+/// message each, under max.message.bytes). Every publish is PIPELINED (join_all)
+/// so a flush pays ≈ one broker RTT, not one per chunk.
 ///
-/// Failure semantics: drain only what Kafka accepted. Events belonging to a
-/// failed chunk stay queued (in order) for the next flush; the first error is
-/// returned after the buffer is reconciled.
+/// Failure semantics: events whose publish failed are pushed back into `events`
+/// (retained for the next flush); published events are dropped. The first error
+/// is returned after reconciliation.
+/// shard_events groups events by destination partition via partition_for(order_id),
+/// moving them out of the input buffer. The eBPF capture shards orders.acked by the
+/// same hash, so an order's sent and acked events land on the same partition.
+/// Exposed for unit-testing the co-partition invariant.
+fn shard_events(
+    events: &mut Vec<OrderSentEvent>,
+    num_partitions: i32,
+) -> BTreeMap<i32, Vec<OrderSentEvent>> {
+    let mut by_part: BTreeMap<i32, Vec<OrderSentEvent>> = BTreeMap::new();
+    for e in events.drain(..) {
+        by_part
+            .entry(partition_for(&e.order_id, num_partitions))
+            .or_default()
+            .push(e);
+    }
+    by_part
+}
+
 async fn flush(
     producer: &KafkaProducer,
     topic: &str,
     session_id: &str,
     worker_id: &str,
+    num_partitions: i32,
     events: &mut Vec<OrderSentEvent>,
 ) -> Result<()> {
     if events.is_empty() {
         return Ok(());
     }
 
-    let payloads = encode_chunks(session_id, worker_id, events)?;
+    // Shard by destination partition (move events out — no clone).
+    let by_part = shard_events(events, num_partitions);
+
+    // One message per (partition, size-bounded chunk); each owns its events so a
+    // failed publish can be retained without re-encoding.
+    let mut msgs: Vec<(i32, Vec<u8>, Vec<OrderSentEvent>)> = Vec::new();
+    for (part, mut group) in by_part {
+        while !group.is_empty() {
+            let take = group.len().min(MAX_EVENTS_PER_BATCH);
+            let chunk: Vec<OrderSentEvent> = group.drain(..take).collect();
+            let payload = rmp_serde::to_vec_named(&OrderSentBatchRef {
+                session_id,
+                worker_id,
+                events: &chunk,
+            })
+            .context("encode orders.sent messagepack")?;
+            msgs.push((part, payload, chunk));
+        }
+    }
+
+    // Pipeline every publish, then await together (≈ one broker RTT).
     let results = futures::future::join_all(
-        payloads
-            .iter()
-            .map(|payload| kafka::publish_bytes(producer, topic, session_id, payload)),
+        msgs.iter().map(|(part, payload, _)| {
+            kafka::publish_to_partition(producer, topic, *part, session_id, payload)
+        }),
     )
     .await;
 
-    let failed: Vec<bool> = results.iter().map(Result::is_err).collect();
     let mut first_err = None;
-    for (chunk, result) in events.chunks(MAX_EVENTS_PER_BATCH).zip(results) {
+    for ((_, _, chunk), result) in msgs.into_iter().zip(results) {
         match result {
             Ok(()) => metrics::telemetry_flushed(chunk.len()),
             Err(err) => {
                 if first_err.is_none() {
                     first_err = Some(err);
                 }
+                events.extend(chunk); // retain for next flush
             }
         }
     }
-    retain_failed_chunks(events, &failed);
     match first_err {
         None => Ok(()),
         Some(err) => Err(err),
     }
-}
-
-/// encode_chunks splits the event buffer into MAX_EVENTS_PER_BATCH-sized
-/// chunks and MessagePack-encodes each as one OrderSentBatch message.
-/// msgpack-named events repeat field names (~360 B each at realistic
-/// identifier sizes); a few thousand in one message overflow the topic's
-/// 1 MiB max.message.bytes and the broker rejects the whole message.
-fn encode_chunks(
-    session_id: &str,
-    worker_id: &str,
-    events: &[OrderSentEvent],
-) -> Result<Vec<Vec<u8>>> {
-    events
-        .chunks(MAX_EVENTS_PER_BATCH)
-        .map(|chunk| {
-            rmp_serde::to_vec_named(&OrderSentBatchRef {
-                session_id,
-                worker_id,
-                events: chunk,
-            })
-            .context("encode orders.sent messagepack")
-        })
-        .collect()
-}
-
-/// retain_failed_chunks keeps only the events whose chunk publish failed
-/// (failed[i] covers events[i*MAX_EVENTS_PER_BATCH ..]), in order, so the
-/// next flush retries exactly what Kafka has not accepted.
-fn retain_failed_chunks(events: &mut Vec<OrderSentEvent>, failed: &[bool]) {
-    let mut index = 0;
-    events.retain(|_| {
-        let chunk = index / MAX_EVENTS_PER_BATCH;
-        index += 1;
-        failed.get(chunk).copied().unwrap_or(false)
-    });
 }
 
 /// Max events per published orders.sent Kafka message. Size math:
@@ -272,77 +279,71 @@ mod tests {
             payload_type: PayloadType::New,
             ord_type: OrdType::Limit,
             orig_order_id: String::new(),
+            barrier_epoch_ns: 1_770_000_000_000_000_000,
         }
     }
 
-    // A flush larger than the per-message ceiling must split into multiple
-    // size-bounded chunks, each decodable as a complete OrderSentBatch, with
-    // event order preserved across chunk boundaries.
+    // Co-partition invariant: every event in group[p] hashes to p, and sharding
+    // preserves all events. This is what guarantees an order's sent batch and (via
+    // the same partition_for hash on the eBPF side) its acked batch land together.
     #[test]
-    fn oversized_flush_encodes_multiple_chunks() {
-        let events: Vec<OrderSentEvent> = (0..2_500).map(test_event).collect();
+    fn shard_events_groups_every_event_to_its_partition() {
+        let n = 24;
+        let mut events: Vec<OrderSentEvent> = (0..5_000).map(test_event).collect();
+        let total = events.len();
 
-        let payloads = encode_chunks("sess", "worker", &events).expect("encode chunks");
+        let by_part = shard_events(&mut events, n);
 
-        assert_eq!(payloads.len(), 3, "2500 events must split into 3 chunks");
-        let batches: Vec<OrderSentBatch> = payloads
-            .iter()
-            .map(|p| rmp_serde::from_slice(p).expect("decode chunk"))
-            .collect();
-        let counts: Vec<usize> = batches.iter().map(|b| b.events.len()).collect();
-        assert_eq!(counts, vec![1000, 1000, 500]);
-        // Order preserved: chunk 2 starts at event 2000.
-        assert_eq!(batches[2].events[0].order_id, test_event(2_000).order_id);
-        for payload in &payloads {
-            assert!(
-                payload.len() < 1_048_576,
-                "chunk payload {} bytes breaches max.message.bytes",
-                payload.len()
-            );
+        assert!(events.is_empty(), "shard_events must drain the input buffer");
+        let regrouped: usize = by_part.values().map(Vec::len).sum();
+        assert_eq!(regrouped, total, "no events lost in sharding");
+        for (part, group) in &by_part {
+            for e in group {
+                assert_eq!(
+                    partition_for(&e.order_id, n),
+                    *part,
+                    "event {} placed in wrong partition",
+                    e.order_id
+                );
+            }
         }
+        assert!(by_part.len() > 1, "events should spread across partitions");
     }
 
-    // Size math behind the 1000-event ceiling: msgpack-named events repeat
-    // field names, ≈360 B/event at realistic identifier sizes, so a full
-    // chunk is ≈360 KB — comfortably under the topic's 1 MiB
-    // max.message.bytes even with headroom for larger identifiers.
+    // A per-task order_id stream (all same order_id prefix differing by seq) must
+    // still spread across partitions — confirms we shard by full order_id, not by a
+    // coarse prefix that would funnel a session to one partition.
     #[test]
-    fn full_chunk_stays_under_broker_message_ceiling() {
-        let events: Vec<OrderSentEvent> = (0..MAX_EVENTS_PER_BATCH).map(test_event).collect();
-
-        let payloads = encode_chunks("sess", "worker", &events).expect("encode chunk");
-
-        assert_eq!(payloads.len(), 1);
+    fn shard_events_spreads_a_single_session_across_partitions() {
+        let n = 24;
+        let mut events: Vec<OrderSentEvent> = (0..2_000).map(test_event).collect();
+        let by_part = shard_events(&mut events, n);
         assert!(
-            payloads[0].len() < 1_048_576,
-            "full chunk is {} bytes, must stay under 1 MiB",
-            payloads[0].len()
+            by_part.len() >= n as usize / 2,
+            "a busy session must use many partitions, used {}",
+            by_part.len()
         );
     }
 
-    // Failure semantics: drain only what Kafka accepted. Events belonging to
-    // a failed chunk stay queued (in order) for the next flush; accepted
-    // chunks are dropped.
+    // Size math behind the 1000-event ceiling: msgpack-named events repeat field
+    // names, ≈360 B/event at realistic identifier sizes, so a full chunk is ≈360 KB
+    // — comfortably under the topic's 1 MiB max.message.bytes.
     #[test]
-    fn retain_failed_chunks_keeps_only_rejected_events() {
-        let mut events: Vec<OrderSentEvent> = (0..2_500).map(test_event).collect();
+    fn full_chunk_stays_under_broker_message_ceiling() {
+        let events: Vec<OrderSentEvent> = (0..MAX_EVENTS_PER_BATCH).map(test_event).collect();
+        let payload = rmp_serde::to_vec_named(&OrderSentBatchRef {
+            session_id: "sess",
+            worker_id: "worker",
+            events: &events,
+        })
+        .expect("encode chunk");
 
-        // Chunk 0 (0..1000) accepted, chunk 1 (1000..2000) failed,
-        // chunk 2 (2000..2500) accepted.
-        retain_failed_chunks(&mut events, &[false, true, false]);
-
-        assert_eq!(events.len(), 1_000);
-        assert_eq!(events[0].order_id, test_event(1_000).order_id);
-        assert_eq!(events[999].order_id, test_event(1_999).order_id);
-    }
-
-    // All chunks accepted → nothing retained (the steady-state path).
-    #[test]
-    fn retain_failed_chunks_drains_everything_on_success() {
-        let mut events: Vec<OrderSentEvent> = (0..1_500).map(test_event).collect();
-
-        retain_failed_chunks(&mut events, &[false, false]);
-
-        assert!(events.is_empty());
+        let decoded: OrderSentBatch = rmp_serde::from_slice(&payload).expect("decode chunk");
+        assert_eq!(decoded.events.len(), MAX_EVENTS_PER_BATCH);
+        assert!(
+            payload.len() < 1_048_576,
+            "full chunk is {} bytes, must stay under 1 MiB",
+            payload.len()
+        );
     }
 }

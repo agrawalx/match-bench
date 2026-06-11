@@ -9,4 +9,5 @@ pub mod join;
 pub mod kafka;
 pub mod metrics;
 pub mod redis_sink;
+pub mod rollup;
 pub mod store;

@@ -8,7 +8,7 @@ use rdkafka::{
     config::ClientConfig,
     consumer::{CommitMode, Consumer, StreamConsumer},
     message::Message,
-    producer::{FutureProducer, FutureRecord},
+    producer::{FutureProducer, FutureRecord, Producer},
     Offset, TopicPartitionList,
 };
 
@@ -271,6 +271,46 @@ pub async fn publish_bytes(
         .send(record, Duration::from_secs(5))
         .await
         .map_err(|(err, _msg)| anyhow!("publish kafka message: {err}"))?;
+    Ok(())
+}
+
+/// topic_partition_count reads the REAL partition count of `topic` from Kafka
+/// metadata. This is the authoritative N for partition_for(order_id, N): the topic
+/// is the source of truth, so deriving N here avoids drift between an env var and
+/// the actual topic (an env N larger than the real count would make an explicit
+/// `.partition(p)` publish fail). Returns None on metadata error / unknown topic;
+/// callers fall back to their configured ORDERS_PARTITIONS.
+pub fn topic_partition_count(producer: &KafkaProducer, topic: &str) -> Option<i32> {
+    let md = producer
+        .inner
+        .client()
+        .fetch_metadata(Some(topic), Duration::from_secs(5))
+        .ok()?;
+    let n = md.topics().iter().find(|t| t.name() == topic)?.partitions().len();
+    (n > 0).then_some(n as i32)
+}
+
+/// publish_to_partition sends a payload to an EXPLICIT partition (overriding the
+/// key partitioner). The telemetry flush shards a batch by partition_for(order_id)
+/// so an order's sent event lands on the same partition as its acked event (the
+/// eBPF capture shards by the same hash). The key is still set (session_id) as
+/// message metadata, but the explicit partition is what librdkafka honours.
+pub async fn publish_to_partition(
+    producer: &KafkaProducer,
+    topic: &str,
+    partition: i32,
+    key: &str,
+    payload: &[u8],
+) -> Result<()> {
+    let record = FutureRecord::to(topic)
+        .key(key)
+        .payload(payload)
+        .partition(partition);
+    producer
+        .inner
+        .send(record, Duration::from_secs(5))
+        .await
+        .map_err(|(err, _msg)| anyhow!("publish kafka message to partition {partition}: {err}"))?;
     Ok(())
 }
 

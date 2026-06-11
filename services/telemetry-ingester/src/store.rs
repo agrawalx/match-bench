@@ -32,6 +32,35 @@ CREATE TABLE IF NOT EXISTS metrics (
     slip_hdr_encoded BYTEA
 );";
 
+/// metrics_partial holds each ingester replica's PARTIAL per-(session,wave)
+/// aggregate, tagged with `shard` (the replica id). When a session is sharded
+/// across replicas, each writes its own non-colliding rows here; the rollup merges
+/// the per-shard partials into the canonical `metrics` table (which readers use,
+/// unchanged). Same columns as metrics + shard. The HDR blobs are mergeable
+/// (lossless bucket add); the count columns sum across shards.
+const METRICS_PARTIAL_TABLE: &str = "\
+CREATE TABLE IF NOT EXISTS metrics_partial (
+    time          TIMESTAMPTZ NOT NULL,
+    shard         TEXT        NOT NULL,
+    session_id    TEXT        NOT NULL,
+    contestant_id TEXT        NOT NULL,
+    wave_index    INT         NOT NULL,
+    p50_ns        BIGINT,
+    p90_ns        BIGINT,
+    p99_ns        BIGINT,
+    p999_ns       BIGINT,
+    rt_p50_ns     BIGINT,
+    rt_p90_ns     BIGINT,
+    rt_p99_ns     BIGINT,
+    tps_1s        DOUBLE PRECISION,
+    error_rate    DOUBLE PRECISION,
+    offered       BIGINT,
+    errors        BIGINT,
+    hdr_encoded   BYTEA,
+    rt_hdr_encoded   BYTEA,
+    slip_hdr_encoded BYTEA
+);";
+
 /// Adds the response-time (r9 - t0, the coordinated-omission-aware round trip)
 /// percentile columns to an EXISTING metrics table. CREATE TABLE IF NOT EXISTS
 /// above only covers fresh clusters; this backfills the columns where the table
@@ -58,17 +87,21 @@ const TIMESCALE_SETUP: &[&str] = &[
         schedule_interval => INTERVAL '10 seconds');",
 ];
 
+// The ingester writes PARTIALS (one row per shard); the rollup merges them into
+// `metrics`. $17 is the shard id.
 const INSERT_SQL: &str = "\
-INSERT INTO metrics
-    (time, session_id, contestant_id, wave_index, p50_ns, p90_ns, p99_ns, p999_ns, rt_p50_ns, rt_p90_ns, rt_p99_ns, tps_1s, error_rate, hdr_encoded, rt_hdr_encoded, slip_hdr_encoded)
-VALUES (to_timestamp($1::double precision / 1e9), $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)";
+INSERT INTO metrics_partial
+    (time, session_id, contestant_id, wave_index, p50_ns, p90_ns, p99_ns, p999_ns, rt_p50_ns, rt_p90_ns, rt_p99_ns, tps_1s, error_rate, hdr_encoded, rt_hdr_encoded, slip_hdr_encoded, offered, errors, shard)
+VALUES (to_timestamp($1::double precision / 1e9), $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)";
 
 pub struct Store {
     pool: Pool,
+    /// This replica's shard id, written into every metrics_partial row.
+    shard: String,
 }
 
 impl Store {
-    pub async fn connect(url: &str) -> Result<Self> {
+    pub async fn connect(url: &str, shard: String) -> Result<Self> {
         let pg_config: tokio_postgres::Config = url.parse().context("parse TIMESCALE_URL")?;
         let mgr = deadpool_postgres::Manager::from_config(
             pg_config,
@@ -82,7 +115,7 @@ impl Store {
             .runtime(Runtime::Tokio1)
             .build()
             .context("build timescale pool")?;
-        Ok(Self { pool })
+        Ok(Self { pool, shard })
     }
 
     /// Create the metrics table (required) + the TimescaleDB hypertable/aggregate
@@ -94,9 +127,22 @@ impl Store {
             .await
             .context("create metrics table")?;
         client
+            .batch_execute(METRICS_PARTIAL_TABLE)
+            .await
+            .context("create metrics_partial table")?;
+        client
             .batch_execute(ADD_RT_COLUMNS)
             .await
             .context("add response-time columns")?;
+        // metrics_partial as a hypertable (best-effort, like metrics below).
+        if let Err(e) = client
+            .batch_execute(
+                "SELECT create_hypertable('metrics_partial', 'time', if_not_exists => TRUE, chunk_time_interval => INTERVAL '1 hour');",
+            )
+            .await
+        {
+            warn!(error = %e, "metrics_partial hypertable setup failed (non-fatal)");
+        }
         for stmt in TIMESCALE_SETUP {
             if let Err(e) = client.batch_execute(stmt).await {
                 warn!(error = %e, stmt = %stmt.split_whitespace().take(3).collect::<Vec<_>>().join(" "),
@@ -136,10 +182,13 @@ impl Store {
                         &s.hdr_encoded,
                         &s.rt_hdr_encoded,
                         &s.slip_hdr_encoded,
+                        &(s.offered as i64),
+                        &(s.errors as i64),
+                        &self.shard,
                     ],
                 )
                 .await
-                .context("insert metrics row")?;
+                .context("insert metrics_partial row")?;
         }
         Ok(())
     }

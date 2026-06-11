@@ -80,7 +80,14 @@ fn merge_one<'a>(blobs: impl Iterator<Item = &'a [u8]>) -> Histogram<u64> {
 /// the supplied per-shard blobs (lossless HDR add → true merged percentiles), the
 /// counts are taken as given. Callers decide WHICH blobs/counts to pass (a single
 /// bucket's partials, or carry-forward state — see [`roll_wave_buckets`]).
-fn build_merged(svc_blobs: &[&[u8]], rt_blobs: &[&[u8]], slip_blobs: &[&[u8]], tps_1s: f64, offered: u64, errors: u64) -> Merged {
+fn build_merged(
+    svc_blobs: &[&[u8]],
+    rt_blobs: &[&[u8]],
+    slip_blobs: &[&[u8]],
+    tps_1s: f64,
+    offered: u64,
+    errors: u64,
+) -> Merged {
     let svc = merge_one(svc_blobs.iter().copied());
     let rt = merge_one(rt_blobs.iter().copied());
     let slip = merge_one(slip_blobs.iter().copied());
@@ -151,14 +158,21 @@ pub fn roll_wave_buckets(parts: &[PartialRow]) -> Vec<(i64, Merged)> {
             errors += r.errors;
             latest.insert(
                 r.shard.clone(),
-                (r.hdr_encoded.clone(), r.rt_hdr_encoded.clone(), r.slip_hdr_encoded.clone()),
+                (
+                    r.hdr_encoded.clone(),
+                    r.rt_hdr_encoded.clone(),
+                    r.slip_hdr_encoded.clone(),
+                ),
             );
             i += 1;
         }
         let svc: Vec<&[u8]> = latest.values().map(|b| b.0.as_slice()).collect();
         let rt: Vec<&[u8]> = latest.values().map(|b| b.1.as_slice()).collect();
         let slip: Vec<&[u8]> = latest.values().map(|b| b.2.as_slice()).collect();
-        out.push((bucket_ns, build_merged(&svc, &rt, &slip, tps, offered, errors)));
+        out.push((
+            bucket_ns,
+            build_merged(&svc, &rt, &slip, tps, offered, errors),
+        ));
     }
     out
 }
@@ -395,7 +409,13 @@ mod tests {
     // Build a per-shard cumulative partial for a given bucket. svc is the shard's
     // CUMULATIVE sample set as of this bucket (mirrors the real ingester, whose
     // per-wave histogram only grows).
-    fn shard_partial(shard: &str, bucket_ns: i64, tps: f64, offered: u64, svc_cumulative: &[u64]) -> PartialRow {
+    fn shard_partial(
+        shard: &str,
+        bucket_ns: i64,
+        tps: f64,
+        offered: u64,
+        svc_cumulative: &[u64],
+    ) -> PartialRow {
         PartialRow {
             shard: shard.to_string(),
             bucket_ns,
@@ -417,10 +437,7 @@ mod tests {
         let shard_a = vec![100u64, 200, 300, 400, 500];
         let shard_b = vec![600u64, 700, 800, 900, 1000];
 
-        let merged = merge_partials(&[
-            partial(5.0, 5, 1, &shard_a),
-            partial(5.0, 5, 0, &shard_b),
-        ]);
+        let merged = merge_partials(&[partial(5.0, 5, 1, &shard_a), partial(5.0, 5, 0, &shard_b)]);
 
         // Reference: one histogram with ALL samples.
         let mut all = new_hist();
@@ -445,10 +462,7 @@ mod tests {
     // No offered → error_rate is 0, not NaN; empty/missing HDR blobs are tolerated.
     #[test]
     fn merge_partials_handles_empty_and_zero_offered() {
-        let merged = merge_partials(&[
-            PartialRow::default(),
-            partial(0.0, 0, 0, &[]),
-        ]);
+        let merged = merge_partials(&[PartialRow::default(), partial(0.0, 0, 0, &[])]);
         assert_eq!(merged.error_rate, 0.0);
         assert_eq!(merged.tps_1s, 0.0);
         // Empty histogram percentile is 0, not a panic.
@@ -507,8 +521,16 @@ mod tests {
         // tail (500) must still be present. The pre-fix code returned 3 here.
         let (b2, m2) = &rows[1];
         assert_eq!(*b2, 2);
-        assert_eq!(blob_count(&m2.hdr_encoded), 5, "absent shard Y must be carried forward");
-        assert_eq!(blob_max(&m2.hdr_encoded), 500, "Y's tail must survive into the final bucket");
+        assert_eq!(
+            blob_count(&m2.hdr_encoded),
+            5,
+            "absent shard Y must be carried forward"
+        );
+        assert_eq!(
+            blob_max(&m2.hdr_encoded),
+            500,
+            "Y's tail must survive into the final bucket"
+        );
 
         // Counts are PER-INTERVAL (not carried): bucket 2 had only X's interval.
         assert_eq!(m2.tps_1s, 1.0);

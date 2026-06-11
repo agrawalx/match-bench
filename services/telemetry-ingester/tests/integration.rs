@@ -192,7 +192,9 @@ async fn store_roundtrip_writes_and_reads_metrics() {
     let session = format!("itest-store-{}", unique_suffix());
     let contestant = format!("c-{}", unique_suffix());
 
-    let store = Store::connect(&url, "test-shard-0".to_string()).await.expect("connect timescale");
+    let store = Store::connect(&url, "test-shard-0".to_string())
+        .await
+        .expect("connect timescale");
     store.init_schema().await.expect("init schema");
     let (snaps, exp) = aggregate_synthetic(&session, &contestant);
     assert!(!snaps.is_empty(), "aggregator produced a snapshot");
@@ -463,7 +465,9 @@ async fn full_pipeline_kafka_to_timescale_and_redis() {
     assert_eq!(seen, want, "consumed the full synthetic session");
 
     let snaps = agg.snapshot(now_ns(), 1.0);
-    let store = Store::connect(&turl, "test-shard-0".to_string()).await.unwrap();
+    let store = Store::connect(&turl, "test-shard-0".to_string())
+        .await
+        .unwrap();
     store.init_schema().await.unwrap();
     store.write(&snaps).await.unwrap();
     let redis = RedisSink::connect(&rurl).await.unwrap();

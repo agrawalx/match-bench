@@ -203,18 +203,20 @@ pub async fn publish_bytes(
     Ok(())
 }
 
-
 pub fn topic_partition_count(producer: &KafkaProducer, topic: &str) -> Option<i32> {
     let md = producer
         .inner
         .client()
         .fetch_metadata(Some(topic), Duration::from_secs(5))
         .ok()?;
-    let n = md.topics().iter().find(|t| t.name() == topic)?.partitions().len();
+    let n = md
+        .topics()
+        .iter()
+        .find(|t| t.name() == topic)?
+        .partitions()
+        .len();
     (n > 0).then_some(n as i32)
 }
-
-
 
 pub async fn publish_to_partition(
     producer: &KafkaProducer,
@@ -234,7 +236,6 @@ pub async fn publish_to_partition(
         .map_err(|(err, _msg)| anyhow!("publish kafka message to partition {partition}: {err}"))?;
     Ok(())
 }
-
 
 pub async fn wait_for_barrier(
     consumer: &KafkaConsumer,

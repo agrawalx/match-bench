@@ -25,7 +25,9 @@ use aya::{
 };
 use iicpc_bot_fleet::kafka::{self, KafkaProducer};
 use iicpc_logger_rust::loki;
-use iicpc_schemas_rust::{partition_for, OrderAckedBatchRef, OrderAckedEventRef, TOPIC_ORDERS_ACKED};
+use iicpc_schemas_rust::{
+    partition_for, OrderAckedBatchRef, OrderAckedEventRef, TOPIC_ORDERS_ACKED,
+};
 use std::collections::BTreeMap;
 use tokio::signal::unix::{signal, Signal, SignalKind};
 use tokio::time;
@@ -266,7 +268,7 @@ async fn flush(
     if events.is_empty() {
         return Ok(());
     }
-    
+
     let mut by_part: BTreeMap<i32, Vec<MatchedEvent>> = BTreeMap::new();
     for e in events.drain(..) {
         by_part
@@ -275,7 +277,6 @@ async fn flush(
             .push(e);
     }
 
-    
     let mut msgs: Vec<(i32, Vec<u8>, Vec<MatchedEvent>)> = Vec::new();
     for (part, mut group) in by_part {
         while !group.is_empty() {
@@ -314,11 +315,16 @@ async fn flush(
 
     // Pipeline every publish to its explicit partition, then await together.
     let results = futures::future::join_all(msgs.iter().map(|(part, payload, _)| {
-        kafka::publish_to_partition(producer, &config.topic, *part, &config.contestant_id, payload)
+        kafka::publish_to_partition(
+            producer,
+            &config.topic,
+            *part,
+            &config.contestant_id,
+            payload,
+        )
     }))
     .await;
 
-    
     let mut publish_failed = false;
     for ((_, _, chunk), result) in msgs.into_iter().zip(results) {
         match result {

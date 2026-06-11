@@ -159,7 +159,6 @@ struct OrderSentBatchRef<'a> {
     events: &'a [OrderSentEvent],
 }
 
-
 fn shard_events(
     events: &mut Vec<OrderSentEvent>,
     num_partitions: i32,
@@ -207,11 +206,9 @@ async fn flush(
     }
 
     // Pipeline every publish, then await together (≈ one broker RTT).
-    let results = futures::future::join_all(
-        msgs.iter().map(|(part, payload, _)| {
-            kafka::publish_to_partition(producer, topic, *part, session_id, payload)
-        }),
-    )
+    let results = futures::future::join_all(msgs.iter().map(|(part, payload, _)| {
+        kafka::publish_to_partition(producer, topic, *part, session_id, payload)
+    }))
     .await;
 
     let mut first_err = None;
@@ -262,7 +259,6 @@ mod tests {
         }
     }
 
-    
     #[test]
     fn shard_events_groups_every_event_to_its_partition() {
         let n = 24;
@@ -271,7 +267,10 @@ mod tests {
 
         let by_part = shard_events(&mut events, n);
 
-        assert!(events.is_empty(), "shard_events must drain the input buffer");
+        assert!(
+            events.is_empty(),
+            "shard_events must drain the input buffer"
+        );
         let regrouped: usize = by_part.values().map(Vec::len).sum();
         assert_eq!(regrouped, total, "no events lost in sharding");
         for (part, group) in &by_part {
@@ -287,7 +286,6 @@ mod tests {
         assert!(by_part.len() > 1, "events should spread across partitions");
     }
 
-    
     #[test]
     fn shard_events_spreads_a_single_session_across_partitions() {
         let n = 24;
@@ -300,7 +298,6 @@ mod tests {
         );
     }
 
-    
     #[test]
     /// full_chunk_stays_under_broker_message_ceiling performs the module-specific operation described by its name.
     /// It keeps validation, side effects, and returned values within this module's contract.

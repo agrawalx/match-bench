@@ -122,7 +122,11 @@ pub async fn run(mut config: Config) -> Result<()> {
     // so an order's sent + acked co-locate on one partition.
     if let Some(n) = kafka::topic_partition_count(&telemetry_producer, &config.orders_sent_topic) {
         if n != config.orders_partitions {
-            tracing::info!(env = config.orders_partitions, topic = n, "orders.sent partition count from metadata overrides ORDERS_PARTITIONS");
+            tracing::info!(
+                env = config.orders_partitions,
+                topic = n,
+                "orders.sent partition count from metadata overrides ORDERS_PARTITIONS"
+            );
         }
         config.orders_partitions = n;
     }

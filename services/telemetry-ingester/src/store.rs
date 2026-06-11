@@ -31,7 +31,6 @@ CREATE TABLE IF NOT EXISTS metrics (
     slip_hdr_encoded BYTEA
 );";
 
-
 const METRICS_PARTIAL_TABLE: &str = "\
 CREATE TABLE IF NOT EXISTS metrics_partial (
     time          TIMESTAMPTZ NOT NULL,

@@ -20,7 +20,6 @@ pub const TOPIC_SCORES_CORRECTNESS: &str = "scores.correctness";
 pub const TOPIC_LEADERBOARD_UPDATES: &str = "leaderboard.updates";
 pub const TELEMETRY_PRICE_SCALE: u64 = 1_000_000_000;
 
-
 pub fn partition_for(order_id: &str, num_partitions: i32) -> i32 {
     debug_assert!(num_partitions > 0, "num_partitions must be positive");
     if num_partitions <= 1 {
@@ -435,7 +434,11 @@ mod tests {
         for i in 0..1000 {
             seen.insert(partition_for(&format!("ord_{i}"), 24));
         }
-        assert!(seen.len() > 10, "hash spreads poorly: only {} partitions used", seen.len());
+        assert!(
+            seen.len() > 10,
+            "hash spreads poorly: only {} partitions used",
+            seen.len()
+        );
     }
 
     // Degenerate partition counts must not panic or divide by zero.

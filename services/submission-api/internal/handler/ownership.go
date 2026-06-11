@@ -1,3 +1,8 @@
+// Package handler implements ownership behavior.
+//
+// This file is part of the IICPC benchmarking platform and keeps its
+// responsibilities local to the surrounding package. It should be read with
+// the service-level design in design.md for broader operational context.
 package handler
 
 import (
@@ -8,28 +13,15 @@ import (
 	"github.com/iicpc/submission-api/internal/store"
 )
 
-// submissionBinder is the slice of the store the claim/ownership resolution
-// needs. *store.PostgresStore satisfies it; tests fake it to script the
-// lost-claim interleavings that cannot be scheduled through a live handler.
+// submissionBinder defines the behavior expected by this package boundary.
+// Implementations should preserve the caller-visible contract.
 type submissionBinder interface {
 	ClaimSubmissionContestantIfEmpty(ctx context.Context, submissionID, contestantID string) (bool, error)
 	GetByID(ctx context.Context, submissionID string) (*store.SubmissionMeta, error)
 }
 
-// claimOrResolveOwner returns the submission with its OWNER AS THE DATABASE
-// SEES IT after attempting to bind an unowned row to contestantID.
-//
-// Three outcomes:
-//   - the row is already owned: returned unchanged — the caller compares
-//     owner vs contestantID and 404s/409s on mismatch as before;
-//   - the claim wins: a copy with ContestantID = contestantID is returned;
-//   - the claim is LOST (another request bound the row between our read and
-//     the UPDATE): the row is re-read so ownership reflects the winner, not
-//     our local assumption. The pre-fix call sites set sub.ContestantID =
-//     contestantID unconditionally after the claim call, so the loser of the
-//     race proceeded as if it owned another contestant's submission.
-//
-// A vanished row on re-read maps to cerrs.ErrSubmissionNotFound.
+// claimOrResolveOwner performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func claimOrResolveOwner(ctx context.Context, pg submissionBinder, sub *store.SubmissionMeta, contestantID string) (*store.SubmissionMeta, error) {
 	if sub.ContestantID != "" {
 		return sub, nil

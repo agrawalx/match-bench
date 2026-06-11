@@ -1,11 +1,10 @@
-# Placeholder secret shape only. Create the real secret outside Git
-# (bootstrap/secrets-live/, gitignored).
+# bootstrap/secret-templates/platform-auth-api.yaml
 #
-# google-allowed-redirect-uris is REQUIRED and fail-closed: auth-api refuses
-# to start when it is empty (an empty allowlist used to mean allow-all).
-# Comma-separated, must exactly match the URIs registered on the Google
-# OAuth client, e.g.:
-#   http://localhost:8080/auth/callback,https://contest.example.com/auth/callback
+# This file documents the secret shape required by platform auth api.
+# It is part of the IICPC platform configuration and should remain
+# aligned with the deployment and operations guidance in the README.
+# Keep comments at the file header so resource bodies stay declarative.
+
 apiVersion: v1
 kind: Secret
 metadata:

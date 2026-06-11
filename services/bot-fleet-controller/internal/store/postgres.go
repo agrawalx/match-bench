@@ -1,3 +1,8 @@
+// Package store implements postgres behavior.
+//
+// This file is part of the IICPC benchmarking platform and keeps its
+// responsibilities local to the surrounding package. It should be read with
+// the service-level design in design.md for broader operational context.
 package store
 
 import (
@@ -13,11 +18,8 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// SubmissionInfo holds the fields the controller needs from a submission row
-// to assemble a WorkloadSpec: protocol, port, and the image ref produced by
-// the build pipeline.
-// The controller does not own the submissions table — submission-api does.
-// We only read.
+// SubmissionInfo groups the state and dependencies used by this package.
+// Keep this type aligned with the runtime contract around it.
 type SubmissionInfo struct {
 	SubmissionID string
 	ContestantID string
@@ -26,10 +28,14 @@ type SubmissionInfo struct {
 	ImageRef     string
 }
 
+// Store groups the state and dependencies used by this package.
+// Keep this type aligned with the runtime contract around it.
 type Store struct {
 	pool *pgxpool.Pool
 }
 
+// New performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func New(ctx context.Context, dsn string) (*Store, error) {
 	start := time.Now()
 	pool, err := pgxpool.New(ctx, dsn)
@@ -41,10 +47,12 @@ func New(ctx context.Context, dsn string) (*Store, error) {
 	return &Store{pool: pool}, nil
 }
 
+// Close applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (s *Store) Close() { s.pool.Close() }
 
-// GetSubmission fetches the fields the controller needs. Returns (nil, nil)
-// when the submission row does not exist.
+// GetSubmission applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (s *Store) GetSubmission(ctx context.Context, submissionID string) (*SubmissionInfo, error) {
 	start := time.Now()
 	row := s.pool.QueryRow(ctx,
@@ -65,8 +73,8 @@ func (s *Store) GetSubmission(ctx context.Context, submissionID string) (*Submis
 	return &info, nil
 }
 
-// InFlightRun represents a runs row found in a non-terminal state on
-// controller startup. Used only by the crash-recovery path.
+// InFlightRun groups the state and dependencies used by this package.
+// Keep this type aligned with the runtime contract around it.
 type InFlightRun struct {
 	SessionID    string
 	SubmissionID string
@@ -74,13 +82,8 @@ type InFlightRun struct {
 	Status       string
 }
 
-// ListInFlightRuns returns every runs row in a non-terminal state.
-//
-// The controller is single-replica and architecturally locked at 1; on a
-// restart there can be runs frozen mid-flight (the per-session goroutine
-// died with the process). v1 crash recovery is "mark-failed-on-restart":
-// every row returned by this query gets MarkRunFailed'd before consumers
-// start. No resume logic. The user re-triggers via the frontend.
+// ListInFlightRuns applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (s *Store) ListInFlightRuns(ctx context.Context) ([]InFlightRun, error) {
 	start := time.Now()
 	rows, err := s.pool.Query(ctx,
@@ -111,23 +114,8 @@ func (s *Store) ListInFlightRuns(ctx context.Context) ([]InFlightRun, error) {
 	return out, nil
 }
 
-// MarkRunFailed is the controller's only direct write to the runs table.
-//
-// HARD INVARIANT for the rest of the platform: only the bot-fleet-controller
-// may write the terminal statuses 'completed' or 'failed' to runs.status.
-// Every other status change flows through a benchmark.status.updated Kafka
-// message produced by this service and consumed by submission-api.
-//
-// This function is the single, explicit exception — used only by the
-// startup recovery path. The exception exists because recovery must
-// complete BEFORE the controller starts consuming benchmark.requested:
-// otherwise a new click for a submission whose previous run is still
-// in-flight will see "active run exists" (partial unique index on
-// runs.submission_id WHERE status NOT IN ('completed','failed')) and be
-// returned the dead session_id of the abandoned run.
-//
-// Do not add other callers. If you think you need one, the answer is
-// almost always "produce a benchmark.status.updated message" instead.
+// MarkRunFailed applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (s *Store) MarkRunFailed(ctx context.Context, sessionID, message string) error {
 	start := time.Now()
 	tag, err := s.pool.Exec(ctx,
@@ -146,13 +134,8 @@ func (s *Store) MarkRunFailed(ctx context.Context, sessionID, message string) er
 	return nil
 }
 
-// MarkRunGroupFailed directly marks a run_group terminal-failed. This is the
-// run_groups counterpart of MarkRunFailed and the SAME recovery-only exception:
-// the "one active benchmark per submission" unique index lives on RUN_GROUPS
-// (idx_run_groups_one_active_per_submission), not runs, so marking child runs
-// failed does NOT release it — the group row must be set terminal too, or a
-// re-trigger after a controller crash is permanently rejected. Called only by
-// the startup recovery sweep, before benchmark.requested consumption begins.
+// MarkRunGroupFailed applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (s *Store) MarkRunGroupFailed(ctx context.Context, runGroupID string) error {
 	if runGroupID == "" {
 		return nil // legacy single-session run with no parent group
@@ -169,10 +152,8 @@ func (s *Store) MarkRunGroupFailed(ctx context.Context, runGroupID string) error
 	return nil
 }
 
-// RunStatus returns the current status of a run, or ("", nil) if no such run.
-// Used by the benchmark.requested consumer to short-circuit a redelivered
-// message for a session that already reached a terminal state (crash between
-// the final status publish and the Kafka offset commit re-delivers it).
+// RunStatus applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (s *Store) RunStatus(ctx context.Context, sessionID string) (string, error) {
 	var status string
 	err := s.pool.QueryRow(ctx,
@@ -186,14 +167,8 @@ func (s *Store) RunStatus(ctx context.Context, sessionID string) (string, error)
 	return status, nil
 }
 
-// LoadScenario reads one row of the scenarios table. The controller calls
-// this on every benchmark.requested message to materialise the TaskSpec list
-// the bot-fleet workers will execute. The table is owned (created + seeded)
-// by submission-api; the controller is a read-only consumer.
-//
-// Returns (nil, ErrScenarioNotFound) when the scenario_id does not exist —
-// the controller treats this as a fatal session error (the user got a
-// stale benchmark.requested for a deleted scenario row).
+// LoadScenario applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (s *Store) LoadScenario(ctx context.Context, scenarioID string) (*topics.Scenario, error) {
 	start := time.Now()
 	row := s.pool.QueryRow(ctx,
@@ -219,13 +194,10 @@ func (s *Store) LoadScenario(ctx context.Context, scenarioID string) (*topics.Sc
 	return &sc, nil
 }
 
-// ErrScenarioNotFound signals a missing scenario row — controller fails the
-// session in that case (the trigger referenced a scenario that no longer
-// exists, almost certainly because a judge deleted it after the row was
-// referenced in a benchmark.requested message).
 var ErrScenarioNotFound = errors.New("scenario not found")
 
-// Healthcheck verifies the pool can issue a basic query. Used by /readyz.
+// Healthcheck applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (s *Store) Healthcheck(ctx context.Context) error {
 	start := time.Now()
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
@@ -235,6 +207,8 @@ func (s *Store) Healthcheck(ctx context.Context) error {
 	return err
 }
 
+// RecordPoolStats applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (s *Store) RecordPoolStats() {
 	stats := s.pool.Stat()
 	labels := metrics.Labels("service", "bot-fleet-controller")
@@ -246,11 +220,8 @@ func (s *Store) RecordPoolStats() {
 	metrics.Gauge("pgxpool_canceled_acquire_total", "pgxpool canceled acquire count.", labels, float64(stats.CanceledAcquireCount()))
 }
 
-// recordDB makes controller DB reads/recovery writes visible to Prometheus.
-//
-// Problem: controller readiness depends on DB recovery and scenario lookups,
-// but those paths only logged failures. Fix: emit duration/result metrics for
-// every controller store operation and export pgxpool saturation.
+// recordDB performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func recordDB(operation string, start time.Time, err error) {
 	labels := metrics.Labels("service", "bot-fleet-controller", "operation", operation)
 	metrics.Histogram("db_query_duration_seconds", "PostgreSQL query duration in seconds.", labels, metrics.SinceSeconds(start))

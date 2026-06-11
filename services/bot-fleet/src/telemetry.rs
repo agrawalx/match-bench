@@ -1,3 +1,9 @@
+//! This module implements telemetry behavior.
+//!
+//! It belongs to the IICPC benchmarking platform and should keep its
+//! behavior consistent with the service contracts documented in design.md.
+//! The comments in this file describe public structure and callable behavior.
+
 use std::{
     collections::BTreeMap,
     sync::{Arc, Mutex},
@@ -20,17 +26,17 @@ use crate::{
     metrics,
 };
 
-/// TelemetrySink accepts per-order telemetry from bot tasks and forwards it to
-/// one background aggregator for batched Kafka publishing.
 #[derive(Clone)]
+/// TelemetrySink stores the state passed across this module boundary.
+/// Keep field changes compatible with callers and serialized contracts.
 pub struct TelemetrySink {
     tx: Sender<OrderSentEvent>,
     handle: Arc<Mutex<Option<JoinHandle<Result<()>>>>>,
 }
 
 impl TelemetrySink {
-    /// new starts the background telemetry aggregator for one workload session.
-    /// The channel capacity and flush cadence come from Config.
+    /// new performs the module-specific operation described by its name.
+    /// It keeps validation, side effects, and returned values within this module's contract.
     pub fn new(
         producer: KafkaProducer,
         topic: String,
@@ -58,8 +64,8 @@ impl TelemetrySink {
         }
     }
 
-    /// record queues one outbound order timestamp without blocking bot writes.
-    /// Events are dropped only when the bounded channel is full.
+    /// record performs the module-specific operation described by its name.
+    /// It keeps validation, side effects, and returned values within this module's contract.
     pub async fn record(&self, event: OrderSentEvent) {
         match self.tx.try_send(event) {
             Ok(()) => {}
@@ -74,9 +80,8 @@ impl TelemetrySink {
         }
     }
 
-    /// close drops the final sender and waits for the aggregator to flush.
-    /// Telemetry is loss-tolerant; publish failures are logged by the
-    /// aggregator and must not block workload offset commits.
+    /// close performs the module-specific operation described by its name.
+    /// It keeps validation, side effects, and returned values within this module's contract.
     pub async fn close(self) -> Result<()> {
         drop(self.tx);
 
@@ -98,8 +103,8 @@ impl TelemetrySink {
     }
 }
 
-/// run_aggregator drains telemetry events into batches and publishes them by
-/// size or interval, whichever arrives first.
+/// run_aggregator performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 async fn run_aggregator(
     mut rx: mpsc::Receiver<OrderSentEvent>,
     producer: KafkaProducer,
@@ -114,8 +119,6 @@ async fn run_aggregator(
     let mut events = Vec::with_capacity(batch_size);
 
     loop {
-        // biased select ensures recv is drained before
-        // timer flushes, preventing stale partial batches under high throughput
         tokio::select! {
             biased;
             maybe_event = rx.recv() => {
@@ -147,32 +150,16 @@ async fn run_aggregator(
     }
 }
 
-/// OrderSentBatchRef mirrors OrderSentBatch for zero-copy encoding of a chunk
-/// of the aggregator's event buffer.
 #[derive(Serialize)]
+/// OrderSentBatchRef stores the state passed across this module boundary.
+/// Keep field changes compatible with callers and serialized contracts.
 struct OrderSentBatchRef<'a> {
     session_id: &'a str,
     worker_id: &'a str,
     events: &'a [OrderSentEvent],
 }
 
-/// flush shards the batch by destination partition and publishes one sub-batch
-/// per partition to its EXPLICIT partition. partition_for(order_id) is the same
-/// hash the eBPF capture uses for orders.acked, so an order's sent event lands on
-/// the same partition as its acked event — the co-partitioning a multi-replica
-/// telemetry-ingester needs to join sent⋈acked on a single consumer.
-///
-/// Within a partition, events are split into size-bounded chunks (one Kafka
-/// message each, under max.message.bytes). Every publish is PIPELINED (join_all)
-/// so a flush pays ≈ one broker RTT, not one per chunk.
-///
-/// Failure semantics: events whose publish failed are pushed back into `events`
-/// (retained for the next flush); published events are dropped. The first error
-/// is returned after reconciliation.
-/// shard_events groups events by destination partition via partition_for(order_id),
-/// moving them out of the input buffer. The eBPF capture shards orders.acked by the
-/// same hash, so an order's sent and acked events land on the same partition.
-/// Exposed for unit-testing the co-partition invariant.
+
 fn shard_events(
     events: &mut Vec<OrderSentEvent>,
     num_partitions: i32,
@@ -245,13 +232,6 @@ async fn flush(
     }
 }
 
-/// Max events per published orders.sent Kafka message. Size math:
-/// msgpack-named events repeat field names, ≈360 B/event at realistic
-/// identifier sizes, so 1000 events ≈ 360 KB — comfortably under the topic's
-/// 1 MiB max.message.bytes (topic-init / kafka.rs ensure_topics both set
-/// max.message.bytes=1048576) with headroom for larger identifiers. Kept
-/// equal to Config::telemetry_batch_size so a steady-state flush is exactly
-/// one Kafka message.
 pub(crate) const MAX_EVENTS_PER_BATCH: usize = 1000;
 
 #[cfg(test)]
@@ -259,9 +239,8 @@ mod tests {
     use super::*;
     use iicpc_schemas_rust::{OrdType, OrderSentBatch, PayloadType, Side};
 
-    /// test_event builds an event with production-realistic identifier sizes
-    /// (UUID session/submission ids, k8s pod-name worker id) so the encoded
-    /// payload size assertions track what the broker actually sees.
+    /// test_event performs the module-specific operation described by its name.
+    /// It keeps validation, side effects, and returned values within this module's contract.
     fn test_event(i: usize) -> OrderSentEvent {
         OrderSentEvent {
             session_id: "01890dd2-71f3-7abc-9def-0123456789ab".to_string(),
@@ -283,9 +262,7 @@ mod tests {
         }
     }
 
-    // Co-partition invariant: every event in group[p] hashes to p, and sharding
-    // preserves all events. This is what guarantees an order's sent batch and (via
-    // the same partition_for hash on the eBPF side) its acked batch land together.
+    
     #[test]
     fn shard_events_groups_every_event_to_its_partition() {
         let n = 24;
@@ -310,9 +287,7 @@ mod tests {
         assert!(by_part.len() > 1, "events should spread across partitions");
     }
 
-    // A per-task order_id stream (all same order_id prefix differing by seq) must
-    // still spread across partitions — confirms we shard by full order_id, not by a
-    // coarse prefix that would funnel a session to one partition.
+    
     #[test]
     fn shard_events_spreads_a_single_session_across_partitions() {
         let n = 24;
@@ -325,10 +300,10 @@ mod tests {
         );
     }
 
-    // Size math behind the 1000-event ceiling: msgpack-named events repeat field
-    // names, ≈360 B/event at realistic identifier sizes, so a full chunk is ≈360 KB
-    // — comfortably under the topic's 1 MiB max.message.bytes.
+    
     #[test]
+    /// full_chunk_stays_under_broker_message_ceiling performs the module-specific operation described by its name.
+    /// It keeps validation, side effects, and returned values within this module's contract.
     fn full_chunk_stays_under_broker_message_ceiling() {
         let events: Vec<OrderSentEvent> = (0..MAX_EVENTS_PER_BATCH).map(test_event).collect();
         let payload = rmp_serde::to_vec_named(&OrderSentBatchRef {

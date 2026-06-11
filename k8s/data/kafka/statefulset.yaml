@@ -1,5 +1,10 @@
-# Three-node Kafka in KRaft mode (no ZooKeeper).
-# For multi-broker production use, replace with the Strimzi operator.
+# k8s/data/kafka/statefulset.yaml
+#
+# This file declares Kubernetes resources for k8s/data/kafka.
+# It is part of the IICPC platform configuration and should remain
+# aligned with the deployment and operations guidance in the README.
+# Keep comments at the file header so resource bodies stay declarative.
+
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
@@ -8,9 +13,6 @@ metadata:
 spec:
   serviceName: kafka
   replicas: 3
-  # All 3 KRaft controllers must start together to bootstrap a quorum; the default
-  # OrderedReady deadlocks (kafka-1/2 wait for kafka-0 Ready, but kafka-0 can't be
-  # Ready until a 2-of-3 controller quorum forms).
   podManagementPolicy: Parallel
   selector:
     matchLabels:
@@ -20,8 +22,6 @@ spec:
       labels:
         app: kafka
       annotations:
-        # kafka-exporter sidecar (below) exposes broker/topic/consumer-group
-        # metrics on 9308.
         prometheus.io/scrape: "true"
         prometheus.io/path: /metrics
         prometheus.io/port: "9308"
@@ -31,8 +31,8 @@ spec:
         - name: kafka
           image: apache/kafka:3.7.1
           ports:
-            - containerPort: 9092   # client
-            - containerPort: 9093   # controller (KRaft)
+            - containerPort: 9092
+            - containerPort: 9093
           command: ["/bin/bash", "-ec"]
           args:
             - |
@@ -87,8 +87,6 @@ spec:
             initialDelaySeconds: 15
             periodSeconds: 10
           securityContext:
-            # apache/kafka rewrites its config under /opt/kafka/config at startup,
-            # which is on the image root fs — so the root fs cannot be read-only.
             readOnlyRootFilesystem: false
             allowPrivilegeEscalation: false
             runAsNonRoot: true
@@ -102,10 +100,6 @@ spec:
             limits:
               cpu: "2"
               memory: 2Gi
-        # kafka-exporter sidecar — scrapes the local broker (PLAINTEXT, no auth)
-        # for topic/partition/consumer-group lag metrics. securityContext mirrors
-        # the postgres-exporter style. Each broker pod runs its own exporter; they
-        # report the same cluster-wide view, so dashboards should aggregate/dedupe.
         - name: kafka-exporter
           image: danielqsj/kafka-exporter:v1.8.0
           args:
@@ -132,8 +126,6 @@ spec:
               memory: 128Mi
       securityContext:
         runAsNonRoot: true
-        # apache/kafka's user is the non-numeric "appuser"; the kubelet needs a
-        # numeric runAsUser to verify non-root under runAsNonRoot.
         runAsUser: 1000
         runAsGroup: 1000
         fsGroup: 1000

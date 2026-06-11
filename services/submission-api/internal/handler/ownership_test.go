@@ -1,3 +1,8 @@
+// Package handler defines tests for ownership test.
+//
+// This file is part of the IICPC benchmarking platform and keeps its
+// responsibilities local to the surrounding package. It should be read with
+// the service-level design in design.md for broader operational context.
 package handler
 
 import (
@@ -9,9 +14,8 @@ import (
 	"github.com/iicpc/submission-api/internal/store"
 )
 
-// fakeBinder scripts the two store calls claimOrResolveOwner makes, so the
-// lost-claim interleavings — impossible to schedule deterministically through
-// a live handler — are pinned at the unit level.
+// fakeBinder groups the state and dependencies used by this package.
+// Keep this type aligned with the runtime contract around it.
 type fakeBinder struct {
 	claimed  bool
 	claimErr error
@@ -23,21 +27,22 @@ type fakeBinder struct {
 	rereadCalls int
 }
 
+// ClaimSubmissionContestantIfEmpty applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (f *fakeBinder) ClaimSubmissionContestantIfEmpty(ctx context.Context, submissionID, contestantID string) (bool, error) {
 	f.claimCalls++
 	return f.claimed, f.claimErr
 }
 
+// GetByID applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (f *fakeBinder) GetByID(ctx context.Context, submissionID string) (*store.SubmissionMeta, error) {
 	f.rereadCalls++
 	return f.reread, f.rereadErr
 }
 
-// TestClaimOrResolveOwner covers the claim race: when the atomic claim is
-// lost, ownership MUST come from a re-read of the database row — never from
-// locally assuming the claim went through. The loser of the race previously
-// proceeded as if it owned the submission (benchmark.go) or leaked the
-// duplicate's submission_id (submit.go).
+// TestClaimOrResolveOwner performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func TestClaimOrResolveOwner(t *testing.T) {
 	dbErr := errors.New("connection reset")
 

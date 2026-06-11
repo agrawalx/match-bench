@@ -1,12 +1,10 @@
-# Additive netpol: the base sandbox-isolation policy denies all sandbox
-# egress except DNS + public internet (so contestant algo pods cannot reach
-# cluster services). The orchestrator pod needs to reach the k8s API server
-# to manage Pod + Service resources — this policy adds that permission, but
-# only for pods labelled app=sandbox-orchestrator.
+# k8s/sandbox/sandbox-orchestrator/network-policy.yaml
 #
-# Per the NetworkPolicy spec, when multiple policies select the same pod,
-# the union of their rules applies. Algo pods are NOT selected here and
-# remain locked down by sandbox-isolation.
+# This file declares Kubernetes resources for k8s/sandbox/sandbox-orchestrator.
+# It is part of the IICPC platform configuration and should remain
+# aligned with the deployment and operations guidance in the README.
+# Keep comments at the file header so resource bodies stay declarative.
+
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -20,8 +18,6 @@ spec:
     - Ingress
     - Egress
 
-  # Ingress: only the bot-fleet-controller in the benchmark namespace calls
-  # the orchestrator's HTTP API.
   ingress:
     - from:
         - namespaceSelector:
@@ -30,7 +26,6 @@ spec:
       ports:
         - port: 8080
           protocol: TCP
-    # Prometheus (observability namespace) scrapes the orchestrator metrics on 8080.
     - from:
         - namespaceSelector:
             matchLabels:
@@ -40,9 +35,6 @@ spec:
           protocol: TCP
 
   egress:
-    # Loki log shipping — the orchestrator's logger pushes to
-    # loki.observability.svc:3100 (LOKI_URL). Algo pods are NOT selected here and
-    # stay locked down by sandbox-isolation.
     - to:
         - namespaceSelector:
             matchLabels:
@@ -50,15 +42,6 @@ spec:
       ports:
         - port: 3100
           protocol: TCP
-    # k8s API server. Resolves to a ClusterIP in the default namespace
-    # (kubernetes.default.svc :443), backed by endpoints in kube-system on the
-    # control plane. On k3s/kubeadm the ClusterIP is DNAT'd to the node's API
-    # port :6443, and the netpol is enforced against the POST-DNAT destination —
-    # so BOTH 443 (managed/cloud control planes) and 6443 (k3s/kubeadm node API)
-    # must be allowed, or `create slot` fails with
-    # "dial 10.43.0.1:443: connect: connection refused". Tightening the CIDR
-    # further requires hardcoding the api-server endpoint, which differs across
-    # clusters.
     - to:
         - ipBlock:
             cidr: 0.0.0.0/0
@@ -67,7 +50,6 @@ spec:
           protocol: TCP
         - port: 6443
           protocol: TCP
-    # DNS (kube-system :53). Required to resolve kubernetes.default.svc.
     - to:
         - namespaceSelector:
             matchLabels:

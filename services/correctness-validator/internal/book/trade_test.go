@@ -1,3 +1,8 @@
+// Package book defines tests for trade test.
+//
+// This file is part of the IICPC benchmarking platform and keeps its
+// responsibilities local to the surrounding package. It should be read with
+// the service-level design in design.md for broader operational context.
 package book
 
 import (
@@ -6,9 +11,8 @@ import (
 	"github.com/iicpc/correctness-validator/internal/model"
 )
 
-// The engine must emit, per trade, a definite maker/taker pair at the maker's
-// resting price — this is what the validator reconciles reported fills against to
-// decide time-priority, self-trade, and cancel-replace violations.
+// TestTradesCarryMakerTaker performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func TestTradesCarryMakerTaker(t *testing.T) {
 	e := NewEngine()
 	e.Process(limit("S1", model.Sell, 100, 10)) // maker rests
@@ -26,9 +30,8 @@ func TestTradesCarryMakerTaker(t *testing.T) {
 	}
 }
 
-// FIFO at a level: the front (earliest) maker trades before the next, and each
-// trade records WHICH maker the reference filled. This is the ground truth a
-// time-priority check compares the contestant's report against.
+// TestTradesPreserveFIFOMakerOrder performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func TestTradesPreserveFIFOMakerOrder(t *testing.T) {
 	e := NewEngine()
 	e.Process(limit("S1", model.Sell, 100, 5)) // front
@@ -46,9 +49,8 @@ func TestTradesPreserveFIFOMakerOrder(t *testing.T) {
 	}
 }
 
-// Resting() exposes the end-of-replay book so the validator can ask "was there an
-// earlier same-price order the reference left with remaining qty?" (time priority)
-// and "what was already resting at the new level before a replace?" (cancel-replace).
+// TestRestingSnapshot performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func TestRestingSnapshot(t *testing.T) {
 	e := NewEngine()
 	e.Process(limit("S1", model.Sell, 100, 10)) // stays resting (front, seq smaller)

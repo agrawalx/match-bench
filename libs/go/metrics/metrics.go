@@ -1,5 +1,8 @@
-// Package metrics wraps the official Prometheus Go client with small project
-// helpers so services can share metric names, labels, and HTTP wiring.
+// Package metrics defines shared library behavior for metrics.
+//
+// This file is part of the IICPC benchmarking platform and keeps its
+// responsibilities local to the surrounding package. It should be read with
+// the service-level design in design.md for broader operational context.
 package metrics
 
 import (
@@ -34,6 +37,8 @@ const (
 	kindHistogram
 )
 
+// registry groups the state and dependencies used by this package.
+// Keep this type aligned with the runtime contract around it.
 type registry struct {
 	mu      sync.RWMutex
 	prom    *prometheus.Registry
@@ -41,6 +46,8 @@ type registry struct {
 	errors  *prometheus.CounterVec
 }
 
+// metric groups the state and dependencies used by this package.
+// Keep this type aligned with the runtime contract around it.
 type metric struct {
 	name      string
 	kind      metricKind
@@ -51,6 +58,8 @@ type metric struct {
 	histogram *prometheus.HistogramVec
 }
 
+// metricSpec groups the state and dependencies used by this package.
+// Keep this type aligned with the runtime contract around it.
 type metricSpec struct {
 	name      string
 	help      string
@@ -61,6 +70,8 @@ type metricSpec struct {
 
 var global = newRegistry()
 
+// newRegistry performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func newRegistry() *registry {
 	promRegistry := prometheus.NewRegistry()
 	errs := prometheus.NewCounterVec(
@@ -84,6 +95,8 @@ func newRegistry() *registry {
 	return r
 }
 
+// Counter performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func Counter(name, help string, labels map[string]string, delta float64) {
 	if delta < 0 || !isFinite(delta) {
 		global.recordError("invalid_counter_delta")
@@ -99,6 +112,8 @@ func Counter(name, help string, labels map[string]string, delta float64) {
 	m.counter.WithLabelValues(values...).Add(delta)
 }
 
+// Gauge performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func Gauge(name, help string, labels map[string]string, value float64) {
 	if !isFinite(value) {
 		global.recordError("invalid_gauge_value")
@@ -111,10 +126,14 @@ func Gauge(name, help string, labels map[string]string, value float64) {
 	m.gauge.WithLabelValues(values...).Set(value)
 }
 
+// Histogram performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func Histogram(name, help string, labels map[string]string, value float64) {
 	HistogramWithBuckets(name, help, labels, value, bucketsForMetric(name))
 }
 
+// HistogramWithBuckets performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func HistogramWithBuckets(name, help string, labels map[string]string, value float64, buckets []float64) {
 	if !isFinite(value) {
 		global.recordError("invalid_histogram_observation")
@@ -130,10 +149,14 @@ func HistogramWithBuckets(name, help string, labels map[string]string, value flo
 	m.histogram.WithLabelValues(values...).Observe(value)
 }
 
+// Handler performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func Handler() http.Handler {
 	return promhttp.HandlerFor(global.prom, promhttp.HandlerOpts{ErrorHandling: promhttp.HTTPErrorOnError})
 }
 
+// StartServer performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func StartServer(addr string) (*http.Server, error) {
 	if addr == "" {
 		addr = ":9090"
@@ -154,10 +177,14 @@ func StartServer(addr string) (*http.Server, error) {
 	return srv, nil
 }
 
+// SinceSeconds performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func SinceSeconds(start time.Time) float64 {
 	return time.Since(start).Seconds()
 }
 
+// Labels performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func Labels(values ...string) map[string]string {
 	labels := make(map[string]string, len(values)/2)
 	for i := 0; i+1 < len(values); i += 2 {
@@ -166,6 +193,8 @@ func Labels(values ...string) map[string]string {
 	return labels
 }
 
+// metric applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (r *registry) metric(name, help string, kind metricKind, buckets []float64, labels map[string]string) (*metric, []string) {
 	name = normalizeName(name)
 	sanitized, ok := sanitizedLabels(labels, kind == kindHistogram)
@@ -191,6 +220,8 @@ func (r *registry) metric(name, help string, kind metricKind, buckets []float64,
 	return nil, nil
 }
 
+// registerCatalog applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (r *registry) registerCatalog(specs []metricSpec) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -211,6 +242,8 @@ func (r *registry) registerCatalog(specs []metricSpec) {
 	}
 }
 
+// registerMetricLocked applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (r *registry) registerMetricLocked(m *metric, help string) bool {
 	switch m.kind {
 	case kindCounter:
@@ -232,6 +265,8 @@ func (r *registry) registerMetricLocked(m *metric, help string) bool {
 	return true
 }
 
+// projectMetricCatalog performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func projectMetricCatalog() []metricSpec {
 	return []metricSpec{
 		counterSpec("active_run_group_conflicts_total", "Benchmark requests that joined an existing active run-group.", nil),
@@ -303,18 +338,26 @@ func projectMetricCatalog() []metricSpec {
 	}
 }
 
+// counterSpec performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func counterSpec(name, help string, labelKeys []string) metricSpec {
 	return metricSpec{name: name, help: help, kind: kindCounter, labelKeys: labelKeys}
 }
 
+// gaugeSpec performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func gaugeSpec(name, help string, labelKeys []string) metricSpec {
 	return metricSpec{name: name, help: help, kind: kindGauge, labelKeys: labelKeys}
 }
 
+// histogramSpec performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func histogramSpec(name, help string, labelKeys []string, buckets []float64) metricSpec {
 	return metricSpec{name: name, help: help, kind: kindHistogram, labelKeys: labelKeys, buckets: buckets}
 }
 
+// bucketsForMetric performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func bucketsForMetric(name string) []float64 {
 	name = normalizeName(name)
 	for _, spec := range projectMetricCatalog() {
@@ -325,6 +368,8 @@ func bucketsForMetric(name string) []float64 {
 	return defaultBuckets
 }
 
+// register applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (r *registry) register(c prometheus.Collector) bool {
 	if err := r.prom.Register(c); err != nil {
 		r.recordErrorLocked("collector_registration_failed")
@@ -333,6 +378,8 @@ func (r *registry) register(c prometheus.Collector) bool {
 	return true
 }
 
+// normalizeName performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func normalizeName(name string) string {
 	name = strings.TrimSpace(name)
 	if strings.HasPrefix(name, namespace+"_") {
@@ -341,6 +388,8 @@ func normalizeName(name string) string {
 	return sanitizeMetricName(namespace + "_" + name)
 }
 
+// normalizeBuckets performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func normalizeBuckets(buckets []float64) []float64 {
 	cp := append([]float64(nil), buckets...)
 	sort.Float64s(cp)
@@ -356,6 +405,8 @@ func normalizeBuckets(buckets []float64) []float64 {
 	return out
 }
 
+// sanitizedLabels performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func sanitizedLabels(labels map[string]string, histogram bool) (map[string]string, bool) {
 	if len(labels) == 0 {
 		return nil, true
@@ -374,6 +425,8 @@ func sanitizedLabels(labels map[string]string, histogram bool) (map[string]strin
 	return out, true
 }
 
+// sanitizeCatalogLabelKeys performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func sanitizeCatalogLabelKeys(keys []string, histogram bool) []string {
 	if len(keys) == 0 {
 		return nil
@@ -395,6 +448,8 @@ func sanitizeCatalogLabelKeys(keys []string, histogram bool) []string {
 	return out
 }
 
+// splitLabels performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func splitLabels(labels map[string]string) ([]string, []string) {
 	if len(labels) == 0 {
 		return nil, nil
@@ -407,6 +462,8 @@ func splitLabels(labels map[string]string) ([]string, []string) {
 	return keys, orderedValues(labels, keys)
 }
 
+// orderedValues performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func orderedValues(labels map[string]string, keys []string) []string {
 	values := make([]string, 0, len(keys))
 	for _, k := range keys {
@@ -415,6 +472,8 @@ func orderedValues(labels map[string]string, keys []string) []string {
 	return values
 }
 
+// sanitizeLabelName performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func sanitizeLabelName(name string) string {
 	var b strings.Builder
 	for i, r := range name {
@@ -431,6 +490,8 @@ func sanitizeLabelName(name string) string {
 	return b.String()
 }
 
+// sanitizeMetricName performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func sanitizeMetricName(name string) string {
 	var b strings.Builder
 	for i, r := range name {
@@ -447,6 +508,8 @@ func sanitizeMetricName(name string) string {
 	return b.String()
 }
 
+// sameBuckets performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func sameBuckets(a, b []float64) bool {
 	if len(a) != len(b) {
 		return false
@@ -459,6 +522,8 @@ func sameBuckets(a, b []float64) bool {
 	return true
 }
 
+// sameStrings performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func sameStrings(a, b []string) bool {
 	if len(a) != len(b) {
 		return false
@@ -471,14 +536,20 @@ func sameStrings(a, b []string) bool {
 	return true
 }
 
+// isFinite performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func isFinite(v float64) bool {
 	return !math.IsNaN(v) && !math.IsInf(v, 0)
 }
 
+// recordError applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (r *registry) recordError(reason string) {
 	r.errors.WithLabelValues(reason).Inc()
 }
 
+// recordErrorLocked applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (r *registry) recordErrorLocked(reason string) {
 	r.errors.WithLabelValues(reason).Inc()
 }

@@ -1,21 +1,8 @@
-// sandbox-orchestrator manages the lifecycle of contestant algorithm pods
-// in the sandbox namespace. The bot-fleet-controller calls this service via
-// HTTP to allocate, observe, and release one Pod + Service per benchmark run.
+// Package main starts the sandbox-orchestrator service.
 //
-// Core invariants this service enforces:
-//   - slot_id is always the controller's session_id; orchestrator never mints IDs.
-//   - One Pod and one Service per slot (both named algo-{slot_id}), created
-//     together on POST /slots, deleted together on DELETE /slots/{id}.
-//   - Image ref is supplied by the caller (controller composes Harbor refs).
-//   - Lazy lifecycle in v1 — no warm pool, no caching. Allocation costs
-//     ~3-10 s per run. Warm pool is a v2 optimization.
-//   - In-memory slot map; k8s itself is the durable source of truth.
-//     On startup we rebuild the map from a Pod list (label app=algo) in
-//     the sandbox namespace.
-//   - Pod spec is FAIRNESS-driven: Guaranteed QoS, readOnlyRootFilesystem +
-//     tmpfs mounts, CNI bandwidth caps, optional gVisor runtime class,
-//     optional dedicated node pool. See internal/k8s/slot.go for the
-//     full set and the rationale behind each.
+// This file is part of the IICPC benchmarking platform and keeps its
+// responsibilities local to the surrounding package. It should be read with
+// the service-level design in design.md for broader operational context.
 package main
 
 import (
@@ -36,6 +23,8 @@ import (
 	"github.com/iicpc/sandbox-orchestrator/internal/store"
 )
 
+// main performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func main() {
 	logCfg := logger.DefaultConfig()
 	logCfg.ServiceName = "sandbox-orchestrator"
@@ -48,25 +37,11 @@ func main() {
 	port := envOr("PORT", "8080")
 	namespace := envOr("K8S_NAMESPACE", "sandbox")
 	runtimeClass := os.Getenv("RUNTIME_CLASS") // empty in dev k3s; "gvisor" in prod
-	// CPU/memory: same value used for both request AND limit (which is what
-	// makes the pod Guaranteed QoS, the precondition for both stable memory
-	// accounting and kubelet CPU manager cpuset pinning). CPU MUST be an
-	// integer string ("2", not "2000m") for the static-policy CPU manager
-	// to allocate a dedicated cpuset; millicore values fall back to shared
-	// CFS bandwidth and lose pinning.
 	algoCPU := envOr("ALGO_CPU", "2")
 	algoMemory := envOr("ALGO_MEMORY", "1Gi")
-	// Optional dedicated node pool — mirrors BUILD_NODE_POOL pattern.
-	// Empty in dev k3s; "sandbox" in prod (with matching taint on the node).
 	nodePool := os.Getenv("SANDBOX_NODE_POOL")
-	// Optional per-pod bandwidth caps. CNI bandwidth plugin reads the
-	// kubernetes.io/{egress,ingress}-bandwidth annotations.
 	egressBw := os.Getenv("ALGO_EGRESS_BANDWIDTH")
 	ingressBw := os.Getenv("ALGO_INGRESS_BANDWIDTH")
-	// eBPF latency capture (per-slot Job). Off by default; when CAPTURE_ENABLED,
-	// a capture Job is created per slot once its algo pod is Ready. CAPTURE_IMAGE
-	// must carry the baked BPF object; KAFKA_BROKERS is where it publishes
-	// orders.acked.
 	captureEnabled := envOr("CAPTURE_ENABLED", "false") == "true"
 	captureImage := os.Getenv("CAPTURE_IMAGE")
 	kafkaBrokers := os.Getenv("KAFKA_BROKERS")
@@ -101,17 +76,6 @@ func main() {
 
 	slots := store.NewSlotStore()
 
-	// Rebuild the in-memory slot map from k8s on every startup.
-	//
-	// The map is a cache; k8s itself is the durable source of truth. After
-	// a crash or rolling restart, the previous in-memory state is gone but
-	// any Pod the orchestrator created is still alive in the cluster (or
-	// has been cleaned up by its own RestartPolicy=Never failure mode).
-	// Listing here lets the new process resume answering GET /slots/{id}
-	// for runs that started under the previous process. Any Pod we
-	// don't recognise (label app=algo + managed-by=sandbox-orchestrator,
-	// but slot label missing) is treated as leaked and ignored — it'll
-	// surface as a NotFound on the controller's eventual DELETE.
 	existing, skippedMissingSlotLabel, err := mgr.ListExisting(ctx)
 	if err != nil {
 		log.Error("list existing slots", "error", err)
@@ -131,8 +95,6 @@ func main() {
 	r.Use(middleware.RequestID)
 	r.Use(middleware.RealIP)
 	r.Use(requestLogger(log))
-	// Problem: operators could see slot API calls only by tailing logs. Fix:
-	// expose RED metrics for each stable route template on /metrics.
 	r.Use(metrics.HTTPMiddleware("sandbox-orchestrator", chiRoutePattern))
 	r.Use(middleware.Recoverer)
 
@@ -177,6 +139,8 @@ func main() {
 	log.Info("server stopped")
 }
 
+// chiRoutePattern performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func chiRoutePattern(r *http.Request) string {
 	if routeCtx := chi.RouteContext(r.Context()); routeCtx != nil {
 		return routeCtx.RoutePattern()
@@ -184,6 +148,8 @@ func chiRoutePattern(r *http.Request) string {
 	return ""
 }
 
+// requestLogger performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func requestLogger(log *slog.Logger) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -207,6 +173,8 @@ func requestLogger(log *slog.Logger) func(http.Handler) http.Handler {
 	}
 }
 
+// envOr performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func envOr(key, def string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
@@ -214,6 +182,8 @@ func envOr(key, def string) string {
 	return def
 }
 
+// runtimeClassOrNone performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func runtimeClassOrNone(v string) string {
 	if v == "" {
 		return "(unset — using default runtime)"
@@ -221,6 +191,8 @@ func runtimeClassOrNone(v string) string {
 	return v
 }
 
+// nodePoolOrNone performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func nodePoolOrNone(v string) string {
 	if v == "" {
 		return "(unset — algo pods schedule on any node)"
@@ -228,6 +200,8 @@ func nodePoolOrNone(v string) string {
 	return v
 }
 
+// secretOrNone performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func secretOrNone(v string) string {
 	if v == "" {
 		return "(unset)"

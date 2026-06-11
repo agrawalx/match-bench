@@ -1,3 +1,10 @@
+# k8s/platform/auth-api/deployment.yaml
+#
+# This file declares Kubernetes resources for k8s/platform/auth-api.
+# It is part of the IICPC platform configuration and should remain
+# aligned with the deployment and operations guidance in the README.
+# Keep comments at the file header so resource bodies stay declarative.
+
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -14,16 +21,10 @@ spec:
     metadata:
       labels:
         app: auth-api
-      # No prometheus.io/scrape annotations: auth-api exposes no /metrics
-      # endpoint (only /health, /ready, /token, /refresh, /logout). Add the
-      # annotations together with a metrics server in main.go, not before.
     spec:
       automountServiceAccountToken: false
       containers:
         - name: auth-api
-          # Dev-tag placeholder, same convention as the other platform
-          # deployments — point at your registry at deploy time:
-          #   kubectl set image deployment/auth-api auth-api=ghcr.io/<user>/auth-api:dev -n platform
           image: ghcr.io/agrawalx/auth-api:dev
           ports:
             - name: http
@@ -62,8 +63,6 @@ spec:
               port: http
             initialDelaySeconds: 10
             periodSeconds: 20
-          # Image is distroless nonroot: static Go binary, no shell, no writes
-          # to the root filesystem, runs as UID 65532 by design.
           securityContext:
             readOnlyRootFilesystem: true
             allowPrivilegeEscalation: false

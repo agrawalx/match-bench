@@ -1,12 +1,10 @@
-# PodDisruptionBudget — bot-fleet-controller runs at exactly one replica
-# (architecturally locked; no horizontal scale-out).
+# k8s/benchmark/bot-fleet-controller/pdb.yaml
 #
-# Use maxUnavailable=1, NOT minAvailable=1. With a single replica, minAvailable=1
-# yields disruptionsAllowed=0: the Eviction API refuses to evict the only pod and
-# `kubectl drain` HANGS indefinitely, blocking routine node maintenance — strictly
-# worse than no PDB. maxUnavailable=1 lets the pod be evicted and rescheduled (the
-# brief in-flight gap is marked failed by recovery and the user re-triggers — the
-# accepted v1 trade-off for a single-replica controller).
+# This file declares Kubernetes resources for k8s/benchmark/bot-fleet-controller.
+# It is part of the IICPC platform configuration and should remain
+# aligned with the deployment and operations guidance in the README.
+# Keep comments at the file header so resource bodies stay declarative.
+
 apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:

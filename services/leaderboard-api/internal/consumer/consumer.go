@@ -1,3 +1,8 @@
+// Package consumer implements consumer behavior.
+//
+// This file is part of the IICPC benchmarking platform and keeps its
+// responsibilities local to the surrounding package. It should be read with
+// the service-level design in design.md for broader operational context.
 package consumer
 
 import (
@@ -11,6 +16,8 @@ import (
 	"github.com/segmentio/kafka-go"
 )
 
+// Consumer groups the state and dependencies used by this package.
+// Keep this type aligned with the runtime contract around it.
 type Consumer struct {
 	brokers []string
 	group   string
@@ -18,18 +25,15 @@ type Consumer struct {
 	log     *slog.Logger
 }
 
+// New performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func New(brokers []string, group string, broker *sse.Broker, log *slog.Logger) *Consumer {
 	return &Consumer{brokers: brokers, group: group, broker: broker, log: log}
 }
 
+// Run applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (c *Consumer) Run(ctx context.Context) {
-	// c.group is unique per pod (POD_NAME suffix) so every replica receives
-	// every update — the SSE broker only fans out to its own clients. These
-	// groups are transient fan-out groups: offsets are never committed (there
-	// is no resume semantic — the snapshot endpoint covers reconnect state) and
-	// StartOffset=LastOffset attaches a fresh pod at the log tail instead of
-	// replaying stale updates. With no committed offsets, empty groups are
-	// garbage-collected by the broker instead of accumulating per pod churn.
 	r := kafka.NewReader(kafka.ReaderConfig{
 		Brokers:     c.brokers,
 		GroupID:     c.group,

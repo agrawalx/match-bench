@@ -1,3 +1,8 @@
+// Package replay defines tests for order test.
+//
+// This file is part of the IICPC benchmarking platform and keeps its
+// responsibilities local to the surrounding package. It should be read with
+// the service-level design in design.md for broader operational context.
 package replay
 
 import (
@@ -6,6 +11,8 @@ import (
 	"github.com/iicpc/correctness-validator/internal/model"
 )
 
+// ids performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func ids(orders []*model.Order) []string {
 	out := make([]string, len(orders))
 	for i, o := range orders {
@@ -14,6 +21,8 @@ func ids(orders []*model.Order) []string {
 	return out
 }
 
+// eq performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func eq(t *testing.T, got, want []string) {
 	t.Helper()
 	if len(got) != len(want) {
@@ -26,8 +35,8 @@ func eq(t *testing.T, got, want []string) {
 	}
 }
 
-// The canonical worked example from architecture_v2: flow A has three reordered
-// segments (A2/A3 promoted to A1's delivery time), flow B interleaves cleanly.
+// TestEffectiveT3HOLWorkedExample performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func TestEffectiveT3HOLWorkedExample(t *testing.T) {
 	fa := model.Flow{SrcIP: 1, SrcPort: 1}
 	fb := model.Flow{SrcIP: 2, SrcPort: 2}
@@ -49,6 +58,8 @@ func TestEffectiveT3HOLWorkedExample(t *testing.T) {
 	eq(t, ids(out), []string{"B1", "B2", "A1", "A2", "A3"})
 }
 
+// TestInOrderFlowHasNoPromotion performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func TestInOrderFlowHasNoPromotion(t *testing.T) {
 	f := model.Flow{SrcIP: 1, SrcPort: 1}
 	orders := []*model.Order{
@@ -63,6 +74,8 @@ func TestInOrderFlowHasNoPromotion(t *testing.T) {
 	}
 }
 
+// TestFullyReversedFlowCascadesToFirst performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func TestFullyReversedFlowCascadesToFirst(t *testing.T) {
 	f := model.Flow{SrcIP: 1, SrcPort: 1}
 	orders := []*model.Order{
@@ -78,8 +91,9 @@ func TestFullyReversedFlowCascadesToFirst(t *testing.T) {
 	}
 }
 
+// TestCrossFlowTieBrokenByFlowThenSeq performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func TestCrossFlowTieBrokenByFlowThenSeq(t *testing.T) {
-	// Two flows, identical effective_t3 -> deterministic tiebreak by flow_id.
 	fa := model.Flow{SrcIP: 1, SrcPort: 1}
 	fb := model.Flow{SrcIP: 1, SrcPort: 2} // same ip, higher port -> after fa
 	orders := []*model.Order{
@@ -90,6 +104,8 @@ func TestCrossFlowTieBrokenByFlowThenSeq(t *testing.T) {
 	eq(t, ids(out), []string{"A", "B"})
 }
 
+// TestCrossFlowTieTolerance performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func TestCrossFlowTieTolerance(t *testing.T) {
 	fa := model.Flow{SrcIP: 1, SrcPort: 1}
 	fb := model.Flow{SrcIP: 2, SrcPort: 2}

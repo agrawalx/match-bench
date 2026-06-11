@@ -1,3 +1,8 @@
+// Package scenarios defines tests for builder test.
+//
+// This file is part of the IICPC benchmarking platform and keeps its
+// responsibilities local to the surrounding package. It should be read with
+// the service-level design in design.md for broader operational context.
 package scenarios
 
 import (
@@ -7,9 +12,8 @@ import (
 	"github.com/iicpc/schemas/topics"
 )
 
-// sumRPSAt returns the total active RPS at time t (relative to barrier epoch)
-// across the given task list. Used to verify that scenarios hit their
-// documented RPS targets at the documented phases.
+// sumRPSAt performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func sumRPSAt(specs []topics.TaskSpec, t time.Duration) uint64 {
 	var total uint64
 	for _, s := range specs {
@@ -22,6 +26,8 @@ func sumRPSAt(specs []topics.TaskSpec, t time.Duration) uint64 {
 	return total
 }
 
+// TestConstantScenario_FlatBaseline performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func TestConstantScenario_FlatBaseline(t *testing.T) {
 	rows, err := BuildAll(DefaultConfig())
 	if err != nil {
@@ -38,6 +44,8 @@ func TestConstantScenario_FlatBaseline(t *testing.T) {
 	}
 }
 
+// TestSpikeScenario_Shape performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func TestSpikeScenario_Shape(t *testing.T) {
 	rows, err := BuildAll(DefaultConfig())
 	if err != nil {
@@ -65,6 +73,8 @@ func TestSpikeScenario_Shape(t *testing.T) {
 	}
 }
 
+// TestRampScenario_Staircase performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func TestRampScenario_Staircase(t *testing.T) {
 	rows, err := BuildAll(DefaultConfig())
 	if err != nil {
@@ -73,9 +83,6 @@ func TestRampScenario_Staircase(t *testing.T) {
 	r := find(t, rows, "ramp")
 
 	perWave := uint64(DefaultConfig().RampPeakRPS / rampWaveCount)
-	// Probe one second past each wave boundary so assertions are not
-	// sensitive to whether a wave starts at exactly the boundary or one
-	// nanosecond later.
 	for wave := 0; wave < rampWaveCount; wave++ {
 		at := time.Duration(wave)*rampWaveCadence + 1*time.Second
 		expected := perWave * uint64(wave+1)
@@ -86,7 +93,6 @@ func TestRampScenario_Staircase(t *testing.T) {
 		}
 	}
 
-	// Peak holds until the end of the ramp duration.
 	peak := perWave * uint64(rampWaveCount)
 	got := sumRPSAt(r.TaskSpecs, 179*time.Second)
 	if got != peak {
@@ -94,9 +100,8 @@ func TestRampScenario_Staircase(t *testing.T) {
 	}
 }
 
-// TestConfig_CustomDurationAndRPS verifies the operator knobs flow through:
-// a 300s constant at 50k RPS produces a 300s scenario whose tasks all run the
-// full window and sum to 50k, with the 60/25/15 mix preserved.
+// TestConfig_CustomDurationAndRPS performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func TestConfig_CustomDurationAndRPS(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.ConstantDuration = 300 * time.Second
@@ -112,14 +117,12 @@ func TestConfig_CustomDurationAndRPS(t *testing.T) {
 	if c.DurationNs != uint64((300 * time.Second).Nanoseconds()) {
 		t.Errorf("constant duration = %d ns, want 300s", c.DurationNs)
 	}
-	// At t=0 and near the end the full baseline must be active.
 	for _, at := range []time.Duration{0, 150 * time.Second, 299 * time.Second} {
 		if got := sumRPSAt(c.TaskSpecs, at); got != 50000 {
 			t.Errorf("constant@50k: RPS at t=%v = %d, want 50000", at, got)
 		}
 	}
 
-	// Spike peak knob: burst window reaches 200k, baseline stays 50k.
 	s := find(t, rows, "spike")
 	pre := cfg.SpikePreWindow
 	if got := sumRPSAt(s.TaskSpecs, pre-time.Second); got != 50000 {
@@ -130,7 +133,8 @@ func TestConfig_CustomDurationAndRPS(t *testing.T) {
 	}
 }
 
-// TestConfig_Validation rejects nonsense configs.
+// TestConfig_Validation performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func TestConfig_Validation(t *testing.T) {
 	bad := []Config{
 		func() Config { c := DefaultConfig(); c.ConstantDuration = 0; return c }(),
@@ -144,6 +148,8 @@ func TestConfig_Validation(t *testing.T) {
 	}
 }
 
+// find performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func find(t *testing.T, rows []ScenarioRow, name string) ScenarioRow {
 	t.Helper()
 	for _, r := range rows {

@@ -1,3 +1,8 @@
+// Package store defines tests for slot race test.
+//
+// This file is part of the IICPC benchmarking platform and keeps its
+// responsibilities local to the surrounding package. It should be read with
+// the service-level design in design.md for broader operational context.
 package store
 
 import (
@@ -7,6 +12,8 @@ import (
 	"time"
 )
 
+// TestSlotStoreConcurrentAccess performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func TestSlotStoreConcurrentAccess(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -63,6 +70,8 @@ func TestSlotStoreConcurrentAccess(t *testing.T) {
 	}
 }
 
+// TestSlotStoreReturnsCopies performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func TestSlotStoreReturnsCopies(t *testing.T) {
 	store := NewSlotStore()
 	store.Put(&Slot{SlotID: "slot-a", Image: "before", State: StateReady})

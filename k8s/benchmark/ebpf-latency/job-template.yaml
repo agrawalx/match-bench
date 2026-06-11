@@ -1,23 +1,22 @@
-# REFERENCE ONLY — the orchestrator builds this Job in Go (see
-# services/sandbox-orchestrator/internal/k8s/slot.go `captureJobSpec`). This file
-# documents the shape it produces; it is not applied directly. The DaemonSet that
-# used to live here was removed: it could not carry per-pod identity or watch more
-# than one algo pod per node.
+# k8s/benchmark/ebpf-latency/job-template.yaml
 #
-# One of these is created per slot, in the sandbox namespace, when the algo pod
-# reaches Ready. <PLACEHOLDER> values are filled per slot by the orchestrator.
+# This file declares Kubernetes resources for k8s/benchmark/ebpf-latency.
+# It is part of the IICPC platform configuration and should remain
+# aligned with the deployment and operations guidance in the README.
+# Keep comments at the file header so resource bodies stay declarative.
+
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: capture-<SLOT_ID>          # = session_id
+  name: capture-<SLOT_ID>
   namespace: sandbox
   labels:
     app: ebpf-capture
     slot: <SLOT_ID>
     app.kubernetes.io/managed-by: sandbox-orchestrator
 spec:
-  backoffLimit: 0                  # a failed attach is reported, not retried
-  ttlSecondsAfterFinished: 300     # self-clean finished Jobs
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 300
   template:
     metadata:
       labels:
@@ -25,28 +24,15 @@ spec:
         slot: <SLOT_ID>
         app.kubernetes.io/managed-by: sandbox-orchestrator
       annotations:
-        # The capture's metrics server (src/metrics.rs start_server) binds
-        # METRICS_PORT, defaulting to 9090 — and no METRICS_PORT is set below, so
-        # it listens on 9090. REFERENCE ONLY: the orchestrator builds the real Job
-        # in Go (services/sandbox-orchestrator/internal/k8s/slot.go captureJobSpec);
-        # to actually scrape these short-lived capture pods, captureJobSpec must
-        # emit these same pod annotations + the metrics containerPort below.
         prometheus.io/scrape: "true"
         prometheus.io/path: /metrics
         prometheus.io/port: "9090"
     spec:
       restartPolicy: Never
-      nodeName: <ALGO_POD_NODE>    # pinned to the algo pod's node
-      hostPID: true                # to read /proc/<pid>/ns/net on the host
+      nodeName: <ALGO_POD_NODE>
+      hostPID: true
       automountServiceAccountToken: false
       terminationGracePeriodSeconds: 5
-      # Toleration is added only when SANDBOX_NODE_POOL is set, matching the algo
-      # pod's taint so the capture can land on the dedicated sandbox node.
-      # tolerations:
-      #   - key: sandbox
-      #     operator: Equal
-      #     value: "true"
-      #     effect: NoSchedule
       volumes:
         - name: bpffs
           hostPath:
@@ -54,13 +40,10 @@ spec:
             type: DirectoryOrCreate
       containers:
         - name: capture
-          image: <CAPTURE_IMAGE>   # carries the baked /opt/iicpc/ebpf/libiicpc_ebpf_latency.so
+          image: <CAPTURE_IMAGE>
           ports:
             - name: metrics
               containerPort: 9090
-          # Burstable QoS (request < limit) on purpose: the node CPU manager
-          # never gives this an exclusive cpuset, so it runs on shared cores and
-          # never steals from the algo pod's pinned cores.
           resources:
             requests:
               cpu: 200m
@@ -78,7 +61,6 @@ spec:
           env:
             - name: RUST_LOG
               value: info
-            # In-cluster Loki push endpoint (logger appends /loki/api/v1/push).
             - name: LOKI_URL
               value: http://loki.observability.svc.cluster.local:3100
             - name: SESSION_ID
@@ -87,8 +69,6 @@ spec:
               value: <CONTESTANT_ID>
             - name: EBPF_IFACE
               value: eth0
-            # The capture resolves the algo pod's netns on the node from its UID
-            # (the API exposes the container ID but not the host PID).
             - name: EBPF_ALGO_POD_UID
               value: <ALGO_POD_UID>
             - name: EBPF_ALGO_CONTAINER_ID

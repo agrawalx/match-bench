@@ -1,3 +1,8 @@
+// Package k8s implements slot behavior.
+//
+// This file is part of the IICPC benchmarking platform and keeps its
+// responsibilities local to the surrounding package. It should be read with
+// the service-level design in design.md for broader operational context.
 package k8s
 
 import (
@@ -19,8 +24,6 @@ import (
 	"k8s.io/client-go/kubernetes"
 )
 
-// Labels applied to every slot resource so the orchestrator can list its own
-// resources without colliding with anything else in the sandbox namespace.
 const (
 	LabelApp       = "app"
 	LabelSlot      = "slot"
@@ -29,52 +32,22 @@ const (
 	AppValue       = "algo"
 	ManagedByValue = "sandbox-orchestrator"
 
-	// CaptureAppValue labels the per-slot eBPF latency-capture Job (app=...),
-	// distinct from the algo pod's app=algo, so the two never collide.
-	CaptureAppValue = "ebpf-capture"
-	// captureContestantAnnotation carries contestant_id on the algo pod so the
-	// capture Job (created later, from the pod alone) can stamp it onto events.
+	CaptureAppValue             = "ebpf-capture"
 	captureContestantAnnotation = "iicpc.dev/contestant-id"
-	// captureObjectPath is where the capture image bakes the BPF object.
-	captureObjectPath = "/opt/iicpc/ebpf/libiicpc_ebpf_latency.so"
+	captureObjectPath           = "/opt/iicpc/ebpf/libiicpc_ebpf_latency.so"
 
-	// slotActiveDeadlineSeconds bounds an algo pod's lifetime as a self-healing
-	// backstop against leaked pods (controller crash / failed DeleteSlot). Set far
-	// above any scenario run-group's wall-time.
-	slotActiveDeadlineSeconds = int64(3600)
-	// captureJobActiveDeadlineSeconds bounds the (otherwise infinite-loop) capture
-	// Job so a leaked privileged hostPID capture cannot run forever.
+	slotActiveDeadlineSeconds       = int64(3600)
 	captureJobActiveDeadlineSeconds = int64(3600)
 )
 
-// capturablePorts are the TCP ports the eBPF program is compiled to match. When
-// capture is enabled a slot MUST use one of these, or it would come up Ready with
-// trading bots but produce zero t3/t7 captures (silently empty orders.acked).
 var capturablePorts = map[int]struct{}{8080: {}, 9898: {}}
 
-// captureJobName is the per-slot capture Job (and is deterministic so creation
-// is idempotent and deletion needs no lookup).
+// captureJobName performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func captureJobName(slotID string) string { return "capture-" + slotID }
 
-// Manager wraps k8s client operations for sandbox slot lifecycle.
-//
-// One slot is conceptually two resources: a Pod and a Service, both
-// named algo-{slot_id}. They are created together on POST /slots and
-// deleted together on DELETE /slots/{id}. Never delete one without the
-// other — the Pod without the Service becomes unreachable from the bots;
-// the Service without the Pod becomes a dangling endpoint that fails
-// requests. slot_id is always the controller's session_id verbatim.
-//
-// All pod-spec fields the methods below set are FAIRNESS-driven: equal
-// CPU/memory request and limit (Guaranteed QoS), readOnlyRootFilesystem +
-// tmpfs mounts (no disk I/O), CNI bandwidth annotations (per-pod NIC cap),
-// nodeSelector + toleration (dedicated sandbox node pool), optional
-// runtimeClassName=gvisor. The pod spec is necessary but not sufficient:
-// it depends on the kubelet being configured with cpuManagerPolicy=static
-// + full-pcpus-only=true + topologyManagerPolicy=single-numa-node, plus
-// OS-level tuning (CPU governor, C-states, IRQ pinning) on the sandbox
-// node pool. Without those, the pod spec still applies but contestants
-// can see ~ms-scale jitter from sources outside the pod's control.
+// Manager groups the state and dependencies used by this package.
+// Keep this type aligned with the runtime contract around it.
 type Manager struct {
 	client       kubernetes.Interface
 	namespace    string
@@ -85,58 +58,36 @@ type Manager struct {
 	egressBwBps  string // empty → no annotation; non-empty → CNI bandwidth plugin throttles egress (e.g. "100M")
 	ingressBwBps string // same for ingress
 
-	// eBPF latency capture. When captureEnabled, every slot that reaches Ready
-	// gets a per-pod capture Job (see ensureCapture). Off by default so the
-	// slot lifecycle is unchanged until a deployment opts in.
 	captureEnabled      bool
 	captureImage        string // image with the baked BPF object + userspace binary
 	kafkaBrokers        string // passed to the capture so it can publish orders.acked
 	imagePullSecretName string // optional registry credentials for contestant images
 }
 
+// Config groups the state and dependencies used by this package.
+// Keep this type aligned with the runtime contract around it.
 type Config struct {
-	Namespace    string
-	RuntimeClass string // e.g. "gvisor" in prod; empty in dev k3s
-	// CPU is the integer CPU count (string) for both request and limit.
-	// Must be an integer string ("1", "2", "4") — NOT millicores like
-	// "2000m" — for cpuset pinning to engage. The kubelet's CPU manager
-	// (when configured with cpuManagerPolicy=static) only allocates a
-	// dedicated cpuset to Guaranteed-QoS pods with integer CPU; anything
-	// else gets shared CFS bandwidth, which has documented throttling-
-	// cliff tail-latency pathologies under HFT-style load. Equal request
-	// AND limit is what makes the pod Guaranteed QoS; integer count is
-	// what makes it eligible for cpuset pinning. Both required.
-	CPU string
-	// Memory is the size string (e.g. "1Gi") for both request and limit.
-	// Equal request/limit makes the pod Guaranteed QoS — required for
-	// fair memory.max enforcement and (with kubelet config) cpuset pinning.
-	Memory string
-	// NodePool, when non-empty, pins algo pods to nodes labelled
-	// pool=<value> with toleration for taint sandbox=true:NoSchedule.
-	// Mirrors BUILD_NODE_POOL pattern. Empty in dev k3s.
-	NodePool string
-	// Egress/IngressBandwidth, when non-empty, are CNI bandwidth-plugin
-	// annotations applied to the pod (e.g. "100M"). Cilium also honors
-	// these as kubernetes.io/egress-bandwidth.
+	Namespace        string
+	RuntimeClass     string // e.g. "gvisor" in prod; empty in dev k3s
+	CPU              string
+	Memory           string
+	NodePool         string
 	EgressBandwidth  string
 	IngressBandwidth string
 
-	// CaptureEnabled turns on the per-slot eBPF latency-capture Job. When true,
-	// CaptureImage and KafkaBrokers are required.
 	CaptureEnabled bool
 	CaptureImage   string
 	KafkaBrokers   string
 
-	// ImagePullSecretName, when non-empty, is attached to every algo Pod so
-	// private contestant image refs (GHCR/Harbor/ECR token secrets) can be pulled
-	// by kubelet in the sandbox namespace.
 	ImagePullSecretName string
 }
 
-// Namespace returns the sandbox namespace this manager operates in.
-// Used by handlers to build Service FQDNs without duplicating the env value.
+// Namespace applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (m *Manager) Namespace() string { return m.namespace }
 
+// NewManager performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func NewManager(client kubernetes.Interface, cfg Config) (*Manager, error) {
 	if err := validateConfig(cfg); err != nil {
 		return nil, err
@@ -157,6 +108,8 @@ func NewManager(client kubernetes.Interface, cfg Config) (*Manager, error) {
 	}, nil
 }
 
+// validateConfig performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func validateConfig(cfg Config) error {
 	if cfg.Namespace == "" {
 		return fmt.Errorf("namespace is required")
@@ -181,18 +134,9 @@ func validateConfig(cfg Config) error {
 	return nil
 }
 
-// CreateSlot creates the Pod + Service pair for a slot.
-// Idempotent: if both resources already exist with matching image, returns
-// nil (caller observes via Refresh). If a resource exists with a different
-// image, returns ErrSlotImageMismatch.
-//
-// If Service creation fails after Pod creation, a Pod-without-Service orphan
-// can remain. The operation is deliberately retryable: the next CreateSlot call
-// for the same slot/image reuses the Pod and attempts Service creation again.
+// CreateSlot applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (m *Manager) CreateSlot(ctx context.Context, slotID, contestantID, image string, port int) error {
-	// M22: when capture is on, the BPF program only matches a fixed port set, so a
-	// slot on any other port would be Ready yet capture nothing. Reject early
-	// (HTTP 400) instead of silently producing empty telemetry.
 	if m.captureEnabled {
 		if _, ok := capturablePorts[port]; !ok {
 			return fmt.Errorf("%w: port %d is not in the eBPF-capture set {8080, 9898}", cerrs.ErrInvalidRequest, port)
@@ -225,16 +169,16 @@ func (m *Manager) CreateSlot(ctx context.Context, slotID, contestantID, image st
 	return nil
 }
 
+// ensurePod applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (m *Manager) ensurePod(ctx context.Context, resourceName, slotID, contestantID, image string, port int) (*corev1.Pod, error) {
 	existing, err := m.client.CoreV1().Pods(m.namespace).Get(ctx, resourceName, metav1.GetOptions{})
 	switch {
 	case err == nil:
 		return existing, nil
 	case apierrors.IsNotFound(err):
-		// Expected path: create the Pod.
 		created, err := m.client.CoreV1().Pods(m.namespace).Create(ctx, m.podSpec(slotID, contestantID, image, port), metav1.CreateOptions{})
 		if err != nil {
-			// Race: someone created the pod between our Get and Create.
 			if apierrors.IsAlreadyExists(err) {
 				existing, err := m.client.CoreV1().Pods(m.namespace).Get(ctx, resourceName, metav1.GetOptions{})
 				if err != nil {
@@ -250,8 +194,8 @@ func (m *Manager) ensurePod(ctx context.Context, resourceName, slotID, contestan
 	}
 }
 
-// DeleteSlot removes both the Pod and the Service for a slot.
-// Returns nil if either resource is already gone — DELETE is idempotent.
+// DeleteSlot applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (m *Manager) DeleteSlot(ctx context.Context, slotID string) error {
 	resourceName := podName(slotID)
 
@@ -262,7 +206,6 @@ func (m *Manager) DeleteSlot(ctx context.Context, slotID string) error {
 		return fmt.Errorf("delete service: %w", err)
 	}
 	if m.captureEnabled {
-		// Background propagation so the Job's pod is garbage-collected too.
 		policy := metav1.DeletePropagationBackground
 		if err := m.client.BatchV1().Jobs(m.namespace).Delete(ctx, captureJobName(slotID), metav1.DeleteOptions{PropagationPolicy: &policy}); err != nil && !apierrors.IsNotFound(err) {
 			return fmt.Errorf("delete capture job: %w", err)
@@ -271,8 +214,8 @@ func (m *Manager) DeleteSlot(ctx context.Context, slotID string) error {
 	return nil
 }
 
-// Refresh reads the live Pod state from k8s and returns the derived SlotState.
-// Returns ErrSlotNotFound when the Pod no longer exists.
+// Refresh applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (m *Manager) Refresh(ctx context.Context, slotID string) (store.SlotState, string, error) {
 	pod, err := m.client.CoreV1().Pods(m.namespace).Get(ctx, podName(slotID), metav1.GetOptions{})
 	if err != nil {
@@ -282,11 +225,6 @@ func (m *Manager) Refresh(ctx context.Context, slotID string) (store.SlotState, 
 		return "", "", fmt.Errorf("get pod: %w", err)
 	}
 	state, msg := deriveState(pod)
-	// Once the algo pod is Ready it has a NodeName and a running container, so
-	// the capture Job can be placed and can resolve the pod's netns. Creation is
-	// idempotent and best-effort: a capture failure must not wedge the slot, so
-	// we log and still report Ready. There is ample slack before the controller's
-	// barrier releases (workload publish → fan-in), so the capture attaches first.
 	if state == store.StateReady && m.captureEnabled {
 		if err := m.ensureCapture(ctx, pod); err != nil {
 			slog.Default().Warn("ensure capture job", "slot_id", slotID, "error", err)
@@ -295,18 +233,8 @@ func (m *Manager) Refresh(ctx context.Context, slotID string) (store.SlotState, 
 	return state, msg, nil
 }
 
-// ListExisting enumerates slots already in the cluster on startup so the
-// in-memory slot map can be rebuilt from k8s.
-//
-// The orchestrator is intentionally stateless across restarts: the
-// in-memory map is a cache, k8s itself is the durable source of truth.
-// On startup we list Pods labelled app=algo + managed-by=sandbox-orchestrator
-// and reconstruct each Slot record from the live Pod state. Anything we
-// fail to match here is either a leaked Pod (orchestrator was killed
-// after CreatePod but before recording the slot) or an orphan (Service
-// without its Pod) — both surface in subsequent DELETE calls failing
-// with NotFound, which is acceptable because there's nothing live to
-// clean up anyway.
+// ListExisting applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (m *Manager) ListExisting(ctx context.Context) ([]store.Slot, int, error) {
 	selector := fmt.Sprintf("%s=%s,%s=%s", LabelApp, AppValue, LabelManagedBy, ManagedByValue)
 	pods, err := m.client.CoreV1().Pods(m.namespace).List(ctx, metav1.ListOptions{LabelSelector: selector})
@@ -352,9 +280,8 @@ func (m *Manager) ListExisting(ctx context.Context) ([]store.Slot, int, error) {
 	return out, skippedMissingSlotLabel, nil
 }
 
-// reapOrphanCaptureJobs deletes capture Jobs whose algo pod no longer exists
-// (e.g. the orchestrator was killed between slot delete and Job delete).
-// Best-effort: failures are logged, not fatal — the Job's TTL is the backstop.
+// reapOrphanCaptureJobs applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (m *Manager) reapOrphanCaptureJobs(ctx context.Context, liveSlots map[string]struct{}) {
 	selector := fmt.Sprintf("%s=%s,%s=%s", LabelApp, CaptureAppValue, LabelManagedBy, ManagedByValue)
 	jobs, err := m.client.BatchV1().Jobs(m.namespace).List(ctx, metav1.ListOptions{LabelSelector: selector})
@@ -374,18 +301,20 @@ func (m *Manager) reapOrphanCaptureJobs(ctx context.Context, liveSlots map[strin
 	}
 }
 
-// podName returns the pod (and service) name for a slot.
-// Convention: algo-{slot_id}. Both resources share this name.
+// podName performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func podName(slotID string) string {
 	return "algo-" + slotID
 }
 
-// ServiceFQDN returns the cluster-internal DNS name a controller passes as
-// target_host in WorkloadSpec.
+// ServiceFQDN performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func ServiceFQDN(slotID, namespace string) string {
 	return fmt.Sprintf("%s.%s.svc.cluster.local", podName(slotID), namespace)
 }
 
+// podSpec applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (m *Manager) podSpec(slotID, contestantID, image string, port int) *corev1.Pod {
 	labels := map[string]string{
 		LabelApp:       AppValue,
@@ -393,12 +322,6 @@ func (m *Manager) podSpec(slotID, contestantID, image string, port int) *corev1.
 		LabelManagedBy: ManagedByValue,
 	}
 
-	// Bandwidth annotations are read by the CNI bandwidth plugin (and Cilium
-	// natively) which applies tc qdisc throttling so one chatty contestant
-	// cannot saturate the node NIC and starve neighbour pods. Caps bytes/sec,
-	// NOT packets/sec — a contestant doing high-pps low-bps traffic can
-	// still pressure IRQ handling; that's solved at the node level via NIC
-	// IRQ pinning to reserved system cores (not in this code).
 	annotations := map[string]string{}
 	if m.egressBwBps != "" {
 		annotations["kubernetes.io/egress-bandwidth"] = m.egressBwBps
@@ -406,27 +329,13 @@ func (m *Manager) podSpec(slotID, contestantID, image string, port int) *corev1.
 	if m.ingressBwBps != "" {
 		annotations["kubernetes.io/ingress-bandwidth"] = m.ingressBwBps
 	}
-	// Stamp contestant_id on the pod so the capture Job — created later from the
-	// pod alone (see ensureCapture) — can carry it onto the latency events.
 	if contestantID != "" {
 		annotations[captureContestantAnnotation] = contestantID
 	}
 
 	autoMount := false
-	// readOnlyRoot + tmpfs emptyDirs together eliminate ALL disk I/O from
-	// the algo pod. readOnlyRoot alone leaves the contestant with no
-	// writable paths (their process crashes on first write); tmpfs alone
-	// leaves the container's overlayfs writable to disk. BOTH are
-	// required. tmpfs (RAM-backed) usage counts against the pod's
-	// memory.max cgroup, so a contestant who writes 256 MiB of logs eats
-	// into their own memory allocation instead of contending with
-	// neighbours for node disk bandwidth.
 	readOnlyRoot := true
 	noPrivEsc := false
-	// Self-healing backstop: if the controller crashes or a DeleteSlot fails, the
-	// algo pod (Guaranteed-QoS, pinned CPUs) would otherwise survive forever and
-	// permanently remove a node from the sandbox pool. ActiveDeadlineSeconds caps
-	// its lifetime well above any scenario's run-group duration.
 	deadline := slotActiveDeadlineSeconds
 
 	pod := &corev1.Pod{
@@ -440,11 +349,7 @@ func (m *Manager) podSpec(slotID, contestantID, image string, port int) *corev1.
 			RestartPolicy:                corev1.RestartPolicyNever,
 			ActiveDeadlineSeconds:        &deadline,
 			AutomountServiceAccountToken: &autoMount,
-			// Four tmpfs (RAM-backed) emptyDirs at the paths contestant code
-			// is most likely to write to. RAM usage counts against the pod's
-			// memory limit, so a contestant that logs heavily eats into their
-			// own allocation instead of hitting node disk.
-			Volumes: writableVolumes(),
+			Volumes:                      writableVolumes(),
 			Containers: []corev1.Container{{
 				Name:            "algo",
 				Image:           image,
@@ -459,12 +364,6 @@ func (m *Manager) podSpec(slotID, contestantID, image string, port int) *corev1.
 					FailureThreshold:    30,
 				},
 				Resources: m.containerResources(),
-				// The algo image is untrusted contestant code. We cannot force
-				// RunAsNonRoot (some legitimate images run as root and there is no
-				// USER we control), so gVisor (RuntimeClassName, set in prod) is the
-				// real isolation boundary. These flags are defense-in-depth that do
-				// not break root images: no privilege escalation, all capabilities
-				// dropped, and the runtime-default seccomp profile.
 				SecurityContext: &corev1.SecurityContext{
 					ReadOnlyRootFilesystem:   &readOnlyRoot,
 					AllowPrivilegeEscalation: &noPrivEsc,
@@ -487,12 +386,6 @@ func (m *Manager) podSpec(slotID, contestantID, image string, port int) *corev1.
 		pod.Spec.RuntimeClassName = &rc
 	}
 
-	// Node-pool pinning: a dedicated sandbox node pool prevents platform
-	// workloads (submission-api, controller, Kafka, etc.) from sharing
-	// CPU/memory/NIC with contestant pods. Requires the ops side to
-	// label the pool nodes pool=<value> and taint them
-	// sandbox=true:NoSchedule. Mirrors the BUILD_NODE_POOL toggle: empty
-	// SANDBOX_NODE_POOL env disables (dev k3s); non-empty enables.
 	if m.nodePool != "" {
 		pod.Spec.Tolerations = []corev1.Toleration{{
 			Key:      "sandbox",
@@ -506,11 +399,8 @@ func (m *Manager) podSpec(slotID, contestantID, image string, port int) *corev1.
 	return pod
 }
 
-// writableVolumes returns the four tmpfs emptyDirs every algo pod mounts.
-// Memory-backed → no disk I/O → counts against the pod's memory.max cgroup.
-// Paired with readOnlyRootFilesystem=true on the container, this gives a
-// contestant exactly four writable locations (/tmp, /var/tmp, /var/log,
-// /var/run) and nowhere else, all RAM-backed.
+// writableVolumes performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func writableVolumes() []corev1.Volume {
 	tmpfs := func(name string) corev1.Volume {
 		return corev1.Volume{
@@ -528,8 +418,8 @@ func writableVolumes() []corev1.Volume {
 	}
 }
 
-// writableMounts pairs with writableVolumes — the contestant container can
-// only write to these four paths, and only as RAM (cgroup-accounted).
+// writableMounts performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func writableMounts() []corev1.VolumeMount {
 	return []corev1.VolumeMount{
 		{Name: "tmp", MountPath: "/tmp"},
@@ -539,6 +429,8 @@ func writableMounts() []corev1.VolumeMount {
 	}
 }
 
+// serviceSpec applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (m *Manager) serviceSpec(slotID string, port int) *corev1.Service {
 	labels := map[string]string{
 		LabelApp:       AppValue,
@@ -565,9 +457,8 @@ func (m *Manager) serviceSpec(slotID string, port int) *corev1.Service {
 	}
 }
 
-// ensureCapture creates the per-slot eBPF latency-capture Job if it doesn't
-// already exist. Idempotent (deterministic Job name). Requires the algo pod to
-// be scheduled (NodeName set) so the Job can be pinned to the same node.
+// ensureCapture applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (m *Manager) ensureCapture(ctx context.Context, pod *corev1.Pod) error {
 	slotID := pod.Labels[LabelSlot]
 	if slotID == "" {
@@ -595,11 +486,8 @@ func (m *Manager) ensureCapture(ctx context.Context, pod *corev1.Pod) error {
 	return nil
 }
 
-// captureJobSpec builds the per-slot capture Job. It runs on the algo pod's node
-// (nodeName), Burstable QoS so the node CPU manager keeps it on shared cores
-// (never the algo's pinned cpuset — the measurement must not perturb the
-// measured pod), with hostPID + BPF/NET_ADMIN/SYS_ADMIN so it can resolve the
-// algo pod's netns from its UID and attach XDP/tc inside it.
+// captureJobSpec applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (m *Manager) captureJobSpec(slotID, contestantID, nodeName, podUID, containerID string) *batchv1.Job {
 	labels := map[string]string{
 		LabelApp:       CaptureAppValue,
@@ -611,17 +499,11 @@ func (m *Manager) captureJobSpec(slotID, contestantID, nodeName, podUID, contain
 	backoffLimit := int32(0) // no retries; a failed attach is reported, not looped
 	ttl := int32(300)        // self-clean finished Jobs after 5 min
 	graceful := int64(5)
-	// The capture binary runs an infinite loop (exits only on SIGINT), so its
-	// TTLSecondsAfterFinished never fires on its own. ActiveDeadlineSeconds bounds
-	// a leaked privileged hostPID capture; the ownerReference below GC's it when
-	// the algo pod is deleted (the normal teardown path).
 	captureDeadline := captureJobActiveDeadlineSeconds
 	bpffsType := corev1.HostPathDirectoryOrCreate
 
 	var tolerations []corev1.Toleration
 	if m.nodePool != "" {
-		// Same taint the algo pod tolerates, so the Job can land on the
-		// dedicated sandbox node it's pinned to.
 		tolerations = []corev1.Toleration{{
 			Key:      "sandbox",
 			Operator: corev1.TolerationOpEqual,
@@ -660,10 +542,6 @@ func (m *Manager) captureJobSpec(slotID, contestantID, nodeName, podUID, contain
 			ActiveDeadlineSeconds:   &captureDeadline,
 			TTLSecondsAfterFinished: &ttl,
 			Template: corev1.PodTemplateSpec{
-				// Scrape annotations so Prometheus' annotation-based pod discovery
-				// picks up the per-slot capture pod's /metrics (the ebpf-latency
-				// binary's metrics server binds :9090 in the pod's own netns).
-				// Mirrors k8s/benchmark/ebpf-latency/job-template.yaml.
 				ObjectMeta: metav1.ObjectMeta{
 					Labels: labels,
 					Annotations: map[string]string{
@@ -705,10 +583,8 @@ func (m *Manager) captureJobSpec(slotID, contestantID, nodeName, podUID, contain
 	}
 }
 
-// captureResources is intentionally Burstable (request < limit) so the kubelet
-// CPU manager (static policy) never hands the capture an exclusive cpuset — it
-// runs on the node's shared/non-isolated cores, leaving the algo pod's pinned
-// cores untouched.
+// captureResources performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func captureResources() corev1.ResourceRequirements {
 	return corev1.ResourceRequirements{
 		Requests: corev1.ResourceList{
@@ -722,19 +598,8 @@ func captureResources() corev1.ResourceRequirements {
 	}
 }
 
-// containerResources builds a Guaranteed-QoS resource block: request == limit
-// for both CPU and memory. This is the gate that unlocks:
-//   - cgroup v2 memory.max == memory.high (no kernel reclamation under load,
-//     so a contestant's working set isn't evicted while their algorithm runs)
-//   - kubelet CPU manager (static policy) cpuset pinning to a dedicated set
-//     of cores — when the node is configured with cpuManagerPolicy=static.
-//     Without that kubelet setting the resource block still applies but the
-//     contestant shares cores via CFS bandwidth rather than getting an
-//     exclusive cpuset.
-//
-// Both values must be parseable by resource.MustParse. For CPU pinning,
-// the value must also be an integer ("1", "2", "4") — millicpu strings
-// ("500m") would still be Guaranteed but the CPU manager would skip pinning.
+// containerResources applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (m *Manager) containerResources() corev1.ResourceRequirements {
 	list := corev1.ResourceList{}
 	if m.cpu != "" {
@@ -743,45 +608,23 @@ func (m *Manager) containerResources() corev1.ResourceRequirements {
 	if m.memory != "" {
 		list[corev1.ResourceMemory] = resource.MustParse(m.memory)
 	}
-	// Same map used for both — guaranteed QoS only triggers when request
-	// and limit are bytewise equal, which copying the same ResourceList
-	// satisfies.
 	return corev1.ResourceRequirements{Requests: list.DeepCopy(), Limits: list.DeepCopy()}
 }
 
-// deriveState turns a live Pod into the orchestrator's SlotState + message.
-//
-// Slot lifecycle the controller depends on (returned as `state` in the JSON):
-//
-//	creating  → Pod object exists but is not yet schedulable/ready
-//	ready     → Pod has the PodReady=True condition (algo is accepting TCP)
-//	failed    → Pod hit a terminal phase (PodFailed/PodSucceeded with
-//	            restartPolicy=Never) OR a terminal waiting reason
-//	            (ImagePullBackOff, ErrImagePull, CrashLoopBackOff,
-//	            CreateContainerConfigError)
-//	terminating → Pod is being deleted (DeletionTimestamp set)
-//
-// Returning failed promptly for terminal waiting reasons matters: the
-// controller's GET /slots/{id} poll loop would otherwise wait the full
-// DEPLOY_DEADLINE (60s) on what is clearly a permanent failure (e.g.
-// the contestant image doesn't exist in Harbor). Fail fast → user
-// re-triggers sooner.
+// deriveState performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func deriveState(pod *corev1.Pod) (store.SlotState, string) {
 	if pod.DeletionTimestamp != nil {
 		return store.StateTerminating, "pod deletion in progress"
 	}
 
-	// Terminal phases first.
 	switch pod.Status.Phase {
 	case corev1.PodFailed:
 		return store.StateFailed, fmt.Sprintf("pod failed: %s", pod.Status.Message)
 	case corev1.PodSucceeded:
-		// restartPolicy=Never + container exited 0 = contestant binary exited
-		// unexpectedly. Treat as failed; the algo should be long-running.
 		return store.StateFailed, "container exited unexpectedly (algo should stay running)"
 	}
 
-	// Inspect container states for terminal waiting reasons.
 	for _, cs := range pod.Status.ContainerStatuses {
 		if cs.State.Waiting == nil {
 			continue
@@ -792,7 +635,6 @@ func deriveState(pod *corev1.Pod) (store.SlotState, string) {
 		}
 	}
 
-	// Ready when k8s PodReady condition is True.
 	for _, cond := range pod.Status.Conditions {
 		if cond.Type == corev1.PodReady && cond.Status == corev1.ConditionTrue {
 			return store.StateReady, "ready"
@@ -802,16 +644,13 @@ func deriveState(pod *corev1.Pod) (store.SlotState, string) {
 	return store.StateCreating, "pod scheduling / readiness probe pending"
 }
 
+// isTerminalWaitingReason performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func isTerminalWaitingReason(reason string) bool {
-	// CrashLoopBackOff is treated as terminal here because we set restartPolicy=Never,
-	// so it should never legitimately appear; if it does, something is very wrong.
 	switch reason {
 	case "ImagePullBackOff", "ErrImagePull", "InvalidImageName", "CreateContainerConfigError",
 		"CreateContainerError", "CrashLoopBackOff":
 		return true
 	}
-	// Defensive and intentionally conservative: false positives fail fast and
-	// release a broken slot sooner, while false negatives can burn the full
-	// deploy deadline on an unrecoverable image/container error.
 	return strings.HasPrefix(reason, "Err")
 }

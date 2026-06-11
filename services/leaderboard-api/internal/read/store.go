@@ -1,3 +1,8 @@
+// Package read implements store behavior.
+//
+// This file is part of the IICPC benchmarking platform and keeps its
+// responsibilities local to the surrounding package. It should be read with
+// the service-level design in design.md for broader operational context.
 package read
 
 import (
@@ -21,17 +26,17 @@ const (
 	maxLeaderboardOffset   = 100000
 )
 
-// rankedOrder is the canonical ranking order for the ROW_NUMBER() subqueries,
-// mirroring score-computer's rankOrderBy. disqualified ASC must stay the
-// leading term: DQ'd results retain their measured peak for transparency, so
-// a DQ-blind ordering would let a cheating engine rank #1.
 const rankedOrder = `disqualified ASC, peak_sustained_tps DESC, p99_at_peak_ns ASC, spike_recovery_ns ASC, total_correctness DESC, run_group_id ASC`
 
+// Store groups the state and dependencies used by this package.
+// Keep this type aligned with the runtime contract around it.
 type Store struct {
 	meta      *pgxpool.Pool
 	timescale *pgxpool.Pool
 }
 
+// New performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func New(ctx context.Context, metadataURL, timescaleURL string) (*Store, error) {
 	meta, err := pgxpool.New(ctx, metadataURL)
 	if err != nil {
@@ -45,11 +50,15 @@ func New(ctx context.Context, metadataURL, timescaleURL string) (*Store, error) 
 	return &Store{meta: meta, timescale: ts}, nil
 }
 
+// Close applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (s *Store) Close() {
 	s.meta.Close()
 	s.timescale.Close()
 }
 
+// Healthcheck applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (s *Store) Healthcheck(ctx context.Context) error {
 	if err := s.meta.Ping(ctx); err != nil {
 		return err
@@ -57,12 +66,16 @@ func (s *Store) Healthcheck(ctx context.Context) error {
 	return s.timescale.Ping(ctx)
 }
 
+// LeaderboardResponse groups the state and dependencies used by this package.
+// Keep this type aligned with the runtime contract around it.
 type LeaderboardResponse struct {
 	Source     string           `json:"source"`
 	Rows       []LeaderboardRow `json:"rows"`
 	NextCursor string           `json:"next_cursor,omitempty"`
 }
 
+// LeaderboardQuery groups the state and dependencies used by this package.
+// Keep this type aligned with the runtime contract around it.
 type LeaderboardQuery struct {
 	Limit        int
 	Sort         string
@@ -75,6 +88,8 @@ type LeaderboardQuery struct {
 	TeamName     string
 }
 
+// LeaderboardRow groups the state and dependencies used by this package.
+// Keep this type aligned with the runtime contract around it.
 type LeaderboardRow struct {
 	Rank                 int64   `json:"rank"`
 	RunGroupID           string  `json:"run_group_id"`
@@ -91,6 +106,8 @@ type LeaderboardRow struct {
 	ComputedAtUnixNS     int64   `json:"computed_at_ns"`
 }
 
+// Leaderboard applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (s *Store) Leaderboard(ctx context.Context, q LeaderboardQuery) (LeaderboardResponse, error) {
 	limit := q.Limit
 	if limit <= 0 || limit > maxLeaderboardRows {
@@ -100,11 +117,6 @@ func (s *Store) Leaderboard(ctx context.Context, q LeaderboardQuery) (Leaderboar
 	if err != nil {
 		return LeaderboardResponse{}, err
 	}
-	// team_id is an alias for contestant_id in v1 (there is no separate team table;
-	// the scores row keys on contestant_id). Collapsing here avoids the prior bug
-	// where team_id was bound to a SECOND contestant_id predicate, so setting both
-	// contestant_id and team_id (or team_id alone, expecting team semantics)
-	// produced a self-conflicting WHERE that returned no rows.
 	contestantFilter := q.ContestantID
 	if contestantFilter == "" {
 		contestantFilter = q.TeamID
@@ -163,15 +175,21 @@ SELECT rank, run_group_id, submission_id, contestant_id, team_name, peak_sustain
 	return resp, nil
 }
 
+// isUndefinedTable performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func isUndefinedTable(err error) bool {
 	var pgErr *pgconn.PgError
 	return errors.As(err, &pgErr) && pgErr.Code == "42P01"
 }
 
+// leaderboardCursor groups the state and dependencies used by this package.
+// Keep this type aligned with the runtime contract around it.
 type leaderboardCursor struct {
 	Offset int `json:"offset"`
 }
 
+// RunDetail groups the state and dependencies used by this package.
+// Keep this type aligned with the runtime contract around it.
 type RunDetail struct {
 	RunGroupID string           `json:"run_group_id"`
 	Score      *LeaderboardRow  `json:"score,omitempty"`
@@ -179,6 +197,8 @@ type RunDetail struct {
 	Violations []ViolationEntry `json:"violations"`
 }
 
+// SessionDetail groups the state and dependencies used by this package.
+// Keep this type aligned with the runtime contract around it.
 type SessionDetail struct {
 	SessionID string        `json:"session_id"`
 	Scenario  string        `json:"scenario"`
@@ -186,27 +206,26 @@ type SessionDetail struct {
 	Timeline  []MetricPoint `json:"timeline"`
 }
 
+// MetricPoint groups the state and dependencies used by this package.
+// Keep this type aligned with the runtime contract around it.
 type MetricPoint struct {
-	TimeUnixNS int64  `json:"time_unix_ns"`
-	WaveIndex  int    `json:"wave_index"`
-	P50NS      uint64 `json:"p50_ns"`
-	P90NS      uint64 `json:"p90_ns"`
-	P99NS      uint64 `json:"p99_ns"`
-	// response_time = r9 - t0: the bot-side round trip including coordinated-
-	// omission delay (vs service_time = t7 - t3, the algo-side processing only).
-	RTP50NS    uint64  `json:"rt_p50_ns"`
-	RTP90NS    uint64  `json:"rt_p90_ns"`
-	RTP99NS    uint64  `json:"rt_p99_ns"`
-	TPS1S      float64 `json:"tps_1s"`
-	ErrorRate  float64 `json:"error_rate"`
-	// V2-deflate HDR histograms (base64): service_time (t7-t3, scored),
-	// response_time (r9-t0, client round trip), schedule_slip (t1-t0, the
-	// back-pressure signal). The frontend decodes and overlays them.
-	HDREncoded     string `json:"hdr_encoded,omitempty"`
-	RTHDREncoded   string `json:"rt_hdr_encoded,omitempty"`
-	SlipHDREncoded string `json:"slip_hdr_encoded,omitempty"`
+	TimeUnixNS     int64   `json:"time_unix_ns"`
+	WaveIndex      int     `json:"wave_index"`
+	P50NS          uint64  `json:"p50_ns"`
+	P90NS          uint64  `json:"p90_ns"`
+	P99NS          uint64  `json:"p99_ns"`
+	RTP50NS        uint64  `json:"rt_p50_ns"`
+	RTP90NS        uint64  `json:"rt_p90_ns"`
+	RTP99NS        uint64  `json:"rt_p99_ns"`
+	TPS1S          float64 `json:"tps_1s"`
+	ErrorRate      float64 `json:"error_rate"`
+	HDREncoded     string  `json:"hdr_encoded,omitempty"`
+	RTHDREncoded   string  `json:"rt_hdr_encoded,omitempty"`
+	SlipHDREncoded string  `json:"slip_hdr_encoded,omitempty"`
 }
 
+// ViolationEntry groups the state and dependencies used by this package.
+// Keep this type aligned with the runtime contract around it.
 type ViolationEntry struct {
 	SessionID     string `json:"session_id"`
 	ContestantID  string `json:"contestant_id"`
@@ -216,6 +235,8 @@ type ViolationEntry struct {
 	DetectedAtNS  int64  `json:"detected_at_ns"`
 }
 
+// RunDetail applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (s *Store) RunDetail(ctx context.Context, runGroupID string) (RunDetail, error) {
 	d := RunDetail{RunGroupID: runGroupID}
 	scoreRow, ok, err := s.scoreForRunGroup(ctx, runGroupID)
@@ -255,13 +276,14 @@ SELECT r.session_id, sc.name, r.status
 		d.Sessions = []SessionDetail{}
 	}
 	d.Violations, err = s.Violations(ctx, runGroupID)
-	// Always marshal arrays (not JSON null) so the dashboard can read .length.
 	if d.Violations == nil {
 		d.Violations = []ViolationEntry{}
 	}
 	return d, err
 }
 
+// Chart applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (s *Store) Chart(ctx context.Context, sessionID string) ([]MetricPoint, error) {
 	rows, err := s.timescale.Query(ctx, `
 SELECT EXTRACT(EPOCH FROM time) * 1000000000, wave_index,
@@ -302,6 +324,8 @@ SELECT EXTRACT(EPOCH FROM time) * 1000000000, wave_index,
 	return out, rows.Err()
 }
 
+// Violations applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (s *Store) Violations(ctx context.Context, runGroupID string) ([]ViolationEntry, error) {
 	rows, err := s.meta.Query(ctx, `
 SELECT v.session_id, v.contestant_id, v.violation_type, v.order_id,
@@ -328,23 +352,24 @@ SELECT v.session_id, v.contestant_id, v.violation_type, v.order_id,
 	return out, rows.Err()
 }
 
+// ActiveSession groups the state and dependencies used by this package.
+// Keep this type aligned with the runtime contract around it.
 type ActiveSession struct {
 	SessionID string `json:"session_id"`
 	Scenario  string `json:"scenario"`
 	Status    string `json:"status"`
 }
 
+// ActiveRun groups the state and dependencies used by this package.
+// Keep this type aligned with the runtime contract around it.
 type ActiveRun struct {
 	RunGroupID string          `json:"run_group_id"`
 	TeamName   string          `json:"team_name"`
 	Sessions   []ActiveSession `json:"sessions"`
 }
 
-// ActiveRuns lists every run-group that still has a non-terminal session (a test
-// in progress), with all its sessions ordered by scenario. The frontend polls
-// this to discover live runs, then polls /api/charts/{session} for each session's
-// real-time p99/tps timeline. Reads metadata only (cheap); the heavy per-second
-// metrics stay on the charts endpoint.
+// ActiveRuns applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (s *Store) ActiveRuns(ctx context.Context) ([]ActiveRun, error) {
 	rows, err := s.meta.Query(ctx, `
 SELECT rg.run_group_id, COALESCE(sub.team_name,''), r.session_id, sc.name, r.status
@@ -380,8 +405,12 @@ SELECT rg.run_group_id, COALESCE(sub.team_name,''), r.session_id, sc.name, r.sta
 	return out, rows.Err()
 }
 
+// String applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (s *Store) String() string { return fmt.Sprintf("read.Store(%p)", s) }
 
+// scoreForRunGroup applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (s *Store) scoreForRunGroup(ctx context.Context, runGroupID string) (LeaderboardRow, bool, error) {
 	rows, err := s.meta.Query(ctx, `
 SELECT rank, run_group_id, submission_id, contestant_id, team_name, peak_sustained_tps,
@@ -416,6 +445,8 @@ SELECT rank, run_group_id, submission_id, contestant_id, team_name, peak_sustain
 	return r, true, rows.Err()
 }
 
+// nonNegativeUint64 performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func nonNegativeUint64(v int64) uint64 {
 	if v <= 0 {
 		return 0
@@ -423,6 +454,8 @@ func nonNegativeUint64(v int64) uint64 {
 	return uint64(v)
 }
 
+// leaderboardOrderBy performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func leaderboardOrderBy(sortField, order string) string {
 	sortField = strings.ToLower(strings.TrimSpace(sortField))
 	sortField = strings.ReplaceAll(sortField, "-", "_")
@@ -462,16 +495,18 @@ func leaderboardOrderBy(sortField, order string) string {
 	case "desc":
 		dir = "DESC"
 	}
-	// disqualified ASC always leads so user-selectable sorts stay secondary;
-	// otherwise ?sort=peak_tps would re-rank DQ'd retained peaks to the top.
 	return "disqualified ASC, " + spec.column + " " + dir + ", " + spec.tiebreak
 }
 
+// encodeLeaderboardCursor performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func encodeLeaderboardCursor(offset int) string {
 	payload, _ := json.Marshal(leaderboardCursor{Offset: offset})
 	return base64.RawURLEncoding.EncodeToString(payload)
 }
 
+// decodeLeaderboardCursor performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func decodeLeaderboardCursor(cursor string) (int, error) {
 	if strings.TrimSpace(cursor) == "" {
 		return 0, nil

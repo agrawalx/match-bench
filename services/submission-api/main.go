@@ -1,3 +1,8 @@
+// Package main starts the submission-api service.
+//
+// This file is part of the IICPC benchmarking platform and keeps its
+// responsibilities local to the surrounding package. It should be read with
+// the service-level design in design.md for broader operational context.
 package main
 
 import (
@@ -21,6 +26,8 @@ import (
 	"github.com/iicpc/submission-api/internal/store"
 )
 
+// main performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func main() {
 	logCfg := logger.DefaultConfig()
 	logCfg.ServiceName = "submission-api"
@@ -79,16 +86,6 @@ func main() {
 		}
 	}()
 
-	// Seed the canonical load-test scenarios (constant, spike, ramp) into the
-	// scenarios table. Durations and total/peak RPS are operator knobs read from
-	// the environment (scenarios.ConfigFromEnv: CONSTANT_DURATION_S,
-	// CONSTANT_TOTAL_RPS, SPIKE_PEAK_RPS, RAMP_PEAK_RPS, ...).
-	//
-	// By default the seeder uses INSERT ... ON CONFLICT (name) DO NOTHING, so a
-	// judge who tweaked a row by hand is not overwritten on restart. Setting
-	// RESEED_SCENARIOS=true switches to an upsert that rewrites duration/task
-	// specs from the current env config (preserving the existing scenario_id) —
-	// the way to apply a changed duration/RPS to an already-seeded database.
 	scenarioCfg := scenarios.ConfigFromEnv()
 	reseed := envBool("RESEED_SCENARIOS", false)
 	scenarioRows, err := scenarios.BuildAll(scenarioCfg)
@@ -117,15 +114,6 @@ func main() {
 	kafkaPub := publisher.NewKafkaPublisher(kafkaBrokers, log)
 	defer kafkaPub.Close()
 
-	// Consumer for benchmark.status.updated. This goroutine is the ONLY path
-	// by which terminal runs.status values ('completed', 'failed') reach
-	// PostgreSQL during normal operation. The only exception platform-wide
-	// is the bot-fleet-controller's startup recovery sweep, which writes
-	// 'failed' directly to release the partial unique index before its
-	// consumers start. Do not add other terminal-status writers — every
-	// such addition risks freeing the unique index while resources for the
-	// run are still live, defeating the one-active-run-per-submission
-	// guarantee that the endpoint's idempotency relies on.
 	group := envOr("KAFKA_BENCHMARK_STATUS_GROUP", "submission-api-benchmark-status")
 	benchStatusConsumer := consumer.NewBenchmarkStatusConsumer(kafkaBrokers, group, pgStore, log)
 	defer benchStatusConsumer.Close()
@@ -148,11 +136,6 @@ func main() {
 	r.Get("/ready", handler.Readiness(pgStore.Ping, log))
 	r.Handle("/metrics", metrics.Handler())
 
-	// Every contestant-facing route rides through the auth middleware, which
-	// verifies the Bearer token as a Google ID token (RS256 against Google's
-	// JWKS, iss/aud/exp/iat — see libs/go/authn) and puts the verified sub in
-	// the request context. AUTH_REQUIRED=false (dev/test ONLY) swaps in the
-	// insecure middleware that trusts the unverified sub claim.
 	authMW := handler.InsecureTrustSubClaim(log)
 	if envBool("AUTH_REQUIRED", true) {
 		googleClientID := mustEnv("GOOGLE_CLIENT_ID")
@@ -169,11 +152,7 @@ func main() {
 	r.Group(func(r chi.Router) {
 		r.Use(authMW)
 		r.Post("/submit", handler.Submit(minioStore, pgStore, kafkaPub, log))
-		// Route param MUST match handler.GetSubmission's chi.URLParam("submission_id").
 		r.Get("/submissions/{submission_id}", handler.GetSubmission(pgStore, log))
-		// POST /submissions/{id}/benchmark mints one run-group and N child runs
-		// (one per row in the scenarios table). The legacy POST /benchmarks/{id}
-		// path is kept as an alias so older frontends do not break.
 		r.Post("/submissions/{submission_id}/benchmark", handler.StartBenchmark(pgStore, kafkaPub, log))
 		r.Post("/benchmarks/{submission_id}", handler.StartBenchmark(pgStore, kafkaPub, log))
 		r.Get("/run-groups", handler.ListRunGroups(pgStore, log))
@@ -208,6 +187,8 @@ func main() {
 	log.Info("server stopped")
 }
 
+// chiRoutePattern performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func chiRoutePattern(r *http.Request) string {
 	if routeCtx := chi.RouteContext(r.Context()); routeCtx != nil {
 		return routeCtx.RoutePattern()
@@ -215,6 +196,8 @@ func chiRoutePattern(r *http.Request) string {
 	return ""
 }
 
+// requestLogger performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func requestLogger(log *slog.Logger) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -241,6 +224,8 @@ func requestLogger(log *slog.Logger) func(http.Handler) http.Handler {
 	}
 }
 
+// envOr performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func envOr(key, def string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
@@ -248,8 +233,8 @@ func envOr(key, def string) string {
 	return def
 }
 
-// envBool reads a boolean env var ("true"/"1" => true). Unset or anything else
-// yields def.
+// envBool performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func envBool(key string, def bool) bool {
 	switch os.Getenv(key) {
 	case "true", "1", "TRUE", "True":
@@ -261,6 +246,8 @@ func envBool(key string, def bool) bool {
 	}
 }
 
+// mustEnv performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func mustEnv(key string) string {
 	v := os.Getenv(key)
 	if v == "" {

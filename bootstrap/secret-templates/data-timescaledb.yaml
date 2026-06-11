@@ -1,7 +1,10 @@
-# Placeholder only — never commit real credentials. Create the real secret out
-# of band, e.g.:
-#   kubectl -n data create secret generic timescaledb-secret \
-#     --from-literal=password="$(openssl rand -hex 24)"
+# bootstrap/secret-templates/data-timescaledb.yaml
+#
+# This file documents the secret shape required by data timescaledb.
+# It is part of the IICPC platform configuration and should remain
+# aligned with the deployment and operations guidance in the README.
+# Keep comments at the file header so resource bodies stay declarative.
+
 apiVersion: v1
 kind: Secret
 metadata:

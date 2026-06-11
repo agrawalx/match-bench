@@ -1,3 +1,8 @@
+// Package controller defines tests for kafka integration test.
+//
+// This file is part of the IICPC benchmarking platform and keeps its
+// responsibilities local to the surrounding package. It should be read with
+// the service-level design in design.md for broader operational context.
 package controller
 
 import (
@@ -13,6 +18,8 @@ import (
 	kafka "github.com/segmentio/kafka-go"
 )
 
+// TestProducerIntegrationPublishesControllerTopics performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func TestProducerIntegrationPublishesControllerTopics(t *testing.T) {
 	brokers := integrationBrokers(t)
 	ensureTopic(t, brokers, topics.TopicWorkloadAssignments, 24)
@@ -68,9 +75,6 @@ func TestProducerIntegrationPublishesControllerTopics(t *testing.T) {
 	if gotSpec.SessionID != sessionID || gotSpec.WorkerIndex != 7 || len(gotSpec.Tasks) != 1 {
 		t.Fatalf("unexpected workload spec: %+v", gotSpec)
 	}
-	// Explicit 1:1 spec→partition assignment: worker_index 7 on the
-	// 24-partition topic MUST land on partition 7 (workerIndexBalancer),
-	// not wherever the key happens to hash.
 	if specPartition != 7 {
 		t.Fatalf("workload spec for worker_index 7 landed on partition %d, want 7", specPartition)
 	}
@@ -88,6 +92,8 @@ func TestProducerIntegrationPublishesControllerTopics(t *testing.T) {
 	}
 }
 
+// TestConsumerIntegrationDispatchesBotReady performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func TestConsumerIntegrationDispatchesBotReady(t *testing.T) {
 	brokers := integrationBrokers(t)
 	ensureTopic(t, brokers, topics.TopicBotReady, 3)
@@ -131,6 +137,8 @@ func TestConsumerIntegrationDispatchesBotReady(t *testing.T) {
 	}
 }
 
+// integrationBrokers performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func integrationBrokers(t *testing.T) []string {
 	t.Helper()
 	raw := os.Getenv("KAFKA_BROKERS")
@@ -149,10 +157,14 @@ func integrationBrokers(t *testing.T) []string {
 	return brokers
 }
 
+// integrationSuffix performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func integrationSuffix() string {
 	return strings.ReplaceAll(time.Now().UTC().Format("20060102150405.000000000"), ".", "")
 }
 
+// ensureTopic performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func ensureTopic(t *testing.T, brokers []string, topic string, partitions int) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -178,6 +190,8 @@ func ensureTopic(t *testing.T, brokers []string, topic string, partitions int) {
 	}
 }
 
+// publishJSON performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func publishJSON[T any](t *testing.T, brokers []string, topic, key string, value T) {
 	t.Helper()
 	payload, err := json.Marshal(value)
@@ -200,9 +214,8 @@ func publishJSON[T any](t *testing.T, brokers []string, topic, key string, value
 	}
 }
 
-// consumeJSONByKey fetches the first message with the given key, decodes its
-// value into dst, and returns the partition the message was read from so
-// callers can assert explicit partition placement.
+// consumeJSONByKey performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func consumeJSONByKey[T any](t *testing.T, brokers []string, topic, key string, dst *T) int {
 	t.Helper()
 	reader := kafka.NewReader(kafka.ReaderConfig{

@@ -1,3 +1,8 @@
+// Package authn defines shared library behavior for jwks.
+//
+// This file is part of the IICPC benchmarking platform and keeps its
+// responsibilities local to the surrounding package. It should be read with
+// the service-level design in design.md for broader operational context.
 package authn
 
 import (
@@ -13,23 +18,12 @@ import (
 	"time"
 )
 
-// jwksTTL is how long a fetched JWKS document is trusted before the next
-// lookup forces a refresh. Google rotates its signing keys on the order of
-// days and serves generous Cache-Control max-age values; 12h keeps us well
-// inside the overlap window during which old and new kids are both published.
 const jwksTTL = 12 * time.Hour
 
-// jwksMaxBody bounds the JWKS response read — the real document is ~1.6 KiB,
-// so 1 MiB is pure paranoia against a misconfigured GOOGLE_JWKS_URL pointing
-// at something enormous.
 const jwksMaxBody = 1 << 20
 
-// jwksCache is a kid-indexed cache of the RSA public keys published at a JWKS
-// URL. Lookups are served from memory while the document is inside its TTL;
-// an unknown kid (Google key rotation) or an expired document triggers a
-// refetch. Refetches are single-flight: concurrent lookups that all miss
-// serialize on fetchMu and every waiter after the first re-checks the cache
-// instead of issuing its own HTTP request.
+// jwksCache groups the state and dependencies used by this package.
+// Keep this type aligned with the runtime contract around it.
 type jwksCache struct {
 	url    string
 	client *http.Client
@@ -41,6 +35,8 @@ type jwksCache struct {
 	fetchMu sync.Mutex // single-flight: at most one in-flight JWKS fetch
 }
 
+// newJWKSCache performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func newJWKSCache(url string) *jwksCache {
 	return &jwksCache{
 		url:    url,
@@ -48,19 +44,16 @@ func newJWKSCache(url string) *jwksCache {
 	}
 }
 
-// key returns the RSA public key for kid, refreshing the JWKS document when
-// the kid is unknown or the cached document has outlived its TTL.
+// key applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (c *jwksCache) key(ctx context.Context, kid string) (*rsa.PublicKey, error) {
 	if pub, ok := c.lookup(kid); ok {
 		return pub, nil
 	}
 
-	// Miss (unknown kid or stale document) — refresh, single-flight.
 	c.fetchMu.Lock()
 	defer c.fetchMu.Unlock()
 
-	// Another goroutine may have refreshed while we waited on fetchMu;
-	// re-check before issuing our own request.
 	if pub, ok := c.lookup(kid); ok {
 		return pub, nil
 	}
@@ -78,8 +71,8 @@ func (c *jwksCache) key(ctx context.Context, kid string) (*rsa.PublicKey, error)
 	return pub, nil
 }
 
-// lookup serves a kid from the cache, honoring the TTL. A hit on a stale
-// document is treated as a miss so the caller refreshes.
+// lookup applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (c *jwksCache) lookup(kid string) (*rsa.PublicKey, bool) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
@@ -90,7 +83,8 @@ func (c *jwksCache) lookup(kid string) (*rsa.PublicKey, bool) {
 	return pub, ok
 }
 
-// jwk is one entry of the RFC 7517 key set as Google publishes it.
+// jwk groups the state and dependencies used by this package.
+// Keep this type aligned with the runtime contract around it.
 type jwk struct {
 	Kty string `json:"kty"`
 	Kid string `json:"kid"`
@@ -100,8 +94,8 @@ type jwk struct {
 	E   string `json:"e"` // base64url exponent
 }
 
-// fetch downloads and parses the JWKS document, replacing the cached key map.
-// Callers must hold fetchMu.
+// fetch applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (c *jwksCache) fetch(ctx context.Context) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.url, nil)
 	if err != nil {
@@ -129,9 +123,6 @@ func (c *jwksCache) fetch(ctx context.Context) error {
 
 	keys := make(map[string]*rsa.PublicKey, len(doc.Keys))
 	for _, k := range doc.Keys {
-		// RS256-only policy: skip non-RSA entries and entries explicitly
-		// labelled with a different algorithm. An absent alg is tolerated —
-		// the verifier enforces RS256 on the token side regardless.
 		if k.Kty != "RSA" || k.Kid == "" || (k.Alg != "" && k.Alg != "RS256") {
 			continue
 		}
@@ -152,7 +143,8 @@ func (c *jwksCache) fetch(ctx context.Context) error {
 	return nil
 }
 
-// rsaPublicKey converts the base64url (n, e) pair of a JWK into *rsa.PublicKey.
+// rsaPublicKey performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func rsaPublicKey(k jwk) (*rsa.PublicKey, error) {
 	nBytes, err := base64.RawURLEncoding.DecodeString(k.N)
 	if err != nil {

@@ -1,10 +1,9 @@
-# outputs.tf — everything the Makefile and the operator need post-apply.
+# infra/terraform/outputs.tf
 #
-# Problem: the Makefile's ecr-login/images/deploy targets and the operator's
-# kubectl all need values that only exist after apply (cluster endpoint, the 12
-# ECR URLs, the kubeconfig command). Decision: surface them as outputs so the
-# Makefile reads them with `terraform output -raw/-json` instead of re-deriving
-# ARNs by hand. Why -json for the map: the images target iterates the repo URLs.
+# This Terraform file exports cluster, registry, and deployment values.
+# It belongs to the IICPC AWS infrastructure layer and should remain
+# aligned with infra/README.md and the Kubernetes manifests under k8s/.
+# Keep explanatory comments at this file header so resource blocks stay declarative.
 
 output "cluster_name" {
   description = "EKS cluster name."

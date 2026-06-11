@@ -1,3 +1,8 @@
+// Package k8s implements spawner behavior.
+//
+// This file is part of the IICPC benchmarking platform and keeps its
+// responsibilities local to the surrounding package. It should be read with
+// the service-level design in design.md for broader operational context.
 package k8s
 
 import (
@@ -37,22 +42,23 @@ const (
 	maxK8sNameLen = 63
 )
 
-// StatusUpdater publishes and persists monotonic submission state transitions.
+// StatusUpdater defines the behavior expected by this package boundary.
+// Implementations should preserve the caller-visible contract.
 type StatusUpdater interface {
 	PublishStatus(ctx context.Context, submissionID, status, message string) error
 	UpdateDBStatus(ctx context.Context, submissionID, status, message string) error
 	UpdateImageRef(ctx context.Context, submissionID, imageRef string) error
 }
 
-// MinioClient provides artifact IO for per-submission build jobs.
+// MinioClient defines the behavior expected by this package boundary.
+// Implementations should preserve the caller-visible contract.
 type MinioClient interface {
 	DownloadObject(ctx context.Context, objectPath string) ([]byte, error)
 	UploadBytes(ctx context.Context, objectPath, contentType string, data []byte) error
 }
 
-// JobConfig holds image refs and credentials for all three Job types.
-// No runner-specific config (KAFKA_BROKERS, DATABASE_URL) — Jobs only interact
-// with MinIO and Harbor; the spawner owns all status updates.
+// JobConfig groups the state and dependencies used by this package.
+// Keep this type aligned with the runtime contract around it.
 type JobConfig struct {
 	Namespace    string
 	SpawnerImage string // harbor.example.com/iicpc/spawner:latest — used as fetcher init container
@@ -72,42 +78,23 @@ type JobConfig struct {
 	HarborUser               string
 	HarborPassword           string
 
-	// RegistryProvider selects registry-specific behavior. "" (default) means a
-	// push-to-create registry (Harbor/ghcr) and nothing extra happens. "ecr"
-	// pre-creates the staging and production repositories via the ECR API before
-	// the kaniko Job pushes and before crane promotes — ECR has no
-	// push-to-create, so without this every first push to
-	// <endpoint>/<project>/<submissionID> fails outright.
 	RegistryProvider string
 
-	// RegistryInsecure, when true, downgrades registry access to plain HTTP /
-	// skip-TLS in kaniko, trivy, syft, and crane. Explicit opt-in for local dev
-	// registries only — never set it in production. Loopback and kind-registry
-	// endpoints are always treated as insecure for dev convenience regardless
-	// of this flag.
 	RegistryInsecure bool
 
-	// BuildNodePool, when non-empty, pins Job pods to nodes with pool=<value> label
-	// and adds the build=true:NoSchedule toleration. Leave empty for single-node dev.
 	BuildNodePool string
 }
 
-// ECRRepositoryClient is the narrow surface of the ECR API the spawner needs
-// when RegistryProvider is "ecr": create a repository ahead of a push. The
-// concrete implementation wraps the aws-sdk-go-v2 ecr client built from the
-// default AWS credential chain (IRSA in-cluster) and must return SDK errors
-// unwrapped so ensureRepository can match RepositoryAlreadyExistsException.
-// Faked in tests the same way kubernetes.Interface is.
+// ECRRepositoryClient defines the behavior expected by this package boundary.
+// Implementations should preserve the caller-visible contract.
 type ECRRepositoryClient interface {
 	CreateRepository(ctx context.Context, repositoryName string) error
 }
 
-// newECRClient builds the ECRRepositoryClient used when REGISTRY_PROVIDER=ecr.
-// It is a package variable so tests can stub it; the production value is the
-// aws-sdk-go-v2 adapter in ecr_aws.go (default AWS credential chain — IRSA
-// in-cluster).
 var newECRClient = newAWSECRClient
 
+// Spawner groups the state and dependencies used by this package.
+// Keep this type aligned with the runtime contract around it.
 type Spawner struct {
 	client  kubernetes.Interface
 	cfg     JobConfig
@@ -117,6 +104,8 @@ type Spawner struct {
 	log     *slog.Logger
 }
 
+// NewSpawner performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func NewSpawner(cfg JobConfig, minio MinioClient, updater StatusUpdater, log *slog.Logger) (*Spawner, error) {
 	if cfg.HarborProductionEndpoint == "" {
 		return nil, fmt.Errorf("harbor production endpoint is required")
@@ -127,7 +116,6 @@ func NewSpawner(cfg JobConfig, minio MinioClient, updater StatusUpdater, log *sl
 	var ecrClient ECRRepositoryClient
 	switch cfg.RegistryProvider {
 	case "":
-		// push-to-create registry (Harbor/ghcr) — nothing to pre-create
 	case "ecr":
 		c, err := newECRClient(context.Background())
 		if err != nil {
@@ -148,13 +136,14 @@ func NewSpawner(cfg JobConfig, minio MinioClient, updater StatusUpdater, log *sl
 	return &Spawner{client: client, cfg: cfg, minio: minio, updater: updater, ecr: ecrClient, log: log}, nil
 }
 
+// Run applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (s *Spawner) Run(ctx context.Context, msg topics.SubmissionBuildRequested) {
 	runStart := time.Now()
 	id := msg.SubmissionID
 	log := s.log.With("submission_id", id)
 	stagingRef := fmt.Sprintf("%s/%s/%s:latest", s.cfg.HarborStagingEndpoint, s.cfg.HarborProject, id)
 
-	// Pre-check: zip-slip scan before any Job is created
 	phaseStart := time.Now()
 	zipData, err := s.minio.DownloadObject(ctx, msg.ArtifactPath)
 	if err != nil {
@@ -173,8 +162,6 @@ func (s *Spawner) Run(ctx context.Context, msg topics.SubmissionBuildRequested) 
 	}
 	recordBuildPhase("precheck", phaseStart, "ok")
 
-	// Generate a platform-controlled Dockerfile from the submission metadata.
-	// Contestants never supply a Dockerfile — the platform controls the build environment.
 	dockerfileContent, err := dockerfile.Generate(msg.Language, msg.BuildType, msg.BuildTarget, msg.Port)
 	if err != nil {
 		recordBuildRequest("error")
@@ -185,12 +172,9 @@ func (s *Spawner) Run(ctx context.Context, msg topics.SubmissionBuildRequested) 
 
 	dockerfileB64 := base64.StdEncoding.EncodeToString([]byte(dockerfileContent))
 
-	// Phase 1: fetcher init container extracts ZIP → kaniko builds and pushes to Harbor staging
 	buildJobName := resourceName("build", id)
 	phaseStart = time.Now()
 	s.setStatus(ctx, id, topics.StatusBuilding, "building image")
-	// ECR has no push-to-create: the staging repository must exist before the
-	// kaniko Job pushes to it. No-op for push-to-create registries (Harbor).
 	if err := s.ensureRepository(ctx, stagingRef); err != nil {
 		recordBuildPhase("build", phaseStart, "error")
 		recordBuildRequest("error")
@@ -222,7 +206,6 @@ func (s *Spawner) Run(ctx context.Context, msg topics.SubmissionBuildRequested) 
 	recordBuildPhase("build", phaseStart, "ok")
 	log.Info("phase 1 complete")
 
-	// Phase 2: Trivy scan + Syft SBOM run in parallel against the staging registry image
 	scanJobName := resourceName("scan", id)
 	sbomJobName := resourceName("sbom", id)
 
@@ -295,10 +278,8 @@ func (s *Spawner) Run(ctx context.Context, msg topics.SubmissionBuildRequested) 
 	}
 	log.Info("phase 2 complete")
 
-	// Phase 3: promote staging → production via crane.Copy (no extra Job)
 	productionRef := fmt.Sprintf("%s/%s/%s:latest", s.cfg.HarborProductionEndpoint, s.cfg.HarborProject, id)
 	phaseStart = time.Now()
-	// ECR again: the production repository must exist before crane copies into it.
 	if err := s.ensureRepository(ctx, productionRef); err != nil {
 		recordBuildPhase("promote", phaseStart, "error")
 		recordBuildRequest("error")
@@ -339,14 +320,8 @@ func (s *Spawner) Run(ctx context.Context, msg topics.SubmissionBuildRequested) 
 	log.Info("pipeline complete")
 }
 
-// phase2Outcome collects the results of the parallel scan + SBOM jobs. Both
-// channels must already be closed (the waiter goroutine closes them after
-// wg.Wait). It returns the per-step success statuses to publish ONLY when no
-// job failed — a partial failure returns the first error and NO statuses, so
-// the caller never publishes a sibling's forward-progress status (e.g.
-// sbom_ready) for a submission that is actually failing. Draining statuses
-// before checking errs is safe because both channels are closed; the success
-// statuses are discarded on any error rather than emitted ahead of `failed`.
+// phase2Outcome performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func phase2Outcome(statuses <-chan string, errs <-chan error) ([]string, error) {
 	var oks []string
 	for st := range statuses {
@@ -360,20 +335,19 @@ func phase2Outcome(statuses <-chan string, errs <-chan error) ([]string, error) 
 	return oks, nil
 }
 
+// createJob applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (s *Spawner) createJob(ctx context.Context, job *batchv1.Job) error {
 	_, err := s.client.BatchV1().Jobs(s.cfg.Namespace).Create(ctx, job, metav1.CreateOptions{})
 	if apierrors.IsAlreadyExists(err) {
-		// Idempotent redelivery: the build offset is committed only after the
-		// whole pipeline finishes, so a SIGTERM mid-build replays the message and
-		// the deterministic Job name still exists within its TTL window. Adopt it
-		// and wait, instead of force-failing — failing here would even overwrite a
-		// submission that already built successfully (failed is the top status rank).
 		s.log.Info("job already exists; adopting (redelivery)", "job", job.Name)
 		return nil
 	}
 	return err
 }
 
+// waitForJob applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (s *Spawner) waitForJob(ctx context.Context, jobName string, timeout time.Duration) error {
 	deadline := time.After(timeout)
 	ticker := time.NewTicker(pollInterval)
@@ -401,8 +375,8 @@ func (s *Spawner) waitForJob(ctx context.Context, jobName string, timeout time.D
 	}
 }
 
-// readJobLogs reads stdout from the pod that ran jobName.
-// container selects a specific container by name; pass "" for single-container Jobs.
+// readJobLogs applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (s *Spawner) readJobLogs(ctx context.Context, jobName, container string) ([]byte, error) {
 	pods, err := s.client.CoreV1().Pods(s.cfg.Namespace).List(ctx, metav1.ListOptions{
 		LabelSelector: "job-name=" + jobName,
@@ -426,9 +400,8 @@ func (s *Spawner) readJobLogs(ctx context.Context, jobName, container string) ([
 	return io.ReadAll(rc)
 }
 
-// buildJobSpec creates the kaniko build Job.
-// Init container (fetcher): downloads ZIP from MinIO → extracts to /workspace, writes kaniko docker config.
-// Main container (kaniko): reads /workspace, pushes built image to Harbor staging.
+// buildJobSpec applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (s *Spawner) buildJobSpec(jobName string, msg topics.SubmissionBuildRequested, stagingRef, dockerfileB64 string) *batchv1.Job {
 	ttl := jobTTL
 	deadline := buildDeadline
@@ -437,10 +410,6 @@ func (s *Spawner) buildJobSpec(jobName string, msg topics.SubmissionBuildRequest
 		"--context=dir:///workspace",
 		"--dockerfile=/workspace/Dockerfile",
 		"--destination=" + stagingRef,
-		// Some Kubernetes/containerd nodes expose /product_uuid inside the
-		// executor rootfs. Kaniko can compile successfully, then fail cleaning
-		// a multi-stage build with "device or resource busy" unless this host
-		// path is excluded from snapshots and stage cleanup.
 		"--ignore-path=/product_uuid",
 	}
 	if s.registryInsecure(s.cfg.HarborStagingEndpoint) {
@@ -515,8 +484,8 @@ func (s *Spawner) buildJobSpec(jobName string, msg topics.SubmissionBuildRequest
 	}
 }
 
-// scanJobSpec creates a trivy vulnerability scan Job against the staging registry image.
-// JSON report is written to stdout and collected by the spawner via pod logs.
+// scanJobSpec applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (s *Spawner) scanJobSpec(jobName, submissionID, stagingRef string) *batchv1.Job {
 	ttl := jobTTL
 	deadline := scanDeadline
@@ -550,9 +519,6 @@ func (s *Spawner) scanJobSpec(jobName, submissionID, stagingRef string) *batchv1
 					SecurityContext: podSecurityContext(),
 					Tolerations:     s.buildTolerations(),
 					NodeSelector:    s.buildNodeSelector(),
-					// Writable scratch: the container has ReadOnlyRootFilesystem=true,
-					// but trivy must write its vulnerability DB + temp files. Without
-					// this emptyDir the scan aborts on a cold pod.
 					Volumes: []corev1.Volume{
 						{Name: "tmp", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
 					},
@@ -578,8 +544,8 @@ func (s *Spawner) scanJobSpec(jobName, submissionID, stagingRef string) *batchv1
 	}
 }
 
-// sbomJobSpec creates a syft SBOM generation Job against the staging registry image.
-// SPDX-JSON output is written to stdout and collected by the spawner via pod logs.
+// sbomJobSpec applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (s *Spawner) sbomJobSpec(jobName, submissionID, stagingRef string) *batchv1.Job {
 	ttl := jobTTL
 	deadline := sbomDeadline
@@ -618,8 +584,6 @@ func (s *Spawner) sbomJobSpec(jobName, submissionID, stagingRef string) *batchv1
 					SecurityContext: podSecurityContext(),
 					Tolerations:     s.buildTolerations(),
 					NodeSelector:    s.buildNodeSelector(),
-					// Writable scratch: ReadOnlyRootFilesystem=true, but syft extracts
-					// image layers to a temp dir. Point TMPDIR/cache at this emptyDir.
 					Volumes: []corev1.Volume{
 						{Name: "tmp", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
 					},
@@ -645,6 +609,8 @@ func (s *Spawner) sbomJobSpec(jobName, submissionID, stagingRef string) *batchv1
 	}
 }
 
+// fetcherEnv applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (s *Spawner) fetcherEnv(msg topics.SubmissionBuildRequested, dockerfileB64 string) []corev1.EnvVar {
 	return []corev1.EnvVar{
 		{Name: "MINIO_ENDPOINT", Value: s.cfg.MinioEndpoint},
@@ -659,6 +625,8 @@ func (s *Spawner) fetcherEnv(msg topics.SubmissionBuildRequested, dockerfileB64 
 	}
 }
 
+// secretKeyRef applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (s *Spawner) secretKeyRef(key string) *corev1.EnvVarSource {
 	return &corev1.EnvVarSource{
 		SecretKeyRef: &corev1.SecretKeySelector{
@@ -668,11 +636,9 @@ func (s *Spawner) secretKeyRef(key string) *corev1.EnvVarSource {
 	}
 }
 
+// setStatus applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (s *Spawner) setStatus(_ context.Context, submissionID, status, message string) {
-	// Status writes must survive shutdown: the request ctx is cancelled on
-	// SIGTERM, and if the terminal 'failed'/'ready' publish + DB write rode that
-	// cancelled ctx the row would be stranded non-terminal and the offset
-	// uncommitted. Detach with a fresh bounded context.
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if err := s.updater.PublishStatus(ctx, submissionID, status, message); err != nil {
@@ -686,6 +652,8 @@ func (s *Spawner) setStatus(_ context.Context, submissionID, status, message str
 	metrics.Counter("submission_status_transition_total", "Submission status transitions by status/result.", metrics.Labels("status", status, "result", "ok"), 1)
 }
 
+// buildTolerations applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (s *Spawner) buildTolerations() []corev1.Toleration {
 	if s.cfg.BuildNodePool == "" {
 		return nil
@@ -698,6 +666,8 @@ func (s *Spawner) buildTolerations() []corev1.Toleration {
 	}}
 }
 
+// buildNodeSelector applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (s *Spawner) buildNodeSelector() map[string]string {
 	if s.cfg.BuildNodePool == "" {
 		return nil
@@ -705,6 +675,8 @@ func (s *Spawner) buildNodeSelector() map[string]string {
 	return map[string]string{"pool": s.cfg.BuildNodePool}
 }
 
+// isJobComplete performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func isJobComplete(job *batchv1.Job) bool {
 	for _, c := range job.Status.Conditions {
 		if c.Type == batchv1.JobComplete && c.Status == corev1.ConditionTrue {
@@ -714,6 +686,8 @@ func isJobComplete(job *batchv1.Job) bool {
 	return false
 }
 
+// isJobFailed performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func isJobFailed(job *batchv1.Job) bool {
 	for _, c := range job.Status.Conditions {
 		if c.Type == batchv1.JobFailed && c.Status == corev1.ConditionTrue {
@@ -723,6 +697,8 @@ func isJobFailed(job *batchv1.Job) bool {
 	return false
 }
 
+// jobFailureMessage performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func jobFailureMessage(job *batchv1.Job) string {
 	for _, c := range job.Status.Conditions {
 		if c.Type == batchv1.JobFailed {
@@ -732,11 +708,8 @@ func jobFailureMessage(job *batchv1.Job) string {
 	return "job failed"
 }
 
-// loadK8sConfig uses in-cluster config when running inside a pod, falling back
-// to kubeconfig for local dev. This mirrors sandbox-orchestrator's loadConfig —
-// the standard loader for every service in this repo (see invariant 6.8). The
-// in-cluster path succeeds only with a mounted ServiceAccount token, so the
-// kubeconfig fallback only fires out-of-cluster.
+// loadK8sConfig performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func loadK8sConfig() (*rest.Config, error) {
 	cfg, inClusterErr := rest.InClusterConfig()
 	if inClusterErr == nil {
@@ -750,6 +723,8 @@ func loadK8sConfig() (*rest.Config, error) {
 	return cfg, nil
 }
 
+// resourceName performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func resourceName(prefix, submissionID string) string {
 	hash := sha256.Sum256([]byte(submissionID))
 	hashSuffix := hex.EncodeToString(hash[:])[:10]
@@ -768,6 +743,8 @@ func resourceName(prefix, submissionID string) string {
 	return fmt.Sprintf("%s-%s-%s", prefix, safe, hashSuffix)
 }
 
+// dnsLabelFragment performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func dnsLabelFragment(value string) string {
 	var b strings.Builder
 	lastHyphen := false
@@ -793,18 +770,18 @@ func dnsLabelFragment(value string) string {
 	return strings.Trim(b.String(), "-")
 }
 
+// podSecurityContext performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func podSecurityContext() *corev1.PodSecurityContext {
 	return &corev1.PodSecurityContext{
 		RunAsNonRoot: boolPtr(true),
 	}
 }
 
+// containerSecurityContext performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func containerSecurityContext() *corev1.SecurityContext {
 	return &corev1.SecurityContext{
-		// Explicit non-root UID: the pod sets RunAsNonRoot=true, which the kubelet
-		// rejects unless a non-root UID is known. The fetch init container's image
-		// (SpawnerImage) and the trivy/syft images may default to root, so pin the
-		// UID here rather than relying on the image's USER directive.
 		RunAsNonRoot:             boolPtr(true),
 		RunAsUser:                int64Ptr(65532),
 		AllowPrivilegeEscalation: boolPtr(false),
@@ -815,16 +792,8 @@ func containerSecurityContext() *corev1.SecurityContext {
 	}
 }
 
-// kanikoSecurityContext is the per-container override for the kaniko build
-// container only. The kaniko executor image runs as root (UID 0) and must
-// extract base-image layers into the container root filesystem, chowning files
-// to match the source image — so RunAsNonRoot, ReadOnlyRootFilesystem, and
-// dropping all capabilities (CAP_CHOWN/CAP_DAC_OVERRIDE/CAP_FOWNER are needed
-// for extraction) all break it. The container-level RunAsNonRoot:false
-// overrides the pod-level RunAsNonRoot:true, so the sibling fetch init
-// container stays hardened while only kaniko is relaxed.
-// AllowPrivilegeEscalation stays false (kaniko is already root and does not
-// need to gain new privileges).
+// kanikoSecurityContext performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func kanikoSecurityContext() *corev1.SecurityContext {
 	return &corev1.SecurityContext{
 		RunAsNonRoot:             boolPtr(false),
@@ -834,25 +803,26 @@ func kanikoSecurityContext() *corev1.SecurityContext {
 	}
 }
 
+// boolPtr performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func boolPtr(v bool) *bool {
 	return &v
 }
 
+// int64Ptr performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func int64Ptr(v int64) *int64 {
 	return &v
 }
 
-// registryInsecure reports whether registry access for endpoint may downgrade
-// to plain HTTP / skipped TLS verification (kaniko --insecure-registry, trivy
-// --insecure, syft SYFT_REGISTRY_INSECURE_*, crane.Insecure). Downgrading is
-// an explicit opt-in via REGISTRY_INSECURE, plus loopback/kind-registry
-// convenience matches ONLY. The old 10.*/172.*/192.168.* heuristic is gone
-// deliberately: EKS pod/service CIDRs (and most in-VPC registries) live in
-// exactly those ranges, so the heuristic silently stripped TLS in production.
+// registryInsecure applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (s *Spawner) registryInsecure(endpoint string) bool {
 	return s.cfg.RegistryInsecure || isLocalRegistry(endpoint)
 }
 
+// isLocalRegistry performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func isLocalRegistry(endpoint string) bool {
 	endpoint = strings.TrimSpace(strings.TrimPrefix(strings.TrimPrefix(endpoint, "http://"), "https://"))
 	return strings.HasPrefix(endpoint, "localhost:") ||
@@ -860,13 +830,8 @@ func isLocalRegistry(endpoint string) bool {
 		strings.Contains(endpoint, "kind-registry")
 }
 
-// ensureRepository pre-creates the repository behind imageRef when the
-// registry provider requires it. ECR has no push-to-create: a kaniko push or
-// crane copy into a nonexistent repository fails outright, so the spawner
-// creates <project>/<submissionID> ahead of both. RepositoryAlreadyExists is
-// success — refs are deterministic, so every rebuild of a submission hits an
-// existing repository. No-op when REGISTRY_PROVIDER is unset (push-to-create
-// registries like Harbor need nothing).
+// ensureRepository applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (s *Spawner) ensureRepository(ctx context.Context, imageRef string) error {
 	if s.ecr == nil {
 		return nil
@@ -883,11 +848,8 @@ func (s *Spawner) ensureRepository(ctx context.Context, imageRef string) error {
 	return nil
 }
 
-// ecrRepositoryName derives the ECR repositoryName from an image ref the
-// spawner composed (<endpoint>/<project>/<submissionID>[:tag]): drop the
-// registry host (first path segment) and the tag. The tag colon is only
-// stripped when it appears after the last slash, so registry ports
-// (localhost:5000/...) never eat into the path.
+// ecrRepositoryName performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func ecrRepositoryName(imageRef string) string {
 	path := imageRef
 	if i := strings.Index(path, "/"); i >= 0 {
@@ -899,22 +861,23 @@ func ecrRepositoryName(imageRef string) string {
 	return path
 }
 
-// isECRRepositoryAlreadyExists matches aws-sdk-go-v2's
-// types.RepositoryAlreadyExistsException without importing the SDK here: all
-// AWS API errors implement smithy APIError's ErrorCode, and the exception's
-// code is its type name.
+// isECRRepositoryAlreadyExists performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func isECRRepositoryAlreadyExists(err error) bool {
 	var apiErr interface{ ErrorCode() string }
 	return errors.As(err, &apiErr) && apiErr.ErrorCode() == "RepositoryAlreadyExistsException"
 }
 
-// recordBuildPhase and recordBuildRequest expose build pipeline health.
+// recordBuildPhase performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func recordBuildPhase(phase string, start time.Time, result string) {
 	labels := metrics.Labels("phase", phase, "result", result)
 	metrics.Counter("build_phase_total", "Build phases by phase and result.", labels, 1)
 	metrics.Histogram("build_phase_duration_seconds", "Build phase duration in seconds.", labels, metrics.SinceSeconds(start))
 }
 
+// recordBuildRequest performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func recordBuildRequest(result string) {
 	metrics.Counter("build_requests_total", "Build requests by result.", metrics.Labels("result", result), 1)
 }

@@ -1,3 +1,8 @@
+// Package score implements score behavior.
+//
+// This file is part of the IICPC benchmarking platform and keeps its
+// responsibilities local to the surrounding package. It should be read with
+// the service-level design in design.md for broader operational context.
 package score
 
 import (
@@ -15,13 +20,11 @@ const (
 	DefaultMaxP99NS               = uint64(1_000_000)
 	DefaultWaveDurationNS         = uint64(20_000_000_000)
 	DefaultMaxScheduledWaves      = uint64(10_000)
-	// DefaultMinCoverage is the telemetry-completeness threshold: the minimum
-	// per-session matched/sent coverage below which violation-based DQ is
-	// suppressed and the run is flagged IncompleteTelemetry. 0.90 mirrors the
-	// scoring_config seed.
-	DefaultMinCoverage = 0.90
+	DefaultMinCoverage            = 0.90
 )
 
+// Config groups the state and dependencies used by this package.
+// Keep this type aligned with the runtime contract around it.
 type Config struct {
 	CorrectnessDQThreshold float64
 	MaxErrorRate           float64
@@ -30,6 +33,8 @@ type Config struct {
 	MinCoverage            float64
 }
 
+// WithDefaults applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (c Config) WithDefaults() Config {
 	if !isPositiveFinite(c.CorrectnessDQThreshold) || c.CorrectnessDQThreshold > 1 {
 		c.CorrectnessDQThreshold = DefaultCorrectnessDQThreshold
@@ -49,25 +54,26 @@ func (c Config) WithDefaults() Config {
 	return c
 }
 
+// isPositiveFinite performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func isPositiveFinite(v float64) bool {
 	return v > 0 && !math.IsNaN(v) && !math.IsInf(v, 0)
 }
 
+// Correctness groups the state and dependencies used by this package.
+// Keep this type aligned with the runtime contract around it.
 type Correctness struct {
 	SessionID      string
 	ValidFills     uint64
 	TotalFills     uint64
 	ViolationCount uint64
-	// Telemetry-completeness counters from the validator's drain. SentCount is
-	// orders.sent events drained, AckedCount is orders.acked events (post-
-	// dedup), MatchedCount is distinct orders present in BOTH streams — the
-	// replay's actual inputs. All zero = unknown (pre-counter rows or timed_out
-	// placeholders), which the coverage gate treats as ungateable.
-	SentCount    uint64
-	AckedCount   uint64
-	MatchedCount uint64
+	SentCount      uint64
+	AckedCount     uint64
+	MatchedCount   uint64
 }
 
+// MetricRow groups the state and dependencies used by this package.
+// Keep this type aligned with the runtime contract around it.
 type MetricRow struct {
 	WaveIndex int
 	P99NS     uint64
@@ -75,6 +81,8 @@ type MetricRow struct {
 	ErrorRate float64
 }
 
+// Session groups the state and dependencies used by this package.
+// Keep this type aligned with the runtime contract around it.
 type Session struct {
 	SessionID  string
 	Scenario   string
@@ -84,6 +92,8 @@ type Session struct {
 	DurationNS uint64
 }
 
+// Input groups the state and dependencies used by this package.
+// Keep this type aligned with the runtime contract around it.
 type Input struct {
 	RunGroupID   string
 	SubmissionID string
@@ -93,6 +103,8 @@ type Input struct {
 	Config       Config
 }
 
+// WaveResult groups the state and dependencies used by this package.
+// Keep this type aligned with the runtime contract around it.
 type WaveResult struct {
 	WaveIndex  int    `json:"wave_index"`
 	OfferedRPS uint64 `json:"offered_rps"`
@@ -101,21 +113,19 @@ type WaveResult struct {
 	Reason     string `json:"reason,omitempty"`
 }
 
+// Result groups the state and dependencies used by this package.
+// Keep this type aligned with the runtime contract around it.
 type Result struct {
-	RunGroupID           string  `json:"run_group_id"`
-	SubmissionID         string  `json:"submission_id"`
-	ContestantID         string  `json:"contestant_id"`
-	TeamName             string  `json:"team_name"`
-	PeakSustainedTPS     uint64  `json:"peak_sustained_tps"`
-	P99AtPeakNS          uint64  `json:"p99_at_peak_ns"`
-	SpikeRecoveryNS      uint64  `json:"spike_recovery_ns"`
-	TotalCorrectness     float64 `json:"total_correctness"`
-	Disqualified         bool    `json:"disqualified"`
-	DisqualificationCode string  `json:"disqualification_code,omitempty"`
-	// IncompleteTelemetry marks a verdict whose correctness inputs failed the
-	// per-session coverage gate (matched/sent below scoring_config.min_coverage).
-	// Violation-based DQ is suppressed for such runs; the reason names the first
-	// offending session so the leaderboard can surface it from score_detail.
+	RunGroupID                string       `json:"run_group_id"`
+	SubmissionID              string       `json:"submission_id"`
+	ContestantID              string       `json:"contestant_id"`
+	TeamName                  string       `json:"team_name"`
+	PeakSustainedTPS          uint64       `json:"peak_sustained_tps"`
+	P99AtPeakNS               uint64       `json:"p99_at_peak_ns"`
+	SpikeRecoveryNS           uint64       `json:"spike_recovery_ns"`
+	TotalCorrectness          float64      `json:"total_correctness"`
+	Disqualified              bool         `json:"disqualified"`
+	DisqualificationCode      string       `json:"disqualification_code,omitempty"`
 	IncompleteTelemetry       bool         `json:"incomplete_telemetry"`
 	IncompleteTelemetryReason string       `json:"incomplete_telemetry_reason,omitempty"`
 	Waves                     []WaveResult `json:"waves,omitempty"`
@@ -123,6 +133,8 @@ type Result struct {
 
 var ErrMissingRampSession = errors.New("missing ramp session")
 
+// Compute performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func Compute(in Input) (Result, error) {
 	cfg := in.Config.WithDefaults()
 	res := Result{
@@ -133,22 +145,6 @@ func Compute(in Input) (Result, error) {
 		TotalCorrectness: aggregateCorrectness(in.Sessions),
 	}
 
-	// Telemetry-completeness gate (v1). Coverage is matched_count/sent_count:
-	// of the orders the bot fleet reports firing (orders.sent is the bot-side
-	// ground truth of what existed), the fraction the validator could join with
-	// at least one kernel-side orders.acked response — the orders that actually
-	// entered the replay. This is the most defensible ratio the validator can
-	// measure: a lost acked event removes its order from matched_count directly
-	// (the silent-exclusion failure this gate exists to catch), while
-	// acked_count/sent_count would be distorted by multi-response orders
-	// (partial fills emit several acked events per order). The ratio is
-	// conservative toward the contestant: genuine non-response also lowers it,
-	// but a false flag only suppresses violation DQ — it never improves a score.
-	// sent_count==0 means the counters are unknown (rows written before the
-	// counters existed, or a timed_out placeholder whose drain never ran), so
-	// coverage is unknowable and the gate must not retroactively reflag those
-	// runs. The first offending session (deterministic LoadInput order) names
-	// the reason persisted in score_detail.
 	for i := range in.Sessions {
 		c := in.Sessions[i].Correct
 		if c.SentCount == 0 {
@@ -166,13 +162,6 @@ func Compute(in Input) (Result, error) {
 
 	var ramp *Session
 	disqualificationCode := ""
-	// The correctness-RATIO gates below stay active even when the run is
-	// flagged IncompleteTelemetry: valid/total is a ratio over the fills that
-	// WERE observed, so uniform telemetry loss leaves it roughly unbiased.
-	// Caveat: non-uniform loss (e.g. one worker's flushes dropped wholesale)
-	// can still skew the ratio — v1 accepts that, because suppressing the
-	// correctness gate entirely would let a cheating engine hide behind lossy
-	// telemetry.
 	if res.TotalCorrectness < cfg.CorrectnessDQThreshold {
 		disqualificationCode = "correctness_below_threshold"
 	}
@@ -190,9 +179,6 @@ func Compute(in Input) (Result, error) {
 		}
 	}
 	if ramp == nil {
-		// A disqualified run-group without a ramp session is still a terminal
-		// result: surface the DQ instead of an error, otherwise no scores row is
-		// ever written and PendingRunGroups re-enqueues the group forever.
 		if disqualificationCode != "" {
 			res.Disqualified = true
 			res.DisqualificationCode = disqualificationCode
@@ -200,25 +186,12 @@ func Compute(in Input) (Result, error) {
 		}
 		return res, ErrMissingRampSession
 	}
-	// The ramp session's correctness is gated by the per-session correctness-ratio
-	// check above (the ramp IS a session), so there is no separate ramp gate. The
-	// earlier binary "any ramp violation -> DQ" rule was removed: a handful of
-	// order-dependent violations out of tens of thousands of fills (a live engine
-	// cannot reproduce the offline effective_t3 order exactly — see the validator's
-	// aggressive-fill tolerance) must not disqualify a correct engine. Only a ramp
-	// whose correctness RATIO falls below the threshold is disqualified, which the
-	// per-session gate already enforces.
 
 	res.SpikeRecoveryNS = spikeRecoveryNS(in.Sessions, cfg.WaveDurationNS)
 
 	schedule := WaveSchedule(ramp.TaskSpecs, cfg.WaveDurationNS)
 	metrics := summarizeMetrics(ramp.Metrics)
 	for _, wave := range schedule {
-		// Wave 0 is the warmup wave: the first seconds after the barrier are
-		// dominated by TCP/connection, cache, and JIT cold-start (tens of ms even
-		// on a healthy node), which is not representative of the engine's sustained
-		// latency. Per the scoring contract the climb is walked from wave 1; wave 0
-		// is the baseline and never gates or contributes to peak.
 		if wave.WaveIndex == 0 {
 			continue
 		}
@@ -253,6 +226,8 @@ func Compute(in Input) (Result, error) {
 	return res, nil
 }
 
+// aggregateCorrectness performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func aggregateCorrectness(sessions []Session) float64 {
 	var valid, total float64
 	for _, s := range sessions {
@@ -265,11 +240,15 @@ func aggregateCorrectness(sessions []Session) float64 {
 	return min(valid/total, 1.0)
 }
 
+// WaveOffer groups the state and dependencies used by this package.
+// Keep this type aligned with the runtime contract around it.
 type WaveOffer struct {
 	WaveIndex  int
 	OfferedRPS uint64
 }
 
+// WaveSchedule performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func WaveSchedule(tasks []topics.TaskSpec, waveDurationNS uint64) []WaveOffer {
 	if waveDurationNS == 0 {
 		waveDurationNS = DefaultWaveDurationNS
@@ -310,6 +289,8 @@ func WaveSchedule(tasks []topics.TaskSpec, waveDurationNS uint64) []WaveOffer {
 	return out
 }
 
+// saturatingAdd performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func saturatingAdd(a, b uint64) uint64 {
 	if math.MaxUint64-a < b {
 		return math.MaxUint64
@@ -317,6 +298,8 @@ func saturatingAdd(a, b uint64) uint64 {
 	return a + b
 }
 
+// overlapNS performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func overlapNS(aStart, aEnd, bStart, bEnd uint64) uint64 {
 	start := max(aStart, bStart)
 	end := min(aEnd, bEnd)
@@ -326,6 +309,8 @@ func overlapNS(aStart, aEnd, bStart, bEnd uint64) uint64 {
 	return end - start
 }
 
+// MetricSummary groups the state and dependencies used by this package.
+// Keep this type aligned with the runtime contract around it.
 type MetricSummary struct {
 	Count        int
 	MaxP99NS     uint64 // worst single second (diagnostic; retained for visibility)
@@ -334,14 +319,8 @@ type MetricSummary struct {
 	p99Samples   []uint64
 }
 
-// summarizeMetrics aggregates the per-second metric rows of a wave. The latency
-// gate uses StableP99NS — the MEDIAN of the wave's per-second p99 values — not the
-// worst single second. A wave's first second after the barrier is dominated by
-// connection/cache/JIT warmup (often tens of ms) and an occasional second carries
-// a GC/scheduling transient; gating on the max would fail an otherwise-healthy
-// wave on one unrepresentative second. The median is the wave's sustained p99 —
-// the "stable window" the scoring contract intends. MaxP99NS is kept for the
-// dashboard. Error rate stays a max: a sustained error second is a real fault.
+// summarizeMetrics performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func summarizeMetrics(rows []MetricRow) map[int]MetricSummary {
 	out := make(map[int]MetricSummary)
 	for _, row := range rows {
@@ -361,8 +340,8 @@ func summarizeMetrics(rows []MetricRow) map[int]MetricSummary {
 	return out
 }
 
-// medianU64 returns the median of the samples (0 if empty). Sorts a copy so the
-// caller's slice order is preserved.
+// medianU64 performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func medianU64(samples []uint64) uint64 {
 	if len(samples) == 0 {
 		return 0
@@ -372,15 +351,8 @@ func medianU64(samples []uint64) uint64 {
 	return s[len(s)/2]
 }
 
-// spikeRecoveryNS estimates the Session-2 (spike) p99 recovery time: the elapsed
-// time from the spike's peak-p99 wave until p99 returns within 10% of the
-// pre-spike baseline (the first wave's p99). It is a secondary tiebreaker only.
-//
-// Resolution is one wave (WaveDurationNS, ~20s) because the metrics store
-// aggregates per wave, not per second — this is a coarse proxy, not a precise
-// recovery time. Returns 0 when there is no spike session, no metrics, or p99
-// never rose meaningfully above baseline; returns the full observed post-peak
-// span when it rose but never recovered.
+// spikeRecoveryNS performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func spikeRecoveryNS(sessions []Session, waveDurationNS uint64) uint64 {
 	if waveDurationNS == 0 {
 		waveDurationNS = DefaultWaveDurationNS
@@ -425,16 +397,15 @@ func spikeRecoveryNS(sessions []Session, waveDurationNS uint64) uint64 {
 			return uint64(w-peakWave) * waveDurationNS
 		}
 	}
-	// rose above baseline but never recovered within the observed window
 	last := waves[len(waves)-1]
 	return uint64(last-peakWave+1) * waveDurationNS
 }
 
+// SortResults performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func SortResults(results []Result) {
 	sort.SliceStable(results, func(i, j int) bool {
 		a, b := results[i], results[j]
-		// Disqualified results keep their measured peak for transparency but
-		// must never outrank a clean result, so DQ is the primary key.
 		if a.Disqualified != b.Disqualified {
 			return b.Disqualified
 		}

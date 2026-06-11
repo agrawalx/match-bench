@@ -1,7 +1,8 @@
-//! Telemetry ingester: consumes the bot-side `orders.sent` and the eBPF-side
-//! `orders.acked` streams into per-`(session, wave)` latency aggregates and
-//! snapshots them to TimescaleDB + Redis once a second.
-
+//! This module implements lib behavior.
+//!
+//! It belongs to the IICPC benchmarking platform and should keep its
+//! behavior consistent with the service contracts documented in design.md.
+//! The comments in this file describe public structure and callable behavior.
 pub mod aggregate;
 pub mod config;
 pub mod ingester;

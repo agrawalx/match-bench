@@ -1,13 +1,16 @@
+// Package main defines tests for main test.
+//
+// This file is part of the IICPC benchmarking platform and keeps its
+// responsibilities local to the surrounding package. It should be read with
+// the service-level design in design.md for broader operational context.
 package main
 
 import (
 	"testing"
 )
 
-// loadConfig must fail when no redirect allowlist is configured — the same
-// treatment as a missing client ID. An auth-api booted without an allowlist
-// would otherwise forward arbitrary attacker-chosen redirect_uri values into
-// the Google token exchange.
+// TestLoadConfigRequiresAllowedRedirects performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func TestLoadConfigRequiresAllowedRedirects(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -52,7 +55,6 @@ func TestLoadConfigRequiresAllowedRedirects(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// Clear every config-relevant var, then apply the case's env.
 			for _, key := range []string{
 				"GOOGLE_CLIENT_ID", "OAUTH_CLIENT_ID",
 				"GOOGLE_CLIENT_SECRET", "OAUTH_CLIENT_SECRET",
@@ -71,8 +73,8 @@ func TestLoadConfigRequiresAllowedRedirects(t *testing.T) {
 	}
 }
 
-// redirectAllowed must fail closed: an empty allowlist (zero-value config that
-// bypassed loadConfig) rejects everything instead of allowing everything.
+// TestRedirectAllowedFailClosed performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func TestRedirectAllowedFailClosed(t *testing.T) {
 	tests := []struct {
 		name        string

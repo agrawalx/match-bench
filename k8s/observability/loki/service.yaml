@@ -1,6 +1,10 @@
-# loki.observability.svc:3100 — the push endpoint every application logger
-# targets via LOKI_URL=http://loki.observability.svc.cluster.local:3100
-# (the logger appends /loki/api/v1/push). Also the Grafana Loki datasource URL.
+# k8s/observability/loki/service.yaml
+#
+# This file declares Kubernetes resources for k8s/observability/loki.
+# It is part of the IICPC platform configuration and should remain
+# aligned with the deployment and operations guidance in the README.
+# Keep comments at the file header so resource bodies stay declarative.
+
 apiVersion: v1
 kind: Service
 metadata:

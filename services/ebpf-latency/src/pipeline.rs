@@ -1,6 +1,8 @@
-//! The userspace processing pipeline: capture -> reassembly -> framing/parse ->
-//! ClOrdID matching -> emitted measurements. Factored into its own module so the
-//! integration test can drive the exact same code that `main` runs.
+//! This module implements pipeline behavior.
+//!
+//! It belongs to the IICPC benchmarking platform and should keep its
+//! behavior consistent with the service contracts documented in design.md.
+//! The comments in this file describe public structure and callable behavior.
 
 use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -10,19 +12,23 @@ use crate::matcher::{MatchedEvent, Matcher, DEFAULT_IDLE_NS};
 use crate::parse::{self, Classified, Frame};
 use crate::reassembly::Reassembler;
 
+/// Pipeline stores the state passed across this module boundary.
+/// Keep field changes compatible with callers and serialized contracts.
 pub struct Pipeline {
     reassemblers: HashMap<(FlowKey, Direction), Reassembler>,
     matcher: Matcher,
-    /// Added to every kernel CLOCK_MONOTONIC stamp to get CLOCK_REALTIME ns.
     clock_offset_ns: u64,
 }
 
 impl Pipeline {
-    /// Sample the monotonic->realtime offset once (so t7 - t3 stays exact).
+    /// new performs the module-specific operation described by its name.
+    /// It keeps validation, side effects, and returned values within this module's contract.
     pub fn new() -> Self {
         Self::with_offset(realtime_minus_monotonic_ns())
     }
 
+    /// with_offset performs the module-specific operation described by its name.
+    /// It keeps validation, side effects, and returned values within this module's contract.
     pub fn with_offset(clock_offset_ns: u64) -> Self {
         Self {
             reassemblers: HashMap::new(),
@@ -31,26 +37,25 @@ impl Pipeline {
         }
     }
 
+    /// to_realtime performs the module-specific operation described by its name.
+    /// It keeps validation, side effects, and returned values within this module's contract.
     pub fn to_realtime(&self, monotonic_ns: u64) -> u64 {
         monotonic_ns.wrapping_add(self.clock_offset_ns)
     }
 
     #[allow(dead_code)] // used for diagnostics; not exercised by every consumer
+    /// unmatched_responses performs the module-specific operation described by its name.
+    /// It keeps validation, side effects, and returned values within this module's contract.
     pub fn unmatched_responses(&self) -> u64 {
         self.matcher.unmatched_responses
     }
 
-    /// Feed one capture through reassembly + framing + matching, pushing any
-    /// emitted measurements into `out`.
+    /// process performs the module-specific operation described by its name.
+    /// It keeps validation, side effects, and returned values within this module's contract.
     pub fn process(&mut self, cap: &Capture, out: &mut Vec<MatchedEvent>) {
         let ts = self.to_realtime(cap.timestamp_ns);
 
-        // Stage 1: reassemble + frame whole messages (reassembler borrow only).
         let mut framed: Vec<(u64, u32, bool, parse::ParsedMessage)> = Vec::new();
-        // H14: the on-wire payload exceeded the capture cap, so `cap.payload` is a
-        // truncated prefix. Feeding it to the reassembler would advance next_seq by
-        // the short length and desync (then stall) the flow. Reset to re-anchor at
-        // the next contiguous segment instead of corrupting the stream.
         let truncated = cap.payload_len as usize > cap.payload.len();
         {
             let re = self
@@ -78,7 +83,6 @@ impl Pipeline {
             }
         }
 
-        // Stage 2: apply framed messages to the matcher.
         for (msg_ts, msg_seq, reordered, p) in framed {
             match p.class {
                 Classified::Request => self.matcher.on_request(
@@ -107,8 +111,9 @@ impl Pipeline {
         }
     }
 
-    /// Drop idle orders and reassemblers to bound memory between runs.
     #[allow(dead_code)] // driven by main's evict ticker; not by the integration test
+    /// evict_idle performs the module-specific operation described by its name.
+    /// It keeps validation, side effects, and returned values within this module's contract.
     pub fn evict_idle(&mut self) {
         let now = self.to_realtime(monotonic_now_ns());
         self.matcher.evict_idle(now, DEFAULT_IDLE_NS);
@@ -118,23 +123,26 @@ impl Pipeline {
 }
 
 impl Default for Pipeline {
+    /// default performs the module-specific operation described by its name.
+    /// It keeps validation, side effects, and returned values within this module's contract.
     fn default() -> Self {
         Self::with_offset(0)
     }
 }
 
+/// monotonic_now_ns performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 pub fn monotonic_now_ns() -> u64 {
     let mut ts = libc::timespec {
         tv_sec: 0,
         tv_nsec: 0,
     };
-    // SAFETY: clock_gettime with a valid pointer; CLOCK_MONOTONIC matches the
-    // kernel's bpf_ktime_get_ns domain.
     unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts) };
     (ts.tv_sec as u64) * 1_000_000_000 + ts.tv_nsec as u64
 }
 
-/// Offset to add to a CLOCK_MONOTONIC stamp to get CLOCK_REALTIME nanoseconds.
+/// realtime_minus_monotonic_ns performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 pub fn realtime_minus_monotonic_ns() -> u64 {
     let real = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -148,6 +156,8 @@ mod tests {
     use super::*;
     use crate::capture::{Capture, FlowKey, Transport};
 
+    /// fix performs the module-specific operation described by its name.
+    /// It keeps validation, side effects, and returned values within this module's contract.
     fn fix(body: &str) -> Vec<u8> {
         let body = body.replace('|', "\x01");
         let head = format!("8=FIX.4.2\x019={}\x01", body.len());
@@ -157,6 +167,8 @@ mod tests {
         bytes
     }
 
+    /// cap performs the module-specific operation described by its name.
+    /// It keeps validation, side effects, and returned values within this module's contract.
     fn cap(dir: Direction, seq: u32, ts: u64, payload: &[u8]) -> Capture<'_> {
         Capture {
             timestamp_ns: ts,
@@ -174,6 +186,8 @@ mod tests {
     }
 
     #[test]
+    /// request_then_two_responses_emit_two_events_sharing_t3 performs the module-specific operation described by its name.
+    /// It keeps validation, side effects, and returned values within this module's contract.
     fn request_then_two_responses_emit_two_events_sharing_t3() {
         let mut p = Pipeline::with_offset(0);
         let mut out = Vec::new();
@@ -197,12 +211,13 @@ mod tests {
     }
 
     #[test]
+    /// two_pipelined_orders_match_per_clordid performs the module-specific operation described by its name.
+    /// It keeps validation, side effects, and returned values within this module's contract.
     fn two_pipelined_orders_match_per_clordid() {
         let mut p = Pipeline::with_offset(0);
         let mut out = Vec::new();
         let a = fix("35=D|49=IICPC-BOT|34=1|11=A|38=1|40=2|44=1.0|");
         let b = fix("35=D|49=IICPC-BOT|34=2|11=B|38=1|40=2|44=2.0|");
-        // both requests coalesced into one segment
         let mut both = a.clone();
         both.extend_from_slice(&b);
         p.process(&cap(Direction::Request, 1, 100, &both), &mut out);

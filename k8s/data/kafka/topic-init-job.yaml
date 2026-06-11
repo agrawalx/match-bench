@@ -1,3 +1,10 @@
+# k8s/data/kafka/topic-init-job.yaml
+#
+# This file declares Kubernetes resources for k8s/data/kafka.
+# It is part of the IICPC platform configuration and should remain
+# aligned with the deployment and operations guidance in the README.
+# Keep comments at the file header so resource bodies stay declarative.
+
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -46,12 +53,6 @@ spec:
               create_topic barrier 3 86400000 || failed=1
               create_topic bot.ready 3 86400000 || failed=1
               create_topic workload.failed 3 604800000 || failed=1
-              # orders.* carry the full telemetry firehose (24 partitions x RF=3,
-              # every order event of every session). At contest-day volume the
-              # 24h default retention overruns the 3x20Gi broker PVCs roughly 3x;
-              # 6h (21600000 ms) is ample headroom — the telemetry-ingester and
-              # validator consume within seconds and results are durable in
-              # TimescaleDB/Postgres long before segments age out.
               create_topic orders.sent 24 21600000 || failed=1
               create_topic orders.acked 24 21600000 || failed=1
               create_topic scores.correctness 3 2592000000 || failed=1

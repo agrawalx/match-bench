@@ -281,7 +281,7 @@
           "text": "submission-api",
           "value": "submission-api"
         },
-        "allValue": ".*",
+        "allValue": ".+",
         "hide": 0,
         "includeAll": true,
         "label": "Service",
@@ -291,7 +291,7 @@
         "query": {
           "label": "service_name",
           "refId": "LokiVariableQueryEditor-Service",
-          "stream": "{}",
+          "stream": "{service_name=~\".+\"}",
           "type": 1
         },
         "refresh": 1,
@@ -306,7 +306,7 @@
           "text": "local",
           "value": "local"
         },
-        "allValue": ".*",
+        "allValue": ".+",
         "hide": 0,
         "includeAll": true,
         "label": "Environment",
@@ -339,7 +339,7 @@
             "ERROR"
           ]
         },
-        "allValue": ".*",
+        "allValue": ".+",
         "hide": 0,
         "includeAll": true,
         "label": "Level",

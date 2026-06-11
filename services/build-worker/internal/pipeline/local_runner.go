@@ -1,3 +1,8 @@
+// Package pipeline implements local runner behavior.
+//
+// This file is part of the IICPC benchmarking platform and keeps its
+// responsibilities local to the surrounding package. It should be read with
+// the service-level design in design.md for broader operational context.
 package pipeline
 
 import (
@@ -16,14 +21,16 @@ import (
 	"github.com/moby/moby/client"
 )
 
-// LocalRunner uses the Docker daemon for build and docker run for trivy/syft.
-// Intended for local development only.
+// LocalRunner groups the state and dependencies used by this package.
+// Keep this type aligned with the runtime contract around it.
 type LocalRunner struct {
 	log              *slog.Logger
 	registryEndpoint string
 	registryProject  string
 }
 
+// NewLocalRunner performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func NewLocalRunner(log *slog.Logger) *LocalRunner {
 	return &LocalRunner{
 		log:              log,
@@ -32,6 +39,8 @@ func NewLocalRunner(log *slog.Logger) *LocalRunner {
 	}
 }
 
+// Build applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (r *LocalRunner) Build(ctx context.Context, submissionID string, zipData []byte) (string, []byte, error) {
 	imageTag := r.imageRef(submissionID)
 
@@ -63,6 +72,8 @@ func (r *LocalRunner) Build(ctx context.Context, submissionID string, zipData []
 	return imageTag, buildLog, nil
 }
 
+// imageRef applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (r *LocalRunner) imageRef(submissionID string) string {
 	endpoint := strings.TrimSuffix(r.registryEndpoint, "/")
 	project := strings.Trim(strings.TrimSpace(r.registryProject), "/")
@@ -72,6 +83,8 @@ func (r *LocalRunner) imageRef(submissionID string) string {
 	return fmt.Sprintf("%s/%s/%s:latest", endpoint, project, submissionID)
 }
 
+// Scan applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (r *LocalRunner) Scan(ctx context.Context, imageRef string) ([]byte, error) {
 	cmd := exec.CommandContext(ctx,
 		"docker", "run", "--rm",
@@ -87,6 +100,8 @@ func (r *LocalRunner) Scan(ctx context.Context, imageRef string) ([]byte, error)
 	return out, nil
 }
 
+// SBOM applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (r *LocalRunner) SBOM(ctx context.Context, imageRef string) ([]byte, error) {
 	cmd := exec.CommandContext(ctx,
 		"docker", "run", "--rm",
@@ -101,6 +116,8 @@ func (r *LocalRunner) SBOM(ctx context.Context, imageRef string) ([]byte, error)
 	return out, nil
 }
 
+// Push applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (r *LocalRunner) Push(ctx context.Context, imageRef string) error {
 	if r.registryEndpoint == "" {
 		r.log.Info("push step skipped: HARBOR_PRODUCTION_ENDPOINT is empty", "image", imageRef)
@@ -115,8 +132,12 @@ func (r *LocalRunner) Push(ctx context.Context, imageRef string) error {
 	return nil
 }
 
+// Cleanup applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (r *LocalRunner) Cleanup(_ context.Context, _ string) {}
 
+// envOr performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func envOr(key, def string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
@@ -124,7 +145,8 @@ func envOr(key, def string) string {
 	return def
 }
 
-// zipToTar converts a ZIP archive into a tar stream for Docker's build context.
+// zipToTar performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func zipToTar(zipData []byte) (io.Reader, error) {
 	zr, err := zip.NewReader(bytes.NewReader(zipData), int64(len(zipData)))
 	if err != nil {
@@ -168,7 +190,8 @@ func zipToTar(zipData []byte) (io.Reader, error) {
 	return &buf, nil
 }
 
-// streamBuildOutput reads Docker's JSON build stream and returns the combined log.
+// streamBuildOutput performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func streamBuildOutput(r io.Reader) ([]byte, error) {
 	var log bytes.Buffer
 	dec := json.NewDecoder(r)

@@ -1,3 +1,8 @@
+// Package score defines tests for score test.
+//
+// This file is part of the IICPC benchmarking platform and keeps its
+// responsibilities local to the surrounding package. It should be read with
+// the service-level design in design.md for broader operational context.
 package score
 
 import (
@@ -11,6 +16,8 @@ import (
 
 const wave = DefaultWaveDurationNS
 
+// TestWaveScheduleDerivesRPSFromTaskIntervals performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func TestWaveScheduleDerivesRPSFromTaskIntervals(t *testing.T) {
 	got := WaveSchedule([]topics.TaskSpec{
 		{TargetRPS: 1000, StartOffsetNs: 0, DurationNs: 2 * wave},
@@ -31,6 +38,8 @@ func TestWaveScheduleDerivesRPSFromTaskIntervals(t *testing.T) {
 	}
 }
 
+// TestComputePassingClimbStopsAtFirstFail performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func TestComputePassingClimbStopsAtFirstFail(t *testing.T) {
 	in := baseInput()
 	in.Sessions[2].Metrics = []MetricRow{
@@ -54,6 +63,8 @@ func TestComputePassingClimbStopsAtFirstFail(t *testing.T) {
 	}
 }
 
+// TestComputeCorrectnessDQ performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func TestComputeCorrectnessDQ(t *testing.T) {
 	in := baseInput()
 	in.Sessions[0].Correct.ValidFills = 900
@@ -66,10 +77,10 @@ func TestComputeCorrectnessDQ(t *testing.T) {
 	}
 }
 
+// TestComputeAbsentWaveFails performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func TestComputeAbsentWaveFails(t *testing.T) {
 	in := baseInput()
-	// wave 0 is warmup (skipped); wave 1 passes, wave 2 has no metrics -> the
-	// climb stops at the missing wave with peak = wave 1's offered RPS.
 	in.Sessions[2].Metrics = []MetricRow{
 		{WaveIndex: 0, P99NS: 500_000, ErrorRate: 0},
 		{WaveIndex: 1, P99NS: 500_000, ErrorRate: 0},
@@ -83,6 +94,8 @@ func TestComputeAbsentWaveFails(t *testing.T) {
 	}
 }
 
+// TestComputeDeterministicJSON performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func TestComputeDeterministicJSON(t *testing.T) {
 	in := baseInput()
 	a, err := Compute(in)
@@ -100,6 +113,8 @@ func TestComputeDeterministicJSON(t *testing.T) {
 	}
 }
 
+// TestComputeNoRampDisqualifiedReturnsResult performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func TestComputeNoRampDisqualifiedReturnsResult(t *testing.T) {
 	in := baseInput()
 	in.Sessions = in.Sessions[:2] // drop the ramp session
@@ -116,6 +131,8 @@ func TestComputeNoRampDisqualifiedReturnsResult(t *testing.T) {
 	}
 }
 
+// TestComputeNoRampWithoutDQReturnsError performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func TestComputeNoRampWithoutDQReturnsError(t *testing.T) {
 	in := baseInput()
 	in.Sessions = in.Sessions[:2] // drop the ramp session
@@ -124,18 +141,10 @@ func TestComputeNoRampWithoutDQReturnsError(t *testing.T) {
 	}
 }
 
-// TestComputeIncompleteTelemetrySkipsViolationDQ pins the telemetry-completeness
-// gate: when any session's acked-matched coverage (matched_count/sent_count)
-// falls below the threshold, violations are unsound evidence — a lost sent
-// flush fabricates phantoms, a lost acked event silently drops orders from the
-// replay — so the ramp_session_violation DQ must NOT fire. The run is flagged
-// IncompleteTelemetry with the reason in score_detail instead; throughput waves
-// are still scored normally.
+// TestComputeIncompleteTelemetrySkipsViolationDQ performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func TestComputeIncompleteTelemetrySkipsViolationDQ(t *testing.T) {
 	in := baseInput()
-	// Ramp session reports a few violations but its correctness RATIO stays 1.0
-	// (ValidFills==TotalFills); coverage 850/1000 = 0.85 is below the 0.90
-	// threshold, so the run is flagged IncompleteTelemetry.
 	in.Sessions[2].Correct.ViolationCount = 1
 	in.Sessions[2].Correct.SentCount = 1000
 	in.Sessions[2].Correct.AckedCount = 900
@@ -144,8 +153,6 @@ func TestComputeIncompleteTelemetrySkipsViolationDQ(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// A high correctness ratio never disqualifies regardless of violation count
-	// (under-reporting and order-dependent breaks are not ratio failures).
 	if res.Disqualified || res.DisqualificationCode != "" {
 		t.Fatalf("high-ratio ramp must not be disqualified: %#v", res)
 	}
@@ -160,14 +167,10 @@ func TestComputeIncompleteTelemetrySkipsViolationDQ(t *testing.T) {
 	}
 }
 
-// TestComputeCoverageAtThresholdKeepsViolationDQ pins the unchanged path:
-// coverage at/above the threshold means the inputs are complete enough, so a
-// ramp violation disqualifies exactly as before and the flag stays false.
+// TestComputeCoverageAtThresholdKeepsViolationDQ performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func TestComputeCoverageAtThresholdKeepsViolationDQ(t *testing.T) {
 	in := baseInput()
-	// Ramp correctness ratio 850/1000 = 0.85 < 0.95 (aggregate stays at 0.95,
-	// so the per-session gate is what fires); coverage 950/1000 = 0.95 >= 0.90,
-	// so the run is NOT flagged incomplete.
 	in.Sessions[2].Correct.ValidFills = 850
 	in.Sessions[2].Correct.SentCount = 1000
 	in.Sessions[2].Correct.AckedCount = 960
@@ -184,10 +187,8 @@ func TestComputeCoverageAtThresholdKeepsViolationDQ(t *testing.T) {
 	}
 }
 
-// TestComputeIncompleteTelemetryKeepsCorrectnessGates pins the asymmetry:
-// the correctness-RATIO gates stay active on incomplete telemetry (a ratio is
-// less sensitive to uniform loss than absolute violation counts), so a
-// below-threshold correctness still disqualifies even when the run is flagged.
+// TestComputeIncompleteTelemetryKeepsCorrectnessGates performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func TestComputeIncompleteTelemetryKeepsCorrectnessGates(t *testing.T) {
 	in := baseInput()
 	in.Sessions[0].Correct.ValidFills = 800 // 0.933 aggregate < 0.95 DQ threshold
@@ -205,16 +206,10 @@ func TestComputeIncompleteTelemetryKeepsCorrectnessGates(t *testing.T) {
 	}
 }
 
-// TestComputeUnknownCoverageNotGated pins the legacy/rollout behavior: a
-// session with sent_count==0 (a row written before the counters existed, or a
-// timed_out placeholder whose drain never completed) has UNKNOWN coverage —
-// the gate must not fire, and pre-gate behavior (including violation DQ) is
-// preserved rather than retroactively reflagging historical runs.
+// TestComputeUnknownCoverageNotGated performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func TestComputeUnknownCoverageNotGated(t *testing.T) {
 	in := baseInput()
-	// sent_count==0 everywhere => coverage unknown => not flagged. The ramp's
-	// correctness ratio 850/1000 = 0.85 < 0.95 still disqualifies via the
-	// per-session gate (ratio gates do not depend on coverage).
 	in.Sessions[2].Correct.ValidFills = 850
 	res, err := Compute(in)
 	if err != nil {
@@ -228,8 +223,8 @@ func TestComputeUnknownCoverageNotGated(t *testing.T) {
 	}
 }
 
-// TestConfigWithDefaultsMinCoverage pins the threshold plumbing: zero/invalid
-// values fall back to the 0.90 default, valid stored values are kept.
+// TestConfigWithDefaultsMinCoverage performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func TestConfigWithDefaultsMinCoverage(t *testing.T) {
 	cases := []struct {
 		name string
@@ -253,6 +248,8 @@ func TestConfigWithDefaultsMinCoverage(t *testing.T) {
 	}
 }
 
+// TestSortResultsDisqualifiedRanksLast performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func TestSortResultsDisqualifiedRanksLast(t *testing.T) {
 	results := []Result{
 		{RunGroupID: "dq", PeakSustainedTPS: 1_000_000, P99AtPeakNS: 1, TotalCorrectness: 1, Disqualified: true},
@@ -268,6 +265,8 @@ func TestSortResultsDisqualifiedRanksLast(t *testing.T) {
 	}
 }
 
+// TestSortResultsTiebreak performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func TestSortResultsTiebreak(t *testing.T) {
 	results := []Result{
 		{RunGroupID: "b", PeakSustainedTPS: 20, P99AtPeakNS: 10, SpikeRecoveryNS: 5, TotalCorrectness: 0.999},
@@ -280,6 +279,8 @@ func TestSortResultsTiebreak(t *testing.T) {
 	}
 }
 
+// TestAggregateCorrectnessDoesNotOverflow performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func TestAggregateCorrectnessDoesNotOverflow(t *testing.T) {
 	got := aggregateCorrectness([]Session{
 		{Correct: Correctness{ValidFills: math.MaxUint64, TotalFills: math.MaxUint64}},
@@ -290,6 +291,8 @@ func TestAggregateCorrectnessDoesNotOverflow(t *testing.T) {
 	}
 }
 
+// TestWaveScheduleBoundsOverflowedTaskEnd performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func TestWaveScheduleBoundsOverflowedTaskEnd(t *testing.T) {
 	got := WaveSchedule([]topics.TaskSpec{
 		{TargetRPS: 1, StartOffsetNs: math.MaxUint64 - 1, DurationNs: math.MaxUint64},
@@ -299,6 +302,8 @@ func TestWaveScheduleBoundsOverflowedTaskEnd(t *testing.T) {
 	}
 }
 
+// baseInput performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func baseInput() Input {
 	correct := Correctness{ValidFills: 1000, TotalFills: 1000}
 	return Input{

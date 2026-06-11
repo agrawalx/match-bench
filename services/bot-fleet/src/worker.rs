@@ -1,3 +1,9 @@
+//! This module implements worker behavior.
+//!
+//! It belongs to the IICPC benchmarking platform and should keep its
+//! behavior consistent with the service contracts documented in design.md.
+//! The comments in this file describe public structure and callable behavior.
+
 use std::{
     collections::HashMap,
     net::SocketAddr,
@@ -37,39 +43,21 @@ use crate::{
     time::unix_nanos,
 };
 
-// The per-pod task ceiling (TCP connections one worker holds for a session) is
-// config.max_bots_per_worker, set from MAX_BOTS_PER_WORKER. It must be >= the
-// controller's MAX_TASKS_PER_WORKER so a sharded spec is never rejected; raise
-// both together to pin more load onto one pod for capacity testing.
-
-/// RESPONSE_TIMEOUT_NS bounds how long a FIX task waits for a response
-/// before the watchdog evicts the pending entry and emits OrderSentEvent
-/// with timed_out=true.
-///
-/// 5s is the same default the validator/ingester use for "lost response"
-/// semantics. Tuning knob — judges can shorten for faster CO detection
-/// (at the cost of more false timeouts on legitimately slow contestants)
-/// or lengthen for higher tolerance.
 const RESPONSE_TIMEOUT_NS: u64 = 5_000_000_000;
 
-/// BARRIER_WAIT bounds how long run_workload blocks on the barrier before
-/// firing. It is part of the worst-case wall time the L39 poll-interval guard
-/// accounts for, so it is a named constant shared between the guard and the
-/// wait_for_barrier call.
 const BARRIER_WAIT: Duration = Duration::from_secs(120);
 
-/// CancelToken is a clonable shutdown signal threaded into the send loops.
-/// A SIGTERM/SIGINT handler cancels it so in-flight workloads stop sending and
-/// TelemetrySink::close runs to flush the final batch before the pod exits
-/// (L43). Built on tokio::sync::watch so every loop can both poll it
-/// (`is_cancelled`) and await it (`cancelled`) without an extra dependency.
 #[derive(Clone)]
+/// CancelToken stores the state passed across this module boundary.
+/// Keep field changes compatible with callers and serialized contracts.
 struct CancelToken {
     tx: Arc<watch::Sender<bool>>,
     rx: watch::Receiver<bool>,
 }
 
 impl CancelToken {
+    /// new performs the module-specific operation described by its name.
+    /// It keeps validation, side effects, and returned values within this module's contract.
     fn new() -> Self {
         let (tx, rx) = watch::channel(false);
         Self {
@@ -78,26 +66,25 @@ impl CancelToken {
         }
     }
 
-    /// cancel flips the token; idempotent across repeated signals.
+    /// cancel performs the module-specific operation described by its name.
+    /// It keeps validation, side effects, and returned values within this module's contract.
     fn cancel(&self) {
         let _ = self.tx.send(true);
     }
 
-    /// is_cancelled is the cheap poll the send loops check each iteration.
+    /// is_cancelled performs the module-specific operation described by its name.
+    /// It keeps validation, side effects, and returned values within this module's contract.
     fn is_cancelled(&self) -> bool {
         *self.rx.borrow()
     }
 
-    /// cancelled resolves once the token is cancelled. Resolves immediately if
-    /// it is already cancelled, so a loop racing it against a sleep cannot hang
-    /// past shutdown.
+    /// cancelled performs the module-specific operation described by its name.
+    /// It keeps validation, side effects, and returned values within this module's contract.
     async fn cancelled(&self) {
         let mut rx = self.rx.clone();
         if *rx.borrow() {
             return;
         }
-        // changed() errors only if the sender dropped; the Arc keeps it alive
-        // for the token's lifetime, so a wait-then-recheck loop is sufficient.
         while rx.changed().await.is_ok() {
             if *rx.borrow() {
                 return;
@@ -106,9 +93,8 @@ impl CancelToken {
     }
 }
 
-/// should_stop_sending is the send-loop guard: stop when the token is cancelled
-/// (graceful shutdown) or the task's wall-clock deadline has passed. Factored
-/// out so the cancellation plumbing is unit-testable without a live socket.
+/// should_stop_sending performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 fn should_stop_sending(cancel: &CancelToken, task_end_ns: u64) -> bool {
     cancel.is_cancelled() || unix_nanos() >= task_end_ns
 }
@@ -128,10 +114,6 @@ pub async fn run(mut config: Config) -> Result<()> {
     )
     .await?;
 
-    // Two producers — control-plane (bot.ready) gets acks=all + idempotence
-    // per architecture §6.5; telemetry (orders.sent) gets acks=1 + batching
-    // for throughput. Splitting also keeps a slow control-plane broker from
-    // back-pressuring the telemetry queue and vice-versa.
     let control_producer = kafka::control_producer(&config.kafka_brokers)?;
     let telemetry_producer = kafka::telemetry_producer(&config.kafka_brokers)?;
     // Authoritative N for order_id sharding: the orders.sent topic's real partition
@@ -157,12 +139,6 @@ pub async fn run(mut config: Config) -> Result<()> {
         "bot worker started"
     );
 
-    // L43: handle SIGTERM (kubelet's graceful-stop signal) as well as
-    // SIGINT/Ctrl-C. As PID 1 with no SIGTERM handler the worker would ignore
-    // the signal and be SIGKILLed at the grace deadline, truncating the final
-    // telemetry batch. A background task watches both signals and cancels the
-    // shared token; in-flight send loops observe it and stop, after which
-    // TelemetrySink::close flushes the last batch.
     let cancel = CancelToken::new();
     {
         let cancel = cancel.clone();
@@ -216,14 +192,6 @@ pub async fn run(mut config: Config) -> Result<()> {
                 .await
                 {
                     metrics::workload_error();
-                    // Log + continue rather than process::exit(1). The
-                    // previous behaviour killed the pod on the first bad
-                    // workload, forcing a restart and a KEDA reschedule
-                    // delay. Continuing keeps the worker available for the
-                    // next benchmark.requested message — the controller's
-                    // fan-in path already handles the missing worker via
-                    // ReadyDeadline + degraded fan-in, so dropping this one
-                    // workload is harmless at the fleet level.
                     error!(error = %err, "workload failed; dropping and continuing");
                 } else {
                     metrics::workload_ok();
@@ -235,21 +203,8 @@ pub async fn run(mut config: Config) -> Result<()> {
     }
 }
 
-/// run_workload prepares one assignment, publishes readiness, waits for the
-/// barrier, and runs every TaskSpec as an independent tokio task.
-///
-/// Lifecycle (matches architecture_v2.md §"Load Scenarios" → Task lifecycle):
-///   1. Pre-warm: open every TaskSpec's TCP connection at barrier time.
-///      Cold-start cost is paid before any task fires so the spike/ramp
-///      measurements are not contaminated by connect latency.
-///   2. Publish ReadySignal once every connection is open.
-///   3. Wait for BarrierEvent; the controller's barrier_epoch_ns becomes
-///      the absolute go-time.
-///   4. Each task spawns its own tokio task that:
-///        - sleeps until (barrier_epoch + task.start_offset_ns)
-///        - paces sends at task.target_rps (fixed-interval, no jitter)
-///        - exits at (barrier_epoch + task.start_offset_ns + task.duration_ns)
-///   5. Telemetry flushes on workload exit.
+/// run_workload performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 async fn run_workload(
     config: &Config,
     control_producer: &KafkaProducer,
@@ -259,10 +214,6 @@ async fn run_workload(
 ) -> Result<()> {
     validate_spec(config, &spec)?;
 
-    // L41: a stable per-worker barrier group. wait_for_barrier already filters
-    // by session_id, so the group need not be unique per session — a per-session
-    // group would be created fresh every run and never deleted, leaking consumer
-    // groups on the broker.
     let barrier_group = barrier_group(&config.consumer_group, &spec.session_id, &config.worker_id);
     let barrier_consumer = kafka::consumer(
         &config.kafka_brokers,
@@ -271,9 +222,6 @@ async fn run_workload(
         config.max_poll_interval,
     )?;
 
-    // worker_index/worker_count make under-provisioned fleets diagnosable
-    // from worker logs alone: if two specs of one session log from the SAME
-    // pod, replicas < worker_count (the second spec will miss the barrier).
     info!(
         session_id = %spec.session_id,
         protocol = ?spec.protocol,
@@ -298,9 +246,6 @@ async fn run_workload(
         connected_count,
         ready_at_unix_nanos: unix_nanos(),
     };
-    // ReadySignal is control-plane — use the acks=all producer so a leader
-    // failure between ack and replication cannot silently drop the signal
-    // and stall the controller's fan-in.
     kafka::publish_json(
         control_producer,
         &config.ready_topic,
@@ -314,9 +259,6 @@ async fn run_workload(
         kafka::wait_for_barrier(&barrier_consumer, &spec.session_id, BARRIER_WAIT).await?;
     let barrier_epoch_ns = barrier.target_epoch_unix_nanos;
 
-    // TelemetrySink uses the acks=1 producer — orders.sent is high-volume
-    // and loss-tolerant; rare drops surface as HDR-histogram gaps, not as
-    // wrong scores.
     let telemetry = TelemetrySink::new(
         telemetry_producer.clone(),
         config.orders_sent_topic.clone(),
@@ -337,14 +279,12 @@ async fn run_workload(
         cancel,
     )
     .await;
-    // Always close the sink — even on a cancelled run — so the final telemetry
-    // batch is flushed before the worker exits (L43).
     telemetry.close().await?;
     result
 }
 
-/// validate_spec enforces local worker limits and rejects identifiers that
-/// would corrupt generated FIX or JSON payloads.
+/// validate_spec performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 fn validate_spec(config: &Config, spec: &WorkloadSpec) -> Result<()> {
     if spec.tasks.is_empty() {
         return Err(
@@ -381,13 +321,6 @@ fn validate_spec(config: &Config, spec: &WorkloadSpec) -> Result<()> {
         )
         .into());
     }
-    // L39: the workload-assignment offset is committed only after run_workload
-    // returns. If the worst-case wall time (barrier wait + last task's
-    // offset+duration + response drain) exceeds the consumer's
-    // max.poll.interval.ms, Kafka rebalances the partition mid-run and
-    // re-delivers the assignment — duplicate execution. Reject such a spec up
-    // front rather than committing before the work (which would drop
-    // at-least-once delivery).
     let worst_case_ns = worst_case_wall_time_ns(spec);
     let poll_ceiling_ns = config.max_poll_interval.as_nanos() as u64;
     if worst_case_ns >= poll_ceiling_ns {
@@ -405,19 +338,14 @@ fn validate_spec(config: &Config, spec: &WorkloadSpec) -> Result<()> {
     Ok(())
 }
 
-/// barrier_group builds the barrier consumer group id. It is intentionally
-/// per-worker (not per-session): wait_for_barrier filters by session_id, so a
-/// session-scoped group would only leak a fresh, never-deleted consumer group
-/// on the broker for every run (L41). `_session_id` is accepted to keep the
-/// call site explicit about what is deliberately excluded.
+/// barrier_group performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 fn barrier_group(consumer_group: &str, _session_id: &str, worker_id: &str) -> String {
     format!("{consumer_group}-barrier-{worker_id}")
 }
 
-/// worst_case_wall_time_ns is the longest run_workload can block before its
-/// Kafka offset is committed: the barrier wait, plus the latest-finishing
-/// task's (start_offset + duration), plus the post-deadline response drain.
-/// The L39 guard compares this against the consumer's max.poll.interval.ms.
+/// worst_case_wall_time_ns performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 fn worst_case_wall_time_ns(spec: &WorkloadSpec) -> u64 {
     let max_task_span_ns = spec
         .tasks
@@ -430,7 +358,8 @@ fn worst_case_wall_time_ns(spec: &WorkloadSpec) -> u64 {
         .saturating_add(RESPONSE_TIMEOUT_NS)
 }
 
-/// validate_identifier allows only simple stable tokens in wire-format fields.
+/// validate_identifier performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 fn validate_identifier(name: &str, value: &str) -> Result<()> {
     let valid = !value.is_empty()
         && value
@@ -447,17 +376,9 @@ fn validate_identifier(name: &str, value: &str) -> Result<()> {
     Ok(())
 }
 
-/// connect_tasks opens one TCP connection per TaskSpec at barrier time. All
-/// connections are pre-warmed before any task fires (the actual sending is
-/// gated by per-task start_offset_ns inside the firing loop), so cold-start
-/// latency cannot leak into spike or ramp measurements.
+/// connect_tasks performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 async fn connect_tasks(spec: &WorkloadSpec) -> Result<Vec<ConnectedTask>> {
-    // The controller supplies target_host as the algo Service's cluster DNS
-    // name (algo-{session_id}.sandbox.svc.cluster.local), not a numeric IP, so
-    // we must resolve it — SocketAddr's FromStr only accepts IP literals and
-    // would reject every in-cluster target. lookup_host handles both DNS names
-    // and bare IPs, so local examples that pass 127.0.0.1 still work. Resolve
-    // once here and share the result across every task's connection.
     let addr = resolve_target(&spec.target_host, spec.target_port).await?;
     let mut set = JoinSet::new();
     let shared_spec = Arc::new(spec.clone());
@@ -480,9 +401,6 @@ async fn connect_tasks(spec: &WorkloadSpec) -> Result<Vec<ConnectedTask>> {
         match result.context("join task connect")? {
             Ok(t) => tasks.push(t),
             Err(err) => {
-                // Connection failure for one task does not fail the workload —
-                // log + drop and continue. The dropped task contributes to
-                // the error-rate metric visible in Grafana via the slog stream.
                 metrics::connect_failure();
                 warn!(error = %err, "task connect failed; dropping");
             }
@@ -491,12 +409,8 @@ async fn connect_tasks(spec: &WorkloadSpec) -> Result<Vec<ConnectedTask>> {
     Ok(tasks)
 }
 
-/// resolve_target turns the controller-supplied (host, port) into a concrete
-/// SocketAddr. host is the algo Service's cluster DNS name in production
-/// (algo-{session_id}.sandbox.svc.cluster.local) and a bare IP in local
-/// examples; lookup_host handles both. This must NOT be `host:port`.parse()
-/// — SocketAddr::FromStr only accepts numeric IP literals and rejects every
-/// in-cluster DNS target, which would silently drop every workload.
+/// resolve_target performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 async fn resolve_target(host: &str, port: u16) -> Result<SocketAddr> {
     let target = format!("{host}:{port}");
     let mut addrs = lookup_host(&target)
@@ -507,9 +421,8 @@ async fn resolve_target(host: &str, port: u16) -> Result<SocketAddr> {
         .ok_or_else(|| anyhow::anyhow!("no addresses resolved for target host {target}"))
 }
 
-/// fire_workload spawns one tokio task per ConnectedTask. Each tokio task
-/// waits until its task-specific start time, then paces sends at the task's
-/// target_rps until its duration expires.
+/// fire_workload performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 async fn fire_workload(
     config: &Config,
     spec: &WorkloadSpec,
@@ -550,11 +463,6 @@ async fn fire_workload(
         match result.context("join task send loop")? {
             Ok(sent) => sent_total += sent,
             Err(err) => {
-                // Mid-flight task failure (TCP reset, write timeout). Logged
-                // here; counted as a dropped task. Does not fail the
-                // workload — partial data is still informative and the
-                // controller's status pipeline reports session completion
-                // regardless of per-task errors.
                 warn!(error = %err, "task send loop failed; dropped");
             }
         }
@@ -563,27 +471,19 @@ async fn fire_workload(
     Ok(())
 }
 
-/// ConnectedTask owns one established connection and its TaskSpec. For FIX
-/// the underlying TcpStream has been split into independent read/write halves
-/// so the response-capture path can drain inbound bytes in parallel with the
-/// fixed-interval pacer.
+/// ConnectedTask stores the state passed across this module boundary.
+/// Keep field changes compatible with callers and serialized contracts.
 struct ConnectedTask {
     task: TaskSpec,
     target_host: String,
     client: TargetClient,
 }
 
-/// PendingOrder is the per-order context the FIX write loop hands off to the
-/// reader/watchdog. We keep the full OrderSentEvent payload here (price, qty,
-/// side, order_id) so that the eventual emission — whether on first response
-/// or watchdog timeout — has everything it needs without round-tripping back
-/// to the writer.
 #[derive(Clone)]
+/// PendingOrder stores the state passed across this module boundary.
+/// Keep field changes compatible with callers and serialized contracts.
 struct PendingOrder {
     order_id: String,
-    /// Bot-authoritative cancel/replace target (the original ClOrdID), empty
-    /// for new/market orders. Carried so the reader/watchdog can stamp it onto
-    /// the emitted OrderSentEvent without round-tripping back to the writer.
     orig_order_id: String,
     target_send_ts_ns: u64,
     send_ts_ns: u64,
@@ -598,19 +498,12 @@ struct PendingOrder {
     ord_type: OrdType,
 }
 
-/// PendingMap is a shared map of ClOrdID → PendingOrder. Locked with a std
-/// Mutex; lock guards never cross an await boundary in any of the three
-/// loops that share it, so the std (non-async) mutex is safe and faster than
-/// tokio::sync::Mutex for this access pattern.
 type PendingMap = Arc<Mutex<HashMap<String, PendingOrder>>>;
 
 impl ConnectedTask {
-    /// run dispatches to the protocol-specific task driver. All three protocols
-    /// (FIX, REST, WS) run the three-loop writer + reader + watchdog setup so
-    /// r9 (response_time) is captured and coordinated omission is observable.
-    /// REST matches responses by the echoed cl_ord_id in the HTTP JSON body;
-    /// WS by the cl_ord_id in the frame payload; FIX by ClOrdID (tag 11).
     #[allow(clippy::too_many_arguments)]
+    /// run performs the module-specific operation described by its name.
+    /// It keeps validation, side effects, and returned values within this module's contract.
     async fn run(
         self,
         session_id: &str,
@@ -644,8 +537,8 @@ impl ConnectedTask {
     }
 }
 
-/// TaskContext bundles the workload-level immutable knobs the task drivers
-/// need. Avoids 10-parameter function signatures.
+/// TaskContext stores the state passed across this module boundary.
+/// Keep field changes compatible with callers and serialized contracts.
 struct TaskContext {
     session_id: String,
     submission_id: String,
@@ -659,17 +552,15 @@ struct TaskContext {
     cancel: CancelToken,
 }
 
-/// FixConnection holds the two halves of a split TcpStream so writer and
-/// reader loops can own their respective ends independently.
+/// FixConnection stores the state passed across this module boundary.
+/// Keep field changes compatible with callers and serialized contracts.
 struct FixConnection {
     read_half: ReadHalf<TcpStream>,
     write_half: WriteHalf<TcpStream>,
 }
 
-/// run_fix_task spawns the three tokio tasks (writer, reader, watchdog) and
-/// waits for them to terminate. Writer exits at task deadline; reader and
-/// watchdog continue for RESPONSE_TIMEOUT past the task deadline so stragglers
-/// either get matched or get evicted with timed_out=true.
+/// run_fix_task performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 async fn run_fix_task(task: TaskSpec, fix: FixConnection, ctx: TaskContext) -> Result<u64> {
     let task_start_ns = ctx.barrier_epoch_ns.saturating_add(task.start_offset_ns);
     let task_end_ns = task_start_ns.saturating_add(task.duration_ns);
@@ -717,10 +608,6 @@ async fn run_fix_task(task: TaskSpec, fix: FixConnection, ctx: TaskContext) -> R
         match result.context("join FIX sub-task")? {
             Ok(n) => sent_total += n,
             Err(err) => {
-                // Sub-task error (e.g. one of the three loops returned an
-                // error rather than panicking). Logged but not propagated —
-                // the other loops keep running, and missing r9 manifests as
-                // timed_out=true via the watchdog.
                 warn!(task_id = task.task_id, error = %err, "FIX sub-task ended with error");
             }
         }
@@ -728,11 +615,8 @@ async fn run_fix_task(task: TaskSpec, fix: FixConnection, ctx: TaskContext) -> R
     Ok(sent_total)
 }
 
-/// fix_write_loop is the fixed-interval pacer. Identical to the legacy
-/// loop in shape, but instead of emitting OrderSentEvent on each write it
-/// hands off PendingOrder to the shared pending map. Emission is the
-/// reader/watchdog's job.
-/// mix_from_task reads the per-task order-type mix percentages off the TaskSpec.
+/// mix_from_task performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 fn mix_from_task(task: &TaskSpec) -> content::OrderMix {
     content::OrderMix {
         market_pct: task.market_pct,
@@ -741,9 +625,8 @@ fn mix_from_task(task: &TaskSpec) -> content::OrderMix {
     }
 }
 
-/// render_frame turns a generated content::Action into the wire frame (FIX +
-/// REST + WS payloads) via the fix builders. A cancel/replace passes the resting
-/// order's full ClOrdID as OrigClOrdID so tag 41 matches the original tag 11.
+/// render_frame performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 fn render_frame(
     fix_version: &str,
     session_id: &str,
@@ -815,6 +698,8 @@ fn render_frame(
 }
 
 #[allow(clippy::too_many_arguments)]
+/// fix_write_loop performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 async fn fix_write_loop(
     mut write_half: WriteHalf<TcpStream>,
     task: TaskSpec,
@@ -842,26 +727,12 @@ async fn fix_write_loop(
     let mut sent: u64 = 0;
 
     loop {
-        // Stop at the task deadline or on a shutdown signal (L43). Breaking
-        // here lets the writer exit so the reader/watchdog can drain and
-        // TelemetrySink::close can flush the final batch.
         if should_stop_sending(&cancel, task_end_ns) {
             break;
         }
 
-        // t0 — the schedule's intended fire time. Captured BEFORE the sleep
-        // so it reflects the schedule, not what the clock actually says when
-        // we wake up. Under coordinated omission `send_ts_ns - target_send_ts_ns`
-        // grows monotonically; that gap is the CO signal.
         let target_send_ts_ns = next_send_ns;
 
-        // Coordinated-omission catch-up pacing (see rw_write_loop for the rationale):
-        // only park on the timer when AHEAD of schedule. When behind (deadline already
-        // passed) send immediately rather than incur tokio's ~1ms timer-wheel
-        // quantization, which would pin the task near ~1k/s. target_send_ts_ns stays
-        // the fixed schedule so the CO signal (send_ts_ns - target_send_ts_ns) is
-        // unaffected. Racing against cancellation keeps SIGTERM responsive in the
-        // ahead-of-schedule (sleeping) case; should_stop_sending covers the behind case.
         if next_send_ns > unix_nanos() {
             tokio::select! {
                 _ = time::sleep_until(instant_from_unix_nanos(next_send_ns)) => {}
@@ -878,16 +749,8 @@ async fn fix_write_loop(
             u64::from(task.task_id),
             &action,
         );
-        // Set FIX SendingTime (tag 52) to the actual transmit instant.
-        // The frame builders emit a fixed-width epoch placeholder; patch_timestamp
-        // rewrites those 21 bytes and delta-fixes the checksum in place.
-        // Without this, every order ships SendingTime=19700101-00:00:00.000 and
-        // a contestant FIX engine validating tag 52 freshness rejects it.
         frame.patch_timestamp(unix_nanos());
 
-        // The pending insert must happen BEFORE the write so that a fast
-        // contestant cannot reply before we've recorded the pending entry.
-        // We patch send_ts_ns after the write succeeds.
         {
             let mut map = pending.lock().expect("pending map poisoned");
             map.insert(
@@ -911,10 +774,6 @@ async fn fix_write_loop(
             Ok(Ok(())) => {
                 let send_ts_ns = unix_nanos();
                 metrics::order_sent();
-                // Patch send_ts_ns. Skipping the patch on a fast-arrived
-                // response is acceptable — the response branch only reads
-                // send_ts_ns which was 0; an r9 < t1 anomaly in the rare
-                // contestant-faster-than-vDSO case is harmless.
                 if let Some(p) = pending
                     .lock()
                     .expect("pending map poisoned")
@@ -925,8 +784,6 @@ async fn fix_write_loop(
                 sent += 1;
             }
             Ok(Err(err)) => {
-                // Write failed — purge the pending entry we just inserted
-                // so the watchdog does not emit a bogus timeout for it.
                 pending
                     .lock()
                     .expect("pending map poisoned")
@@ -958,16 +815,9 @@ async fn fix_write_loop(
     Ok(sent)
 }
 
-/// fix_read_loop drains the read half, parses ExecutionReport (35=8)
-/// messages, matches ClOrdID to the pending map, and emits OrderSentEvent
-/// with timed_out=false. Subsequent reports for the same ClOrdID are dropped
-/// because the first remove() consumed the entry — that's the "first
-/// response wins" rule.
-///
-/// Exits at `drain_end_ns` (= task_end + RESPONSE_TIMEOUT) so late stragglers
-/// past the task deadline still get matched. Anything still pending at that
-/// point is the watchdog's responsibility.
 #[allow(clippy::too_many_arguments)]
+/// fix_read_loop performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 async fn fix_read_loop(
     mut read_half: ReadHalf<TcpStream>,
     task_id: u32,
@@ -990,8 +840,6 @@ async fn fix_read_loop(
 
         let n = match time::timeout(remaining, read_half.read(&mut chunk)).await {
             Ok(Ok(0)) => {
-                // Peer closed the connection — no more responses will arrive.
-                // Stop reading; watchdog will time out any stragglers.
                 break;
             }
             Ok(Ok(n)) => n,
@@ -1005,8 +853,6 @@ async fn fix_read_loop(
 
         let (messages, consumed) = fix::parse_messages(&buf);
         for msg in messages {
-            // Only ExecutionReport (MsgType=8) carries an r9 signal. Other
-            // FIX traffic (heartbeats, logon acks) is silently dropped.
             if msg.msg_type != b"8" {
                 continue;
             }
@@ -1017,9 +863,6 @@ async fn fix_read_loop(
                 continue;
             };
 
-            // Lock scope: remove the entry, then drop the guard BEFORE the
-            // telemetry.record().await call. Holding a std Mutex across an
-            // await would risk deadlock under contention.
             let pending_order = {
                 let mut map = pending.lock().expect("pending map poisoned");
                 map.remove(clord_id)
@@ -1049,16 +892,10 @@ async fn fix_read_loop(
                 .await;
         }
 
-        // Drop the consumed prefix and keep the carry-over tail in place.
         if consumed > 0 {
             buf.drain(..consumed);
         }
 
-        // Guard against unbounded buffer growth — a contestant streaming
-        // unparseable garbage without ever closing the socket would otherwise
-        // pin memory forever. 1 MiB is a generous ceiling for ~6 KiB FIX
-        // messages; if we hit it, drop the prefix and resync on the next
-        // 8=FIX boundary by clearing the buffer.
         if buf.len() > 1_048_576 {
             warn!(task_id, "FIX read buffer overflow; resetting");
             buf.clear();
@@ -1068,15 +905,9 @@ async fn fix_read_loop(
     Ok(0)
 }
 
-/// watchdog_loop evicts pending orders whose send_ts_ns is older than
-/// RESPONSE_TIMEOUT_NS. Evicted orders emit with timed_out=true and
-/// recv_done_ts_ns=0 — the explicit marker that the response was lost rather
-/// than received at instant 0.
-///
-/// Runs every WATCHDOG_TICK_MS until drain_end_ns. On final tick (when no
-/// more sends are happening) it flushes everything still pending, regardless
-/// of age.
 #[allow(clippy::too_many_arguments)]
+/// watchdog_loop performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 async fn watchdog_loop(
     task_id: u32,
     pending: PendingMap,
@@ -1092,25 +923,15 @@ async fn watchdog_loop(
         let now_ns = unix_nanos();
         let last_tick = now_ns >= drain_end_ns;
 
-        // Collect everything to evict, then drop the lock before awaiting
-        // telemetry.record() for each one.
         let to_evict: Vec<PendingOrder> = {
             let mut map = pending.lock().expect("pending map poisoned");
             let mut evicted = Vec::new();
             map.retain(|_, p| {
-                // send_ts_ns == 0 means the write hasn't returned yet; don't
-                // evict — the writer is mid-call. The 5s timeout below would
-                // catch it on the next tick anyway.
                 let age_ns = if p.send_ts_ns == 0 {
                     0
                 } else {
                     now_ns.saturating_sub(p.send_ts_ns)
                 };
-                // L40: on the FINAL tick evict every remaining entry — including one
-                // whose write was still in flight (send_ts_ns == 0). The old guard
-                // (`&& p.send_ts_ns > 0`) dropped such an order entirely (counted as
-                // neither matched nor timed_out) before the loop broke; recording it
-                // as timed_out is the correct offered-order accounting.
                 let expired = age_ns >= RESPONSE_TIMEOUT_NS || last_tick;
                 if expired {
                     evicted.push(p.clone());
@@ -1154,16 +975,16 @@ async fn watchdog_loop(
     Ok(0)
 }
 
-/// RwWriter is the write half of a REST or WS connection. REST writes the
-/// full HTTP/1.1 request bytes; WS sends a binary JSON frame. Both feed the
-/// same paced pending-map write loop so r9 (recv_done) can be captured by the
-/// matching reader — the v2 response-capture path for non-FIX protocols.
+/// RwWriter enumerates the states or variants handled by this module.
+/// Match arms should preserve the semantic contract of each variant.
 enum RwWriter {
     Rest(WriteHalf<TcpStream>),
     Ws(SplitSink<WebSocketStream<MaybeTlsStream<TcpStream>>, WsMessage>),
 }
 
 impl RwWriter {
+    /// write_order performs the module-specific operation described by its name.
+    /// It keeps validation, side effects, and returned values within this module's contract.
     async fn write_order(&mut self, frame: &OrderFrame) -> Result<()> {
         match self {
             Self::Rest(w) => w.write_all(&frame.rest).await.context("write REST order"),
@@ -1175,11 +996,8 @@ impl RwWriter {
     }
 }
 
-/// run_rest_task and run_ws_task mirror run_fix_task: a paced write loop feeds a
-/// shared pending map, a protocol-specific read loop matches responses by
-/// ClOrdID and stamps r9, and the generic watchdog evicts unanswered orders as
-/// timed_out. This gives REST and WS the same coordinated-omission-correct
-/// response_time (r9 - t0) the FIX path already had.
+/// run_rest_task performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 async fn run_rest_task(task: TaskSpec, stream: TcpStream, ctx: TaskContext) -> Result<u64> {
     let (read_half, write_half) = tokio::io::split(stream);
     run_readwrite_task(
@@ -1191,6 +1009,8 @@ async fn run_rest_task(task: TaskSpec, stream: TcpStream, ctx: TaskContext) -> R
     .await
 }
 
+/// run_ws_task performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 async fn run_ws_task(
     task: TaskSpec,
     ws: WebSocketStream<MaybeTlsStream<TcpStream>>,
@@ -1200,14 +1020,15 @@ async fn run_ws_task(
     run_readwrite_task(task, RwWriter::Ws(sink), ReadSource::Ws(stream), ctx).await
 }
 
-/// ReadSource is the read half handed to the response reader.
+/// ReadSource enumerates the states or variants handled by this module.
+/// Match arms should preserve the semantic contract of each variant.
 enum ReadSource {
     Rest(ReadHalf<TcpStream>),
     Ws(SplitStream<WebSocketStream<MaybeTlsStream<TcpStream>>>),
 }
 
-/// run_readwrite_task spawns the three loops (writer + reader + watchdog) shared
-/// by REST and WS and waits for them to terminate, like run_fix_task.
+/// run_readwrite_task performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 async fn run_readwrite_task(
     task: TaskSpec,
     writer: RwWriter,
@@ -1278,11 +1099,9 @@ async fn run_readwrite_task(
     Ok(sent_total)
 }
 
-/// rw_write_loop is the fixed-interval pacer for REST/WS. Identical in shape to
-/// fix_write_loop minus the FIX SendingTime patch: it inserts a PendingOrder
-/// before each write so a fast contestant cannot reply before the entry exists,
-/// then the reader/watchdog own emission.
 #[allow(clippy::too_many_arguments)]
+/// rw_write_loop performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 async fn rw_write_loop(
     mut writer: RwWriter,
     task: TaskSpec,
@@ -1333,7 +1152,6 @@ async fn rw_write_loop(
 
         let action = generator.next();
         let seq = action.seq();
-        // REST/WS frames carry no FIX tag 52, so no patch_timestamp is needed.
         let frame = render_frame(
             &fix_version,
             &session_id,
@@ -1403,9 +1221,9 @@ async fn rw_write_loop(
     Ok(sent)
 }
 
-/// emit_response records the matched OrderSentEvent (timed_out=false) for a
-/// pending order whose response just arrived. Shared by the REST and WS readers.
 #[allow(clippy::too_many_arguments)]
+/// emit_response performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 async fn emit_response(
     telemetry: &TelemetrySink,
     pending: &PendingMap,
@@ -1415,8 +1233,6 @@ async fn emit_response(
     task_id: u32,
     clord_id: &str,
 ) {
-    // First response wins: the remove() consumes the entry, so later responses
-    // (partial fills) for the same ClOrdID are ignored — same rule as FIX.
     let pending_order = {
         let mut map = pending.lock().expect("pending map poisoned");
         map.remove(clord_id)
@@ -1445,11 +1261,12 @@ async fn emit_response(
         .await;
 }
 
-/// clordid_from_json extracts the "cl_ord_id" string from a JSON response body
-/// (the algo's execution report echoes the request's cl_ord_id). Returns None
-/// if the body is not JSON or carries no cl_ord_id.
+/// clordid_from_json performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 fn clordid_from_json(body: &[u8]) -> Option<String> {
     #[derive(serde::Deserialize)]
+    /// Resp stores the state passed across this module boundary.
+    /// Keep field changes compatible with callers and serialized contracts.
     struct Resp {
         cl_ord_id: Option<String>,
     }
@@ -1458,10 +1275,8 @@ fn clordid_from_json(body: &[u8]) -> Option<String> {
         .and_then(|r| r.cl_ord_id)
 }
 
-/// next_http_response frames one HTTP/1.1 response from the buffer head and
-/// returns (cl_ord_id, bytes_consumed). Handles Content-Length and chunked
-/// bodies (keep-alive: several responses can sit in the buffer). Returns None
-/// while the response is still incomplete.
+/// next_http_response performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 fn next_http_response(buf: &[u8]) -> Option<(Option<String>, usize)> {
     let hdr_end = find_subslice(buf, b"\r\n\r\n")?;
     let body_start = hdr_end + 4;
@@ -1469,7 +1284,6 @@ fn next_http_response(buf: &[u8]) -> Option<(Option<String>, usize)> {
     if header_is_chunked(headers) {
         let rel = find_subslice(&buf[body_start..], b"0\r\n\r\n")?;
         let total = body_start + rel + 5;
-        // Best-effort: extract from the first chunk's bytes (single-chunk JSON).
         let chunk_body = dechunk_first(&buf[body_start..total]);
         return Some((clordid_from_json(&chunk_body), total));
     }
@@ -1481,6 +1295,8 @@ fn next_http_response(buf: &[u8]) -> Option<(Option<String>, usize)> {
     Some((clordid_from_json(&buf[body_start..total]), total))
 }
 
+/// find_subslice performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 fn find_subslice(hay: &[u8], needle: &[u8]) -> Option<usize> {
     if needle.is_empty() || hay.len() < needle.len() {
         return None;
@@ -1488,6 +1304,8 @@ fn find_subslice(hay: &[u8], needle: &[u8]) -> Option<usize> {
     hay.windows(needle.len()).position(|w| w == needle)
 }
 
+/// header_content_length performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 fn header_content_length(headers: &[u8]) -> Option<usize> {
     let lower: Vec<u8> = headers.iter().map(u8::to_ascii_lowercase).collect();
     let i = find_subslice(&lower, b"content-length:")?;
@@ -1496,6 +1314,8 @@ fn header_content_length(headers: &[u8]) -> Option<usize> {
     std::str::from_utf8(&rest[..end]).ok()?.trim().parse().ok()
 }
 
+/// header_is_chunked performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 fn header_is_chunked(headers: &[u8]) -> bool {
     let lower: Vec<u8> = headers.iter().map(u8::to_ascii_lowercase).collect();
     match find_subslice(&lower, b"transfer-encoding:") {
@@ -1508,8 +1328,8 @@ fn header_is_chunked(headers: &[u8]) -> bool {
     }
 }
 
-/// dechunk_first returns the bytes of the first chunk (enough for a single-chunk
-/// JSON execution report); good enough for ClOrdID extraction.
+/// dechunk_first performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 fn dechunk_first(body: &[u8]) -> Vec<u8> {
     let Some(crlf) = find_subslice(body, b"\r\n") else {
         return Vec::new();
@@ -1523,10 +1343,9 @@ fn dechunk_first(body: &[u8]) -> Vec<u8> {
     body[start..end].to_vec()
 }
 
-/// rest_read_loop drains HTTP responses, matches each by the echoed cl_ord_id,
-/// and emits with timed_out=false. Exits at drain_end_ns; stragglers are the
-/// watchdog's job. Mirrors fix_read_loop.
 #[allow(clippy::too_many_arguments)]
+/// rest_read_loop performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 async fn rest_read_loop(
     mut read_half: ReadHalf<TcpStream>,
     task_id: u32,
@@ -1557,7 +1376,6 @@ async fn rest_read_loop(
         };
         buf.extend_from_slice(&chunk[..n]);
 
-        // Drain every complete response currently in the buffer.
         while let Some((clord, consumed)) = next_http_response(&buf) {
             if let Some(clord_id) = clord {
                 emit_response(
@@ -1583,10 +1401,9 @@ async fn rest_read_loop(
     Ok(0)
 }
 
-/// ws_read_loop drains WebSocket frames (tungstenite handles framing), matches
-/// each by the echoed cl_ord_id from the JSON payload, and emits. Mirrors
-/// fix_read_loop.
 #[allow(clippy::too_many_arguments)]
+/// ws_read_loop performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 async fn ws_read_loop(
     mut stream: SplitStream<WebSocketStream<MaybeTlsStream<TcpStream>>>,
     task_id: u32,
@@ -1634,15 +1451,12 @@ async fn ws_read_loop(
     Ok(0)
 }
 
-/// order_shape produces deterministic price, quantity, and side values for
-/// the given profile and sequence number. v1 shapes are participant-typical
-/// but not exhaustive — judges can rebalance via the scenarios table without
-/// editing this function.
+/// order_shape performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
+
 pub(crate) fn order_shape(profile: BotProfile, seq: u32, rng: &mut SmallRng) -> (u64, u64, Side) {
     match profile {
         BotProfile::Hft => {
-            // Market-making behaviour: tight spread around 10_000, alternating
-            // side per sequence so the book stays roughly balanced.
             let side = if seq % 2 == 0 { Side::Sell } else { Side::Buy };
             let spread = rng.gen_range(1..25);
             let price = match side {
@@ -1652,7 +1466,6 @@ pub(crate) fn order_shape(profile: BotProfile, seq: u32, rng: &mut SmallRng) -> 
             (price, rng.gen_range(10..50), side)
         }
         BotProfile::Retail => {
-            // Retail: small, random side, modest sizes, close to mid.
             let side = if rng.gen_bool(0.5) {
                 Side::Buy
             } else {
@@ -1666,8 +1479,6 @@ pub(crate) fn order_shape(profile: BotProfile, seq: u32, rng: &mut SmallRng) -> 
             (price, rng.gen_range(1..10), side)
         }
         BotProfile::Institutional => {
-            // Institutional: large block sizes, conservative pricing further
-            // from mid to exercise the depth of the book.
             let side = if rng.gen_bool(0.5) {
                 Side::Buy
             } else {
@@ -1683,8 +1494,8 @@ pub(crate) fn order_shape(profile: BotProfile, seq: u32, rng: &mut SmallRng) -> 
     }
 }
 
-/// instant_from_unix_nanos converts the controller's realtime epoch into a
-/// local Tokio instant for sleep_until.
+/// instant_from_unix_nanos performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 fn instant_from_unix_nanos(target_ns: u64) -> Instant {
     let now_ns = unix_nanos();
     if target_ns <= now_ns {
@@ -1694,10 +1505,8 @@ fn instant_from_unix_nanos(target_ns: u64) -> Instant {
     }
 }
 
-/// TargetClient stores the active connection for the selected workload
-/// protocol. The FIX variant carries the connection already split into
-/// read/write halves so the response capture path can drain inbound bytes in
-/// parallel with the fixed-interval pacer.
+/// TargetClient enumerates the states or variants handled by this module.
+/// Match arms should preserve the semantic contract of each variant.
 enum TargetClient {
     Fix(FixConnection),
     Rest(TcpStream),
@@ -1705,10 +1514,8 @@ enum TargetClient {
 }
 
 impl TargetClient {
-    /// connect establishes the protocol-specific connection and performs FIX
-    /// logon when required. For FIX it then splits the TcpStream into read +
-    /// write halves so the response capture path can drain inbound bytes in
-    /// parallel with the fixed-interval pacer.
+    /// connect performs the module-specific operation described by its name.
+    /// It keeps validation, side effects, and returned values within this module's contract.
     async fn connect(spec: &WorkloadSpec, addr: SocketAddr) -> Result<Self> {
         let timeout = Duration::from_millis(spec.connect_timeout_ms);
         match spec.protocol {
@@ -1722,11 +1529,6 @@ impl TargetClient {
                     .write_all(&fix::logon_frame(&spec.fix_version, 1))
                     .await
                     .context("send FIX logon")?;
-                // split() consumes the stream and hands ownership of each
-                // half to its respective tokio task — the writer paces sends,
-                // the reader drains responses. They share the same socket
-                // but no further synchronisation is needed since reads and
-                // writes are independent in the kernel.
                 let (read_half, write_half) = tokio::io::split(stream);
                 Ok(Self::Fix(FixConnection {
                     read_half,
@@ -1747,8 +1549,6 @@ impl TargetClient {
                     .await
                     .context("timed out connecting WS bot")?
                     .context("connect WS bot")?;
-                // WebSocket path lacked nodelay
-                // that FIX/REST have, causing up to 40ms Nagle coalescing delay
                 if let tokio_tungstenite::MaybeTlsStream::Plain(ref tcp) = ws.get_ref() {
                     let _ = tcp.set_nodelay(true);
                 }
@@ -1764,6 +1564,8 @@ mod tests {
     use std::net::SocketAddr;
 
     #[test]
+    /// http_response_framed_by_content_length_and_clordid_extracted performs the module-specific operation described by its name.
+    /// It keeps validation, side effects, and returned values within this module's contract.
     fn http_response_framed_by_content_length_and_clordid_extracted() {
         let body = br#"{"cl_ord_id":"sess_1_2_O","exec_type":"2","fill_qty":5,"fill_price":10000}"#;
         let resp = format!(
@@ -1777,6 +1579,8 @@ mod tests {
     }
 
     #[test]
+    /// http_two_pipelined_responses_drain_in_order performs the module-specific operation described by its name.
+    /// It keeps validation, side effects, and returned values within this module's contract.
     fn http_two_pipelined_responses_drain_in_order() {
         let one = "HTTP/1.1 200 OK\r\nContent-Length: 22\r\n\r\n{\"cl_ord_id\":\"ord-A\"}\r\n";
         let two = "HTTP/1.1 200 OK\r\nContent-Length: 22\r\n\r\n{\"cl_ord_id\":\"ord-B\"}\r\n";
@@ -1789,15 +1593,17 @@ mod tests {
     }
 
     #[test]
+    /// http_incomplete_response_returns_none performs the module-specific operation described by its name.
+    /// It keeps validation, side effects, and returned values within this module's contract.
     fn http_incomplete_response_returns_none() {
-        // header says 50 bytes of body but only a few are present
         let partial = "HTTP/1.1 200 OK\r\nContent-Length: 50\r\n\r\n{\"cl_ord_id\":";
         assert!(next_http_response(partial.as_bytes()).is_none());
     }
 
     #[test]
+    /// http_chunked_response_clordid_extracted performs the module-specific operation described by its name.
+    /// It keeps validation, side effects, and returned values within this module's contract.
     fn http_chunked_response_clordid_extracted() {
-        // single-chunk JSON body
         let json = "{\"cl_ord_id\":\"ord-C\"}";
         let resp = format!(
             "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n{:x}\r\n{}\r\n0\r\n\r\n",
@@ -1809,6 +1615,8 @@ mod tests {
     }
 
     #[test]
+    /// ws_json_payload_clordid_extracted performs the module-specific operation described by its name.
+    /// It keeps validation, side effects, and returned values within this module's contract.
     fn ws_json_payload_clordid_extracted() {
         let payload = br#"{"cl_ord_id":"ord-ws-1","exec_type":"0"}"#;
         assert_eq!(clordid_from_json(payload).as_deref(), Some("ord-ws-1"));
@@ -1816,13 +1624,9 @@ mod tests {
         assert_eq!(clordid_from_json(b"{\"other\":1}"), None);
     }
 
-    // Regression: the controller passes target_host as a DNS name
-    // (algo-{session_id}.sandbox.svc.cluster.local), never a numeric IP.
-    // The old code did `"host:port".parse::<SocketAddr>()`, whose FromStr
-    // only accepts IP literals, so every in-cluster workload failed to
-    // connect. resolve_target must resolve a hostname. "localhost" is the
-    // portable stand-in that's guaranteed resolvable in CI.
     #[tokio::test]
+    /// resolves_hostname_target performs the module-specific operation described by its name.
+    /// It keeps validation, side effects, and returned values within this module's contract.
     async fn resolves_hostname_target() {
         let addr = resolve_target("localhost", 9876)
             .await
@@ -1831,8 +1635,9 @@ mod tests {
         assert!(addr.ip().is_loopback(), "expected loopback, got {addr}");
     }
 
-    // Bare IP literals (used by the local examples) must keep working.
     #[tokio::test]
+    /// resolves_ip_literal_target performs the module-specific operation described by its name.
+    /// It keeps validation, side effects, and returned values within this module's contract.
     async fn resolves_ip_literal_target() {
         let addr = resolve_target("127.0.0.1", 8080)
             .await
@@ -1840,10 +1645,9 @@ mod tests {
         assert_eq!(addr, "127.0.0.1:8080".parse::<SocketAddr>().unwrap());
     }
 
-    // The exact production-shaped name that broke under SocketAddr::parse.
-    // It won't resolve off-cluster, so we assert we get a clean resolver
-    // error (not a parse rejection) — i.e. the code path now reaches DNS.
     #[tokio::test]
+    /// cluster_dns_name_reaches_resolver performs the module-specific operation described by its name.
+    /// It keeps validation, side effects, and returned values within this module's contract.
     async fn cluster_dns_name_reaches_resolver() {
         let err = resolve_target("algo-sess-123.sandbox.svc.cluster.local", 8080)
             .await
@@ -1854,6 +1658,8 @@ mod tests {
         );
     }
 
+    /// valid_spec performs the module-specific operation described by its name.
+    /// It keeps validation, side effects, and returned values within this module's contract.
     fn valid_spec() -> WorkloadSpec {
         WorkloadSpec {
             session_id: "sess-1".into(),
@@ -1883,6 +1689,8 @@ mod tests {
     }
 
     #[test]
+    /// validate_spec_rejects_submission_id_with_wire_unsafe_chars performs the module-specific operation described by its name.
+    /// It keeps validation, side effects, and returned values within this module's contract.
     fn validate_spec_rejects_submission_id_with_wire_unsafe_chars() {
         let mut spec = valid_spec();
         spec.submission_id = "sub/1".into();
@@ -1891,11 +1699,9 @@ mod tests {
         assert!(err.to_string().contains("submission_id"));
     }
 
-    // Repro for **H13** (producer side): a cancel/replace must carry the
-    // targeted resting order's ClOrdID through to OrderSentEvent.orig_order_id
-    // so the validator can key its reference engine off the bot-authoritative
-    // target. A new/market order must emit an empty orig_order_id.
     #[test]
+    /// cancel_replace_frames_carry_orig_order_id_new_orders_empty performs the module-specific operation described by its name.
+    /// It keeps validation, side effects, and returned values within this module's contract.
     fn cancel_replace_frames_carry_orig_order_id_new_orders_empty() {
         use content::Action;
 
@@ -1936,8 +1742,6 @@ mod tests {
         let frame = render_frame("FIX.4.2", "sess1", "host", 7, &replace);
         assert_eq!(frame.orig_order_id, "sess1_7_1_O");
 
-        // The PendingOrder the writer hands off (and thus the emitted
-        // OrderSentEvent) copies orig_order_id verbatim from the frame.
         let pending = PendingOrder {
             order_id: frame.order_id.clone(),
             orig_order_id: frame.orig_order_id.clone(),
@@ -1953,12 +1757,9 @@ mod tests {
         assert_eq!(pending.orig_order_id, "sess1_7_1_O");
     }
 
-    // Repro for **L41**: the barrier consumer group must be stable per worker,
-    // not per session. A per-session group `{group}-barrier-{session}-{worker}`
-    // is created fresh for every run and never deleted, leaking consumer groups
-    // on the broker. wait_for_barrier already filters by session_id, so a stable
-    // per-worker group is sufficient.
     #[test]
+    /// barrier_group_is_per_worker_not_per_session performs the module-specific operation described by its name.
+    /// It keeps validation, side effects, and returned values within this module's contract.
     fn barrier_group_is_per_worker_not_per_session() {
         let a = barrier_group("bot-fleet", "sess-1", "worker-7");
         let b = barrier_group("bot-fleet", "sess-2", "worker-7");
@@ -1974,13 +1775,9 @@ mod tests {
         assert_eq!(a, "bot-fleet-barrier-worker-7");
     }
 
-    // Repro for **L43**: a SIGTERM-driven shutdown must be able to stop the
-    // send loops promptly so TelemetrySink::close can flush the final batch
-    // before the pod exits. The send loops gate on a CancelToken; an
-    // already-cancelled token must make the loop guard return "stop" without
-    // performing another send. (A full async fire path needs live TCP, so we
-    // unit-test the cancellation plumbing the loops actually consult.)
     #[tokio::test]
+    /// cancelled_token_stops_send_loop performs the module-specific operation described by its name.
+    /// It keeps validation, side effects, and returned values within this module's contract.
     async fn cancelled_token_stops_send_loop() {
         let cancel = CancelToken::new();
         assert!(!cancel.is_cancelled(), "fresh token is not cancelled");
@@ -1988,42 +1785,29 @@ mod tests {
         cancel.cancel();
         assert!(cancel.is_cancelled(), "cancelled token reports cancelled");
 
-        // The send loops break when the token is cancelled; assert the guard.
         assert!(
             should_stop_sending(&cancel, u64::MAX),
             "cancelled token must stop the send loop before the deadline"
         );
-        // An un-cancelled token before the deadline keeps sending.
         let live = CancelToken::new();
         assert!(!should_stop_sending(&live, u64::MAX));
-        // A passed deadline stops regardless of cancellation.
         assert!(should_stop_sending(&live, 0));
 
-        // cancelled() resolves immediately on an already-cancelled token, so a
-        // loop awaiting it does not hang past shutdown.
         tokio::time::timeout(Duration::from_secs(1), cancel.cancelled())
             .await
             .expect("cancelled() must resolve promptly on a cancelled token");
     }
 
-    // Repro for **L39**: the workload-assignment offset is committed only after
-    // run_workload returns (barrier wait + scenario duration + drain). If that
-    // worst-case wall time exceeds the consumer's max.poll.interval.ms, Kafka
-    // rebalances the partition mid-run and re-delivers the assignment to another
-    // worker — duplicate execution. validate_spec must reject a spec whose
-    // worst-case wall time would breach the configured poll bound, and accept
-    // one that fits.
     #[test]
+    /// validate_spec_rejects_duration_that_would_breach_poll_interval performs the module-specific operation described by its name.
+    /// It keeps validation, side effects, and returned values within this module's contract.
     fn validate_spec_rejects_duration_that_would_breach_poll_interval() {
         let config = Config::default();
 
-        // In-bounds: short duration fits comfortably under the poll ceiling.
         let mut ok = valid_spec();
         ok.tasks[0].duration_ns = 1_000_000_000; // 1s
         validate_spec(&config, &ok).expect("short workload must be accepted");
 
-        // Over-ceiling: a duration so long that barrier-wait + duration + drain
-        // exceeds max.poll.interval.ms must be rejected before it runs.
         let mut over = valid_spec();
         over.tasks[0].duration_ns = config.max_poll_interval.as_nanos() as u64;
         let err =
@@ -2034,12 +1818,12 @@ mod tests {
             "error should reference the poll-interval ceiling, got: {err}"
         );
 
-        // The worst-case wall time accounts for barrier wait + offset + duration
-        // + drain, so it strictly exceeds the raw duration.
         assert!(worst_case_wall_time_ns(&over) > over.tasks[0].duration_ns);
     }
 
     #[test]
+    /// ready_key_groups_by_session_and_worker performs the module-specific operation described by its name.
+    /// It keeps validation, side effects, and returned values within this module's contract.
     fn ready_key_groups_by_session_and_worker() {
         let signal = ReadySignal {
             session_id: "sess-1".into(),

@@ -1,3 +1,8 @@
+// Package pipeline implements pipeline behavior.
+//
+// This file is part of the IICPC benchmarking platform and keeps its
+// responsibilities local to the surrounding package. It should be read with
+// the service-level design in design.md for broader operational context.
 package pipeline
 
 import (
@@ -12,17 +17,23 @@ import (
 	"github.com/iicpc/schemas/topics"
 )
 
+// StatusUpdater defines the behavior expected by this package boundary.
+// Implementations should preserve the caller-visible contract.
 type StatusUpdater interface {
 	PublishStatus(ctx context.Context, submissionID, status, message string) error
 	UpdateDBStatus(ctx context.Context, submissionID, status, message string) error
 	UpdateImageRef(ctx context.Context, submissionID, imageRef string) error
 }
 
+// MinioClient defines the behavior expected by this package boundary.
+// Implementations should preserve the caller-visible contract.
 type MinioClient interface {
 	DownloadObject(ctx context.Context, objectPath string) ([]byte, error)
 	UploadBytes(ctx context.Context, objectPath, contentType string, data []byte) error
 }
 
+// Pipeline groups the state and dependencies used by this package.
+// Keep this type aligned with the runtime contract around it.
 type Pipeline struct {
 	minio   MinioClient
 	updater StatusUpdater
@@ -30,10 +41,14 @@ type Pipeline struct {
 	log     *slog.Logger
 }
 
+// New performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func New(minio MinioClient, updater StatusUpdater, runner StepRunner, log *slog.Logger) *Pipeline {
 	return &Pipeline{minio: minio, updater: updater, runner: runner, log: log}
 }
 
+// Run applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (p *Pipeline) Run(ctx context.Context, msg topics.SubmissionBuildRequested) {
 	id := msg.SubmissionID
 	log := p.log.With("submission_id", id)
@@ -44,6 +59,8 @@ func (p *Pipeline) Run(ctx context.Context, msg topics.SubmissionBuildRequested)
 	}
 }
 
+// run applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (p *Pipeline) run(ctx context.Context, msg topics.SubmissionBuildRequested, log *slog.Logger) error {
 	log.Info("downloading artifact", "path", msg.ArtifactPath)
 	zipData, err := p.minio.DownloadObject(ctx, msg.ArtifactPath)
@@ -67,8 +84,6 @@ func (p *Pipeline) run(ctx context.Context, msg topics.SubmissionBuildRequested,
 	if err != nil {
 		return fmt.Errorf("build: %w", err)
 	}
-	// defer Cleanup only after Build succeeds;
-	// empty imageRef on failure could crash future Cleanup implementations
 	defer p.runner.Cleanup(ctx, imageRef)
 	log.Info("image built", "ref", imageRef)
 
@@ -107,6 +122,8 @@ func (p *Pipeline) run(ctx context.Context, msg topics.SubmissionBuildRequested,
 	return nil
 }
 
+// withGeneratedDockerfile performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func withGeneratedDockerfile(zipData []byte, msg topics.SubmissionBuildRequested) ([]byte, error) {
 	content, err := dockerfile.Generate(msg.Language, msg.BuildType, msg.BuildTarget, msg.Port)
 	if err != nil {
@@ -157,6 +174,8 @@ func withGeneratedDockerfile(zipData []byte, msg topics.SubmissionBuildRequested
 	return buf.Bytes(), nil
 }
 
+// setStatus applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (p *Pipeline) setStatus(ctx context.Context, submissionID, status, message string) {
 	if err := p.updater.PublishStatus(ctx, submissionID, status, message); err != nil {
 		p.log.Warn("failed to publish status", "status", status, "error", err)

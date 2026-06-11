@@ -1,3 +1,8 @@
+// Package read defines tests for store test.
+//
+// This file is part of the IICPC benchmarking platform and keeps its
+// responsibilities local to the surrounding package. It should be read with
+// the service-level design in design.md for broader operational context.
 package read
 
 import (
@@ -7,6 +12,8 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 )
 
+// TestLeaderboardOrderByAllowlist performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func TestLeaderboardOrderByAllowlist(t *testing.T) {
 	got := leaderboardOrderBy("p99", "desc")
 	if !strings.HasPrefix(got, "disqualified ASC, p99_at_peak_ns DESC") {
@@ -19,9 +26,8 @@ func TestLeaderboardOrderByAllowlist(t *testing.T) {
 	}
 }
 
-// TestLeaderboardOrderByDisqualifiedAlwaysLeads guards the DQ-aware ranking
-// fix: every user-selectable sort (and every bypass attempt) must stay
-// SECONDARY to the disqualified term, or ?sort= re-ranks DQ'd peaks to #1.
+// TestLeaderboardOrderByDisqualifiedAlwaysLeads performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func TestLeaderboardOrderByDisqualifiedAlwaysLeads(t *testing.T) {
 	cases := []struct {
 		name string
@@ -56,9 +62,8 @@ func TestLeaderboardOrderByDisqualifiedAlwaysLeads(t *testing.T) {
 	}
 }
 
-// TestRankedSubqueryOrderLeadsWithDisqualified pins the ROW_NUMBER() ranking
-// order shared by the leaderboard and run-detail subqueries: a DQ row with the
-// max retained peak must rank below every clean row.
+// TestRankedSubqueryOrderLeadsWithDisqualified performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func TestRankedSubqueryOrderLeadsWithDisqualified(t *testing.T) {
 	if !strings.HasPrefix(rankedOrder, "disqualified ASC") {
 		t.Fatalf("ranked subquery order must lead with disqualified ASC, got %q", rankedOrder)
@@ -81,6 +86,8 @@ func TestRankedSubqueryOrderLeadsWithDisqualified(t *testing.T) {
 	}
 }
 
+// TestLeaderboardCursorRoundTrip performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func TestLeaderboardCursorRoundTrip(t *testing.T) {
 	cursor := encodeLeaderboardCursor(125)
 	offset, err := decodeLeaderboardCursor(cursor)
@@ -92,12 +99,16 @@ func TestLeaderboardCursorRoundTrip(t *testing.T) {
 	}
 }
 
+// TestLeaderboardCursorRejectsInvalidInput performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func TestLeaderboardCursorRejectsInvalidInput(t *testing.T) {
 	if _, err := decodeLeaderboardCursor("not-base64"); err == nil {
 		t.Fatal("invalid cursor was accepted")
 	}
 }
 
+// TestCacheableLeaderboardOnlyDefaultTopRank performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func TestCacheableLeaderboardOnlyDefaultTopRank(t *testing.T) {
 	if !cacheableLeaderboard(LeaderboardQuery{Limit: 50}) {
 		t.Fatal("default top leaderboard should be cacheable")
@@ -110,6 +121,8 @@ func TestCacheableLeaderboardOnlyDefaultTopRank(t *testing.T) {
 	}
 }
 
+// TestIsUndefinedTable performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func TestIsUndefinedTable(t *testing.T) {
 	if !isUndefinedTable(&pgconn.PgError{Code: "42P01"}) {
 		t.Fatal("undefined_table was not recognized")

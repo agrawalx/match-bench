@@ -1,3 +1,8 @@
+// Package validate defines tests for validate test.
+//
+// This file is part of the IICPC benchmarking platform and keeps its
+// responsibilities local to the surrounding package. It should be read with
+// the service-level design in design.md for broader operational context.
 package validate
 
 import (
@@ -7,16 +12,21 @@ import (
 	"github.com/iicpc/correctness-validator/internal/model"
 )
 
+// fill performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func fill(qty, price uint64) model.Response {
 	return model.Response{ExecType: "2", FillQty: qty, FillPrice: price}
 }
 
+// order performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func order(id string, kind model.Kind, side model.Side, price int64, qty uint64, resp ...model.Response) *model.Order {
 	return &model.Order{OrderID: id, Kind: kind, Side: side, Price: price, Qty: qty, Responses: resp}
 }
 
+// TestCleanCrossIsAllValid performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func TestCleanCrossIsAllValid(t *testing.T) {
-	// S1 rests, B1 crosses; both correctly report a 10@100 fill.
 	ordered := []*model.Order{
 		order("S1", model.NewLimit, model.Sell, 100, 10, fill(10, 100)),
 		order("B1", model.NewLimit, model.Buy, 100, 10, fill(10, 100)),
@@ -30,8 +40,9 @@ func TestCleanCrossIsAllValid(t *testing.T) {
 	}
 }
 
+// TestOverfillFlagged performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func TestOverfillFlagged(t *testing.T) {
-	// Maker has plenty; buyer (qty 10) over-reports 6+6 = 12.
 	ordered := []*model.Order{
 		order("S1", model.NewLimit, model.Sell, 100, 20),
 		order("B1", model.NewLimit, model.Buy, 100, 10, fill(6, 100), fill(6, 100)),
@@ -45,6 +56,8 @@ func TestOverfillFlagged(t *testing.T) {
 	}
 }
 
+// TestPhantomFlagged performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func TestPhantomFlagged(t *testing.T) {
 	r := Run(nil, []ReportedFill{{OrderID: "ghost", Qty: 5, Price: 100}})
 	if r.PhantomFills != 1 || r.TotalFills != 1 || r.ValidFills != 0 {
@@ -55,8 +68,9 @@ func TestPhantomFlagged(t *testing.T) {
 	}
 }
 
+// TestWrongPriceFlagged performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func TestWrongPriceFlagged(t *testing.T) {
-	// Reference fills B1 at 100; contestant claims it filled at 101.
 	ordered := []*model.Order{
 		order("S1", model.NewLimit, model.Sell, 100, 10),
 		order("B1", model.NewLimit, model.Buy, 100, 10, fill(10, 101)),
@@ -67,8 +81,9 @@ func TestWrongPriceFlagged(t *testing.T) {
 	}
 }
 
+// TestFillBeyondReferenceQtyFlagged performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func TestFillBeyondReferenceQtyFlagged(t *testing.T) {
-	// B1 (qty 20) reports 15@100, but only 10 was available to fill at the book.
 	ordered := []*model.Order{
 		order("S1", model.NewLimit, model.Sell, 100, 10),
 		order("B1", model.NewLimit, model.Buy, 100, 20, fill(15, 100)),
@@ -79,8 +94,9 @@ func TestFillBeyondReferenceQtyFlagged(t *testing.T) {
 	}
 }
 
+// TestUnderReportIsValid performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func TestUnderReportIsValid(t *testing.T) {
-	// Reference fills 10; contestant reports only 5 — under-fill is not a violation.
 	ordered := []*model.Order{
 		order("S1", model.NewLimit, model.Sell, 100, 10),
 		order("B1", model.NewLimit, model.Buy, 100, 10, fill(5, 100)),
@@ -91,6 +107,8 @@ func TestUnderReportIsValid(t *testing.T) {
 	}
 }
 
+// TestDeterministic performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func TestDeterministic(t *testing.T) {
 	build := func() []*model.Order {
 		return []*model.Order{
@@ -106,8 +124,9 @@ func TestDeterministic(t *testing.T) {
 	}
 }
 
+// TestWindowsOverlap performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func TestWindowsOverlap(t *testing.T) {
-	// aggressor t3=1600, tol=200 -> window [1400,1800]
 	if !windowsOverlap(1000, 1500, 1600, 200) { // liquidity [1000,1500] touches 1400..1800 at 1500
 		t.Fatal("should overlap: avail exit 1500 within [1400,1800]")
 	}

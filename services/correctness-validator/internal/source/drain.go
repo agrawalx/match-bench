@@ -1,23 +1,8 @@
-// Package source drains a completed session's full order log from Kafka.
+// Package source implements drain behavior.
 //
-// On the completion trigger we snapshot each partition's high-watermark and read
-// orders.sent + orders.acked up to that watermark, keeping only batches for the
-// target session_id. Watermark-at-trigger is the completeness oracle (the
-// controller publishes `completed` only after every producer acked), so reading
-// to the watermark = reading every event. All partitions are read explicitly (we
-// don't rely on kafka-go ↔ rdkafka partitioner parity).
-//
-// The START offset is bounded to the session's time window rather than offset 0.
-// These topics accumulate every session's data, so draining one session from
-// earliest would scan the WHOLE topic — the per-message msgpack churn over
-// millions of messages × concurrently-validating sessions blows the heap
-// (OOMKilled even at 3Gi). Since session_id is a UUIDv7 whose first 48 bits are
-// the Unix-ms creation time, we derive the session start, subtract a safety
-// margin, and use Kafka's time-based offset lookup (Conn.ReadOffset) to start
-// each partition at the first message at-or-after that instant. All of the
-// session's events are produced after session-start, so the result is identical
-// — only the scan is bounded. Ids that aren't valid UUIDv7 (e.g. synthetic test
-// ids) fall back to earliest, so we never silently lose events.
+// This file is part of the IICPC benchmarking platform and keeps its
+// responsibilities local to the surrounding package. It should be read with
+// the service-level design in design.md for broader operational context.
 package source
 
 import (
@@ -35,30 +20,25 @@ import (
 	"github.com/vmihailenco/msgpack/v5"
 )
 
-// startMargin is subtracted from the session-start timestamp before the
-// time-based offset lookup, guarding against clock skew between the session-id
-// minter and Kafka brokers and against producers that ran slightly ahead of the
-// id's timestamp. 60s is generous relative to any realistic skew while still
-// bounding the scan to seconds-of-data instead of the whole topic.
 const startMargin = 60 * time.Second
 
-// recordDecodeError surfaces a message that failed msgpack decode during the
-// drain: counted per stage and logged with its partition/offset so the poison
-// message can be located, then skipped — one undecodable message must not sink
-// (or silently distort) the whole session's validation.
+// recordDecodeError performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func recordDecodeError(topic string, m kafka.Message, err error) {
 	metrics.Counter("validator_validation_errors_total", "Correctness-validator validation errors by stage.", metrics.Labels("stage", "drain_decode"), 1)
 	slog.Warn("drain: msgpack decode failed; skipping message", "topic", topic, "partition", m.Partition, "offset", m.Offset, "error", err)
 }
 
-// sentCollector accumulates one session's orders.sent events off the drained
-// messages, counting (and skipping) msgpack decode failures.
+// sentCollector groups the state and dependencies used by this package.
+// Keep this type aligned with the runtime contract around it.
 type sentCollector struct {
 	sessionID    string
 	events       []topics.OrderSentEvent
 	decodeErrors int
 }
 
+// handle applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (c *sentCollector) handle(m kafka.Message) {
 	var b topics.OrderSentBatch
 	if err := msgpack.Unmarshal(m.Value, &b); err != nil {
@@ -71,21 +51,16 @@ func (c *sentCollector) handle(m kafka.Message) {
 	}
 }
 
-// ackKey identifies one orders.acked response for dedup:
-// (order_id, exec_type, t7_xdp_egress_ns). The producers are at-least-once, so
-// the same event can land on the topic twice; t7 (per-response-packet XDP egress
-// timestamp, ns) distinguishes genuine repeat responses — e.g. two partial fills
-// with the same exec_type — from redeliveries of the same one.
+// ackKey groups the state and dependencies used by this package.
+// Keep this type aligned with the runtime contract around it.
 type ackKey struct {
 	orderID  string
 	execType string
 	t7NS     uint64
 }
 
-// ackedCollector accumulates one session's orders.acked events, dropping
-// redelivered duplicates by ackKey (a duplicated fill would inflate the
-// reported cumulative quantity into a false overfill/phantom violation) and
-// counting msgpack decode failures.
+// ackedCollector groups the state and dependencies used by this package.
+// Keep this type aligned with the runtime contract around it.
 type ackedCollector struct {
 	sessionID    string
 	seen         map[ackKey]struct{}
@@ -94,10 +69,14 @@ type ackedCollector struct {
 	decodeErrors int
 }
 
+// newAckedCollector performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func newAckedCollector(sessionID string) *ackedCollector {
 	return &ackedCollector{sessionID: sessionID, seen: make(map[ackKey]struct{})}
 }
 
+// handle applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (c *ackedCollector) handle(m kafka.Message) {
 	var b topics.OrderAckedBatch
 	if err := msgpack.Unmarshal(m.Value, &b); err != nil {
@@ -119,8 +98,8 @@ func (c *ackedCollector) handle(m kafka.Message) {
 	}
 }
 
-// DrainSession returns every orders.sent + orders.acked event for sessionID,
-// with at-least-once duplicates of acked events removed before assembly.
+// DrainSession performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func DrainSession(ctx context.Context, brokers []string, sessionID string) ([]topics.OrderSentEvent, []topics.OrderAckedEvent, error) {
 	// orders.sent and orders.acked are independent topics drained into separate
 	// collectors, so drain them concurrently — halving wall-clock, which matters
@@ -141,8 +120,6 @@ func DrainSession(ctx context.Context, brokers []string, sessionID string) ([]to
 		return nil, nil, fmt.Errorf("drain orders.acked: %w", ackedErr)
 	}
 	if ac.duplicates > 0 {
-		// Counted alongside the drained-events metric so total-seen = drained +
-		// duplicates; dropped here so they can never inflate fills downstream.
 		metrics.Counter("validator_events_drained_total", "Correctness-validator events drained from Kafka by topic.", metrics.Labels("topic", "orders_acked_duplicates"), float64(ac.duplicates))
 		slog.Warn("drain: dropped duplicate orders.acked events", "session_id", sessionID, "duplicates", ac.duplicates)
 	}
@@ -150,17 +127,12 @@ func DrainSession(ctx context.Context, brokers []string, sessionID string) ([]to
 	return sc.events, ac.events, nil
 }
 
-// drainPartitionConcurrency bounds how many partition readers run at once. Each
-// kafka-go partition Reader pays a fixed connection/initial-fetch cost (~seconds)
-// independent of how few messages it returns, so draining the topic's partitions
-// sequentially makes the whole drain scale with partition count — on a
-// co-partitioned topic (orders.sent/acked are sharded across many partitions by
-// order_id) that serial cost alone blew the validation deadline. Reading the
-// partitions concurrently collapses it to ~one reader's cost. The cap keeps the
-// fan-out (sockets + buffered batches) bounded so a high-partition topic can't
-// exhaust fds or memory.
+// drainPartitionConcurrency bounds how many partition readers run at once. 
+
 const drainPartitionConcurrency = 12
 
+// drainTopic performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func drainTopic(ctx context.Context, brokers []string, topic, sessionID string, handle func(kafka.Message)) error {
 	if len(brokers) == 0 {
 		return fmt.Errorf("no kafka brokers configured")
@@ -260,11 +232,8 @@ func drainPartition(ctx context.Context, brokers []string, topic string, partiti
 	return nil
 }
 
-// partitionOffsets returns (startOffset, highWatermark) for a partition, where
-// startOffset is bounded to the session's time window (see package doc) rather
-// than the partition's earliest offset. The high-watermark is the snapshotted
-// completeness oracle; reading [start, watermark) captures every event for the
-// session while scanning only the session's window of the topic.
+// partitionOffsets performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func partitionOffsets(ctx context.Context, broker, topic string, partition int, sessionID string) (int64, int64, error) {
 	conn, err := kafka.DialLeader(ctx, "tcp", broker, topic, partition)
 	if err != nil {
@@ -281,9 +250,6 @@ func partitionOffsets(ctx context.Context, broker, topic string, partition int, 
 		return 0, 0, fmt.Errorf("read last offset %s/%d: %w", topic, partition, err)
 	}
 	if start == kafka.FirstOffset {
-		// Non-UUIDv7 id: fall back to the partition's earliest offset so no event
-		// is ever missed. ReadOffset(zero time) would mean "epoch", which Kafka
-		// also resolves to earliest, but ReadFirstOffset is the explicit primitive.
 		earliest, err := conn.ReadFirstOffset()
 		if err != nil {
 			return 0, 0, fmt.Errorf("read first offset %s/%d: %w", topic, partition, err)
@@ -293,14 +259,8 @@ func partitionOffsets(ctx context.Context, broker, topic string, partition int, 
 	return resolveStart(start, last), last, nil
 }
 
-// resolveStart turns the raw ReadOffset (time-lookup) result into a concrete
-// start offset for the [start,last) scan. Kafka's ListOffsets returns -1 when no
-// message in the partition has a timestamp at-or-after the requested time — i.e.
-// the session produced nothing in this partition (it holds only older runs' data
-// on a shared, retained topic). That must map to an EMPTY range (start=last), not
-// fall through to SetOffset(-1)=LastOffset, which made the reader block on the
-// high watermark until the validation deadline and drain zero events for the
-// whole session (spurious timeout / zero-correctness verdict).
+// resolveStart performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func resolveStart(seek, last int64) int64 {
 	if seek < 0 {
 		return last
@@ -308,13 +268,8 @@ func resolveStart(seek, last int64) int64 {
 	return seek
 }
 
-// startOffsetForSession returns the offset to begin reading a partition from for
-// sessionID. If sessionID is a UUIDv7, it resolves the offset of the first
-// message produced at-or-after (session-start − startMargin) via the supplied
-// time-based lookup (kafka.Conn.ReadOffset). Otherwise it returns
-// kafka.FirstOffset, signalling the caller to read from earliest (no events lost).
-//
-// The lookup is injected so the bounding policy is unit-testable without a broker.
+// startOffsetForSession performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func startOffsetForSession(sessionID string, lookup func(time.Time) (int64, error)) (int64, error) {
 	start, ok := sessionStartFromID(sessionID)
 	if !ok {
@@ -323,15 +278,8 @@ func startOffsetForSession(sessionID string, lookup func(time.Time) (int64, erro
 	return lookup(start.Add(-startMargin))
 }
 
-// sessionStartFromID extracts the creation time embedded in a UUIDv7 session id.
-// Per RFC 9562 the first 48 bits of a v7 UUID are the Unix-millisecond timestamp.
-// Returns (_, false) for ids that aren't well-formed UUIDv7 — including the
-// synthetic "itest-..." ids used in tests — so callers fall back to earliest.
-//
-// We derive session-start from the id itself rather than reading the run row's
-// created_at/started_at from Postgres: the id is already in hand at drain time,
-// so this avoids a DB round-trip on the hot completion path while giving the same
-// "recent" lower bound. A non-v7 id simply falls back to a full (earliest) scan.
+// sessionStartFromID performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func sessionStartFromID(sessionID string) (time.Time, bool) {
 	hexDigits := strings.ReplaceAll(sessionID, "-", "")
 	if len(hexDigits) != 32 {
@@ -341,7 +289,6 @@ func sessionStartFromID(sessionID string) (time.Time, bool) {
 	if err != nil {
 		return time.Time{}, false // not a hex UUID (e.g. synthetic "itest-..." id)
 	}
-	// Version is the high nibble of byte 6; v7 carries the ms timestamp.
 	if raw[6]>>4 != 7 {
 		return time.Time{}, false
 	}

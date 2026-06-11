@@ -1,6 +1,9 @@
-# Optional local platform services.
-# Use with docker-compose.yml and docker-compose.kafka.yml so every service uses
-# the same local Docker Compose Postgres, TimescaleDB, Redis, and Kafka cluster.
+# docker-compose.platform.yml
+#
+# This file defines the local Docker Compose stack for docker compose.platform.
+# It is part of the IICPC platform configuration and should remain
+# aligned with the deployment and operations guidance in the README.
+# Keep comments at the file header so resource bodies stay declarative.
 
 services:
   leaderboard-api:
@@ -42,8 +45,6 @@ services:
       MINIO_BUCKET: submissions
       MINIO_CREATE_BUCKET_IF_MISSING: "true"
       KAFKA_BROKERS: kafka-1:9092,kafka-2:9092,kafka-3:9092
-      # Local stack runs without Google JWT verification; flip to true and
-      # set GOOGLE_CLIENT_ID to exercise the real auth path locally.
       AUTH_REQUIRED: "false"
     ports:
       - "8082:8080"

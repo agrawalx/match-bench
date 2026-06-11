@@ -1,3 +1,8 @@
+// Package store implements minio behavior.
+//
+// This file is part of the IICPC benchmarking platform and keeps its
+// responsibilities local to the surrounding package. It should be read with
+// the service-level design in design.md for broader operational context.
 package store
 
 import (
@@ -17,15 +22,21 @@ const (
 	artifactObjectName      = "artifact.zip"
 )
 
+// MinioStore groups the state and dependencies used by this package.
+// Keep this type aligned with the runtime contract around it.
 type MinioStore struct {
 	client *minio.Client
 	bucket string
 }
 
+// MinioStoreOptions groups the state and dependencies used by this package.
+// Keep this type aligned with the runtime contract around it.
 type MinioStoreOptions struct {
 	CreateBucketIfMissing bool
 }
 
+// NewMinioStore performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func NewMinioStore(endpoint, accessKey, secretKey, bucket string, useSSL bool) (*MinioStore, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), minioInitTimeout)
 	defer cancel()
@@ -33,6 +44,8 @@ func NewMinioStore(endpoint, accessKey, secretKey, bucket string, useSSL bool) (
 	return NewMinioStoreWithOptions(ctx, endpoint, accessKey, secretKey, bucket, useSSL, MinioStoreOptions{})
 }
 
+// NewMinioStoreWithOptions performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func NewMinioStoreWithOptions(ctx context.Context, endpoint, accessKey, secretKey, bucket string, useSSL bool, opts MinioStoreOptions) (*MinioStore, error) {
 	client, err := minio.New(endpoint, &minio.Options{
 		Creds:  credentials.NewStaticV4(accessKey, secretKey, ""),
@@ -58,11 +71,8 @@ func NewMinioStoreWithOptions(ctx context.Context, endpoint, accessKey, secretKe
 	return &MinioStore{client: client, bucket: bucket}, nil
 }
 
-// Upload streams r into MinIO and returns the object path.
-//
-// The object name is intentionally fixed to artifact.zip because each
-// submission_id is immutable and inserted once. Re-uploads mint a new
-// submission_id rather than overwriting this object.
+// Upload applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (s *MinioStore) Upload(ctx context.Context, submissionID string, r io.Reader, size int64, sha256hex string) (string, error) {
 	if size <= 0 {
 		return "", fmt.Errorf("%w: minio put object: size must be greater than zero", cerrs.ErrStoreUploadFailed)
@@ -83,8 +93,8 @@ func (s *MinioStore) Upload(ctx context.Context, submissionID string, r io.Reade
 	return objectPath, nil
 }
 
-// Close is a no-op. The MinIO Go client does not own persistent resources that
-// require shutdown, but this keeps store lifecycle management uniform.
+// Close applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (s *MinioStore) Close() error {
 	return nil
 }

@@ -1,3 +1,8 @@
+// Package k8s defines tests for spawner bugfix test.
+//
+// This file is part of the IICPC benchmarking platform and keeps its
+// responsibilities local to the surrounding package. It should be read with
+// the service-level design in design.md for broader operational context.
 package k8s
 
 import (
@@ -13,6 +18,8 @@ import (
 	"k8s.io/client-go/kubernetes/fake"
 )
 
+// bugfixSpawner performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func bugfixSpawner(client kubernetes.Interface, updater StatusUpdater) *Spawner {
 	return &Spawner{
 		client: client,
@@ -26,6 +33,8 @@ func bugfixSpawner(client kubernetes.Interface, updater StatusUpdater) *Spawner 
 	}
 }
 
+// bfEnv performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func bfEnv(c corev1.Container, key string) (string, bool) {
 	for _, e := range c.Env {
 		if e.Name == key {
@@ -35,6 +44,8 @@ func bfEnv(c corev1.Container, key string) (string, bool) {
 	return "", false
 }
 
+// bfMount performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func bfMount(c corev1.Container, name string) (string, bool) {
 	for _, m := range c.VolumeMounts {
 		if m.Name == name {
@@ -44,6 +55,8 @@ func bfMount(c corev1.Container, name string) (string, bool) {
 	return "", false
 }
 
+// bfHasVolume performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func bfHasVolume(vs []corev1.Volume, name string) bool {
 	for _, v := range vs {
 		if v.Name == name {
@@ -53,8 +66,8 @@ func bfHasVolume(vs []corev1.Volume, name string) bool {
 	return false
 }
 
-// C3: every hardened container must run as an explicit non-root UID so the
-// pod-level RunAsNonRoot=true passes admission regardless of the image's USER.
+// TestContainerSecurityContextNonRoot performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func TestContainerSecurityContextNonRoot(t *testing.T) {
 	sc := containerSecurityContext()
 	if sc.RunAsNonRoot == nil || !*sc.RunAsNonRoot {
@@ -72,8 +85,8 @@ func TestContainerSecurityContextNonRoot(t *testing.T) {
 	}
 }
 
-// H7: trivy and syft run with ReadOnlyRootFilesystem=true, so they need a
-// writable scratch volume + cache env or they abort on a cold pod.
+// TestScanSbomHaveWritableScratch performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func TestScanSbomHaveWritableScratch(t *testing.T) {
 	s := bugfixSpawner(fake.NewSimpleClientset(), nil)
 
@@ -97,6 +110,8 @@ func TestScanSbomHaveWritableScratch(t *testing.T) {
 	}
 }
 
+// TestBuildJobAllowsInsecureKindRegistry performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func TestBuildJobAllowsInsecureKindRegistry(t *testing.T) {
 	s := bugfixSpawner(fake.NewSimpleClientset(), nil)
 	s.cfg.HarborStagingEndpoint = "kind-registry:5000"
@@ -122,10 +137,8 @@ func TestBuildJobAllowsInsecureKindRegistry(t *testing.T) {
 	}
 }
 
-// FIX 2 (audit M-insecure-registry): the old RFC1918 heuristic silently
-// stripped TLS from kaniko/trivy/syft/crane on EKS VPC and service CIDRs.
-// Insecure registry access is now an explicit opt-in (REGISTRY_INSECURE);
-// only loopback and kind-registry endpoints stay auto-insecure for dev.
+// TestRegistryInsecureIsExplicitNotHeuristic performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func TestRegistryInsecureIsExplicitNotHeuristic(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -155,8 +168,8 @@ func TestRegistryInsecureIsExplicitNotHeuristic(t *testing.T) {
 	}
 }
 
-// Job specs must not downgrade TLS for private-CIDR endpoints unless the
-// explicit env is set — production EKS registries live on exactly these CIDRs.
+// TestJobSpecsSecureByDefaultOnPrivateCIDRs performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func TestJobSpecsSecureByDefaultOnPrivateCIDRs(t *testing.T) {
 	s := bugfixSpawner(fake.NewSimpleClientset(), nil)
 	s.cfg.HarborStagingEndpoint = "10.100.0.5:5000"
@@ -177,9 +190,8 @@ func TestJobSpecsSecureByDefaultOnPrivateCIDRs(t *testing.T) {
 	}
 }
 
-// FIX 1 (audit 1.9): ECR has no push-to-create — the spawner derives the
-// repository path from the refs it composes (<endpoint>/<project>/<id>:latest)
-// and pre-creates it before kaniko pushes / crane promotes.
+// TestECRRepositoryName performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func TestECRRepositoryName(t *testing.T) {
 	tests := []struct {
 		name string
@@ -200,26 +212,34 @@ func TestECRRepositoryName(t *testing.T) {
 	}
 }
 
-// fakeECRClient mocks ECRRepositoryClient the same way the kubernetes fakes
-// stand in for the real clientset.
+// fakeECRClient groups the state and dependencies used by this package.
+// Keep this type aligned with the runtime contract around it.
 type fakeECRClient struct {
 	created []string
 	err     error
 }
 
+// CreateRepository applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (f *fakeECRClient) CreateRepository(_ context.Context, repositoryName string) error {
 	f.created = append(f.created, repositoryName)
 	return f.err
 }
 
-// ecrAlreadyExistsErr mimics aws-sdk-go-v2's
-// types.RepositoryAlreadyExistsException: a smithy APIError whose ErrorCode is
-// the exception type name.
+// ecrAlreadyExistsErr groups the state and dependencies used by this package.
+// Keep this type aligned with the runtime contract around it.
 type ecrAlreadyExistsErr struct{}
 
-func (ecrAlreadyExistsErr) Error() string     { return "repository already exists" }
+// Error applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
+func (ecrAlreadyExistsErr) Error() string { return "repository already exists" }
+
+// ErrorCode applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (ecrAlreadyExistsErr) ErrorCode() string { return "RepositoryAlreadyExistsException" }
 
+// TestEnsureRepositoryToleratesAlreadyExists performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func TestEnsureRepositoryToleratesAlreadyExists(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -249,8 +269,8 @@ func TestEnsureRepositoryToleratesAlreadyExists(t *testing.T) {
 	}
 }
 
-// REGISTRY_PROVIDER unset (the default) must be a strict no-op: Harbor creates
-// repositories on push, and no ECR client is configured.
+// TestEnsureRepositoryNoopWhenProviderOff performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func TestEnsureRepositoryNoopWhenProviderOff(t *testing.T) {
 	s := bugfixSpawner(fake.NewSimpleClientset(), nil)
 	if err := s.ensureRepository(context.Background(), "h/iicpc/sub:latest"); err != nil {
@@ -258,8 +278,8 @@ func TestEnsureRepositoryNoopWhenProviderOff(t *testing.T) {
 	}
 }
 
-// H6: a redelivered build (deterministic Job name already exists within its TTL)
-// must NOT force-fail the submission — createJob treats AlreadyExists as success.
+// TestCreateJobIdempotentOnRedelivery performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func TestCreateJobIdempotentOnRedelivery(t *testing.T) {
 	client := fake.NewSimpleClientset()
 	s := bugfixSpawner(client, nil)
@@ -274,8 +294,8 @@ func TestCreateJobIdempotentOnRedelivery(t *testing.T) {
 	}
 }
 
-// M30: status writes must survive a cancelled request ctx (SIGTERM mid-build),
-// or the terminal status is lost and the row is stranded non-terminal.
+// TestSetStatusSurvivesCancelledCtx performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func TestSetStatusSurvivesCancelledCtx(t *testing.T) {
 	rec := &recordingUpdater{}
 	s := bugfixSpawner(fake.NewSimpleClientset(), rec)
@@ -293,27 +313,37 @@ func TestSetStatusSurvivesCancelledCtx(t *testing.T) {
 	}
 }
 
+// recordingUpdater groups the state and dependencies used by this package.
+// Keep this type aligned with the runtime contract around it.
 type recordingUpdater struct {
 	published, dbWritten bool
 	pubCtxErr, dbCtxErr  error
 }
 
+// PublishStatus applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (r *recordingUpdater) PublishStatus(ctx context.Context, _, _, _ string) error {
 	r.published = true
 	r.pubCtxErr = ctx.Err()
 	return nil
 }
 
+// UpdateDBStatus applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (r *recordingUpdater) UpdateDBStatus(ctx context.Context, _, _, _ string) error {
 	r.dbWritten = true
 	r.dbCtxErr = ctx.Err()
 	return nil
 }
 
+// UpdateImageRef applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (r *recordingUpdater) UpdateImageRef(context.Context, string, string) error {
 	return nil
 }
 
+// containsString performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func containsString(values []string, want string) bool {
 	for _, value := range values {
 		if value == want {

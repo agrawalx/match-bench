@@ -1,3 +1,8 @@
+// Package controller defines tests for recovery integration test.
+//
+// This file is part of the IICPC benchmarking platform and keeps its
+// responsibilities local to the surrounding package. It should be read with
+// the service-level design in design.md for broader operational context.
 package controller
 
 import (
@@ -36,15 +41,8 @@ CREATE TABLE IF NOT EXISTS runs (
 CREATE UNIQUE INDEX IF NOT EXISTS idx_run_groups_one_active_per_submission
   ON run_groups (submission_id) WHERE status NOT IN ('completed', 'failed');`
 
-// TestIntegration_RecoveryReleasesRunGroupIndex reproduces C4/H4: after a
-// controller crash, recovery must release the one-active-per-submission unique
-// index — which lives on run_groups, NOT runs. The old recovery only marked
-// child runs failed (+ published an empty RunGroupID), leaving the parent group
-// non-terminal forever, so re-triggering a benchmark for that submission was
-// permanently rejected. This drives the real RecoverInFlightRuns against live
-// Postgres + Kafka and asserts the index is freed.
-//
-// Env-gated: needs DATABASE_URL + KAFKA_BROKERS.
+// TestIntegration_RecoveryReleasesRunGroupIndex performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func TestIntegration_RecoveryReleasesRunGroupIndex(t *testing.T) {
 	dsn := strings.TrimSpace(os.Getenv("DATABASE_URL"))
 	brokers := strings.TrimSpace(os.Getenv("KAFKA_BROKERS"))
@@ -83,8 +81,6 @@ func TestIntegration_RecoveryReleasesRunGroupIndex(t *testing.T) {
 	}
 	defer st.Close()
 
-	// ListInFlightRuns must now carry run_group_id (the fix) so recovery can
-	// target the parent group.
 	runs, err := st.ListInFlightRuns(ctx)
 	if err != nil {
 		t.Fatalf("list in-flight: %v", err)
@@ -102,7 +98,6 @@ func TestIntegration_RecoveryReleasesRunGroupIndex(t *testing.T) {
 		t.Fatalf("ListInFlightRuns RunGroupID = %q, want %q (run_group_id select fix)", found.RunGroupID, grp)
 	}
 
-	// RunStatus (L38 precheck) works and reports unknown sessions as "".
 	if s, _ := st.RunStatus(ctx, sess); s != "running" {
 		t.Fatalf("RunStatus(sess) = %q, want running", s)
 	}
@@ -110,25 +105,20 @@ func TestIntegration_RecoveryReleasesRunGroupIndex(t *testing.T) {
 		t.Fatalf("RunStatus(unknown) = %q, want \"\"", s)
 	}
 
-	// Before recovery the index is occupied: a second active group for the same
-	// submission must be rejected.
 	if _, err := pool.Exec(ctx,
 		`INSERT INTO run_groups (run_group_id, submission_id, status) VALUES ($1,$2,'requested')`, grp+"-2", sub); err == nil {
 		t.Fatal("expected unique-index violation inserting a 2nd active group before recovery")
 	}
 
-	// Run the real recovery path (marks runs + run_groups failed, publishes).
 	producer := NewProducer(brokers, slog.Default())
 	defer producer.Close()
 	if err := RecoverInFlightRuns(ctx, st, producer, slog.Default()); err != nil {
 		t.Fatalf("recovery: %v", err)
 	}
 
-	// Child run is failed.
 	if s, _ := st.RunStatus(ctx, sess); s != "failed" {
 		t.Errorf("run status after recovery = %q, want failed", s)
 	}
-	// Parent group is failed — the index slot is freed.
 	var gstatus string
 	if err := pool.QueryRow(ctx, `SELECT status FROM run_groups WHERE run_group_id=$1`, grp).Scan(&gstatus); err != nil {
 		t.Fatalf("read group status: %v", err)
@@ -136,7 +126,6 @@ func TestIntegration_RecoveryReleasesRunGroupIndex(t *testing.T) {
 	if gstatus != "failed" {
 		t.Fatalf("C4/H4: run_group status after recovery = %q, want failed (index never released)", gstatus)
 	}
-	// A fresh active group for the same submission now inserts successfully.
 	if _, err := pool.Exec(ctx,
 		`INSERT INTO run_groups (run_group_id, submission_id, status) VALUES ($1,$2,'requested')`, grp+"-3", sub); err != nil {
 		t.Fatalf("re-trigger after recovery should succeed (index released), got: %v", err)

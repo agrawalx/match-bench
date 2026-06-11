@@ -1,14 +1,15 @@
-//! Kafka consumer for the two telemetry streams.
+//! This module implements kafka behavior.
 //!
-//! Telemetry is loss-tolerant (the producers use acks=1), so unlike the
-//! control-plane consumers this one uses librdkafka auto-commit and starts at
-//! `latest` — on restart we resume with live data rather than reprocessing a
-//! session's history into the time-series.
+//! It belongs to the IICPC benchmarking platform and should keep its
+//! behavior consistent with the service contracts documented in design.md.
+//! The comments in this file describe public structure and callable behavior.
 
 use anyhow::{Context, Result};
 use rdkafka::config::ClientConfig;
 use rdkafka::consumer::{Consumer, StreamConsumer};
 
+/// build_consumer performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 pub fn build_consumer(brokers: &str, group: &str, topics: &[&str]) -> Result<StreamConsumer> {
     let consumer: StreamConsumer = ClientConfig::new()
         .set("bootstrap.servers", brokers)

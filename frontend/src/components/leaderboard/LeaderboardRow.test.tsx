@@ -1,17 +1,21 @@
-import { render, screen } from '@testing-library/react';
-import { describe, expect, it, vi } from 'vitest';
-import type { LeaderboardEntry } from '@/types/leaderboard';
-import { LeaderboardRow } from './LeaderboardRow';
+/**
+ * This file defines tests for LeaderboardRow.test.
+ * It is part of the IICPC frontend and keeps UI, API, or test behavior
+ * scoped to this module so callers can rely on stable boundaries.
+ */
+import { render, screen } from "@testing-library/react";
+import { describe, expect, it, vi } from "vitest";
+import type { LeaderboardEntry } from "@/types/leaderboard";
+import { LeaderboardRow } from "./LeaderboardRow";
 
-// LeaderboardRow now uses useRouter to link to the public run-detail page.
 vi.mock('next/navigation', () => ({ useRouter: () => ({ push: vi.fn() }) }));
 
 const entry: LeaderboardEntry = {
   rank: 1,
-  contestant_id: 'contestant_123456789',
-  team_name: 'Ada',
-  submission_id: 'sub_1',
-  run_group_id: 'run_1',
+  contestant_id: "contestant_123456789",
+  team_name: "Ada",
+  submission_id: "sub_1",
+  run_group_id: "run_1",
   peak_sustained_tps: 9001,
   p99_ns_at_peak_tps: 2000,
   spike_recovery_ns: 3000,
@@ -21,8 +25,8 @@ const entry: LeaderboardEntry = {
   computed_at_ns: Date.now() * 1_000_000,
 };
 
-describe('LeaderboardRow', () => {
-  it('renders rank, score, and own row state', () => {
+describe("LeaderboardRow", () => {
+  it("renders rank, score, and own row state", () => {
     const { container } = render(
       <table>
         <tbody>
@@ -30,8 +34,8 @@ describe('LeaderboardRow', () => {
         </tbody>
       </table>,
     );
-    expect(screen.getByText('1')).toBeInTheDocument();
-    expect(screen.getByText('9,001')).toBeInTheDocument();
-    expect(container.querySelector('tr')?.className).toContain('own');
+    expect(screen.getByText("1")).toBeInTheDocument();
+    expect(screen.getByText("9,001")).toBeInTheDocument();
+    expect(container.querySelector("tr")?.className).toContain("own");
   });
 });

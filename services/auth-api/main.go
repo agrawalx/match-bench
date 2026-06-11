@@ -1,3 +1,8 @@
+// Package main starts the auth-api service.
+//
+// This file is part of the IICPC benchmarking platform and keeps its
+// responsibilities local to the surrounding package. It should be read with
+// the service-level design in design.md for broader operational context.
 package main
 
 import (
@@ -18,6 +23,8 @@ import (
 	"time"
 )
 
+// config groups the state and dependencies used by this package.
+// Keep this type aligned with the runtime contract around it.
 type config struct {
 	port             string
 	clientID         string
@@ -30,11 +37,15 @@ type config struct {
 	allowedRedirects map[string]struct{}
 }
 
+// server groups the state and dependencies used by this package.
+// Keep this type aligned with the runtime contract around it.
 type server struct {
 	cfg    config
 	client *http.Client
 }
 
+// tokenRequest groups the state and dependencies used by this package.
+// Keep this type aligned with the runtime contract around it.
 type tokenRequest struct {
 	Code         string `json:"code"`
 	CodeVerifier string `json:"code_verifier"`
@@ -43,6 +54,8 @@ type tokenRequest struct {
 	Nonce        string `json:"nonce"`
 }
 
+// googleTokenResponse groups the state and dependencies used by this package.
+// Keep this type aligned with the runtime contract around it.
 type googleTokenResponse struct {
 	AccessToken  string `json:"access_token,omitempty"`
 	ExpiresIn    int64  `json:"expires_in,omitempty"`
@@ -54,6 +67,8 @@ type googleTokenResponse struct {
 	ErrorMessage string `json:"error_description,omitempty"`
 }
 
+// tokenResponse groups the state and dependencies used by this package.
+// Keep this type aligned with the runtime contract around it.
 type tokenResponse struct {
 	AccessToken   string       `json:"access_token,omitempty"`
 	ExpiresIn     int64        `json:"expires_in"`
@@ -62,6 +77,8 @@ type tokenResponse struct {
 	User          *userProfile `json:"user,omitempty"`
 }
 
+// userProfile groups the state and dependencies used by this package.
+// Keep this type aligned with the runtime contract around it.
 type userProfile struct {
 	Sub           string  `json:"sub"`
 	Email         string  `json:"email"`
@@ -71,6 +88,8 @@ type userProfile struct {
 	ContestantID  string  `json:"contestantId"`
 }
 
+// idTokenClaims groups the state and dependencies used by this package.
+// Keep this type aligned with the runtime contract around it.
 type idTokenClaims struct {
 	Sub           string `json:"sub"`
 	Email         string `json:"email"`
@@ -80,6 +99,8 @@ type idTokenClaims struct {
 	Nonce         string `json:"nonce"`
 }
 
+// main performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func main() {
 	cfg, err := loadConfig()
 	if err != nil {
@@ -113,9 +134,6 @@ func main() {
 		log.Fatal(err)
 	}
 
-	// Graceful shutdown: on SIGTERM (kubelet) or SIGINT, stop accepting new
-	// connections and drain in-flight token exchanges before exiting, so a
-	// rolling deploy never cuts off a login mid-exchange.
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
 
@@ -142,6 +160,8 @@ func main() {
 	log.Printf("auth-api stopped")
 }
 
+// handleToken applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (s *server) handleToken(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeError(w, http.StatusMethodNotAllowed, "method_not_allowed")
@@ -199,6 +219,8 @@ func (s *server) handleToken(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, responseFromToken(token, claims))
 }
 
+// handleRefresh applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (s *server) handleRefresh(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeError(w, http.StatusMethodNotAllowed, "method_not_allowed")
@@ -233,6 +255,8 @@ func (s *server) handleRefresh(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, responseFromToken(token, claims))
 }
 
+// handleLogout applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (s *server) handleLogout(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeError(w, http.StatusMethodNotAllowed, "method_not_allowed")
@@ -242,6 +266,8 @@ func (s *server) handleLogout(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// exchange applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (s *server) exchange(form url.Values) (googleTokenResponse, error) {
 	req, err := http.NewRequest(http.MethodPost, s.cfg.tokenURL, strings.NewReader(form.Encode()))
 	if err != nil {
@@ -267,6 +293,8 @@ func (s *server) exchange(form url.Values) (googleTokenResponse, error) {
 	return token, nil
 }
 
+// responseFromToken performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func responseFromToken(token googleTokenResponse, claims idTokenClaims) tokenResponse {
 	user := userProfile{
 		Sub:           claims.Sub,
@@ -287,6 +315,8 @@ func responseFromToken(token googleTokenResponse, claims idTokenClaims) tokenRes
 	}
 }
 
+// parseClaims performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func parseClaims(idToken string) (idTokenClaims, error) {
 	parts := strings.Split(idToken, ".")
 	if len(parts) != 3 {
@@ -306,15 +336,15 @@ func parseClaims(idToken string) (idTokenClaims, error) {
 	return claims, nil
 }
 
-// redirectAllowed is fail-closed: loadConfig guarantees a non-empty allowlist,
-// and an empty set here (a zero-value config that bypassed loadConfig) must
-// reject every redirect_uri rather than forward arbitrary attacker-chosen
-// values into the token exchange.
+// redirectAllowed applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (s *server) redirectAllowed(redirectURI string) bool {
 	_, ok := s.cfg.allowedRedirects[redirectURI]
 	return ok
 }
 
+// setRefreshCookie applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (s *server) setRefreshCookie(w http.ResponseWriter, value string, clear bool) {
 	maxAge := 30 * 24 * 60 * 60
 	expires := time.Now().Add(time.Duration(maxAge) * time.Second)
@@ -334,6 +364,8 @@ func (s *server) setRefreshCookie(w http.ResponseWriter, value string, clear boo
 	})
 }
 
+// loadConfig performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func loadConfig() (config, error) {
 	secure := envBool("AUTH_COOKIE_SECURE", false)
 	cookieName := os.Getenv("AUTH_REFRESH_COOKIE_NAME")
@@ -370,6 +402,8 @@ func loadConfig() (config, error) {
 	return cfg, nil
 }
 
+// redirectSet performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func redirectSet(raw string) map[string]struct{} {
 	out := map[string]struct{}{}
 	for _, item := range strings.Split(raw, ",") {
@@ -381,6 +415,8 @@ func redirectSet(raw string) map[string]struct{} {
 	return out
 }
 
+// sameSiteFromEnv performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func sameSiteFromEnv(value string) http.SameSite {
 	switch strings.ToLower(value) {
 	case "strict":
@@ -392,6 +428,8 @@ func sameSiteFromEnv(value string) http.SameSite {
 	}
 }
 
+// durationFromEnv performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func durationFromEnv(key string, def time.Duration) time.Duration {
 	value := os.Getenv(key)
 	if value == "" {
@@ -404,25 +442,35 @@ func durationFromEnv(key string, def time.Duration) time.Duration {
 	return parsed
 }
 
+// readJSON performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func readJSON(r *http.Request, v any) error {
 	defer r.Body.Close()
 	return json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(v)
 }
 
+// writeJSON performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(v)
 }
 
+// writeError performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func writeError(w http.ResponseWriter, status int, msg string) {
 	writeJSON(w, status, map[string]string{"error": msg})
 }
 
+// ok performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func ok(w http.ResponseWriter, _ *http.Request) {
 	w.WriteHeader(http.StatusOK)
 }
 
+// securityHeaders performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func securityHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Content-Type-Options", "nosniff")
@@ -431,6 +479,8 @@ func securityHeaders(next http.Handler) http.Handler {
 	})
 }
 
+// envOr performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func envOr(key, def string) string {
 	if value := os.Getenv(key); value != "" {
 		return value
@@ -438,6 +488,8 @@ func envOr(key, def string) string {
 	return def
 }
 
+// envBool performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func envBool(key string, def bool) bool {
 	switch strings.ToLower(os.Getenv(key)) {
 	case "true", "1", "yes":
@@ -449,6 +501,8 @@ func envBool(key string, def bool) bool {
 	}
 }
 
+// firstNonEmpty performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func firstNonEmpty(values ...string) string {
 	for _, value := range values {
 		if strings.TrimSpace(value) != "" {

@@ -1,3 +1,8 @@
+// Package handler implements slot behavior.
+//
+// This file is part of the IICPC benchmarking platform and keeps its
+// responsibilities local to the surrounding package. It should be read with
+// the service-level design in design.md for broader operational context.
 package handler
 
 import (
@@ -14,17 +19,8 @@ import (
 	"github.com/iicpc/sandbox-orchestrator/internal/store"
 )
 
-// Slot endpoints are internal controller-to-orchestrator APIs, not public user
-// APIs. Error responses may include underlying k8s messages for operator
-// visibility.
-
-// createSlotRequest is the controller → orchestrator contract for POST /slots.
-//
-// slot_id MUST be the controller's session_id verbatim. The orchestrator
-// never mints its own IDs — having a single ID for the run means the
-// algo Pod, Service, and any log/metric record can be cross-referenced
-// without translation. The image ref is also supplied by the caller;
-// the orchestrator does not assemble Harbor refs itself.
+// createSlotRequest groups the state and dependencies used by this package.
+// Keep this type aligned with the runtime contract around it.
 type createSlotRequest struct {
 	SlotID       string `json:"slot_id"`
 	ContestantID string `json:"contestant_id"` // stamped onto the eBPF capture's latency events
@@ -32,7 +28,8 @@ type createSlotRequest struct {
 	Port         int    `json:"port"`
 }
 
-// slotResponse is returned by POST /slots and GET /slots/{id}.
+// slotResponse groups the state and dependencies used by this package.
+// Keep this type aligned with the runtime contract around it.
 type slotResponse struct {
 	SlotID   string       `json:"slot_id"`
 	State    string       `json:"state"`
@@ -40,14 +37,15 @@ type slotResponse struct {
 	Endpoint endpointJSON `json:"endpoint"`
 }
 
+// endpointJSON groups the state and dependencies used by this package.
+// Keep this type aligned with the runtime contract around it.
 type endpointJSON struct {
 	Host string `json:"host"`
 	Port int    `json:"port"`
 }
 
-// CreateSlot is the POST /slots handler.
-// Idempotent: if a slot with the same slot_id and image already exists,
-// returns 200 with current state. Different image → 409 Conflict.
+// CreateSlot performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func CreateSlot(mgr *k8s.Manager, slots *store.SlotStore, log *slog.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req createSlotRequest
@@ -63,7 +61,6 @@ func CreateSlot(mgr *k8s.Manager, slots *store.SlotStore, log *slog.Logger) http
 		ctx := r.Context()
 		existing, exists := slots.Get(req.SlotID)
 		if exists && existing.Image == req.Image {
-			// Refresh the cached state so the controller sees current pod status.
 			state, msg, err := mgr.Refresh(ctx, req.SlotID)
 			if err != nil && !errors.Is(err, cerrs.ErrSlotNotFound) {
 				recordSlot("refresh", "error", "")
@@ -72,8 +69,6 @@ func CreateSlot(mgr *k8s.Manager, slots *store.SlotStore, log *slog.Logger) http
 				return
 			}
 			if !errors.Is(err, cerrs.ErrSlotNotFound) {
-				// existing is a copy returned by SlotStore.Get; mutate it and Put
-				// to publish the refreshed state back into the shared cache.
 				existing.State = state
 				existing.Message = msg
 				slots.Put(existing)
@@ -118,8 +113,8 @@ func CreateSlot(mgr *k8s.Manager, slots *store.SlotStore, log *slog.Logger) http
 	}
 }
 
-// GetSlot is the GET /slots/{slot_id} handler.
-// Always refreshes from k8s so the controller sees authoritative state.
+// GetSlot performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func GetSlot(mgr *k8s.Manager, slots *store.SlotStore, log *slog.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		slotID := chi.URLParam(r, "slot_id")
@@ -137,7 +132,6 @@ func GetSlot(mgr *k8s.Manager, slots *store.SlotStore, log *slog.Logger) http.Ha
 
 		state, msg, err := mgr.Refresh(ctx, slotID)
 		if errors.Is(err, cerrs.ErrSlotNotFound) {
-			// Pod was deleted externally; drop the stale entry and 404.
 			slots.Delete(slotID)
 			recordSlot("refresh", "not_found", "")
 			writeError(w, http.StatusNotFound, "slot not found")
@@ -158,10 +152,8 @@ func GetSlot(mgr *k8s.Manager, slots *store.SlotStore, log *slog.Logger) http.Ha
 	}
 }
 
-// DeleteSlot is the DELETE /slots/{slot_id} handler.
-// Idempotent: 204 whether or not the slot existed. k8s remains the source of
-// truth, so we still call DeleteSlot for unknown in-memory IDs in case the map
-// is stale after a restart or partial restore.
+// DeleteSlot performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func DeleteSlot(mgr *k8s.Manager, slots *store.SlotStore, log *slog.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		slotID := chi.URLParam(r, "slot_id")
@@ -189,7 +181,8 @@ func DeleteSlot(mgr *k8s.Manager, slots *store.SlotStore, log *slog.Logger) http
 	}
 }
 
-// recordSlot turns slot lifecycle state into Prometheus counters.
+// recordSlot performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func recordSlot(operation, result, state string) {
 	metrics.Counter("slots_operations_total", "Sandbox slot operations by operation and result.", metrics.Labels("operation", operation, "result", result), 1)
 	if state != "" {
@@ -197,6 +190,8 @@ func recordSlot(operation, result, state string) {
 	}
 }
 
+// toResponse performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func toResponse(slot *store.Slot) slotResponse {
 	return slotResponse{
 		SlotID:  slot.SlotID,

@@ -1,9 +1,8 @@
-//! Prometheus metrics for the telemetry ingester.
+//! This module implements metrics behavior.
 //!
-//! Mirrors the `iicpc-ebpf-latency` / `iicpc-bot-fleet` idiom: a single static
-//! `Registry`, per-metric helper fns, and a `start_server()` that spawns a thread
-//! serving `/metrics` over a hand-rolled HTTP responder. Metric names are
-//! `iicpc_telemetry_*`, consistent with `iicpc_ebpf_*` / `iicpc_bot_*`.
+//! It belongs to the IICPC benchmarking platform and should keep its
+//! behavior consistent with the service contracts documented in design.md.
+//! The comments in this file describe public structure and callable behavior.
 
 use std::{
     env,
@@ -22,30 +21,20 @@ use prometheus_client::{
 
 type TopicFamily = Family<[(&'static str, &'static str); 1], Counter>;
 
+/// Metrics stores the state passed across this module boundary.
+/// Keep field changes compatible with callers and serialized contracts.
 struct Metrics {
     registry: Registry,
-    /// orders.sent / orders.acked telemetry events consumed, keyed by topic.
     events_consumed: TopicFamily,
-    /// Kafka batches whose payload failed to decode, keyed by topic.
     decode_errors: TopicFamily,
-    /// Kafka consume (recv) errors.
     consume_errors: Counter,
-    /// Snapshot rows finalized (emitted to the sinks) across all flushes.
     records_finalized: Counter,
-    /// First-response entries evicted without ever producing a scored sample
-    /// (idle eviction of in-flight orders ≈ acks that never completed in time).
     records_evicted: Counter,
-    /// Current first-response join-buffer size (in-flight tracked orders).
     join_buffer_size: Gauge,
-    /// Snapshot batches written to TimescaleDB.
     timescale_writes: Counter,
-    /// TimescaleDB write duration, in seconds.
     timescale_write_seconds: Histogram,
-    /// TimescaleDB write errors.
     timescale_errors: Counter,
-    /// Snapshot batches written to Redis.
     redis_writes: Counter,
-    /// Redis write errors.
     redis_errors: Counter,
 }
 
@@ -59,8 +48,6 @@ static METRICS: LazyLock<Metrics> = LazyLock::new(|| {
     let records_evicted = Counter::default();
     let join_buffer_size = Gauge::default();
     let timescale_writes = Counter::default();
-    // 100us .. ~6.5s, doubling each bucket — covers a healthy ms-scale batch
-    // insert through a pathological multi-second stall.
     let timescale_write_seconds = Histogram::new(
         prometheus_client::metrics::histogram::exponential_buckets(0.0001, 2.0, 17),
     );
@@ -140,6 +127,8 @@ static METRICS: LazyLock<Metrics> = LazyLock::new(|| {
     }
 });
 
+/// start_server performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 pub fn start_server() {
     let addr = env::var("METRICS_ADDR").unwrap_or_else(|_| "0.0.0.0:9090".to_string());
 
@@ -158,7 +147,8 @@ pub fn start_server() {
     });
 }
 
-/// `n` telemetry events were consumed from `topic` and handed to the aggregator.
+/// events_consumed performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 pub fn events_consumed(topic: &'static str, n: u64) {
     METRICS
         .events_consumed
@@ -166,7 +156,8 @@ pub fn events_consumed(topic: &'static str, n: u64) {
         .inc_by(n);
 }
 
-/// A Kafka batch for `topic` failed to decode.
+/// decode_error performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 pub fn decode_error(topic: &'static str) {
     METRICS
         .decode_errors
@@ -174,29 +165,34 @@ pub fn decode_error(topic: &'static str) {
         .inc();
 }
 
-/// A Kafka recv() returned an error.
+/// consume_error performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 pub fn consume_error() {
     METRICS.consume_errors.inc();
 }
 
-/// `n` snapshot rows were finalized for this flush.
+/// records_finalized performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 pub fn records_finalized(n: usize) {
     METRICS.records_finalized.inc_by(n as u64);
 }
 
-/// `n` in-flight orders were evicted from the join buffer without completing.
+/// records_evicted performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 pub fn records_evicted(n: usize) {
     if n > 0 {
         METRICS.records_evicted.inc_by(n as u64);
     }
 }
 
-/// Report the current first-response join-buffer size.
+/// set_join_buffer_size performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 pub fn set_join_buffer_size(n: usize) {
     METRICS.join_buffer_size.set(n as i64);
 }
 
-/// Record a successful TimescaleDB write of a snapshot batch and its duration.
+/// timescale_write performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 pub fn timescale_write(elapsed: Duration) {
     METRICS.timescale_writes.inc();
     METRICS
@@ -204,25 +200,34 @@ pub fn timescale_write(elapsed: Duration) {
         .observe(elapsed.as_secs_f64());
 }
 
+/// timescale_error performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 pub fn timescale_error() {
     METRICS.timescale_errors.inc();
 }
 
-/// Record a successful Redis write of a snapshot batch.
+/// redis_write performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 pub fn redis_write() {
     METRICS.redis_writes.inc();
 }
 
+/// redis_error performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 pub fn redis_error() {
     METRICS.redis_errors.inc();
 }
 
+/// render performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 fn render() -> String {
     let mut out = String::new();
     let _ = encode(&mut out, &METRICS.registry);
     out
 }
 
+/// handle_client performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 fn handle_client(mut stream: TcpStream) {
     let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
     let mut buf = [0_u8; 512];

@@ -1,3 +1,8 @@
+// Package pipeline defines tests for pipeline test.
+//
+// This file is part of the IICPC benchmarking platform and keeps its
+// responsibilities local to the surrounding package. It should be read with
+// the service-level design in design.md for broader operational context.
 package pipeline
 
 import (
@@ -6,6 +11,8 @@ import (
 	"github.com/iicpc/schemas/topics"
 )
 
+// sent performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func sent(id, side, payload, ordType string, price, qty uint64) topics.OrderSentEvent {
 	return topics.OrderSentEvent{
 		SessionID: "S", OrderID: id, Side: side, PayloadType: payload, OrdType: ordType,
@@ -13,6 +20,8 @@ func sent(id, side, payload, ordType string, price, qty uint64) topics.OrderSent
 	}
 }
 
+// acked performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func acked(id string, srcPort uint16, tcpSeq uint32, t3 uint64, exec string, fillQty, fillPrice uint64) topics.OrderAckedEvent {
 	return topics.OrderAckedEvent{
 		SessionID: "S", ContestantID: "c1", OrderID: id,
@@ -22,17 +31,16 @@ func acked(id string, srcPort uint16, tcpSeq uint32, t3 uint64, exec string, fil
 	}
 }
 
+// TestEndToEndCleanSessionWithPhantomAndExcludedOrder performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func TestEndToEndCleanSessionWithPhantomAndExcludedOrder(t *testing.T) {
 	sents := []topics.OrderSentEvent{
 		sent("B1", "BUY", "NEW", "LIMIT", 100, 10),
 		sent("S1", "SELL", "NEW", "LIMIT", 100, 10),
 		sent("NOACK", "BUY", "NEW", "LIMIT", 100, 5), // sent but never delivered (no acked)
 	}
-	// fill_price is fixed-point scaled by TelemetryPriceScale in production (eBPF
-	// parses the contestant's decimal ×1e9); sent price 100 -> reported 100*scale.
 	fp := 100 * topics.TelemetryPriceScale
 	ackeds := []topics.OrderAckedEvent{
-		// B1 arrives first (tcp_seq 1) on the flow, rests; S1 (tcp_seq 2) crosses it.
 		acked("B1", 5, 1, 10, "2", 10, fp),
 		acked("S1", 5, 2, 10, "2", 10, fp),
 		acked("ghost", 5, 3, 10, "2", 5, fp), // never sent -> phantom
@@ -58,14 +66,8 @@ func TestEndToEndCleanSessionWithPhantomAndExcludedOrder(t *testing.T) {
 	}
 }
 
-// TestRunCountsTelemetryCompleteness pins the completeness counters the
-// pipeline reports alongside the verdict: SentEvents = orders.sent events
-// drained, AckedEvents = orders.acked events drained (post-dedup, the caller's
-// slice), MatchedOrders = distinct orders present in BOTH streams (the
-// replay's actual inputs). A sent order with no ack (NOACK) and an acked order
-// never sent (ghost) must each count in their own stream but NOT in matched —
-// the gap between SentEvents and MatchedOrders is exactly the signal
-// score-computer's coverage gate consumes.
+// TestRunCountsTelemetryCompleteness performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func TestRunCountsTelemetryCompleteness(t *testing.T) {
 	fp := 100 * topics.TelemetryPriceScale
 	sents := []topics.OrderSentEvent{
@@ -86,19 +88,13 @@ func TestRunCountsTelemetryCompleteness(t *testing.T) {
 		t.Fatalf("Run counts = %+v, want %+v", counts, want)
 	}
 
-	// Empty drain: all-zero counts (downstream treats that as "unknown", and a
-	// session with zero telemetry has nothing to gate anyway).
 	if _, counts, _ := Run(nil, nil); counts != (Counts{}) {
 		t.Fatalf("Run(nil, nil) counts = %+v, want zero", counts)
 	}
 }
 
-// TestRunScaledPriceDomain reproduces C1: orders.sent.price is a raw integer
-// (the bot writes FIX tag 44=<int>) while orders.acked.fill_price is fixed-point
-// scaled by TelemetryPriceScale (eBPF parses the contestant's decimal ×1e9, see
-// schema annotation). A correct validator must compare both in one domain;
-// otherwise every legitimate fill is flagged a price violation and the
-// CorrectnessScore collapses to ~0, disqualifying every contestant at the 0.99 gate.
+// TestRunScaledPriceDomain performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func TestRunScaledPriceDomain(t *testing.T) {
 	const tick = uint64(10_000) // raw integer price the bot puts on the wire
 	scaled := tick * topics.TelemetryPriceScale
@@ -120,10 +116,8 @@ func TestRunScaledPriceDomain(t *testing.T) {
 	}
 }
 
-// TestAssemblePrefersSentOrigOrderID reproduces H13: the reference engine must
-// key cancel/replace off the bot-authoritative orders.sent.orig_order_id, not the
-// contestant's echoed tag 41 in orders.acked, so a contestant can't steer the
-// reference book by altering the cancel target.
+// TestAssemblePrefersSentOrigOrderID performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func TestAssemblePrefersSentOrigOrderID(t *testing.T) {
 	sents := []topics.OrderSentEvent{
 		{SessionID: "S", OrderID: "C1", Side: "BUY", PayloadType: "CANCEL", OrdType: "LIMIT", OrigOrderID: "REAL-TARGET"},
@@ -139,6 +133,8 @@ func TestAssemblePrefersSentOrigOrderID(t *testing.T) {
 	}
 }
 
+// TestAssembleMapsKindAndFlow performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func TestAssembleMapsKindAndFlow(t *testing.T) {
 	sents := []topics.OrderSentEvent{
 		sent("m1", "SELL", "NEW", "MARKET", 0, 7),

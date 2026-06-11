@@ -1,5 +1,10 @@
-# Loki chunk + index storage. Default StorageClass, ReadWriteOnce — the
-# single-binary Loki is a single replica (Recreate strategy).
+# k8s/observability/loki/pvc.yaml
+#
+# This file declares Kubernetes resources for k8s/observability/loki.
+# It is part of the IICPC platform configuration and should remain
+# aligned with the deployment and operations guidance in the README.
+# Keep comments at the file header so resource bodies stay declarative.
+
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:

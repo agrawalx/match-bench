@@ -1,3 +1,8 @@
+// Package handler defines tests for health test.
+//
+// This file is part of the IICPC benchmarking platform and keeps its
+// responsibilities local to the surrounding package. It should be read with
+// the service-level design in design.md for broader operational context.
 package handler
 
 import (
@@ -9,8 +14,8 @@ import (
 	"testing"
 )
 
-// TestReadiness reproduces L35: readiness must reflect datastore health, not a
-// static 200. A failing ping -> 503; a healthy ping -> 200.
+// TestReadiness performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func TestReadiness(t *testing.T) {
 	down := Readiness(func(context.Context) error { return errors.New("pool closed") }, slog.Default())
 	rec := httptest.NewRecorder()

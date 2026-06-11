@@ -1,5 +1,8 @@
-// worker is the local development entry point.
-// It consumes Kafka and runs the full pipeline in-process using Docker.
+// Package main starts the worker service.
+//
+// This file is part of the IICPC benchmarking platform and keeps its
+// responsibilities local to the surrounding package. It should be read with
+// the service-level design in design.md for broader operational context.
 package main
 
 import (
@@ -18,6 +21,8 @@ import (
 	"github.com/iicpc/libs/metrics"
 )
 
+// main performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func main() {
 	logCfg := logger.DefaultConfig()
 	logCfg.ServiceName = "build-worker"
@@ -89,23 +94,33 @@ func main() {
 	log.Info("build-worker stopped")
 }
 
+// statusUpdater groups the state and dependencies used by this package.
+// Keep this type aligned with the runtime contract around it.
 type statusUpdater struct {
 	pub *publisher.Publisher
 	pg  *store.PostgresStore
 }
 
+// PublishStatus applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (u *statusUpdater) PublishStatus(ctx context.Context, submissionID, status, message string) error {
 	return u.pub.PublishStatus(ctx, submissionID, status, message)
 }
 
+// UpdateDBStatus applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (u *statusUpdater) UpdateDBStatus(ctx context.Context, submissionID, status, message string) error {
 	return u.pg.UpdateStatus(ctx, submissionID, status, message)
 }
 
+// UpdateImageRef applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (u *statusUpdater) UpdateImageRef(ctx context.Context, submissionID, imageRef string) error {
 	return u.pg.UpdateImageRef(ctx, submissionID, imageRef)
 }
 
+// envOr performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func envOr(key, def string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
@@ -113,6 +128,8 @@ func envOr(key, def string) string {
 	return def
 }
 
+// mustEnv performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func mustEnv(key string) string {
 	v := os.Getenv(key)
 	if v == "" {

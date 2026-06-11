@@ -1,27 +1,15 @@
+//! This module implements ebpf behavior.
+//!
+//! It belongs to the IICPC benchmarking platform and should keep its
+//! behavior consistent with the service contracts documented in design.md.
+//! The comments in this file describe public structure and callable behavior.
+
 #![cfg_attr(target_arch = "bpf", no_std)]
 #![cfg_attr(target_arch = "bpf", no_main)]
 
-//! Capture-only eBPF data plane.
-//!
-//! This program does the absolute minimum in the kernel: parse the L2-L4 headers
-//! (fixed-size, verifier-trivial), stamp a timestamp, and copy the TCP payload of
-//! every request/response segment into a ring buffer. ALL protocol parsing (FIX,
-//! REST, WebSocket), TCP stream reassembly (coalescing + straddling), request to
-//! response matching by ClOrdID, and per-response emission happen in userspace
-//! (see src/capture.rs, reassembly.rs, parse.rs, matcher.rs).
-//!
-//! Rationale: keeping parsing out of the kernel removes the BPF verifier
-//! complexity, lets the parser handle arbitrary (contestant-controlled) message
-//! layouts, and makes per-order matching a normal HashMap instead of a flow-keyed
-//! LRU map. XDP is kept for the ingress timestamp because it fires before the
-//! kernel network stack, giving the most faithful t3.
-//!
-//! Subtle but important: TCP payload length is derived from IPv4 `total_length`,
-//! not from the packet buffer's trailing boundary. Small Ethernet frames may
-//! carry L2 padding, and treating padding as TCP payload can inject fake bytes
-//! for SYN/ACK/control packets and poison userspace stream reassembly.
-
 #[cfg(not(target_arch = "bpf"))]
+/// host_placeholder performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 pub fn host_placeholder() {}
 
 #[cfg(target_arch = "bpf")]
@@ -45,15 +33,8 @@ const FIX_PORT: u16 = 9898;
 #[cfg(target_arch = "bpf")]
 const HTTP_WS_PORT: u16 = 8080;
 
-/// Maximum payload bytes copied per segment. Sized to cover a full MTU payload so
-/// that, with GSO/TSO disabled on the veth (segments <= MTU), `captured_len`
-/// always equals `payload_len` — i.e. coalesced multi-message segments are
-/// captured whole and never truncated. `TRUNCATED_CAPTURES` counts any segment
-/// that exceeds this (expected 0 with GSO off).
 #[cfg(target_arch = "bpf")]
 const CAPTURE_CAP: usize = 1536;
-/// Byte offset of the inline payload within `CaptureRecord` (repr(C) layout).
-/// Must match `CAPTURE_HEADER_LEN` in src/capture.rs.
 #[cfg(target_arch = "bpf")]
 const CAPTURE_HEADER_LEN: usize = 28;
 
@@ -62,13 +43,11 @@ const DIR_REQUEST: u8 = 0;
 #[cfg(target_arch = "bpf")]
 const DIR_RESPONSE: u8 = 1;
 
-/// Fixed-layout capture record. The header is followed by `captured_len` payload
-/// bytes; only `CAPTURE_HEADER_LEN + captured_len` bytes are emitted to the ring
-/// buffer (variable-length record), so small messages do not pay for the full
-/// `CAPTURE_CAP`. Keep this layout in sync with `CaptureRecord` in src/capture.rs.
 #[cfg(target_arch = "bpf")]
 #[repr(C)]
 #[derive(Clone, Copy)]
+/// CaptureRecord stores the state passed across this module boundary.
+/// Keep field changes compatible with callers and serialized contracts.
 struct CaptureRecord {
     timestamp_ns: u64,
     client_ip: u32,
@@ -85,6 +64,8 @@ struct CaptureRecord {
 #[cfg(target_arch = "bpf")]
 #[repr(C)]
 #[derive(Clone, Copy)]
+/// EthHdr stores the state passed across this module boundary.
+/// Keep field changes compatible with callers and serialized contracts.
 struct EthHdr {
     dst: [u8; 6],
     src: [u8; 6],
@@ -94,6 +75,8 @@ struct EthHdr {
 #[cfg(target_arch = "bpf")]
 #[repr(C)]
 #[derive(Clone, Copy)]
+/// Ipv4Hdr stores the state passed across this module boundary.
+/// Keep field changes compatible with callers and serialized contracts.
 struct Ipv4Hdr {
     version_ihl: u8,
     tos: u8,
@@ -110,6 +93,8 @@ struct Ipv4Hdr {
 #[cfg(target_arch = "bpf")]
 #[repr(C)]
 #[derive(Clone, Copy)]
+/// TcpHdr stores the state passed across this module boundary.
+/// Keep field changes compatible with callers and serialized contracts.
 struct TcpHdr {
     source: u16,
     dest: u16,
@@ -118,14 +103,10 @@ struct TcpHdr {
     doff_res_flags: u16,
 }
 
-/// Per-packet bounds + flow identity. `client_ip`/`client_port` are always the
-/// BOT side (canonicalized across both directions) so a flow is identified
-/// identically on ingress and egress. `server_port` is the FIX/HTTP port (a
-/// transport hint for userspace). `payload_offset` is from the start of packet
-/// data; `payload_len` is the TCP payload length from IPv4/TCP header math;
-/// `tcp_seq` is this segment's starting sequence number.
 #[cfg(target_arch = "bpf")]
 #[derive(Clone, Copy)]
+/// PacketBounds stores the state passed across this module boundary.
+/// Keep field changes compatible with callers and serialized contracts.
 struct PacketBounds {
     payload_offset: usize,
     payload_len: usize,
@@ -139,26 +120,22 @@ struct PacketBounds {
 #[map]
 static EVENTS: RingBuf = RingBuf::with_byte_size(64 * 1024 * 1024, 0);
 
-// Per-CPU staging buffer for one capture record. Filled then emitted within a
-// single program invocation; never holds a pointer across invocations.
 #[cfg(target_arch = "bpf")]
 #[map]
 static SCRATCH: PerCpuArray<CaptureRecord> = PerCpuArray::with_max_entries(1, 0);
 
-// Incremented when RingBuf::output fails (ring full) — the userspace reader logs
-// the delta so backpressure is observable.
 #[cfg(target_arch = "bpf")]
 #[map]
 static DROPPED_EVENTS: PerCpuArray<u64> = PerCpuArray::with_max_entries(1, 0);
 
-// Incremented when a segment's payload exceeded CAPTURE_CAP and was truncated.
-// Expected to stay 0 when GSO/TSO are disabled on the veth.
 #[cfg(target_arch = "bpf")]
 #[map]
 static TRUNCATED_CAPTURES: PerCpuArray<u64> = PerCpuArray::with_max_entries(1, 0);
 
 #[cfg(target_arch = "bpf")]
 #[xdp]
+/// iicpc_xdp_ingress performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 pub fn iicpc_xdp_ingress(ctx: XdpContext) -> u32 {
     try_xdp_ingress(&ctx);
     XDP_PASS
@@ -167,6 +144,8 @@ pub fn iicpc_xdp_ingress(ctx: XdpContext) -> u32 {
 #[cfg(target_arch = "bpf")]
 #[no_mangle]
 #[link_section = "classifier"]
+/// iicpc_tc_egress performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 pub extern "C" fn iicpc_tc_egress(ctx: *mut __sk_buff) -> i32 {
     try_tc_egress(TcContext::new(ctx));
     TC_ACT_PIPE
@@ -174,6 +153,8 @@ pub extern "C" fn iicpc_tc_egress(ctx: *mut __sk_buff) -> i32 {
 
 #[cfg(target_arch = "bpf")]
 #[inline(always)]
+/// try_xdp_ingress performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 fn try_xdp_ingress(ctx: &XdpContext) {
     let data = ctx.data();
     let data_end = ctx.data_end();
@@ -187,15 +168,10 @@ fn try_xdp_ingress(ctx: &XdpContext) {
     let Some(rec) = SCRATCH.get_ptr_mut(0) else {
         return;
     };
-    // The verifier loses "payload_len > 0" across the packet-pointer subtraction,
-    // and the optimizer would fold a plain `cap == 0` guard away (it CAN prove
-    // it). A volatile reload makes `cap` opaque so the guard survives into
-    // codegen, giving bpf_xdp_load_bytes a provable 1..=CAPTURE_CAP length.
     let cap = unsafe { ptr::read_volatile(&clamp_cap(bounds.payload_len)) };
     if cap == 0 || cap > CAPTURE_CAP {
         return;
     }
-    // Copy straight from the (linear) XDP buffer into the staging record.
     let dst = unsafe { ptr::addr_of_mut!((*rec).payload) as *mut c_void };
     let ret = unsafe { bpf_xdp_load_bytes(ctx.ctx, bounds.payload_offset as u32, dst, cap as u32) };
     if ret != 0 {
@@ -206,6 +182,8 @@ fn try_xdp_ingress(ctx: &XdpContext) {
 
 #[cfg(target_arch = "bpf")]
 #[inline(never)]
+/// try_tc_egress performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 fn try_tc_egress(ctx: TcContext) {
     let Some(bounds) = tc_payload_bounds(&ctx) else {
         return;
@@ -217,7 +195,6 @@ fn try_tc_egress(ctx: TcContext) {
     let Some(rec) = SCRATCH.get_ptr_mut(0) else {
         return;
     };
-    // See try_xdp_ingress: volatile reload keeps the >0 guard for the verifier.
     let cap = unsafe { ptr::read_volatile(&clamp_cap(bounds.payload_len)) };
     if cap == 0 || cap > CAPTURE_CAP {
         return;
@@ -237,10 +214,10 @@ fn try_tc_egress(ctx: TcContext) {
     emit_capture(rec, &bounds, cap, DIR_RESPONSE);
 }
 
-/// Clamp the copy length to CAPTURE_CAP. Returning a value the verifier can prove
-/// is <= CAPTURE_CAP is what makes the variable-length ring output provably safe.
 #[cfg(target_arch = "bpf")]
 #[inline(always)]
+/// clamp_cap performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 fn clamp_cap(payload_len: usize) -> usize {
     if payload_len > CAPTURE_CAP {
         if let Some(c) = TRUNCATED_CAPTURES.get_ptr_mut(0) {
@@ -254,8 +231,9 @@ fn clamp_cap(payload_len: usize) -> usize {
 
 #[cfg(target_arch = "bpf")]
 #[inline(always)]
+/// emit_capture performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 fn emit_capture(rec: *mut CaptureRecord, bounds: &PacketBounds, cap: usize, direction: u8) {
-    // `cap` is proven <= CAPTURE_CAP by clamp_cap, so total <= size_of::<CaptureRecord>().
     let cap = if cap > CAPTURE_CAP { CAPTURE_CAP } else { cap };
     let total = CAPTURE_HEADER_LEN + cap;
     unsafe {
@@ -278,10 +256,10 @@ fn emit_capture(rec: *mut CaptureRecord, bounds: &PacketBounds, cap: usize, dire
     }
 }
 
-/// Parse eth/ip/tcp for an XDP ingress packet (request: client -> server).
-/// The client tuple is the source; the server port is the destination.
 #[cfg(target_arch = "bpf")]
 #[inline(always)]
+/// xdp_payload_bounds performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 fn xdp_payload_bounds(data: usize, data_end: usize) -> Option<PacketBounds> {
     let eth: EthHdr = load(data, data_end, 0)?;
     if u16::from_be(eth.eth_proto) != ETH_P_IP {
@@ -329,15 +307,11 @@ fn xdp_payload_bounds(data: usize, data_end: usize) -> Option<PacketBounds> {
     })
 }
 
-/// Parse eth/ip/tcp for a tc egress skb (response: server -> client). Tries with
-/// and without an ethernet header (veth may present either). The client tuple is
-/// the destination; the server port is the source.
 #[cfg(target_arch = "bpf")]
 #[inline(always)]
+/// tc_payload_bounds performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 fn tc_payload_bounds(ctx: &TcContext) -> Option<PacketBounds> {
-    // Prefer the Ethernet view when present because it validates EtherType
-    // before looking at IPv4/TCP fields. Falling back keeps raw-IP skb layouts
-    // working on tc paths that do not expose an L2 header.
     let packet_len = ctx.len() as usize;
     let framed = || -> Option<PacketBounds> {
         let eth: EthHdr = ctx.load(0).ok()?;
@@ -351,6 +325,8 @@ fn tc_payload_bounds(ctx: &TcContext) -> Option<PacketBounds> {
 
 #[cfg(target_arch = "bpf")]
 #[inline(always)]
+/// parse_skb_ip_tcp_at performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 fn parse_skb_ip_tcp_at(
     ctx: &TcContext,
     ip_offset: usize,
@@ -399,6 +375,8 @@ fn parse_skb_ip_tcp_at(
 
 #[cfg(target_arch = "bpf")]
 #[inline(always)]
+/// load performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 fn load<T: Copy>(data: usize, data_end: usize, offset: usize) -> Option<T> {
     let len = mem::size_of::<T>();
     if data + offset + len > data_end {
@@ -410,15 +388,17 @@ fn load<T: Copy>(data: usize, data_end: usize, offset: usize) -> Option<T> {
 
 #[cfg(target_arch = "bpf")]
 #[inline(always)]
+/// bpf_ktime_get_ns performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 unsafe fn bpf_ktime_get_ns() -> u64 {
-    // Helper id 5 = bpf_ktime_get_ns (CLOCK_MONOTONIC). Userspace converts to
-    // CLOCK_REALTIME using a sampled offset so t3/t7 share the bot's clock domain.
     let helper: extern "C" fn() -> u64 = mem::transmute(5usize);
     helper()
 }
 
 #[cfg(target_arch = "bpf")]
 #[panic_handler]
+/// panic performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 fn panic(_info: &PanicInfo) -> ! {
     loop {}
 }

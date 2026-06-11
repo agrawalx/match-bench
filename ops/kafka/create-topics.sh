@@ -1,4 +1,11 @@
 #!/usr/bin/env bash
+# ops/kafka/create-topics.sh
+#
+# This script configures operational tooling for create topics.
+# It belongs to the IICPC operational toolchain and should keep
+# setup, validation, and deployment behavior explicit at entry points.
+# Function-level comments describe reusable shell routines below.
+
 set -euo pipefail
 
 bootstrap_server="${KAFKA_BOOTSTRAP_SERVER:-kafka-1:9092}"
@@ -7,6 +14,8 @@ topic_config=(
   --config max.message.bytes=1048576
 )
 
+# create_topic performs the script-specific operation described by its name.
+# It keeps command side effects explicit and returns shell status to callers.
 create_topic() {
   local name="$1"
   local partitions="$2"

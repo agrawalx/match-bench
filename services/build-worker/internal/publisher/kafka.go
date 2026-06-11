@@ -1,3 +1,8 @@
+// Package publisher implements kafka behavior.
+//
+// This file is part of the IICPC benchmarking platform and keeps its
+// responsibilities local to the surrounding package. It should be read with
+// the service-level design in design.md for broader operational context.
 package publisher
 
 import (
@@ -15,12 +20,16 @@ import (
 
 const writerTimeout = 5 * time.Second
 
+// Publisher groups the state and dependencies used by this package.
+// Keep this type aligned with the runtime contract around it.
 type Publisher struct {
 	writer *kafka.Writer
 	log    *slog.Logger
 	noop   bool
 }
 
+// NewKafkaPublisher performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func NewKafkaPublisher(brokers string, log *slog.Logger) *Publisher {
 	if brokers == "" {
 		log.Warn("KAFKA_BROKERS not set — status publishing disabled")
@@ -45,6 +54,8 @@ func NewKafkaPublisher(brokers string, log *slog.Logger) *Publisher {
 	return &Publisher{writer: w, log: log}
 }
 
+// PublishStatus applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (p *Publisher) PublishStatus(ctx context.Context, submissionID, status, message string) error {
 	if p.noop {
 		return nil
@@ -73,6 +84,8 @@ func (p *Publisher) PublishStatus(ctx context.Context, submissionID, status, mes
 	return err
 }
 
+// Close applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (p *Publisher) Close() error {
 	if p.noop || p.writer == nil {
 		return nil
@@ -80,7 +93,8 @@ func (p *Publisher) Close() error {
 	return p.writer.Close()
 }
 
-// recordProduce makes submission.status.updated delivery observable.
+// recordProduce performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func recordProduce(start time.Time, err error) {
 	result := "ok"
 	if err != nil {
@@ -91,6 +105,8 @@ func recordProduce(start time.Time, err error) {
 	metrics.Histogram("kafka_produce_duration_seconds", "Kafka produce duration in seconds.", labels, metrics.SinceSeconds(start))
 }
 
+// parseBrokers performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func parseBrokers(brokers string) []string {
 	parts := strings.Split(brokers, ",")
 	out := make([]string, 0, len(parts))

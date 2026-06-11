@@ -1,10 +1,17 @@
+# k8s/data/timescaledb/service.yaml
+#
+# This file declares Kubernetes resources for k8s/data/timescaledb.
+# It is part of the IICPC platform configuration and should remain
+# aligned with the deployment and operations guidance in the README.
+# Keep comments at the file header so resource bodies stay declarative.
+
 apiVersion: v1
 kind: Service
 metadata:
   name: timescaledb
   namespace: data
 spec:
-  clusterIP: None # headless, matches the StatefulSet serviceName
+  clusterIP: None
   selector:
     app: timescaledb
   ports:

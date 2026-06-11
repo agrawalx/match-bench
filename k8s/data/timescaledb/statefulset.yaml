@@ -1,7 +1,10 @@
-# TimescaleDB — metrics time-series for the telemetry-ingester. A SEPARATE
-# instance from the metadata postgres (per architecture_v2). The image ships the
-# timescaledb extension preloaded; the ingester creates the hypertable +
-# continuous aggregate on startup.
+# k8s/data/timescaledb/statefulset.yaml
+#
+# This file declares Kubernetes resources for k8s/data/timescaledb.
+# It is part of the IICPC platform configuration and should remain
+# aligned with the deployment and operations guidance in the README.
+# Keep comments at the file header so resource bodies stay declarative.
+
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
@@ -18,7 +21,6 @@ spec:
       labels:
         app: timescaledb
       annotations:
-        # postgres-exporter sidecar (below) exposes metrics on 9187.
         prometheus.io/scrape: "true"
         prometheus.io/path: /metrics
         prometheus.io/port: "9187"
@@ -67,8 +69,6 @@ spec:
             limits:
               cpu: "2"
               memory: 2Gi
-        # Mirrors the postgres-exporter sidecar (env/securityContext style).
-        # Points at the metrics DB this instance serves.
         - name: postgres-exporter
           image: quay.io/prometheuscommunity/postgres-exporter:v0.15.0
           ports:
@@ -98,10 +98,6 @@ spec:
               memory: 128Mi
       securityContext:
         runAsNonRoot: true
-        # runAsNonRoot only asserts uid != 0; without an explicit numeric uid the
-        # kubelet cannot verify it before start and the container fails with
-        # CreateContainerConfigError (the timescaledb image declares no USER).
-        # 70 is the postgres uid/gid the timescaledb image inherits.
         runAsUser: 70
         runAsGroup: 70
         fsGroup: 70

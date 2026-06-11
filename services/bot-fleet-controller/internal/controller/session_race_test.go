@@ -1,3 +1,8 @@
+// Package controller defines tests for session race test.
+//
+// This file is part of the IICPC benchmarking platform and keeps its
+// responsibilities local to the surrounding package. It should be read with
+// the service-level design in design.md for broader operational context.
 package controller
 
 import (
@@ -9,6 +14,8 @@ import (
 	"github.com/iicpc/schemas/topics"
 )
 
+// TestSessionManagerConcurrentAccess performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func TestSessionManagerConcurrentAccess(t *testing.T) {
 	tests := []struct {
 		name        string

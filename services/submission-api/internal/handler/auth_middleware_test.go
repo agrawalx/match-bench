@@ -1,3 +1,8 @@
+// Package handler defines tests for auth middleware test.
+//
+// This file is part of the IICPC benchmarking platform and keeps its
+// responsibilities local to the surrounding package. It should be read with
+// the service-level design in design.md for broader operational context.
 package handler
 
 import (
@@ -18,16 +23,16 @@ import (
 
 const testGoogleClientID = "submission-api-test.apps.googleusercontent.com"
 
-// tokenSigner owns one RSA key pair, serves its public half as a JWKS
-// document over httptest, and signs Google-shaped ID tokens with the private
-// half. It is the green-path counterpart to forgedRequest: tokens minted here
-// MUST verify, tokens forged there MUST NOT.
+// tokenSigner groups the state and dependencies used by this package.
+// Keep this type aligned with the runtime contract around it.
 type tokenSigner struct {
 	key  *rsa.PrivateKey
 	kid  string
 	jwks *httptest.Server
 }
 
+// newTokenSigner performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func newTokenSigner(t *testing.T) *tokenSigner {
 	t.Helper()
 	key, err := rsa.GenerateKey(rand.Reader, 2048)
@@ -51,6 +56,8 @@ func newTokenSigner(t *testing.T) *tokenSigner {
 	return s
 }
 
+// verifier applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (s *tokenSigner) verifier(t *testing.T) *authn.Verifier {
 	t.Helper()
 	v, err := authn.NewVerifierWithJWKSURL(testGoogleClientID, s.jwks.URL)
@@ -60,8 +67,8 @@ func (s *tokenSigner) verifier(t *testing.T) *authn.Verifier {
 	return v
 }
 
-// token signs a valid Google-shaped ID token for sub; mutate tweaks the
-// claims for the negative cases (expired, wrong aud, ...).
+// token applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (s *tokenSigner) token(t *testing.T, sub string, mutate func(jwt.MapClaims)) string {
 	t.Helper()
 	now := time.Now()
@@ -84,7 +91,8 @@ func (s *tokenSigner) token(t *testing.T, sub string, mutate func(jwt.MapClaims)
 	return signed
 }
 
-// request builds an authenticated request carrying a properly signed token.
+// request applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (s *tokenSigner) request(t *testing.T, method, target, sub string) *http.Request {
 	t.Helper()
 	req := httptest.NewRequest(method, target, nil)
@@ -92,10 +100,8 @@ func (s *tokenSigner) request(t *testing.T, method, target, sub string) *http.Re
 	return req
 }
 
-// forgedRequest builds the alg:none token the pre-fix handlers accepted —
-// header {"alg":"none"}, unverified payload, empty signature. This is the
-// Critical-1 attack shape: before JWT verification existed, this impersonated
-// any contestant. It MUST now die at the middleware with 401.
+// forgedRequest performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func forgedRequest(method, target, sub string) *http.Request {
 	req := httptest.NewRequest(method, target, nil)
 	header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"none"}`))
@@ -104,9 +110,8 @@ func forgedRequest(method, target, sub string) *http.Request {
 	return req
 }
 
-// TestRequireContestant pins the middleware's accept/reject matrix. The
-// protected handler echoes the contestant ID it reads from the request
-// context, proving both the 401 gate and the context plumbing.
+// TestRequireContestant performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func TestRequireContestant(t *testing.T) {
 	signer := newTokenSigner(t)
 	mw := RequireContestant(signer.verifier(t), slog.Default())

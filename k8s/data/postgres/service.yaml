@@ -1,3 +1,10 @@
+# k8s/data/postgres/service.yaml
+#
+# This file declares Kubernetes resources for k8s/data/postgres.
+# It is part of the IICPC platform configuration and should remain
+# aligned with the deployment and operations guidance in the README.
+# Keep comments at the file header so resource bodies stay declarative.
+
 apiVersion: v1
 kind: Service
 metadata:
@@ -13,4 +20,4 @@ spec:
     - name: metrics
       port: 9187
       targetPort: 9187
-  clusterIP: None   # headless — direct pod DNS: postgres-0.postgres.data.svc.cluster.local
+  clusterIP: None

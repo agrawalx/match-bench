@@ -1,3 +1,9 @@
+//! This module defines shared library behavior for loki.
+//!
+//! It belongs to the IICPC benchmarking platform and should keep its
+//! behavior consistent with the service contracts documented in design.md.
+//! The comments in this file describe public structure and callable behavior.
+
 use std::{
     cell::RefCell,
     env, fs,
@@ -39,6 +45,8 @@ thread_local! {
 }
 
 #[derive(Clone, Debug)]
+/// Config stores the state passed across this module boundary.
+/// Keep field changes compatible with callers and serialized contracts.
 pub struct Config {
     pub service_name: String,
     pub environment: String,
@@ -54,6 +62,8 @@ pub struct Config {
 }
 
 impl Default for Config {
+    /// default performs the module-specific operation described by its name.
+    /// It keeps validation, side effects, and returned values within this module's contract.
     fn default() -> Self {
         Self {
             service_name: DEFAULT_SERVICE_NAME.to_string(),
@@ -71,16 +81,22 @@ impl Default for Config {
     }
 }
 
+/// default_config performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 pub fn default_config() -> Config {
     Config::default()
 }
 
+/// init performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 pub fn init(service_name: &str) -> Option<LokiGuard> {
     let mut config = default_config();
     config.service_name = service_name.to_string();
     init_with_config(config)
 }
 
+/// init_with_config performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 pub fn init_with_config(config: Config) -> Option<LokiGuard> {
     let config = normalize_config(config);
     let filter = EnvFilter::try_from_default_env()
@@ -111,6 +127,8 @@ pub fn init_with_config(config: Config) -> Option<LokiGuard> {
     Some(guard)
 }
 
+/// normalize_config performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 fn normalize_config(mut config: Config) -> Config {
     let defaults = default_config();
     if config.service_name.is_empty() {
@@ -156,6 +174,8 @@ fn normalize_config(mut config: Config) -> Config {
 }
 
 #[derive(Clone)]
+/// LokiClient stores the state passed across this module boundary.
+/// Keep field changes compatible with callers and serialized contracts.
 pub struct LokiClient {
     tx: SyncSender<WorkerMessage>,
     closed: Arc<AtomicBool>,
@@ -165,12 +185,16 @@ pub struct LokiClient {
 }
 
 impl LokiClient {
+    /// new performs the module-specific operation described by its name.
+    /// It keeps validation, side effects, and returned values within this module's contract.
     pub fn new(base_url: &str) -> Self {
         let mut config = default_config();
         config.loki_url = base_url.to_string();
         Self::new_with_config(config)
     }
 
+    /// new_with_config performs the module-specific operation described by its name.
+    /// It keeps validation, side effects, and returned values within this module's contract.
     pub fn new_with_config(config: Config) -> Self {
         let config = normalize_config(config);
         if !config.loki_url.trim().is_empty() {
@@ -205,6 +229,8 @@ impl LokiClient {
         }
     }
 
+    /// guard performs the module-specific operation described by its name.
+    /// It keeps validation, side effects, and returned values within this module's contract.
     pub fn guard(&self) -> LokiGuard {
         LokiGuard {
             tx: self.tx.clone(),
@@ -215,6 +241,8 @@ impl LokiClient {
         }
     }
 
+    /// close performs the module-specific operation described by its name.
+    /// It keeps validation, side effects, and returned values within this module's contract.
     pub fn close(&self) {
         close_worker(
             &self.tx,
@@ -225,14 +253,20 @@ impl LokiClient {
         );
     }
 
+    /// queue_drops performs the module-specific operation described by its name.
+    /// It keeps validation, side effects, and returned values within this module's contract.
     pub fn queue_drops(&self) -> u64 {
         self.queue_drops.load(Ordering::Relaxed)
     }
 
+    /// send_drops performs the module-specific operation described by its name.
+    /// It keeps validation, side effects, and returned values within this module's contract.
     pub fn send_drops(&self) -> u64 {
         self.send_drops.load(Ordering::Relaxed)
     }
 
+    /// queue performs the module-specific operation described by its name.
+    /// It keeps validation, side effects, and returned values within this module's contract.
     fn queue(&self, entry: LokiEntry) {
         if self.closed.load(Ordering::Relaxed) {
             return;
@@ -246,6 +280,8 @@ impl LokiClient {
     }
 }
 
+/// LokiGuard stores the state passed across this module boundary.
+/// Keep field changes compatible with callers and serialized contracts.
 pub struct LokiGuard {
     tx: SyncSender<WorkerMessage>,
     closed: Arc<AtomicBool>,
@@ -255,6 +291,8 @@ pub struct LokiGuard {
 }
 
 impl LokiGuard {
+    /// close performs the module-specific operation described by its name.
+    /// It keeps validation, side effects, and returned values within this module's contract.
     pub fn close(&self) {
         close_worker(
             &self.tx,
@@ -267,43 +305,59 @@ impl LokiGuard {
 }
 
 impl Drop for LokiGuard {
+    /// drop performs the module-specific operation described by its name.
+    /// It keeps validation, side effects, and returned values within this module's contract.
     fn drop(&mut self) {
         self.close();
     }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
+/// Attr stores the state passed across this module boundary.
+/// Keep field changes compatible with callers and serialized contracts.
 pub struct Attr {
     key: String,
     value: Value,
 }
 
 #[derive(Clone, Debug, Default)]
+/// LogContext stores the state passed across this module boundary.
+/// Keep field changes compatible with callers and serialized contracts.
 pub struct LogContext {
     attrs: Vec<Attr>,
 }
 
 impl LogContext {
+    /// new performs the module-specific operation described by its name.
+    /// It keeps validation, side effects, and returned values within this module's contract.
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// with_attrs performs the module-specific operation described by its name.
+    /// It keeps validation, side effects, and returned values within this module's contract.
     pub fn with_attrs(attrs: impl IntoIterator<Item = Attr>) -> Self {
         Self {
             attrs: attrs.into_iter().collect(),
         }
     }
 
+    /// child performs the module-specific operation described by its name.
+    /// It keeps validation, side effects, and returned values within this module's contract.
     pub fn child(&self, attrs: impl IntoIterator<Item = Attr>) -> Self {
         let mut merged = self.attrs.clone();
         merged.extend(attrs);
         Self { attrs: merged }
     }
 
+    /// scope performs the module-specific operation described by its name.
+    /// It keeps validation, side effects, and returned values within this module's contract.
     pub fn scope<T>(&self, f: impl FnOnce() -> T) -> T {
         with_attrs(self.attrs.clone(), f)
     }
 
+    /// span performs the module-specific operation described by its name.
+    /// It keeps validation, side effects, and returned values within this module's contract.
     pub fn span(&self) -> Span {
         let loki_context = serde_json::to_string(&self.attrs).unwrap_or_else(|_| "[]".to_string());
         tracing::span!(Level::INFO, "loki_context", loki_context = %loki_context)
@@ -311,6 +365,8 @@ impl LogContext {
 }
 
 impl Attr {
+    /// string performs the module-specific operation described by its name.
+    /// It keeps validation, side effects, and returned values within this module's contract.
     pub fn string(key: impl Into<String>, value: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -318,6 +374,8 @@ impl Attr {
         }
     }
 
+    /// u64 performs the module-specific operation described by its name.
+    /// It keeps validation, side effects, and returned values within this module's contract.
     pub fn u64(key: impl Into<String>, value: u64) -> Self {
         Self {
             key: key.into(),
@@ -325,6 +383,8 @@ impl Attr {
         }
     }
 
+    /// i64 performs the module-specific operation described by its name.
+    /// It keeps validation, side effects, and returned values within this module's contract.
     pub fn i64(key: impl Into<String>, value: i64) -> Self {
         Self {
             key: key.into(),
@@ -332,6 +392,8 @@ impl Attr {
         }
     }
 
+    /// bool performs the module-specific operation described by its name.
+    /// It keeps validation, side effects, and returned values within this module's contract.
     pub fn bool(key: impl Into<String>, value: bool) -> Self {
         Self {
             key: key.into(),
@@ -340,6 +402,8 @@ impl Attr {
     }
 }
 
+/// with_attrs performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 pub fn with_attrs<T>(attrs: impl IntoIterator<Item = Attr>, f: impl FnOnce() -> T) -> T {
     let attrs = attrs.into_iter().collect::<Vec<_>>();
     CONTEXT_ATTRS.with(|slot| {
@@ -355,6 +419,8 @@ pub fn with_attrs<T>(attrs: impl IntoIterator<Item = Attr>, f: impl FnOnce() -> 
     })
 }
 
+/// LokiLayer stores the state passed across this module boundary.
+/// Keep field changes compatible with callers and serialized contracts.
 struct LokiLayer {
     client: LokiClient,
     config: Config,
@@ -364,6 +430,8 @@ impl<S> Layer<S> for LokiLayer
 where
     S: Subscriber + for<'a> LookupSpan<'a>,
 {
+    /// on_new_span performs the module-specific operation described by its name.
+    /// It keeps validation, side effects, and returned values within this module's contract.
     fn on_new_span(&self, attrs: &Attributes<'_>, id: &Id, ctx: Context<'_, S>) {
         let Some(span) = ctx.span(id) else {
             return;
@@ -375,6 +443,8 @@ where
         }
     }
 
+    /// on_record performs the module-specific operation described by its name.
+    /// It keeps validation, side effects, and returned values within this module's contract.
     fn on_record(&self, id: &Id, values: &Record<'_>, ctx: Context<'_, S>) {
         let Some(span) = ctx.span(id) else {
             return;
@@ -392,6 +462,8 @@ where
         }
     }
 
+    /// on_event performs the module-specific operation described by its name.
+    /// It keeps validation, side effects, and returned values within this module's contract.
     fn on_event(&self, event: &Event<'_>, _ctx: Context<'_, S>) {
         let now = SystemTime::now();
         let mut visitor = JsonVisitor::new(&self.config);
@@ -407,10 +479,6 @@ where
         event.record(&mut visitor);
 
         let meta = event.metadata();
-        // Emit an in-line RFC3339Nano UTC `time` field matching the Go slog
-        // JSONHandler, so cross-language Loki/Grafana dashboards can parse one
-        // timestamp field for both Go and Rust services. (Loki ingest uses the
-        // stream timestamp below; this is the human/queryable copy.)
         visitor
             .fields
             .insert("time".to_string(), Value::String(rfc3339_nanos(now)));
@@ -432,11 +500,15 @@ where
     }
 }
 
+/// JsonVisitor stores the state passed across this module boundary.
+/// Keep field changes compatible with callers and serialized contracts.
 struct JsonVisitor {
     fields: Map<String, Value>,
 }
 
 impl JsonVisitor {
+    /// new performs the module-specific operation described by its name.
+    /// It keeps validation, side effects, and returned values within this module's contract.
     fn new(config: &Config) -> Self {
         let mut fields = Map::new();
         fields.insert(
@@ -464,11 +536,15 @@ impl JsonVisitor {
 }
 
 #[derive(Default)]
+/// SpanAttrVisitor stores the state passed across this module boundary.
+/// Keep field changes compatible with callers and serialized contracts.
 struct SpanAttrVisitor {
     attrs: Vec<Attr>,
 }
 
 impl Visit for SpanAttrVisitor {
+    /// record_str performs the module-specific operation described by its name.
+    /// It keeps validation, side effects, and returned values within this module's contract.
     fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
         if field.name() == "loki_context" {
             if let Ok(attrs) = serde_json::from_str::<Vec<Attr>>(value) {
@@ -477,6 +553,8 @@ impl Visit for SpanAttrVisitor {
         }
     }
 
+    /// record_debug performs the module-specific operation described by its name.
+    /// It keeps validation, side effects, and returned values within this module's contract.
     fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
         if field.name() == "loki_context" {
             let rendered = format!("{value:?}");
@@ -489,26 +567,36 @@ impl Visit for SpanAttrVisitor {
 }
 
 impl Visit for JsonVisitor {
+    /// record_bool performs the module-specific operation described by its name.
+    /// It keeps validation, side effects, and returned values within this module's contract.
     fn record_bool(&mut self, field: &tracing::field::Field, value: bool) {
         self.fields
             .insert(field.name().to_string(), Value::Bool(value));
     }
 
+    /// record_i64 performs the module-specific operation described by its name.
+    /// It keeps validation, side effects, and returned values within this module's contract.
     fn record_i64(&mut self, field: &tracing::field::Field, value: i64) {
         self.fields
             .insert(field.name().to_string(), Value::Number(Number::from(value)));
     }
 
+    /// record_u64 performs the module-specific operation described by its name.
+    /// It keeps validation, side effects, and returned values within this module's contract.
     fn record_u64(&mut self, field: &tracing::field::Field, value: u64) {
         self.fields
             .insert(field.name().to_string(), Value::Number(Number::from(value)));
     }
 
+    /// record_str performs the module-specific operation described by its name.
+    /// It keeps validation, side effects, and returned values within this module's contract.
     fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
         self.fields
             .insert(field.name().to_string(), Value::String(value.to_string()));
     }
 
+    /// record_error performs the module-specific operation described by its name.
+    /// It keeps validation, side effects, and returned values within this module's contract.
     fn record_error(
         &mut self,
         field: &tracing::field::Field,
@@ -518,6 +606,8 @@ impl Visit for JsonVisitor {
             .insert(field.name().to_string(), Value::String(value.to_string()));
     }
 
+    /// record_debug performs the module-specific operation described by its name.
+    /// It keeps validation, side effects, and returned values within this module's contract.
     fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
         self.fields.insert(
             field.name().to_string(),
@@ -527,28 +617,38 @@ impl Visit for JsonVisitor {
 }
 
 #[derive(Clone)]
+/// LokiEntry stores the state passed across this module boundary.
+/// Keep field changes compatible with callers and serialized contracts.
 struct LokiEntry {
     timestamp_ns: u128,
     line: String,
 }
 
+/// WorkerMessage enumerates the states or variants handled by this module.
+/// Match arms should preserve the semantic contract of each variant.
 enum WorkerMessage {
     Entry(LokiEntry),
     Shutdown,
 }
 
 #[derive(Serialize)]
+/// PushRequest stores the state passed across this module boundary.
+/// Keep field changes compatible with callers and serialized contracts.
 struct PushRequest<'a> {
     streams: [Stream<'a>; 1],
 }
 
 #[derive(Serialize)]
+/// Stream stores the state passed across this module boundary.
+/// Keep field changes compatible with callers and serialized contracts.
 struct Stream<'a> {
     stream: Labels<'a>,
     values: &'a [[String; 2]],
 }
 
 #[derive(Serialize)]
+/// Labels stores the state passed across this module boundary.
+/// Keep field changes compatible with callers and serialized contracts.
 struct Labels<'a> {
     service_name: &'a str,
     environment: &'a str,
@@ -556,6 +656,8 @@ struct Labels<'a> {
     version: &'a str,
 }
 
+/// run_worker performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 fn run_worker(
     rx: mpsc::Receiver<WorkerMessage>,
     config: Config,
@@ -617,12 +719,6 @@ fn run_worker(
                     eprintln!("loki final push failed for Rust logs: {err}");
                 }
             }
-            // L46: entries enqueued concurrently with shutdown (after the drain loop
-            // above but before `rx` is dropped) would otherwise be discarded silently
-            // and counted in neither queue_drops nor send_drops. Tally them so the
-            // bounded shutdown-time loss is VISIBLE in the completeness counters
-            // operators rely on. (The TOCTOU window cannot be fully closed without
-            // ordering the closed-check against worker exit.)
             let mut residual = 0u64;
             while let Ok(WorkerMessage::Entry(_)) = rx.try_recv() {
                 residual += 1;
@@ -630,8 +726,6 @@ fn run_worker(
             if residual > 0 {
                 send_drops.fetch_add(residual, Ordering::Relaxed);
             }
-            // Surface the completeness counters on shutdown so any dropped logs are
-            // visible to operators rather than silently lost.
             let qd = queue_drops.load(Ordering::Relaxed);
             let sd = send_drops.load(Ordering::Relaxed);
             if qd > 0 || sd > 0 {
@@ -642,6 +736,8 @@ fn run_worker(
     }
 }
 
+/// push_batch_with_retries performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 fn push_batch_with_retries(
     client: &reqwest::blocking::Client,
     push_url: &str,
@@ -678,6 +774,8 @@ fn push_batch_with_retries(
     Ok(())
 }
 
+/// push_batch performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 fn push_batch(
     client: &reqwest::blocking::Client,
     push_url: &str,
@@ -727,6 +825,8 @@ fn push_batch(
 }
 
 #[derive(Debug)]
+/// PushError enumerates the states or variants handled by this module.
+/// Match arms should preserve the semantic contract of each variant.
 enum PushError {
     Retryable(String),
     Permanent(String),
@@ -734,12 +834,16 @@ enum PushError {
 }
 
 impl From<reqwest::Error> for PushError {
+    /// from performs the module-specific operation described by its name.
+    /// It keeps validation, side effects, and returned values within this module's contract.
     fn from(value: reqwest::Error) -> Self {
         Self::Http(value)
     }
 }
 
 impl core::fmt::Display for PushError {
+    /// fmt performs the module-specific operation described by its name.
+    /// It keeps validation, side effects, and returned values within this module's contract.
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::Retryable(message) | Self::Permanent(message) => f.write_str(message),
@@ -748,6 +852,8 @@ impl core::fmt::Display for PushError {
     }
 }
 
+/// close_worker performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 fn close_worker(
     tx: &SyncSender<WorkerMessage>,
     closed: &AtomicBool,
@@ -772,6 +878,8 @@ fn close_worker(
     }
 }
 
+/// sleep_with_jitter performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 fn sleep_with_jitter(delay: Duration, closed: &AtomicBool) -> bool {
     let jitter_max = delay / 2;
     let jitter = if jitter_max.is_zero() {
@@ -795,6 +903,8 @@ fn sleep_with_jitter(delay: Duration, closed: &AtomicBool) -> bool {
     closed.load(Ordering::Relaxed)
 }
 
+/// serialize_log_line performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 fn serialize_log_line(fields: &Map<String, Value>) -> Option<String> {
     JSON_BUF.with(|slot| {
         let mut buf = slot.borrow_mut();
@@ -804,6 +914,8 @@ fn serialize_log_line(fields: &Map<String, Value>) -> Option<String> {
     })
 }
 
+/// loki_push_url performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 fn loki_push_url(base_url: &str) -> String {
     if base_url.ends_with("/loki/api/v1/push") {
         base_url.to_string()
@@ -812,6 +924,8 @@ fn loki_push_url(base_url: &str) -> String {
     }
 }
 
+/// level_filter performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 fn level_filter(value: &str) -> &'static str {
     match value.trim().to_ascii_lowercase().as_str() {
         "debug" => "debug",
@@ -822,6 +936,8 @@ fn level_filter(value: &str) -> &'static str {
     }
 }
 
+/// level_str performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 fn level_str(level: &Level) -> &'static str {
     match *level {
         Level::ERROR => "ERROR",
@@ -832,17 +948,16 @@ fn level_str(level: &Level) -> &'static str {
     }
 }
 
+/// unix_nanos performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 fn unix_nanos(time: SystemTime) -> u128 {
     time.duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_nanos())
         .unwrap_or(0)
 }
 
-/// rfc3339_nanos formats a SystemTime as RFC3339 in UTC with fractional seconds,
-/// trailing zeros trimmed (e.g. `2026-06-04T12:34:56.123Z`, or `...:56Z` when the
-/// nanos are zero) — the same shape Go's slog JSONHandler emits for its `time`
-/// field. std-only (no chrono/time dep): civil date via Howard Hinnant's
-/// days-from-epoch algorithm.
+/// rfc3339_nanos performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 fn rfc3339_nanos(now: SystemTime) -> String {
     let total = now.duration_since(UNIX_EPOCH).unwrap_or_default();
     let secs = total.as_secs() as i64;
@@ -860,8 +975,8 @@ fn rfc3339_nanos(now: SystemTime) -> String {
     }
 }
 
-/// civil_from_days converts a count of days since 1970-01-01 into (year, month,
-/// day) for the proleptic Gregorian calendar (Howard Hinnant, public domain).
+/// civil_from_days performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 fn civil_from_days(days: i64) -> (i64, u32, u32) {
     let z = days + 719_468;
     let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
@@ -875,6 +990,8 @@ fn civil_from_days(days: i64) -> (i64, u32, u32) {
     (if m <= 2 { y + 1 } else { y }, m, d)
 }
 
+/// env_or performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 fn env_or(key: &str, fallback: impl Into<String>) -> String {
     env::var(key)
         .ok()
@@ -882,6 +999,8 @@ fn env_or(key: &str, fallback: impl Into<String>) -> String {
         .unwrap_or_else(|| fallback.into())
 }
 
+/// cached_hostname performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 fn cached_hostname() -> String {
     env::var("HOSTNAME")
         .ok()
@@ -901,21 +1020,25 @@ mod time_tests {
     use std::time::{Duration, UNIX_EPOCH};
 
     #[test]
+    /// formats_rfc3339_nanos_utc_matching_go_slog performs the module-specific operation described by its name.
+    /// It keeps validation, side effects, and returned values within this module's contract.
     fn formats_rfc3339_nanos_utc_matching_go_slog() {
-        // Unix billennium: 1_000_000_000s after epoch = 2001-09-09T01:46:40Z.
         let t = UNIX_EPOCH + Duration::new(1_000_000_000, 123_000_000);
         assert_eq!(rfc3339_nanos(t), "2001-09-09T01:46:40.123Z");
     }
 
     #[test]
+    /// zero_nanos_has_no_fraction performs the module-specific operation described by its name.
+    /// It keeps validation, side effects, and returned values within this module's contract.
     fn zero_nanos_has_no_fraction() {
         assert_eq!(rfc3339_nanos(UNIX_EPOCH), "1970-01-01T00:00:00Z");
     }
 
     #[test]
+    /// full_nanosecond_precision_preserved performs the module-specific operation described by its name.
+    /// It keeps validation, side effects, and returned values within this module's contract.
     fn full_nanosecond_precision_preserved() {
         let t = UNIX_EPOCH + Duration::new(1_700_000_000, 987_654_321);
-        // 1_700_000_000s = 2023-11-14T22:13:20Z
         assert_eq!(rfc3339_nanos(t), "2023-11-14T22:13:20.987654321Z");
     }
 }

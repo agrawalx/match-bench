@@ -1,16 +1,8 @@
-//! Integration tests against real infra (Kafka + TimescaleDB + Redis).
+//! This module defines tests for integration.
 //!
-//! Env-gated like the Go services' *_integration_test.go: each test skips unless
-//! the infra URLs are set. Bring the infra up with `docker compose up -d` (it now
-//! includes timescaledb on :5434 and redis on :6379), then:
-//!
-//!   KAFKA_BROKERS=localhost:9092 \
-//!   TIMESCALE_URL=postgres://iicpc:iicpc@localhost:5434/metrics \
-//!   REDIS_URL=redis://localhost:6379 \
-//!   cargo test -p iicpc-telemetry-ingester --test integration -- --nocapture
-//!
-//! Without the env vars the tests print a skip line and pass, so `cargo test`
-//! stays green on a machine with no broker/DB.
+//! It belongs to the IICPC benchmarking platform and should keep its
+//! behavior consistent with the service contracts documented in design.md.
+//! The comments in this file describe public structure and callable behavior.
 
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -27,10 +19,14 @@ use rdkafka::message::Message;
 use rdkafka::producer::{FutureProducer, FutureRecord};
 use rdkafka::util::Timeout;
 
+/// env performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 fn env(key: &str) -> Option<String> {
     std::env::var(key).ok().filter(|v| !v.trim().is_empty())
 }
 
+/// now_ns performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 fn now_ns() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -38,11 +34,14 @@ fn now_ns() -> u64 {
         .as_nanos() as u64
 }
 
-/// Unique per run so concurrent/repeated runs don't collide on session/contestant.
+/// unique_suffix performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 fn unique_suffix() -> String {
     format!("{}-{}", std::process::id(), now_ns())
 }
 
+/// acked performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 fn acked(
     session: &str,
     contestant: &str,
@@ -71,6 +70,8 @@ fn acked(
     }
 }
 
+/// sent performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 fn sent(session: &str, order: &str, t0: u64, t1: u64, r9: u64, timed_out: bool) -> OrderSentEvent {
     OrderSentEvent {
         session_id: session.into(),
@@ -92,13 +93,15 @@ fn sent(session: &str, order: &str, t0: u64, t1: u64, r9: u64, timed_out: bool) 
     }
 }
 
-/// Build a small synthetic session: 4 sent (1 timed out), 4 acked (3 ack + 1
-/// extra fill), all in wave 0. Returns (session_id, contestant_id, expected).
+/// Expected stores the state passed across this module boundary.
+/// Keep field changes compatible with callers and serialized contracts.
 struct Expected {
     responded: u64,
     error_rate: f64,
 }
 
+/// synthetic performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 fn synthetic(
     session: &str,
     contestant: &str,
@@ -148,8 +151,6 @@ fn synthetic(
             0,
         ), // reject
     ];
-    // responded = distinct first responses = o1,o2,o3 = 3
-    // error_rate = (1 timeout + 1 reject)/4 offered = 0.5
     (
         sents,
         ackeds,
@@ -160,6 +161,8 @@ fn synthetic(
     )
 }
 
+/// aggregate_synthetic performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 fn aggregate_synthetic(session: &str, contestant: &str) -> (Vec<Snapshot>, Expected) {
     let (sents, ackeds, exp) = synthetic(session, contestant);
     let mut agg = Aggregator::new(DEFAULT_WAVE_NS);
@@ -172,13 +175,15 @@ fn aggregate_synthetic(session: &str, contestant: &str) -> (Vec<Snapshot>, Expec
     (agg.snapshot(now_ns(), 1.0), exp)
 }
 
+/// redis_snapshot_key performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 fn redis_snapshot_key(contestant: &str, session: &str, wave_index: u32) -> String {
     format!("contestant:{contestant}:{session}:{wave_index}")
 }
 
-// ---- Test A: TimescaleDB store round-trip ----------------------------------
-
 #[tokio::test]
+/// store_roundtrip_writes_and_reads_metrics performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 async fn store_roundtrip_writes_and_reads_metrics() {
     let Some(url) = env("TIMESCALE_URL") else {
         eprintln!("skip store_roundtrip: TIMESCALE_URL unset");
@@ -193,7 +198,6 @@ async fn store_roundtrip_writes_and_reads_metrics() {
     assert!(!snaps.is_empty(), "aggregator produced a snapshot");
     store.write(&snaps).await.expect("write metrics");
 
-    // Read back with a raw client.
     let (client, conn) = tokio_postgres::connect(&url, tokio_postgres::NoTls)
         .await
         .expect("raw connect");
@@ -216,9 +220,9 @@ async fn store_roundtrip_writes_and_reads_metrics() {
     eprintln!("store_roundtrip OK: rows={count} tps={max_tps} p99={max_p99}");
 }
 
-// ---- Test B: Redis hot-snapshot round-trip ---------------------------------
-
 #[tokio::test]
+/// redis_roundtrip_writes_contestant_hash performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 async fn redis_roundtrip_writes_contestant_hash() {
     let Some(url) = env("REDIS_URL") else {
         eprintln!("skip redis_roundtrip: REDIS_URL unset");
@@ -250,9 +254,9 @@ async fn redis_roundtrip_writes_contestant_hash() {
     eprintln!("redis_roundtrip OK: {map:?}");
 }
 
-// ---- Test C: Kafka produce -> consume -> aggregate -------------------------
-
 #[tokio::test]
+/// kafka_produce_consume_aggregate performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 async fn kafka_produce_consume_aggregate() {
     let Some(brokers) = env("KAFKA_BROKERS") else {
         eprintln!("skip kafka_produce_consume_aggregate: KAFKA_BROKERS unset");
@@ -299,7 +303,6 @@ async fn kafka_produce_consume_aggregate() {
         .await
         .expect("produce orders.acked");
 
-    // Fresh earliest consumer for determinism (the prod build_consumer is `latest`).
     let group = format!("itest-{}", unique_suffix());
     let consumer: StreamConsumer = ClientConfig::new()
         .set("bootstrap.servers", &brokers)
@@ -373,9 +376,9 @@ async fn kafka_produce_consume_aggregate() {
     );
 }
 
-// ---- Test D: full pipeline (Kafka -> aggregate -> TimescaleDB + Redis) ------
-
 #[tokio::test]
+/// full_pipeline_kafka_to_timescale_and_redis performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 async fn full_pipeline_kafka_to_timescale_and_redis() {
     let (Some(brokers), Some(turl), Some(rurl)) =
         (env("KAFKA_BROKERS"), env("TIMESCALE_URL"), env("REDIS_URL"))
@@ -387,7 +390,6 @@ async fn full_pipeline_kafka_to_timescale_and_redis() {
     let contestant = format!("c-{}", unique_suffix());
     let (sents, ackeds, exp) = synthetic(&session, &contestant);
 
-    // Produce.
     let producer: FutureProducer = ClientConfig::new()
         .set("bootstrap.servers", &brokers)
         .set("message.timeout.ms", "5000")
@@ -424,7 +426,6 @@ async fn full_pipeline_kafka_to_timescale_and_redis() {
         .await
         .unwrap();
 
-    // Consume + aggregate (earliest consumer).
     let consumer: StreamConsumer = ClientConfig::new()
         .set("bootstrap.servers", &brokers)
         .set("group.id", format!("itest-{}", unique_suffix()))
@@ -461,7 +462,6 @@ async fn full_pipeline_kafka_to_timescale_and_redis() {
     }
     assert_eq!(seen, want, "consumed the full synthetic session");
 
-    // Snapshot + sink to both stores.
     let snaps = agg.snapshot(now_ns(), 1.0);
     let store = Store::connect(&turl, "test-shard-0".to_string()).await.unwrap();
     store.init_schema().await.unwrap();
@@ -469,7 +469,6 @@ async fn full_pipeline_kafka_to_timescale_and_redis() {
     let redis = RedisSink::connect(&rurl).await.unwrap();
     redis.write(&snaps).await.unwrap();
 
-    // Assert TimescaleDB.
     let (client, conn) = tokio_postgres::connect(&turl, tokio_postgres::NoTls)
         .await
         .unwrap();
@@ -490,7 +489,6 @@ async fn full_pipeline_kafka_to_timescale_and_redis() {
     assert!((err - exp.error_rate).abs() < 1e-9);
     assert!(p99 > 0);
 
-    // Assert Redis.
     let rclient = redis::Client::open(rurl).unwrap();
     let mut rconn = rclient.get_multiplexed_async_connection().await.unwrap();
     let map: std::collections::HashMap<String, String> = redis::cmd("HGETALL")

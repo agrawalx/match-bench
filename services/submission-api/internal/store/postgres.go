@@ -1,3 +1,8 @@
+// Package store implements postgres behavior.
+//
+// This file is part of the IICPC benchmarking platform and keeps its
+// responsibilities local to the surrounding package. It should be read with
+// the service-level design in design.md for broader operational context.
 package store
 
 import (
@@ -123,6 +128,8 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_runs_unique_scenario_per_group
 	WHERE run_group_id IS NOT NULL AND scenario_id IS NOT NULL;
 `
 
+// SubmissionMeta groups the state and dependencies used by this package.
+// Keep this type aligned with the runtime contract around it.
 type SubmissionMeta struct {
 	SubmissionID string
 	ContestantID string
@@ -137,10 +144,14 @@ type SubmissionMeta struct {
 	CreatedAt    time.Time
 }
 
+// PostgresStore groups the state and dependencies used by this package.
+// Keep this type aligned with the runtime contract around it.
 type PostgresStore struct {
 	pool *pgxpool.Pool
 }
 
+// NewPostgresStore performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func NewPostgresStore(ctx context.Context, dsn string) (*PostgresStore, error) {
 	start := time.Now()
 	pool, err := pgxpool.New(ctx, dsn)
@@ -158,7 +169,8 @@ func NewPostgresStore(ctx context.Context, dsn string) (*PostgresStore, error) {
 	return &PostgresStore{pool: pool}, nil
 }
 
-// RunMeta is the in-memory shape of one row of the runs table.
+// RunMeta groups the state and dependencies used by this package.
+// Keep this type aligned with the runtime contract around it.
 type RunMeta struct {
 	SessionID    string
 	SubmissionID string
@@ -171,8 +183,8 @@ type RunMeta struct {
 	UpdatedAt    time.Time
 }
 
-// RunGroupMeta is the in-memory shape of one row of the run_groups table.
-// One row per benchmark trigger; parents N child runs rows (one per scenario).
+// RunGroupMeta groups the state and dependencies used by this package.
+// Keep this type aligned with the runtime contract around it.
 type RunGroupMeta struct {
 	RunGroupID   string
 	SubmissionID string
@@ -182,13 +194,16 @@ type RunGroupMeta struct {
 	UpdatedAt    time.Time
 }
 
+// RunGroupListFilter groups the state and dependencies used by this package.
+// Keep this type aligned with the runtime contract around it.
 type RunGroupListFilter struct {
 	ContestantID  string
 	SubmissionIDs []string
 	Limit         int
 }
 
-// ScenarioRow is the in-memory shape of one row of the scenarios table.
+// ScenarioRow groups the state and dependencies used by this package.
+// Keep this type aligned with the runtime contract around it.
 type ScenarioRow struct {
 	ScenarioID string
 	Name       string // constant | spike | ramp
@@ -198,10 +213,8 @@ type ScenarioRow struct {
 	CreatedAt  time.Time
 }
 
-// FindActiveRunGroup returns the active (non-terminal) run-group for a
-// submission, or (nil, nil) when there is none. The benchmark endpoint uses
-// this for idempotency: if an active group already exists, return it with
-// HTTP 200 instead of creating a new one.
+// FindActiveRunGroup applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (s *PostgresStore) FindActiveRunGroup(ctx context.Context, submissionID string) (*RunGroupMeta, error) {
 	start := time.Now()
 	row := s.pool.QueryRow(ctx,
@@ -226,7 +239,8 @@ func (s *PostgresStore) FindActiveRunGroup(ctx context.Context, submissionID str
 	return &g, nil
 }
 
-// GetRunGroup fetches one run-group by id. Returns (nil, nil) when not found.
+// GetRunGroup applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (s *PostgresStore) GetRunGroup(ctx context.Context, runGroupID string) (*RunGroupMeta, error) {
 	start := time.Now()
 	row := s.pool.QueryRow(ctx,
@@ -248,16 +262,14 @@ func (s *PostgresStore) GetRunGroup(ctx context.Context, runGroupID string) (*Ru
 	return &g, nil
 }
 
+// ListRunGroups applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (s *PostgresStore) ListRunGroups(ctx context.Context, filter RunGroupListFilter) ([]RunGroupMeta, error) {
 	start := time.Now()
 	limit := filter.Limit
 	if limit <= 0 || limit > 200 {
 		limit = 100
 	}
-	// pgx encodes a nil slice as SQL NULL, and cardinality(NULL::text[]) is
-	// NULL — not 0 — which made the filter clause never-true and the
-	// unfiltered listing permanently empty. Normalize nil to an empty array
-	// here AND coalesce in SQL so neither side can reintroduce the bug alone.
 	submissionIDs := filter.SubmissionIDs
 	if submissionIDs == nil {
 		submissionIDs = []string{}
@@ -296,7 +308,8 @@ func (s *PostgresStore) ListRunGroups(ctx context.Context, filter RunGroupListFi
 	return out, nil
 }
 
-// GetRun fetches one run by session_id. Returns (nil, nil) when not found.
+// GetRun applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (s *PostgresStore) GetRun(ctx context.Context, sessionID string) (*RunMeta, error) {
 	start := time.Now()
 	row := s.pool.QueryRow(ctx,
@@ -321,10 +334,8 @@ func (s *PostgresStore) GetRun(ctx context.Context, sessionID string) (*RunMeta,
 	return &r, nil
 }
 
-// ListRunsByGroup returns the child runs of one run-group in EXECUTION order
-// (constant → spike → ramp), not alphabetical. Sort key is scenarios.sort_order,
-// populated by SeedScenarios. Name tiebreak keeps the query deterministic if
-// two scenarios end up with the same sort_order (shouldn't happen but cheap).
+// ListRunsByGroup applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (s *PostgresStore) ListRunsByGroup(ctx context.Context, runGroupID string) ([]RunMeta, error) {
 	start := time.Now()
 	rows, err := s.pool.Query(ctx,
@@ -360,15 +371,8 @@ func (s *PostgresStore) ListRunsByGroup(ctx context.Context, runGroupID string) 
 	return out, nil
 }
 
-// InsertRunGroupWithChildren atomically creates a run-group and N child runs.
-//
-// Returns ErrActiveRunGroupExists when the partial unique index on
-// run_groups(submission_id) WHERE NOT terminal rejects the parent insert —
-// the caller falls back to returning the existing run_group_id with HTTP 200.
-//
-// The transaction guarantees that either all rows land or none do. A
-// half-inserted state (run-group exists but a child row failed) would leave
-// the controller confused about how many sessions to expect.
+// InsertRunGroupWithChildren applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (s *PostgresStore) InsertRunGroupWithChildren(ctx context.Context, g RunGroupMeta, children []RunMeta) error {
 	start := time.Now()
 	tx, err := s.pool.Begin(ctx)
@@ -415,32 +419,8 @@ func (s *PostgresStore) InsertRunGroupWithChildren(ctx context.Context, g RunGro
 	return nil
 }
 
-// UpdateRunStatus applies a benchmark.status.updated event to the runs row.
-//
-// This is the ONLY path that writes terminal values ('completed' or 'failed')
-// into runs.status from outside the bot-fleet-controller's own startup
-// recovery. Only the bot-fleet-controller emits benchmark.status.updated
-// events. Do not add other callers — every other status writer in this
-// repo violates the one-writer invariant that protects the partial unique
-// index from being freed by an unauthorized actor.
-// RecomputeRunGroupStatus rolls up the children of a run-group into the
-// group's own status field. Called by the benchmark-status consumer after
-// every child status change so the group reflects what's actually happening
-// across its sessions.
-//
-// Rollup rules (failure dominates):
-//   - any child in 'failed'                              → group = 'failed'
-//   - all children in 'completed'                        → group = 'completed'
-//   - any child in a non-terminal, non-'requested' state → group = 'running'
-//   - otherwise (all children 'requested')               → group = 'requested'
-//
-// The group's status is denormalized state — the children are the source of
-// truth. We keep it to make leaderboard/listing queries fast (one row scan
-// instead of an N+1 children join per group).
-//
-// A no-op when the group has zero children — defensive against a half-built
-// group state we should never observe in practice but want to handle without
-// crashing if we do.
+// RecomputeRunGroupStatus applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (s *PostgresStore) RecomputeRunGroupStatus(ctx context.Context, runGroupID string) error {
 	start := time.Now()
 	row := s.pool.QueryRow(ctx, `
@@ -466,16 +446,10 @@ func (s *PostgresStore) RecomputeRunGroupStatus(ctx context.Context, runGroupID 
 	case completed == total:
 		newStatus = "completed"
 	case failed > 0 && failed+completed == total:
-		// All children are terminal and at least one failed. Only NOW is the
-		// group terminal-failed. Going 'failed' on the FIRST child failure (the
-		// previous behaviour) flipped the group terminal while sibling sessions
-		// (spike/ramp) were still live, dropping it from the one-active-per-
-		// submission index and letting a re-trigger spawn a second active group.
 		newStatus = "failed"
 	case requested == total:
 		newStatus = "requested"
 	default:
-		// At least one child is still in flight (requested/deploying/running).
 		newStatus = "running"
 	}
 	if _, err := s.pool.Exec(ctx,
@@ -489,14 +463,10 @@ func (s *PostgresStore) RecomputeRunGroupStatus(ctx context.Context, runGroupID 
 	return nil
 }
 
+// UpdateRunStatus applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (s *PostgresStore) UpdateRunStatus(ctx context.Context, sessionID, status, message string) error {
 	start := time.Now()
-	// Guard against terminal-state overwrite. Kafka delivers at-least-once,
-	// so a 'running' message can be redelivered AFTER the 'completed' message
-	// has already been committed. Without this guard, the run would be
-	// reopened — defeating the partial unique index on
-	// run_groups(submission_id) WHERE NOT terminal and letting a re-trigger
-	// see a finished session as live.
 	tag, err := s.pool.Exec(ctx,
 		`UPDATE runs
 		    SET status = $2, message = $3, updated_at = now()
@@ -509,9 +479,6 @@ func (s *PostgresStore) UpdateRunStatus(ctx context.Context, sessionID, status, 
 		return fmt.Errorf("%w: update run status: %v", cerrs.ErrStoreDatabaseFailed, err)
 	}
 	if tag.RowsAffected() == 0 {
-		// Either the row doesn't exist, or it exists in terminal state and we
-		// skipped it. Disambiguate with a follow-up query so the caller can
-		// log accurately and the Kafka offset can be committed in both cases.
 		var currentStatus string
 		err := s.pool.QueryRow(ctx,
 			`SELECT status FROM runs WHERE session_id = $1`, sessionID,
@@ -524,9 +491,6 @@ func (s *PostgresStore) UpdateRunStatus(ctx context.Context, sessionID, status, 
 			recordDB("submission-api", "update_run_status", start, err)
 			return fmt.Errorf("%w: check run status: %v", cerrs.ErrStoreDatabaseFailed, err)
 		}
-		// Row exists in terminal state — guarded redelivery. Treat as
-		// successfully ignored so the consumer commits the Kafka offset
-		// instead of retrying forever.
 		recordDB("submission-api", "update_run_status", start, nil)
 		return nil
 	}
@@ -534,9 +498,8 @@ func (s *PostgresStore) UpdateRunStatus(ctx context.Context, sessionID, status, 
 	return nil
 }
 
-// ListScenarios returns all scenarios in EXECUTION order (by sort_order).
-// submission-api calls this on the benchmark trigger to know how many child
-// runs to mint and which scenario_id each one points at.
+// ListScenarios applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (s *PostgresStore) ListScenarios(ctx context.Context) ([]ScenarioRow, error) {
 	start := time.Now()
 	rows, err := s.pool.Query(ctx,
@@ -570,22 +533,8 @@ func (s *PostgresStore) ListScenarios(ctx context.Context) ([]ScenarioRow, error
 	return out, nil
 }
 
-// SeedScenarios inserts the 3 canonical scenarios (constant, spike, ramp).
-//
-// With reseed=false (the default) it uses ON CONFLICT DO NOTHING: rerunning is
-// a no-op, so judges who hand-edit a row in the scenarios table are not
-// overwritten on the next service restart, and first boot of a fresh database
-// populates all three.
-//
-// With reseed=true (RESEED_SCENARIOS=true) it upserts: an existing row's
-// duration_ns/task_specs/sort_order are overwritten from the builder's current
-// (env-configured) output, while the existing scenario_id is PRESERVED (the SET
-// clause omits scenario_id), so foreign keys from runs/run_groups stay valid.
-// This is how a changed duration or RPS budget is applied to a seeded database.
-//
-// sort_order is backfilled UNCONDITIONALLY (not gated on conflict) so that
-// upgrading from an older deployment whose scenarios table didn't have the
-// column populates the field for existing rows.
+// SeedScenarios applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (s *PostgresStore) SeedScenarios(ctx context.Context, scenarios []ScenarioRow, reseed bool) error {
 	start := time.Now()
 	for _, sc := range scenarios {
@@ -609,7 +558,6 @@ func (s *PostgresStore) SeedScenarios(ctx context.Context, scenarios []ScenarioR
 			recordDB("submission-api", "seed_scenarios", start, err)
 			return fmt.Errorf("%w: seed scenario %q: %v", cerrs.ErrStoreDatabaseFailed, sc.Name, err)
 		}
-		// Backfill sort_order for an existing row that pre-dates this column.
 		if _, err := s.pool.Exec(ctx,
 			`UPDATE scenarios SET sort_order = $2
 			  WHERE name = $1 AND sort_order = 0`,
@@ -623,17 +571,20 @@ func (s *PostgresStore) SeedScenarios(ctx context.Context, scenarios []ScenarioR
 	return nil
 }
 
+// Close applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (s *PostgresStore) Close() {
 	s.pool.Close()
 }
 
-// Ping verifies the database connection is alive — used by the readiness probe so
-// a replica whose datastore connection died post-startup is removed from the
-// Service endpoints instead of serving errors.
+// Ping applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (s *PostgresStore) Ping(ctx context.Context) error {
 	return s.pool.Ping(ctx)
 }
 
+// RecordPoolStats applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (s *PostgresStore) RecordPoolStats() {
 	stats := s.pool.Stat()
 	labels := metrics.Labels("service", "submission-api")
@@ -645,7 +596,8 @@ func (s *PostgresStore) RecordPoolStats() {
 	metrics.Gauge("pgxpool_canceled_acquire_total", "pgxpool canceled acquire count.", labels, float64(stats.CanceledAcquireCount()))
 }
 
-// FindBySHA256 returns the existing submission_id if a duplicate artifact is detected.
+// FindBySHA256 applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (s *PostgresStore) FindBySHA256(ctx context.Context, sha256hex string) (submissionID string, found bool, err error) {
 	start := time.Now()
 	row := s.pool.QueryRow(ctx,
@@ -665,7 +617,8 @@ func (s *PostgresStore) FindBySHA256(ctx context.Context, sha256hex string) (sub
 	return submissionID, true, nil
 }
 
-// GetByID fetches a submission by its ID. Returns (nil, nil) if not found.
+// GetByID applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (s *PostgresStore) GetByID(ctx context.Context, submissionID string) (*SubmissionMeta, error) {
 	start := time.Now()
 	row := s.pool.QueryRow(ctx,
@@ -693,7 +646,8 @@ func (s *PostgresStore) GetByID(ctx context.Context, submissionID string) (*Subm
 	return &m, nil
 }
 
-// Insert writes a new submission record.
+// Insert applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (s *PostgresStore) Insert(ctx context.Context, m SubmissionMeta) error {
 	start := time.Now()
 	_, err := s.pool.Exec(ctx,
@@ -718,12 +672,8 @@ func (s *PostgresStore) Insert(ctx context.Context, m SubmissionMeta) error {
 	return nil
 }
 
-// ClaimSubmissionContestantIfEmpty atomically binds an unowned submission to
-// contestantID. The WHERE contestant_id = ” clause is the race gate: under
-// concurrent claims exactly one UPDATE matches a row. claimed reports whether
-// THIS call won — RowsAffected == 0 means another writer got there first (or
-// the row never existed), and the caller must re-read the row and enforce
-// ownership against the database value instead of assuming the claim took.
+// ClaimSubmissionContestantIfEmpty applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (s *PostgresStore) ClaimSubmissionContestantIfEmpty(ctx context.Context, submissionID, contestantID string) (claimed bool, err error) {
 	if contestantID == "" {
 		return false, nil
@@ -745,7 +695,8 @@ func (s *PostgresStore) ClaimSubmissionContestantIfEmpty(ctx context.Context, su
 	return tag.RowsAffected() == 1, nil
 }
 
-// recordDB emits low-cardinality DB metrics for store methods.
+// recordDB performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func recordDB(service, operation string, start time.Time, err error) {
 	labels := metrics.Labels("service", service, "operation", operation)
 	metrics.Histogram("db_query_duration_seconds", "PostgreSQL query duration in seconds.", labels, metrics.SinceSeconds(start))

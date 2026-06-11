@@ -1,9 +1,8 @@
-//! kafka_roundtrip — end-to-end verification that bot-fleet's rdkafka
-//! producer + consumer can talk to a live broker. Produces 5 messages on a
-//! dedicated test topic, consumes them back through the exact same kafka.rs
-//! primitives the bot-fleet uses, and asserts every payload matches.
+//! This module implements kafka roundtrip behavior.
 //!
-//! Run via testing/08_rdkafka_roundtrip.sh (which pre-creates the topic).
+//! It belongs to the IICPC benchmarking platform and should keep its
+//! behavior consistent with the service contracts documented in design.md.
+//! The comments in this file describe public structure and callable behavior.
 
 use std::time::Duration;
 
@@ -16,13 +15,11 @@ const GROUP: &str = "kafka.smoke.roundtrip";
 const COUNT: usize = 5;
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 2)]
+/// main performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 async fn main() -> Result<()> {
     let brokers = std::env::var("KAFKA_BROKERS").unwrap_or_else(|_| BROKERS.to_string());
 
-    // Set up consumer FIRST so its group offset is known before we publish.
-    // Without this, "auto.offset.reset=earliest" still works because the
-    // commit_message path advances offsets, but ordering this way matches
-    // how production callers (worker.rs) do it.
     let consumer = kafka::consumer(
         &brokers,
         GROUP,
@@ -47,8 +44,6 @@ async fn main() -> Result<()> {
     println!("\nConsuming back from {TOPIC}");
     let mut got: Vec<String> = Vec::with_capacity(COUNT);
     while got.len() < COUNT {
-        // 10s timeout per message is generous; first read includes consumer
-        // group join + offset reset, which can take a second or two.
         let payload = tokio::time::timeout(Duration::from_secs(10), kafka::recv_payload(&consumer))
             .await
             .context("consume timeout")??
@@ -59,9 +54,6 @@ async fn main() -> Result<()> {
         got.push(s);
     }
 
-    // Order is not asserted (Kafka guarantees within a partition; with 1
-    // partition and one producer we'd get strict order, but the test only
-    // needs to confirm the message *set* round-tripped).
     expected.sort();
     got.sort();
     assert_eq!(expected, got, "round-trip payload mismatch");
@@ -70,8 +62,8 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-/// chrono_like_ts gives a millisecond-precision wall-clock stamp without
-/// pulling chrono in just for this example.
+/// chrono_like_ts performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 fn chrono_like_ts() -> u128 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

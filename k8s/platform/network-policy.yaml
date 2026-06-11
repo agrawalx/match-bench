@@ -1,7 +1,10 @@
-# platform namespace: user-facing services (submission-api, spawner).
-# Accepts inbound traffic from the cluster ingress controller and external clients.
-# May reach data namespace for postgres, kafka, and minio.
-# May reach Harbor (external registry) for image promotion.
+# k8s/platform/network-policy.yaml
+#
+# This file declares Kubernetes resources for k8s/platform.
+# It is part of the IICPC platform configuration and should remain
+# aligned with the deployment and operations guidance in the README.
+# Keep comments at the file header so resource bodies stay declarative.
+
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -13,12 +16,10 @@ spec:
     - Ingress
     - Egress
 
-  # Ingress on port 8080 — Ingress controller or direct NodePort
   ingress:
     - ports:
         - port: 8080
           protocol: TCP
-    # Prometheus (observability namespace) scrapes submission-api metrics on 8080.
     - from:
         - namespaceSelector:
             matchLabels:
@@ -28,8 +29,6 @@ spec:
           protocol: TCP
 
   egress:
-    # Loki log shipping — submission-api's logger pushes to
-    # loki.observability.svc:3100 (LOKI_URL).
     - to:
         - namespaceSelector:
             matchLabels:
@@ -38,20 +37,18 @@ spec:
         - port: 3100
           protocol: TCP
 
-    # Data plane: postgres, kafka, minio
     - to:
         - namespaceSelector:
             matchLabels:
               name: data
       ports:
-        - port: 5432   # PostgreSQL
+        - port: 5432
           protocol: TCP
-        - port: 9092   # Kafka
+        - port: 9092
           protocol: TCP
-        - port: 9000   # MinIO S3 API
+        - port: 9000
           protocol: TCP
 
-    # Harbor registry (external HTTPS)
     - to:
         - ipBlock:
             cidr: 0.0.0.0/0
@@ -63,7 +60,6 @@ spec:
         - port: 443
           protocol: TCP
 
-    # DNS
     - to:
         - namespaceSelector:
             matchLabels:

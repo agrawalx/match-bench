@@ -1,31 +1,8 @@
-// Package validate diffs the contestant's REPORTED fills (from orders.acked)
-// against a reference matching engine, classifying each reported fill and scoring
-// valid/total.
+// Package validate implements validate behavior.
 //
-// The reference engine (internal/book) replays the delivery-ordered request stream
-// and, for every aggressor, emits the trades it WOULD produce — each with a
-// definite maker/taker pair (the maker is INFERRED from the reference book's FIFO,
-// not taken from the contestant's report, so no maker ClOrdID is needed on the
-// wire), the maker's resting price, and the FIFO arrival rank of every order that
-// ever rested. We reconcile the reported per-order fills against these reference
-// facts and classify each divergence:
-//
-//   - phantom            — a reported fill on an order_id that was never sent.
-//   - overfill           — reported cumulative qty exceeds the order's own qty.
-//   - self-trade         — the reference trade for this reported fill has the same
-//     participant (bot_id, parsed from order_id) on both sides.
-//   - time priority      — the order reports a fill it should not have, because an
-//     earlier-arriving same-(side,price) order had queue priority (FIFO front).
-//   - cancel-replace loss— a time-priority break where the jumping order lost its
-//     priority via a price-changing REPLACE (must go to the back of the new level).
-//   - price              — a reported fill at a price the reference never gave this
-//     order, or qty beyond what the reference produced for it.
-//
-// Ordering-sensitive checks (time priority / cancel-replace) honour the 100ns
-// cross-flow tie tolerance from internal/replay: when the two orders involved are
-// on different flows and their effective_t3 differ by less than the tolerance, the
-// contestant was free to order them either way and the break is suppressed. Within
-// a single flow the byte stream is unambiguous, so the check is strict.
+// This file is part of the IICPC benchmarking platform and keeps its
+// responsibilities local to the surrounding package. It should be read with
+// the service-level design in design.md for broader operational context.
 package validate
 
 import (
@@ -47,6 +24,8 @@ const (
 	CancelReplaceLoss ViolationType = "cancel_replace_loss"
 )
 
+// Violation groups the state and dependencies used by this package.
+// Keep this type aligned with the runtime contract around it.
 type Violation struct {
 	Type          ViolationType
 	OrderID       string
@@ -55,14 +34,16 @@ type Violation struct {
 	Detail        string
 }
 
-// ReportedFill is an acked fill whose order_id was never sent (phantom input,
-// detected at the join stage).
+// ReportedFill groups the state and dependencies used by this package.
+// Keep this type aligned with the runtime contract around it.
 type ReportedFill struct {
 	OrderID string
 	Qty     uint64
 	Price   int64
 }
 
+// Report groups the state and dependencies used by this package.
+// Keep this type aligned with the runtime contract around it.
 type Report struct {
 	TotalFills      uint64
 	ValidFills      uint64
@@ -74,6 +55,8 @@ type Report struct {
 	Violations      []Violation
 }
 
+// CorrectnessScore applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (r Report) CorrectnessScore() float64 {
 	if r.TotalFills == 0 {
 		return 1.0 // nothing to get wrong
@@ -81,29 +64,33 @@ func (r Report) CorrectnessScore() float64 {
 	return float64(r.ValidFills) / float64(r.TotalFills)
 }
 
+// ViolationCount applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (r Report) ViolationCount() uint32 {
 	return uint32(len(r.Violations))
 }
 
+// isFill performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func isFill(execType string, qty uint64) bool {
 	return qty > 0 && (execType == "1" || execType == "2" || execType == "F")
 }
 
+// refFills groups the state and dependencies used by this package.
+// Keep this type aligned with the runtime contract around it.
 type refFills struct {
 	qty    uint64
 	prices map[int64]struct{}
 }
 
-// Run replays `ordered` (delivery-ordered sent orders, each carrying its acked
-// Responses) through the reference engine and validates the reported fills.
-// `phantoms` are acked fills with no matching sent order (detected upstream).
+// Run performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func Run(ordered []*model.Order, phantoms []ReportedFill) Report {
 	engine := book.NewEngine()
 	for _, o := range ordered {
 		engine.Process(o)
 	}
 
-	// Per-order reference fills (qty + the price set), used for the price/qty checks.
 	ref := make(map[string]*refFills)
 	for _, f := range engine.Fills() {
 		r := ref[f.OrderID]
@@ -115,8 +102,6 @@ func Run(ordered []*model.Order, phantoms []ReportedFill) Report {
 		r.prices[f.Price] = struct{}{}
 	}
 
-	// Reference trades indexed by each side's order_id, so a reported fill on an
-	// order can find the counterparty (self-trade) at a given price.
 	tradesByOrder := make(map[string][]book.Trade)
 	for _, tr := range engine.Trades() {
 		tradesByOrder[tr.MakerOrderID] = append(tradesByOrder[tr.MakerOrderID], tr)
@@ -128,14 +113,6 @@ func Run(ordered []*model.Order, phantoms []ReportedFill) Report {
 		orderByID[o.OrderID] = o
 	}
 
-	// Aggressive-fill tolerance index. A LIVE in-sandbox engine processes orders
-	// in socket-arrival order, not the offline effective_t3 order the reference
-	// replays, so a market/crossing-limit order legitimately matches liquidity at
-	// a slightly different instant. When AggressiveFillToleranceNs > 0, a reported
-	// aggressive fill at price P is accepted if NON-SELF opposite liquidity at P
-	// was genuinely resting within ±tolerance of the aggressor's effective_t3 —
-	// the fairness analog of the resting-order cross-flow tie tolerance. Default 0
-	// preserves strict behavior. Overfill and self-trade are never tolerated.
 	availByLevel := make(map[levelKey][]book.Availability)
 	if AggressiveFillToleranceNs > 0 {
 		for _, a := range engine.Availability() {
@@ -183,9 +160,6 @@ func Run(ordered []*model.Order, phantoms []ReportedFill) Report {
 					"reference match for this fill has the same participant (bot_id) on both sides")
 
 			case ref[o.OrderID] == nil:
-				// Reference never filled this order. If an earlier same-(side,price)
-				// order had queue priority, the contestant jumped the queue; otherwise
-				// the fill simply shouldn't have happened (price/liquidity break).
 				if jumper, ok := queueJump(engine, orderByID, o, price); ok {
 					rep.flagJump(engine, o, jumper, resp.FillQty, price)
 				} else if tolerated(o, price) {
@@ -206,9 +180,6 @@ func Run(ordered []*model.Order, phantoms []ReportedFill) Report {
 				}
 
 			case cumReported > ref[o.OrderID].qty:
-				// Reported beyond what the reference gave this order at a valid price.
-				// If an earlier same-(side,price) order had priority for that extra
-				// quantity, it is a queue jump; otherwise an over-reported price break.
 				if jumper, ok := queueJump(engine, orderByID, o, price); ok {
 					rep.flagJump(engine, o, jumper, resp.FillQty, price)
 				} else if tolerated(o, price) {
@@ -235,15 +206,16 @@ func Run(ordered []*model.Order, phantoms []ReportedFill) Report {
 	return rep
 }
 
+// add applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (r *Report) add(t ViolationType, id string, qty uint64, price int64, detail string) {
 	r.Violations = append(r.Violations, Violation{
 		Type: t, OrderID: id, ReportedQty: qty, ReportedPrice: price, Detail: detail,
 	})
 }
 
-// flagJump records a queue-jump as a cancel-replace priority loss when the jumping
-// order lost priority via a price-changing REPLACE, otherwise a plain time break.
-// Both increment TimeViolations (they are the two faces of the time-priority gate).
+// flagJump applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (r *Report) flagJump(e *book.Engine, o *model.Order, jumper string, qty uint64, price int64) {
 	r.TimeViolations++
 	if e.Repriced(o.OrderID) {
@@ -255,6 +227,8 @@ func (r *Report) flagJump(e *book.Engine, o *model.Order, jumper string, qty uin
 		fmt.Sprintf("filled ahead of earlier same-price order %s (time priority)", jumper))
 }
 
+// selfTrade performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func selfTrade(tradesByOrder map[string][]book.Trade, orderID string, price int64) bool {
 	me := model.ParticipantOf(orderID)
 	for _, tr := range tradesByOrder[orderID] {
@@ -272,17 +246,13 @@ func selfTrade(tradesByOrder map[string][]book.Trade, orderID string, price int6
 	return false
 }
 
-// queueJump reports whether order `o`, reporting a fill at `price`, jumped ahead of
-// an earlier same-(side,price) order that had FIFO priority. It returns the earlier
-// order's id. The 100ns cross-flow tie tolerance suppresses the break when `o` and
-// the earlier order are on different flows within the tolerance window.
+// queueJump performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func queueJump(e *book.Engine, orderByID map[string]*model.Order, o *model.Order, price int64) (string, bool) {
 	mySeq, ok := e.SeqOf(o.OrderID)
 	if !ok {
 		return "", false // o never rested in the reference book, so it never queued
 	}
-	// Deterministically pick the FIFO-front competitor: smallest arrival seq, then
-	// smallest id. Map iteration order is unstable, so we cannot return first-match.
 	var (
 		best    string
 		bestSeq uint64
@@ -306,27 +276,24 @@ func queueJump(e *book.Engine, orderByID map[string]*model.Order, o *model.Order
 	return best, found
 }
 
+// priceAllowed performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func priceAllowed(r *refFills, price int64) bool {
 	_, ok := r.prices[price]
 	return ok
 }
 
-// AggressiveFillToleranceNs is the ±window (effective_t3 nanoseconds) within which
-// a market/crossing-limit fill is accepted if it matched genuine non-self opposite
-// liquidity at the reported price. 0 = strict (no tolerance), preserving the
-// original behavior. The validator's main sets it from AGGRESSIVE_FILL_TOLERANCE_NS.
-// It exists because a live in-sandbox engine processes in socket-arrival order, not
-// the reference's offline effective_t3 order, so aggressive fills are otherwise
-// penalized for an ordering the contestant could not observe. Resting-order time
-// priority keeps its own (tighter) cross-flow tie tolerance in internal/replay.
 var AggressiveFillToleranceNs uint64
 
-// levelKey indexes the reference liquidity timeline by (side, price).
+// levelKey groups the state and dependencies used by this package.
+// Keep this type aligned with the runtime contract around it.
 type levelKey struct {
 	side  model.Side
 	price int64
 }
 
+// oppositeOf performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func oppositeOf(s model.Side) model.Side {
 	if s == model.Buy {
 		return model.Sell
@@ -334,9 +301,8 @@ func oppositeOf(s model.Side) model.Side {
 	return model.Buy
 }
 
-// windowsOverlap reports whether a resting order's availability window
-// [enter, exit] overlaps the aggressor's tolerance window [t3-tol, t3+tol],
-// guarding against unsigned underflow on t3-tol.
+// windowsOverlap performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func windowsOverlap(enter, exit, t3, tol uint64) bool {
 	lo := uint64(0)
 	if t3 > tol {

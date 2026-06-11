@@ -1,3 +1,8 @@
+// Package source defines tests for drain test.
+//
+// This file is part of the IICPC benchmarking platform and keeps its
+// responsibilities local to the surrounding package. It should be read with
+// the service-level design in design.md for broader operational context.
 package source
 
 import (
@@ -13,11 +18,9 @@ import (
 	"github.com/vmihailenco/msgpack/v5"
 )
 
-// TestSessionStartFromID checks the UUIDv7 timestamp extraction: the first 48
-// bits of a v7 id are the Unix-millisecond creation time, which we use as the
-// session's start to bound the Kafka scan.
+// TestSessionStartFromID performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func TestSessionStartFromID(t *testing.T) {
-	// 019e8a61-64f4-... → first 48 bits 0x019e8a6164f4 = 1780438099188 ms.
 	const id = "019e8a61-64f4-7383-b63d-728af69ca072"
 	const wantMS = int64(0x019e8a6164f4) // 1780438099188
 
@@ -30,8 +33,8 @@ func TestSessionStartFromID(t *testing.T) {
 	}
 }
 
-// TestSessionStartFromIDFallback verifies that ids which aren't valid UUIDv7 fall
-// back (ok=false) so the caller reads from earliest and never loses events.
+// TestSessionStartFromIDFallback performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func TestSessionStartFromIDFallback(t *testing.T) {
 	cases := []struct {
 		name string
@@ -54,14 +57,9 @@ func TestSessionStartFromIDFallback(t *testing.T) {
 	}
 }
 
-// TestStartOffsetForSession is the unit-level check of the bounding policy with a
-// fake offset lookup: given a session-start time, the start offset is whatever
-// ReadOffset(session-start − margin) returns, and we never read past the
-// snapshotted high-watermark. A non-UUIDv7 id falls back to kafka.FirstOffset.
+// TestStartOffsetForSession performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func TestStartOffsetForSession(t *testing.T) {
-	// Fake: messages were produced at ms 1000..2000; the broker would return the
-	// offset of the first message at-or-after the requested time. We assert the
-	// requested timestamp is start − margin, and pass back a canned offset.
 	const validID = "019e8a61-64f4-7383-b63d-728af69ca072"
 	startMS := int64(0x019e8a6164f4)
 
@@ -83,7 +81,6 @@ func TestStartOffsetForSession(t *testing.T) {
 		t.Fatalf("time lookup requested %v, want %v (session-start − %v margin)", sawRequest, wantReq, startMargin)
 	}
 
-	// Non-UUIDv7 id: must not call the broker; fall back to FirstOffset (earliest).
 	called := false
 	off, err := startOffsetForSession("itest-123", func(time.Time) (int64, error) {
 		called = true
@@ -100,14 +97,8 @@ func TestStartOffsetForSession(t *testing.T) {
 	}
 }
 
-// TestIntegration_DrainBoundedWindow proves the bounded drain still returns every
-// event for a UUIDv7 session even when the topic also holds OLDER data for other
-// sessions: the time-based start offset must sit at/before the session's events.
-//
-// Env-gated: needs a live broker. Mirrors main_integration_test.go style.
-//
-//	docker compose up -d
-//	KAFKA_BROKERS=localhost:9092 go test ./internal/source/... -run Integration -v
+// TestIntegration_DrainBoundedWindow performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func TestIntegration_DrainBoundedWindow(t *testing.T) {
 	brokersCSV := strings.TrimSpace(os.Getenv("KAFKA_BROKERS"))
 	if brokersCSV == "" {
@@ -116,13 +107,11 @@ func TestIntegration_DrainBoundedWindow(t *testing.T) {
 	brokers := strings.Split(brokersCSV, ",")
 	ctx := context.Background()
 
-	// Old noise for an unrelated session (produced "in the past" relative to ours).
 	old := newUUIDv7(time.Now().Add(-30 * time.Minute))
 	writeSent(ctx, t, brokers, old, []topics.OrderSentEvent{
 		{SessionID: old, OrderID: "OLD1", Price: 1, Qty: 1, Side: "BUY", PayloadType: "NEW", OrdType: "LIMIT"},
 	})
 
-	// Our session: its UUIDv7 timestamp is ~now, so the bounded scan starts late.
 	sid := newUUIDv7(time.Now())
 	want := []topics.OrderSentEvent{
 		{SessionID: sid, OrderID: "A", Price: 100, Qty: 10, Side: "BUY", PayloadType: "NEW", OrdType: "LIMIT"},
@@ -149,8 +138,8 @@ func TestIntegration_DrainBoundedWindow(t *testing.T) {
 	}
 }
 
-// ackedMsg packs a batch into one drained Kafka message (msgpack named maps,
-// matching the Rust rmp_serde::to_vec_named producers).
+// ackedMsg performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func ackedMsg(t *testing.T, b topics.OrderAckedBatch) kafka.Message {
 	t.Helper()
 	payload, err := msgpack.Marshal(b)
@@ -160,12 +149,8 @@ func ackedMsg(t *testing.T, b topics.OrderAckedBatch) kafka.Message {
 	return kafka.Message{Value: payload}
 }
 
-// TestAckedCollectorDedup reproduces the at-least-once inflation bug: a
-// redelivered orders.acked event — same (order_id, exec_type, t7_xdp_egress_ns)
-// — must be dropped during the drain, or the duplicated fill inflates the
-// reported cumulative quantity into a false overfill/phantom violation. Events
-// differing in ANY key component are distinct and must all be kept, in arrival
-// order (Assemble uses acks[0] for flow/t3).
+// TestAckedCollectorDedup performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func TestAckedCollectorDedup(t *testing.T) {
 	const sid = "sess-dedup"
 	fill := topics.OrderAckedEvent{SessionID: sid, OrderID: "A", ExecType: "2", FillQty: 5, FillPrice: 100, T7XDPEgressNS: 1000}
@@ -178,11 +163,8 @@ func TestAckedCollectorDedup(t *testing.T) {
 
 	c := newAckedCollector(sid)
 	c.handle(ackedMsg(t, topics.OrderAckedBatch{SessionID: sid, ContestantID: "team-dedup", Events: []topics.OrderAckedEvent{fill, otherT7}}))
-	// At-least-once redelivery of the SAME batch: both events are exact dupes.
 	c.handle(ackedMsg(t, topics.OrderAckedBatch{SessionID: sid, ContestantID: "team-dedup", Events: []topics.OrderAckedEvent{fill, otherT7}}))
-	// Distinct events sharing the order_id (different exec_type / order): kept.
 	c.handle(ackedMsg(t, topics.OrderAckedBatch{SessionID: sid, ContestantID: "team-dedup", Events: []topics.OrderAckedEvent{otherExec, otherOrder}}))
-	// Another session's batch: filtered entirely, never counted as duplicates.
 	c.handle(ackedMsg(t, topics.OrderAckedBatch{SessionID: "other-session", Events: []topics.OrderAckedEvent{fill}}))
 
 	if len(c.events) != 4 {
@@ -199,12 +181,10 @@ func TestAckedCollectorDedup(t *testing.T) {
 	}
 }
 
-// TestCollectorsCountDecodeErrors pins the decode-failure handling: a message
-// that fails msgpack decode is counted and skipped — never silently swallowed,
-// never fatal to the drain — and later valid messages still land.
+// TestCollectorsCountDecodeErrors performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func TestCollectorsCountDecodeErrors(t *testing.T) {
 	const sid = "sess-decode"
-	// 0xc1 is the one byte the msgpack spec reserves as "never used".
 	garbage := kafka.Message{Partition: 3, Offset: 42, Value: []byte{0xc1}}
 
 	sc := &sentCollector{sessionID: sid}
@@ -237,15 +217,16 @@ func TestCollectorsCountDecodeErrors(t *testing.T) {
 	}
 }
 
-// newUUIDv7 builds a minimal RFC-9562 UUIDv7 string with the given creation time
-// in its first 48 bits (the rest is deterministic filler — enough for the parser).
+// newUUIDv7 performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func newUUIDv7(at time.Time) string {
 	ms := uint64(at.UnixMilli())
-	// 48-bit ms timestamp, then version 7, then variant bits.
 	return fmt.Sprintf("%012x-%04x-7%03x-8%03x-%012x",
 		ms&0xffffffffffff, 0x64f4, 0x383, 0x63d, uint64(0x728af69ca072))
 }
 
+// writeSent performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func writeSent(ctx context.Context, t *testing.T, brokers []string, sid string, events []topics.OrderSentEvent) {
 	t.Helper()
 	batch := topics.OrderSentBatch{SessionID: sid, WorkerID: "w0", Events: events}
@@ -265,10 +246,8 @@ func writeSent(ctx context.Context, t *testing.T, brokers []string, sid string, 
 	}
 }
 
-// TestResolveStart_NoSessionEventsInPartition pins the fix for the silent
-// drain-zero bug: Kafka's time lookup returns -1 for a partition with no
-// message at-or-after the session window; that must yield an empty [start,last)
-// range, never SetOffset(-1)=LastOffset (which blocked the reader to deadline).
+// TestResolveStart performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func TestResolveStart(t *testing.T) {
 	if got := resolveStart(-1, 591); got != 591 {
 		t.Fatalf("seek=-1 (no session events) must map to last=591, got %d", got)

@@ -1,6 +1,10 @@
-# Single-binary Loki configuration (filesystem storage, boltdb-shipper index).
-# Suitable for a self-contained single-replica deployment; the application
-# loggers push directly to /loki/api/v1/push (see LOKI_URL on every workload).
+# k8s/observability/loki/configmap.yaml
+#
+# This file declares Kubernetes resources for k8s/observability/loki.
+# It is part of the IICPC platform configuration and should remain
+# aligned with the deployment and operations guidance in the README.
+# Keep comments at the file header so resource bodies stay declarative.
+
 apiVersion: v1
 kind: ConfigMap
 metadata:

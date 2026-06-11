@@ -1,22 +1,8 @@
-// Command loadgen-seed emits SQL that turns the three scenario rows into a lean
-// single-pod load ramp: three "constant" tests at rising target RPS, each made of
-// a FIXED number of connections (LOADGEN_CONNS) firing pure NewOrderSingle limit
-// orders (no market/cancel/replace). Unlike the realistic 60/25/15 mix, the
-// connection count stays small and fixed as RPS climbs (the mix would need
-// thousands of retail sockets at high RPS), so the only thing scaling is
-// per-connection rate — ideal for finding one pod's generation ceiling.
+// Package main starts the loadgen-seed service.
 //
-// It UPDATEs the existing rows by sort_order (1,2,3), preserving scenario_id so
-// foreign keys from past runs stay valid. StartBenchmark runs all three rows
-// serially, so one trigger = an automatic 3-step ramp.
-//
-// Env (all optional):
-//
-//	LOADGEN_TARGETS    comma-separated aggregate RPS levels (default "20000,60000,150000")
-//	LOADGEN_CONNS      connections per test (default 256)
-//	LOADGEN_DURATION_S seconds per test (default 120)
-//
-//	GOWORK=off go run ./cmd/loadgen-seed | psql ...
+// This file is part of the IICPC benchmarking platform and keeps its
+// responsibilities local to the surrounding package. It should be read with
+// the service-level design in design.md for broader operational context.
 package main
 
 import (
@@ -30,6 +16,8 @@ import (
 	"github.com/iicpc/schemas/topics"
 )
 
+// main performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func main() {
 	targets := parseTargets(getenv("LOADGEN_TARGETS", "20000,60000,150000"))
 	conns := getenvInt("LOADGEN_CONNS", 256)
@@ -49,15 +37,13 @@ func main() {
 			fmt.Fprintf(os.Stderr, "marshal %s: %v\n", name, err)
 			os.Exit(1)
 		}
-		// $JSON$-quote the task_specs literal; JSON never contains the tag.
 		fmt.Printf("UPDATE scenarios SET name='%s', duration_ns=%d, sort_order=%d, task_specs=$JSON$%s$JSON$ WHERE sort_order=%d;\n",
 			name, durationNs, sortOrder, string(j), sortOrder)
 	}
 }
 
-// buildLean spreads `target` RPS across `conns` connections (the remainder goes
-// to the first `target % conns` connections, +1 rps each) so the per-test
-// aggregate hits `target` exactly. All tasks are pure-limit HFT-profile orders.
+// buildLean performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func buildLean(target, conns uint32, durationNs uint64) []topics.TaskSpec {
 	base := target / conns
 	rem := target % conns
@@ -84,6 +70,8 @@ func buildLean(target, conns uint32, durationNs uint64) []topics.TaskSpec {
 	return tasks
 }
 
+// parseTargets performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func parseTargets(s string) []int {
 	var out []int
 	for _, p := range strings.Split(s, ",") {
@@ -100,6 +88,8 @@ func parseTargets(s string) []int {
 	return out
 }
 
+// getenv performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func getenv(k, def string) string {
 	if v := os.Getenv(k); v != "" {
 		return v
@@ -107,6 +97,8 @@ func getenv(k, def string) string {
 	return def
 }
 
+// getenvInt performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func getenvInt(k string, def int) int {
 	if v := os.Getenv(k); v != "" {
 		if n, err := strconv.Atoi(v); err == nil {

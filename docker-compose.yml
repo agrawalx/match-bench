@@ -1,8 +1,9 @@
-# Local dev data services.
-# Application services run with go run / cargo run.
-# Add optional stacks with:
-#   docker compose -f docker-compose.yml -f docker-compose.kafka.yml up -d
-#   docker compose -f docker-compose.yml -f docker-compose.kafka.yml -f docker-compose.observability.yml up -d
+# docker-compose.yml
+#
+# This file defines the local Docker Compose stack for docker compose.
+# It is part of the IICPC platform configuration and should remain
+# aligned with the deployment and operations guidance in the README.
+# Keep comments at the file header so resource bodies stay declarative.
 
 services:
   postgres:
@@ -12,7 +13,7 @@ services:
       POSTGRES_PASSWORD: iicpc
       POSTGRES_DB: iicpc
     ports:
-      - "5433:5432"   # 5433 on host to avoid conflict with a local postgres install
+      - "5433:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -20,9 +21,6 @@ services:
       interval: 5s
       retries: 5
 
-  # TimescaleDB — metrics time-series for the telemetry-ingester. Separate
-  # instance from the metadata postgres (per architecture_v2). The image ships
-  # the timescaledb extension preloaded; the ingester creates the hypertable.
   timescaledb:
     image: timescale/timescaledb:2.17.2-pg16
     environment:
@@ -30,7 +28,7 @@ services:
       POSTGRES_PASSWORD: iicpc
       POSTGRES_DB: metrics
     ports:
-      - "5434:5432"   # 5434 on host to avoid the metadata postgres (5433)
+      - "5434:5432"
     volumes:
       - timescale_data:/var/lib/postgresql/data
     healthcheck:
@@ -38,7 +36,6 @@ services:
       interval: 5s
       retries: 5
 
-  # Redis — hot per-contestant snapshot the leaderboard reads without a DB hit.
   redis:
     image: redis:7-alpine
     ports:
@@ -57,8 +54,8 @@ services:
       MINIO_ROOT_USER: minioadmin
       MINIO_ROOT_PASSWORD: minioadmin
     ports:
-      - "9000:9000"   # S3 API
-      - "9001:9001"   # web console: http://localhost:9001
+      - "9000:9000"
+      - "9001:9001"
     volumes:
       - minio_data:/data
     healthcheck:

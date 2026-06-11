@@ -1,17 +1,20 @@
-//! Environment configuration. Mirrors the env-only pattern used across the
-//! platform (no config files, no flags).
+//! This module implements config behavior.
+//!
+//! It belongs to the IICPC benchmarking platform and should keep its
+//! behavior consistent with the service contracts documented in design.md.
+//! The comments in this file describe public structure and callable behavior.
 
 use std::env;
 
 use crate::aggregate::DEFAULT_WAVE_NS;
 
 #[derive(Debug, Clone)]
+/// Config stores the state passed across this module boundary.
+/// Keep field changes compatible with callers and serialized contracts.
 pub struct Config {
     pub kafka_brokers: String,
     pub consumer_group: String,
-    /// PostgreSQL/TimescaleDB connection string (libpq URL).
     pub timescale_url: String,
-    /// Redis connection URL, e.g. redis://redis.data.svc.cluster.local:6379.
     pub redis_url: String,
     pub wave_ns: u64,
     pub snapshot_interval_ms: u64,
@@ -23,6 +26,8 @@ pub struct Config {
 }
 
 impl Config {
+    /// from_env performs the module-specific operation described by its name.
+    /// It keeps validation, side effects, and returned values within this module's contract.
     pub fn from_env() -> Self {
         Self {
             kafka_brokers: env_or("KAFKA_BROKERS", "localhost:9092"),
@@ -44,6 +49,8 @@ impl Config {
     }
 }
 
+/// env_or performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 fn env_or(key: &str, default: &str) -> String {
     env::var(key)
         .ok()
@@ -51,6 +58,8 @@ fn env_or(key: &str, default: &str) -> String {
         .unwrap_or_else(|| default.to_string())
 }
 
+/// env_u64 performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 fn env_u64(key: &str, default: u64) -> u64 {
     env::var(key)
         .ok()

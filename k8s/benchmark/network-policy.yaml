@@ -1,9 +1,10 @@
-# benchmark namespace: bot-worker pods AND the bot-fleet-controller.
-# Egress permits:
-#   - sandbox (algo TCP order traffic + orchestrator HTTP at :8080)
-#   - data:9092 (Kafka, all benchmark-namespace services)
-#   - data:5432 (PostgreSQL, controller's runs-table reads + recovery writes)
-#   - DNS
+# k8s/benchmark/network-policy.yaml
+#
+# This file declares Kubernetes resources for k8s/benchmark.
+# It is part of the IICPC platform configuration and should remain
+# aligned with the deployment and operations guidance in the README.
+# Keep comments at the file header so resource bodies stay declarative.
+
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -15,15 +16,11 @@ spec:
     - Ingress
     - Egress
 
-  # Ingress from platform (controller probes / future direct calls).
   ingress:
     - from:
         - namespaceSelector:
             matchLabels:
               name: platform
-    # Prometheus (observability namespace) scrapes the metrics endpoints:
-    # bot-fleet-controller :8080, and bot-fleet-worker / telemetry-ingester /
-    # correctness-validator :9090.
     - from:
         - namespaceSelector:
             matchLabels:
@@ -35,8 +32,6 @@ spec:
           protocol: TCP
 
   egress:
-    # Loki log shipping — every benchmark service's logger pushes to
-    # loki.observability.svc:3100 (LOKI_URL).
     - to:
         - namespaceSelector:
             matchLabels:
@@ -45,14 +40,11 @@ spec:
         - port: 3100
           protocol: TCP
 
-    # Sandbox: contestant pods on the contestant's port (bot orders) and the
-    # sandbox-orchestrator HTTP API on :8080 (controller).
     - to:
         - namespaceSelector:
             matchLabels:
               name: sandbox
 
-    # Data plane: Kafka and PostgreSQL.
     - to:
         - namespaceSelector:
             matchLabels:
@@ -60,12 +52,11 @@ spec:
       ports:
         - port: 9092
           protocol: TCP
-        - port: 5432 # postgres + timescaledb (metrics)
+        - port: 5432
           protocol: TCP
-        - port: 6379 # redis (telemetry-ingester hot snapshot)
+        - port: 6379
           protocol: TCP
 
-    # DNS
     - to:
         - namespaceSelector:
             matchLabels:

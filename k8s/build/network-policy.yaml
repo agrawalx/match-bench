@@ -1,21 +1,10 @@
-# build namespace: kaniko/trivy/syft Job pods + spawner.
+# k8s/build/network-policy.yaml
 #
-# Egress is split by pod role via label selectors:
-#   app=build-job  — ephemeral Job pods (kaniko, trivy, syft)
-#   app=spawner    — long-running spawner pod
-#
-# Build Job pods (kaniko/trivy/syft):
-#   - fetcher init container needs MinIO (9000) to download the artifact ZIP
-#   - kaniko/trivy/syft need port 443 to push/pull from Harbor registry
-#   - port 443 also permits outbound HTTPS from contestant RUN commands —
-#     acceptable for the build phase; runtime isolation is enforced in sandbox namespace
-#   - NO access to postgres or kafka (spawner owns all status updates)
-#
-# Spawner pod:
-#   - needs MinIO (artifact download for zip-slip check, log uploads)
-#   - needs postgres (status writes)
-#   - needs kafka (consume build.requested, publish status.updated)
-#   - needs port 443 for crane.Copy staging→production
+# This file declares Kubernetes resources for k8s/build.
+# It is part of the IICPC platform configuration and should remain
+# aligned with the deployment and operations guidance in the README.
+# Keep comments at the file header so resource bodies stay declarative.
+
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -32,7 +21,6 @@ spec:
   ingress: []
 
   egress:
-    # MinIO only — fetcher init container downloads the artifact ZIP
     - to:
         - namespaceSelector:
             matchLabels:
@@ -41,9 +29,6 @@ spec:
         - port: 9000
           protocol: TCP
 
-    # Harbor staging + production registry (push/pull)
-    # Note: also permits contestant RUN commands to reach external HTTPS —
-    # network isolation for running algorithms is enforced in sandbox namespace.
     - to:
         - ipBlock:
             cidr: 0.0.0.0/0
@@ -55,7 +40,6 @@ spec:
         - port: 443
           protocol: TCP
 
-    # Local Kind registry used by the production-shaped local stack.
     - to:
         - ipBlock:
             cidr: 172.20.0.0/16
@@ -63,7 +47,6 @@ spec:
         - port: 5000
           protocol: TCP
 
-    # DNS
     - to:
         - namespaceSelector:
             matchLabels:
@@ -88,7 +71,6 @@ spec:
     - Ingress
     - Egress
 
-  # Prometheus (observability namespace) scrapes the spawner metrics on 9090.
   ingress:
     - from:
         - namespaceSelector:
@@ -99,7 +81,6 @@ spec:
           protocol: TCP
 
   egress:
-    # Data plane: postgres, kafka, minio
     - to:
         - namespaceSelector:
             matchLabels:
@@ -112,8 +93,6 @@ spec:
         - port: 9000
           protocol: TCP
 
-    # Loki log shipping — the spawner's logger pushes to
-    # loki.observability.svc:3100 (LOKI_URL).
     - to:
         - namespaceSelector:
             matchLabels:
@@ -122,7 +101,6 @@ spec:
         - port: 3100
           protocol: TCP
 
-    # Harbor staging + production (crane.Copy promotion)
     - to:
         - ipBlock:
             cidr: 0.0.0.0/0
@@ -134,7 +112,6 @@ spec:
         - port: 443
           protocol: TCP
 
-    # Local Kind registry used by the production-shaped local stack.
     - to:
         - ipBlock:
             cidr: 172.20.0.0/16
@@ -142,7 +119,6 @@ spec:
         - port: 5000
           protocol: TCP
 
-    # DNS
     - to:
         - namespaceSelector:
             matchLabels:

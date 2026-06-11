@@ -1,5 +1,8 @@
-//! Redis sink — hot per-contestant/per-window snapshots for live telemetry.
-//! One hash per contestant/session/wave holds the latest values for that window.
+//! This module implements redis sink behavior.
+//!
+//! It belongs to the IICPC benchmarking platform and should keep its
+//! behavior consistent with the service contracts documented in design.md.
+//! The comments in this file describe public structure and callable behavior.
 
 use anyhow::{Context, Result};
 use redis::aio::MultiplexedConnection;
@@ -7,11 +10,15 @@ use redis::AsyncCommands;
 
 use crate::aggregate::Snapshot;
 
+/// RedisSink stores the state passed across this module boundary.
+/// Keep field changes compatible with callers and serialized contracts.
 pub struct RedisSink {
     conn: MultiplexedConnection,
 }
 
 impl RedisSink {
+    /// connect performs the module-specific operation described by its name.
+    /// It keeps validation, side effects, and returned values within this module's contract.
     pub async fn connect(url: &str) -> Result<Self> {
         let client = redis::Client::open(url).context("open redis client")?;
         let conn = client
@@ -21,8 +28,8 @@ impl RedisSink {
         Ok(Self { conn })
     }
 
-    /// For each snapshot, HSET the contestant/session/wave hot hash with the
-    /// latest p99/tps/error_rate/wave values.
+    /// write performs the module-specific operation described by its name.
+    /// It keeps validation, side effects, and returned values within this module's contract.
     pub async fn write(&self, snaps: &[Snapshot]) -> Result<()> {
         let mut conn = self.conn.clone();
         for s in snaps {
@@ -48,10 +55,8 @@ impl RedisSink {
     }
 }
 
-/// Hot-hash key for a snapshot. Includes session_id + wave_index because a
-/// contestant has one window per (session, wave): keying on contestant_id alone
-/// lets concurrent waves overwrite each other nondeterministically at every wave
-/// boundary (the snapshot Vec / HashMap iteration order is unspecified).
+/// redis_key performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 fn redis_key(s: &Snapshot) -> String {
     format!(
         "contestant:{}:{}:{}",
@@ -63,6 +68,8 @@ fn redis_key(s: &Snapshot) -> String {
 mod tests {
     use super::*;
 
+    /// snap performs the module-specific operation described by its name.
+    /// It keeps validation, side effects, and returned values within this module's contract.
     fn snap(contestant: &str, session: &str, wave: u32) -> Snapshot {
         Snapshot {
             time_ns: 1,
@@ -86,9 +93,9 @@ mod tests {
         }
     }
 
-    // M28: two waves of the same contestant must map to DISTINCT Redis keys, or
-    // the boundary-second double snapshot overwrites one nondeterministically.
     #[test]
+    /// redis_key_disambiguates_session_and_wave performs the module-specific operation described by its name.
+    /// It keeps validation, side effects, and returned values within this module's contract.
     fn redis_key_disambiguates_session_and_wave() {
         let a = redis_key(&snap("c1", "S", 0));
         let b = redis_key(&snap("c1", "S", 1));

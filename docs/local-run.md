@@ -60,7 +60,7 @@ docker compose \
 | leaderboard-api | `http://localhost:8081` |
 | submission-api | `http://localhost:8082` |
 | Prometheus | `http://localhost:9090` |
-| Grafana | `http://localhost:3005` (`admin` / `admin`) |
+| Grafana | `http://localhost:3005` |
 | Loki | `http://localhost:3100` |
 | postgres-exporter | `http://localhost:9187/metrics` |
 
@@ -69,14 +69,14 @@ docker compose \
 Use this when running services from source:
 
 ```bash
-export DATABASE_URL='postgres://iicpc:iicpc@localhost:5433/iicpc?sslmode=disable'
-export TIMESCALE_URL='postgres://iicpc:iicpc@localhost:5434/metrics'
+export DATABASE_URL='postgres://<db-user>:<db-password>@localhost:5433/iicpc?sslmode=disable'
+export TIMESCALE_URL='postgres://<metrics-user>:<metrics-password>@localhost:5434/metrics'
 export REDIS_ADDR='localhost:6379'
 export REDIS_URL='redis://localhost:6379'
 export KAFKA_BROKERS='localhost:9092,localhost:9095,localhost:9096'
 export MINIO_ENDPOINT='localhost:9000'
-export MINIO_ACCESS_KEY='minioadmin'
-export MINIO_SECRET_KEY='minioadmin'
+export MINIO_ACCESS_KEY='<minio-access-key>'
+export MINIO_SECRET_KEY='<minio-secret-key>'
 export MINIO_BUCKET='submissions'
 export MINIO_CREATE_BUCKET_IF_MISSING='true'
 ```
@@ -87,8 +87,8 @@ Auth API:
 
 ```bash
 PORT=8083 \
-GOOGLE_CLIENT_ID=local-dev \
-GOOGLE_CLIENT_SECRET=local-dev \
+GOOGLE_CLIENT_ID='<google-client-id>' \
+GOOGLE_CLIENT_SECRET='<google-client-secret>' \
 GOOGLE_ALLOWED_REDIRECT_URIS=http://localhost:3000/auth/callback \
 AUTH_COOKIE_SECURE=false \
 go run ./services/auth-api

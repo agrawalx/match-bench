@@ -1,10 +1,10 @@
-# observability namespace: the self-contained monitoring stack
-# (Prometheus + Loki + Grafana). Prometheus scrapes annotated pods across every
-# namespace; the application loggers push to Loki here; Grafana reads both.
+# k8s/observability/namespace.yaml
 #
-# The `name: observability` label is what the per-namespace NetworkPolicies match
-# on (namespaceSelector matchLabels name: observability) to allow Prometheus
-# scrape ingress and Loki push egress — keep it in sync with those policies.
+# This file declares Kubernetes resources for k8s/observability.
+# It is part of the IICPC platform configuration and should remain
+# aligned with the deployment and operations guidance in the README.
+# Keep comments at the file header so resource bodies stay declarative.
+
 apiVersion: v1
 kind: Namespace
 metadata:

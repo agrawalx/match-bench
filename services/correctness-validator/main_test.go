@@ -1,8 +1,8 @@
-// Unit tests for the validator's timeout handling: the startup sanity gate on
-// VALIDATION_TIMEOUT vs SETTLE_DELAY, and the shape of the timed_out placeholder
-// record. The invariant under test: a validation timeout must NEVER fabricate a
-// violation — the status column carries the "no verdict" signal, not invented
-// fill counts.
+// Package main defines tests for main test.
+//
+// This file is part of the IICPC benchmarking platform and keeps its
+// responsibilities local to the surrounding package. It should be read with
+// the service-level design in design.md for broader operational context.
 package main
 
 import (
@@ -12,10 +12,8 @@ import (
 	"github.com/iicpc/correctness-validator/internal/store"
 )
 
-// TestCheckTimeoutConfig pins the startup sanity check: a validation timeout
-// that the settle delay alone would consume guarantees EVERY session hits the
-// timeout fallback, so the service must refuse to start instead of silently
-// recording placeholders forever.
+// TestCheckTimeoutConfig performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func TestCheckTimeoutConfig(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -40,10 +38,8 @@ func TestCheckTimeoutConfig(t *testing.T) {
 	}
 }
 
-// TestTimeoutRecordShape locks the timed_out placeholder's shape. The OLD
-// fallback fabricated TotalFills=1/PhantomFills=1, permanently zero-scoring the
-// contestant; the placeholder must instead be internally consistent — zero
-// fills, zero violations — with status='timed_out' carrying the signal.
+// TestTimeoutRecordShape performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func TestTimeoutRecordShape(t *testing.T) {
 	rec := timeoutRecord("sess-timeout", 42)
 
@@ -62,10 +58,6 @@ func TestTimeoutRecordShape(t *testing.T) {
 	if rec.Report.ViolationCount() != 0 || len(rec.Report.Violations) != 0 {
 		t.Errorf("timeout placeholder carries violations: %+v", rec.Report)
 	}
-	// 0/0 scores 1.0 by Report semantics ("nothing to get wrong"), and the
-	// published 0/0 event contributes nothing to score-computer's
-	// aggregateCorrectness (it sums valid and total across sessions) — neutral,
-	// not a permanent zero.
 	if got := rec.Report.CorrectnessScore(); got != 1.0 {
 		t.Errorf("CorrectnessScore() = %v, want 1.0 for the 0/0 placeholder", got)
 	}

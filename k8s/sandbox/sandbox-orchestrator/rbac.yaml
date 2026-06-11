@@ -1,20 +1,16 @@
+# k8s/sandbox/sandbox-orchestrator/rbac.yaml
+#
+# This file declares Kubernetes resources for k8s/sandbox/sandbox-orchestrator.
+# It is part of the IICPC platform configuration and should remain
+# aligned with the deployment and operations guidance in the README.
+# Keep comments at the file header so resource bodies stay declarative.
+
 apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: sandbox-orchestrator
   namespace: sandbox
 ---
-# The orchestrator owns Pod + Service lifecycle for one slot per benchmark run.
-#
-# Least-privilege scope per platform rule: every service has its own
-# ServiceAccount + Role + RoleBinding inside its own namespace. No ClusterRoles
-# in v1. The verbs below are the minimum the orchestrator needs:
-#   - create  → spawn a slot on POST /slots
-#   - get     → fetch state for GET /slots/{id} and during readiness polling
-#   - list    → rebuild the in-memory slot map on startup from label app=algo
-#   - watch   → react to Pod transitions (Ready, Failed) for state derivation
-#   - delete  → tear down Pod + Service on DELETE /slots/{id}
-# Update/patch are intentionally absent — we never mutate live algo pods.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
@@ -27,8 +23,6 @@ rules:
   - apiGroups: [""]
     resources: ["services"]
     verbs: ["create", "get", "list", "watch", "delete"]
-  # Per-slot eBPF latency-capture Jobs (created when CAPTURE_ENABLED): created on
-  # algo-pod Ready, listed to reap orphans on startup, deleted on slot teardown.
   - apiGroups: ["batch"]
     resources: ["jobs"]
     verbs: ["create", "get", "list", "watch", "delete"]

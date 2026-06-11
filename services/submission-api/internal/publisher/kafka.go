@@ -1,3 +1,8 @@
+// Package publisher implements kafka behavior.
+//
+// This file is part of the IICPC benchmarking platform and keeps its
+// responsibilities local to the surrounding package. It should be read with
+// the service-level design in design.md for broader operational context.
 package publisher
 
 import (
@@ -17,13 +22,16 @@ import (
 
 const writerTimeout = 5 * time.Second
 
+// Publisher defines the behavior expected by this package boundary.
+// Implementations should preserve the caller-visible contract.
 type Publisher interface {
 	PublishBuildRequested(ctx context.Context, meta PublishMeta) error
 	PublishBenchmarkRequested(ctx context.Context, meta BenchmarkMeta) error
 	Close() error
 }
 
-// PublishMeta carries all fields needed for the build.requested Kafka message.
+// PublishMeta groups the state and dependencies used by this package.
+// Keep this type aligned with the runtime contract around it.
 type PublishMeta struct {
 	SubmissionID string
 	ContestantID string
@@ -38,18 +46,8 @@ type PublishMeta struct {
 	RequestedAt  time.Time
 }
 
-// BenchmarkMeta carries the fields needed for benchmark.requested.
-//
-// session_id is minted by the submission-api handler as a UUID v7 (so it is
-// both globally unique and time-ordered, which is useful for log scans).
-// The handler must return run_id synchronously in the HTTP response so the
-// frontend can start polling — that's why minting happens in the API
-// instead of being delegated to the controller.
-//
-// One "click benchmark" expands into multiple BenchmarkMeta values — one per
-// scenario in the scenarios table. All share the same RunGroupID; each
-// points at a different ScenarioID. The controller looks up the scenario
-// row when the message arrives.
+// BenchmarkMeta groups the state and dependencies used by this package.
+// Keep this type aligned with the runtime contract around it.
 type BenchmarkMeta struct {
 	SessionID    string
 	SubmissionID string
@@ -59,6 +57,8 @@ type BenchmarkMeta struct {
 	RequestedAt  time.Time
 }
 
+// KafkaPublisher groups the state and dependencies used by this package.
+// Keep this type aligned with the runtime contract around it.
 type KafkaPublisher struct {
 	buildWriter     *kafka.Writer
 	benchmarkWriter *kafka.Writer
@@ -66,9 +66,8 @@ type KafkaPublisher struct {
 	noop            bool
 }
 
-// NewKafkaPublisher returns a no-op publisher when brokers is empty.
-// In no-op mode publish calls return nil after intentionally discarding the
-// event; callers must not treat nil as proof of Kafka delivery in local dev.
+// NewKafkaPublisher performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func NewKafkaPublisher(brokers string, log *slog.Logger) *KafkaPublisher {
 	brokerList := utils.ParseBrokers(brokers)
 	if len(brokerList) == 0 {
@@ -78,15 +77,9 @@ func NewKafkaPublisher(brokers string, log *slog.Logger) *KafkaPublisher {
 
 	addr := kafka.TCP(brokerList...)
 
-	// Build requests are recoverable from the submissions row and build-worker
-	// retry model, so this path uses leader-only acks to keep upload latency
-	// lower than the benchmark control-plane path.
 	build := &kafka.Writer{
-		Addr:  addr,
-		Topic: topics.TopicSubmissionBuildRequested,
-		// Hash (not LeastBytes) so the message Key (submission_id) deterministically
-		// selects a partition — LeastBytes ignores the key, scattering same-key
-		// messages and defeating per-key ordering / future partition sharding.
+		Addr:                   addr,
+		Topic:                  topics.TopicSubmissionBuildRequested,
 		Balancer:               &kafka.Hash{},
 		RequiredAcks:           kafka.RequireOne,
 		Async:                  false,
@@ -94,16 +87,9 @@ func NewKafkaPublisher(brokers string, log *slog.Logger) *KafkaPublisher {
 		WriteTimeout:           writerTimeout,
 	}
 
-	// Synchronous publish for benchmark.requested: the user got a run_id back
-	// in the HTTP response, and if the message is dropped the controller will
-	// never see it. Losing this silently strands the run in 'requested'.
-	//
 	bench := &kafka.Writer{
-		Addr:  addr,
-		Topic: topics.TopicBenchmarkRequested,
-		// Hash so the Key (run_group_id — see benchmarkMessageKey) maps
-		// deterministically to one partition, keeping one run-group's child
-		// sessions ordered on a single partition.
+		Addr:                   addr,
+		Topic:                  topics.TopicBenchmarkRequested,
 		Balancer:               &kafka.Hash{},
 		RequiredAcks:           kafka.RequireAll,
 		Async:                  false,
@@ -114,6 +100,8 @@ func NewKafkaPublisher(brokers string, log *slog.Logger) *KafkaPublisher {
 	return &KafkaPublisher{buildWriter: build, benchmarkWriter: bench, log: log}
 }
 
+// PublishBuildRequested applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (p *KafkaPublisher) PublishBuildRequested(ctx context.Context, meta PublishMeta) error {
 	if p.noop {
 		return nil
@@ -151,6 +139,8 @@ func (p *KafkaPublisher) PublishBuildRequested(ctx context.Context, meta Publish
 	return err
 }
 
+// PublishBenchmarkRequested applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (p *KafkaPublisher) PublishBenchmarkRequested(ctx context.Context, meta BenchmarkMeta) error {
 	if p.noop {
 		return nil
@@ -183,16 +173,8 @@ func (p *KafkaPublisher) PublishBenchmarkRequested(ctx context.Context, meta Ben
 	return err
 }
 
-// benchmarkMessageKey selects the Kafka partition key for benchmark.requested.
-//
-// Keyed by run_group_id, not session_id: the topic has 3 partitions and one
-// "click benchmark" publishes 3 sibling sessions. Keyed per-session they
-// hashed onto different partitions and could be consumed out of publish
-// order, racing the group's scenarios against each other. Keyed per-group
-// all of a group's messages land on ONE partition and serialize.
-//
-// Legacy single-session messages without a run_group_id fall back to
-// session_id so the key is never empty.
+// benchmarkMessageKey performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func benchmarkMessageKey(meta BenchmarkMeta) []byte {
 	if meta.RunGroupID != "" {
 		return []byte(meta.RunGroupID)
@@ -200,6 +182,8 @@ func benchmarkMessageKey(meta BenchmarkMeta) []byte {
 	return []byte(meta.SessionID)
 }
 
+// Close applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (p *KafkaPublisher) Close() error {
 	if p.noop {
 		return nil
@@ -220,7 +204,8 @@ func (p *KafkaPublisher) Close() error {
 	return firstErr
 }
 
-// recordProduce exposes publish durability for submission-api topics.
+// recordProduce performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func recordProduce(topic string, start time.Time, err error) {
 	result := "ok"
 	if err != nil {

@@ -1,18 +1,8 @@
-//! fix_echo_server — a minimal FIX matcher fixture for integration tests.
+//! This module implements fix echo server behavior.
 //!
-//! Listens on a TCP port. For every connection:
-//!   - Skips the FIX Logon (35=A) message the bot sends on connect.
-//!   - For every subsequent NewOrderSingle (35=D) message it reads, replies
-//!     immediately with an ExecutionReport (35=8, OrdStatus=0 / New) whose
-//!     ClOrdID (tag 11) mirrors the incoming order.
-//!
-//! Optional `--latency-ms <N>` arg delays the response by N milliseconds —
-//! used by the bot-worker integration test to verify that r9 - t1 reflects
-//! that delay.
-//!
-//! Optional `--drop-every <N>` arg drops every Nth NewOrderSingle (no reply
-//! sent) — used to verify the watchdog emits timed_out=true for the lost
-//! orders.
+//! It belongs to the IICPC benchmarking platform and should keep its
+//! behavior consistent with the service contracts documented in design.md.
+//! The comments in this file describe public structure and callable behavior.
 
 use std::{env, time::Duration};
 
@@ -24,11 +14,9 @@ use tokio::{
     time::sleep,
 };
 
-/// Knobs (read from env to avoid pulling in clap):
-///   BIND       — bind address (default 127.0.0.1:9876)
-///   LATENCY_MS — artificial response latency (default 0)
-///   DROP_EVERY — drop every Nth NewOrderSingle reply (default 0 = drop none)
 #[tokio::main(flavor = "multi_thread", worker_threads = 2)]
+/// main performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 async fn main() -> Result<()> {
     let bind = env::var("BIND").unwrap_or_else(|_| "127.0.0.1:9876".to_string());
     let latency_ms = env::var("LATENCY_MS")
@@ -60,6 +48,8 @@ async fn main() -> Result<()> {
     }
 }
 
+/// handle_connection performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 async fn handle_connection(
     mut stream: TcpStream,
     latency: Duration,
@@ -81,8 +71,6 @@ async fn handle_connection(
 
         let (messages, consumed) = fix::parse_messages(&buf);
         for msg in messages {
-            // We answer only NewOrderSingle (35=D). Logon (35=A), heartbeat,
-            // etc. are dropped silently.
             if msg.msg_type != b"D" {
                 continue;
             }

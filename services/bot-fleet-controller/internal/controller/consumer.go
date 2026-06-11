@@ -1,3 +1,8 @@
+// Package controller implements consumer behavior.
+//
+// This file is part of the IICPC benchmarking platform and keeps its
+// responsibilities local to the surrounding package. It should be read with
+// the service-level design in design.md for broader operational context.
 package controller
 
 import (
@@ -11,16 +16,8 @@ import (
 	kafka "github.com/segmentio/kafka-go"
 )
 
-// Consumer owns the two inbound topics the controller cares about.
-// benchmark.requested → spawn a new session runner.
-// bot.ready           → demultiplex by session_id into the matching runner.
-//
-// Both readers are scoped to this single-replica controller (the service is
-// architecturally locked at 1 pod, no sharding). One process means one
-// consumer per topic; whatever partitions each topic has all balance to
-// this pod. When/if the controller is ever multi-shard, bot.ready's
-// session-keyed partitioning lets a future shard fan in only the sessions
-// it owns — but that's a v2 problem; v1 is single-replica.
+// Consumer groups the state and dependencies used by this package.
+// Keep this type aligned with the runtime contract around it.
 type Consumer struct {
 	benchmarkReader *kafka.Reader
 	botReadyReader  *kafka.Reader
@@ -29,6 +26,8 @@ type Consumer struct {
 	log             *slog.Logger
 }
 
+// NewConsumer performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func NewConsumer(brokers, benchmarkGroup, botReadyGroup string, runner *Runner, sessions *SessionManager, log *slog.Logger) *Consumer {
 	brokerList := parseBrokers(brokers)
 	return &Consumer{
@@ -56,26 +55,15 @@ func NewConsumer(brokers, benchmarkGroup, botReadyGroup string, runner *Runner, 
 	}
 }
 
+// Close applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (c *Consumer) Close() {
 	_ = c.benchmarkReader.Close()
 	_ = c.botReadyReader.Close()
 }
 
-// StartBenchmarkRequested blocks consuming benchmark.requested.
-//
-// Sessions are processed SERIALLY: this loop fetches one message, runs the
-// session to completion (Runner.Run is synchronous), commits the Kafka
-// offset, and only then pulls the next message. With a single controller
-// replica this gives every session exclusive use of the orchestrator + bot
-// fleet, which is what we want for clean metrics and predictable resource
-// usage.
-//
-// Within a run-group, submission-api publishes N benchmark.requested messages
-// up front (one per scenario). Kafka delivers them; this loop drains them in
-// publish order, producing the sequential per-group execution the load-test
-// design requires. Cross-group serialization is a fortunate side-effect:
-// only one benchmark runs anywhere in the cluster at a time. Lifting that
-// limit is a v2 concern.
+// StartBenchmarkRequested applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (c *Consumer) StartBenchmarkRequested(ctx context.Context) {
 	c.log.Info("benchmark.requested consumer started")
 	for {
@@ -98,7 +86,6 @@ func (c *Consumer) StartBenchmarkRequested(ctx context.Context) {
 			continue
 		}
 
-		// Synchronous: blocks until the session reaches a terminal state.
 		c.runner.Run(ctx, req)
 		recordConsumer(topics.TopicBenchmarkRequested, "ok", metrics.SinceSeconds(start))
 
@@ -111,10 +98,8 @@ func (c *Consumer) StartBenchmarkRequested(ctx context.Context) {
 	}
 }
 
-// StartBotReady blocks consuming bot.ready and demultiplexes by session_id.
-// Unknown sessions (no entry in the session map) are committed and logged —
-// they typically mean the message arrived after the session completed or on
-// a controller restart.
+// StartBotReady applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (c *Consumer) StartBotReady(ctx context.Context) {
 	c.log.Info("bot.ready consumer started")
 	for {
@@ -156,8 +141,8 @@ func (c *Consumer) StartBotReady(ctx context.Context) {
 	}
 }
 
-// recordConsumer/recordControllerCommit expose the controller's inbound
-// control topics.
+// recordConsumer performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func recordConsumer(topic, result string, durationSeconds float64) {
 	labels := metrics.Labels("service", "bot-fleet-controller", "topic", topic, "result", result)
 	metrics.Counter("kafka_messages_consumed_total", "Kafka messages consumed by topic and result.", labels, 1)
@@ -166,6 +151,8 @@ func recordConsumer(topic, result string, durationSeconds float64) {
 	}
 }
 
+// recordControllerCommit performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func recordControllerCommit(topic string, err error) {
 	result := "ok"
 	if err != nil {

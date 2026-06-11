@@ -1,3 +1,8 @@
+// Package controller implements producer behavior.
+//
+// This file is part of the IICPC benchmarking platform and keeps its
+// responsibilities local to the surrounding package. It should be read with
+// the service-level design in design.md for broader operational context.
 package controller
 
 import (
@@ -15,12 +20,8 @@ import (
 
 const writerTimeout = 5 * time.Second
 
-// Producer publishes the three controller-owned topics. Each topic gets its
-// own kafka.Writer because segmentio/kafka-go pins the topic on the writer.
-//
-// All three are control-plane events: RequiredAcks=All, synchronous. Loss
-// equals a stuck run (no barrier fires, no status arrives), so we pay for
-// durability.
+// Producer groups the state and dependencies used by this package.
+// Keep this type aligned with the runtime contract around it.
 type Producer struct {
 	workloadWriter *kafka.Writer
 	barrierWriter  *kafka.Writer
@@ -28,14 +29,11 @@ type Producer struct {
 	log            *slog.Logger
 	noop           bool
 
-	// workloadPartitions caches the partition count of workload.assignments
-	// after the first successful metadata lookup. Only PublishWorkloadSpec
-	// reads/writes it, and that is called solely by the single Runner
-	// goroutine (sessions are processed serially on the 1-replica
-	// controller), so no lock is needed.
 	workloadPartitions int
 }
 
+// NewProducer performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func NewProducer(brokers string, log *slog.Logger) *Producer {
 	list := parseBrokers(brokers)
 	if len(list) == 0 {
@@ -55,39 +53,21 @@ func NewProducer(brokers string, log *slog.Logger) *Producer {
 		}
 	}
 	return &Producer{
-		// workload.assignments gets explicit per-worker partition assignment
-		// (worker_index i → partition i%N) instead of key hashing: hash
-		// collisions on session_id:worker_index keys can place two specs on
-		// one partition, so one worker pod runs both serially (the second
-		// misses the barrier) while another idles — silently degrading most
-		// multi-worker (spike/ramp) runs. See workerIndexBalancer.
 		workloadWriter: mk(topics.TopicWorkloadAssignments, &workerIndexBalancer{}),
-		// Barrier and status hash the message Key (session_id) so a session
-		// deterministically maps to one partition and its events stay
-		// ordered. LeastBytes ignores the Key and scatters a session across
-		// partitions — fine at 1 partition, but it breaks per-session ordering
-		// (e.g. status walk applied out of order) the moment these topics are
-		// created with >1 partition. Matches submission-api's keyed writer.
-		barrierWriter: mk(topics.TopicBarrier, &kafka.Hash{}),
-		statusWriter:  mk(topics.TopicBenchmarkStatusUpdated, &kafka.Hash{}),
-		log:           log,
+		barrierWriter:  mk(topics.TopicBarrier, &kafka.Hash{}),
+		statusWriter:   mk(topics.TopicBenchmarkStatusUpdated, &kafka.Hash{}),
+		log:            log,
 	}
 }
 
-// workerIndexBalancer routes each WorkloadSpec message to the partition
-// matching its worker_index (i%numPartitions), read from the WriterData hint
-// buildWorkloadMessages attaches. This is the 1:1 WorkloadSpec→pod mapping:
-// with worker_count <= partitions (enforced by validateWorkerCapacity) every
-// spec owns a distinct partition, so the bot-fleet consumer group hands at
-// most one spec to each worker pod. Key hashing cannot guarantee that — two
-// keys can hash to the same partition.
-//
-// A message without the hint (never produced by PublishWorkloadSpec; purely
-// defensive) falls back to key hashing so it still routes deterministically.
+// workerIndexBalancer groups the state and dependencies used by this package.
+// Keep this type aligned with the runtime contract around it.
 type workerIndexBalancer struct {
 	fallback kafka.Hash
 }
 
+// Balance applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (b *workerIndexBalancer) Balance(msg kafka.Message, partitions ...int) int {
 	idx, ok := msg.WriterData.(uint32)
 	if !ok {
@@ -96,10 +76,8 @@ func (b *workerIndexBalancer) Balance(msg kafka.Message, partitions ...int) int 
 	return partitions[workerPartition(idx, len(partitions))]
 }
 
-// workerPartition is the pure partition assignment: worker_index i →
-// partition i%numPartitions. The modulo is a safety net only — capacity
-// validation rejects worker_count > partitions before anything is published,
-// so in practice the mapping is the identity i → i.
+// workerPartition performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func workerPartition(workerIndex uint32, numPartitions int) int {
 	if numPartitions <= 0 {
 		return 0
@@ -107,11 +85,8 @@ func workerPartition(workerIndex uint32, numPartitions int) int {
 	return int(workerIndex % uint32(numPartitions))
 }
 
-// validateWorkerCapacity enforces worker_count <= partition count on
-// workload.assignments (24 in topic-init). More workers than partitions means
-// the modulo wraps and two specs share a partition — the exact collision the
-// explicit assignment exists to prevent — so the run must fail loudly instead
-// of degrading silently. Raising the cap requires repartitioning the topic.
+// validateWorkerCapacity performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func validateWorkerCapacity(workerCount, partitions int) error {
 	if partitions <= 0 {
 		return fmt.Errorf("workload.assignments reports %d partitions; cannot assign workers", partitions)
@@ -125,6 +100,8 @@ func validateWorkerCapacity(workerCount, partitions int) error {
 	return nil
 }
 
+// Close applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (p *Producer) Close() error {
 	if p.noop {
 		return nil
@@ -141,27 +118,8 @@ func (p *Producer) Close() error {
 	return firstErr
 }
 
-// PublishWorkloadSpec publishes one WorkloadSpec per worker_index, keyed by
-// session_id:worker_index and pinned to partition worker_index%N via the
-// workload writer's workerIndexBalancer, so each spec owns one partition and
-// the consumer group hands at most one spec to each worker pod.
-//
-// ============================ KEDA / SCALING ============================
-// The 1:1 spec→pod mapping holds ONLY when, by the time fan-in starts:
-//   - worker_count <= partition count (hard-enforced here; topic-init
-//     provisions workload.assignments with 24 partitions), AND
-//   - bot-fleet replicas >= worker_count, AND
-//   - the worker group spreads consecutive partitions across distinct pods
-//     (bot-fleet sets partition.assignment.strategy=roundrobin; the range
-//     default would hand one pod a contiguous block of loaded partitions).
-//
-// KEDA scales bot-fleet on workload.assignments lag AFTER this publish, so
-// the new pods join during the controller's ReadyDeadline fan-in window.
-// For deterministic multi-worker runs, pre-scale the fleet (minReplicaCount
-// >= the largest scenario's worker count) instead of relying on scale-up
-// racing the fan-in. The log line below exists so an under-provisioned run
-// is diagnosable from the controller's logs alone.
-// ========================================================================
+// PublishWorkloadSpec applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (p *Producer) PublishWorkloadSpec(ctx context.Context, specs []topics.WorkloadSpec) error {
 	if p.noop {
 		return nil
@@ -194,9 +152,8 @@ func (p *Producer) PublishWorkloadSpec(ctx context.Context, specs []topics.Workl
 	return err
 }
 
-// buildWorkloadMessages assembles the workload.assignments messages: the Key
-// stays session_id:worker_index (consumer-side identification and ordering),
-// and WriterData carries the WorkerIndex hint workerIndexBalancer routes on.
+// buildWorkloadMessages performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func buildWorkloadMessages(specs []topics.WorkloadSpec) ([]kafka.Message, error) {
 	msgs := make([]kafka.Message, 0, len(specs))
 	for _, spec := range specs {
@@ -213,9 +170,8 @@ func buildWorkloadMessages(specs []topics.WorkloadSpec) ([]kafka.Message, error)
 	return msgs, nil
 }
 
-// workloadPartitionCount returns the live partition count of
-// workload.assignments, cached after the first successful lookup (the topic
-// is provisioned once by topic-init; repartitioning implies a redeploy).
+// workloadPartitionCount applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (p *Producer) workloadPartitionCount(ctx context.Context) (int, error) {
 	if p.workloadPartitions > 0 {
 		return p.workloadPartitions, nil
@@ -238,9 +194,8 @@ func (p *Producer) workloadPartitionCount(ctx context.Context) (int, error) {
 	return 0, fmt.Errorf("topic %s missing from metadata response", topics.TopicWorkloadAssignments)
 }
 
-// PublishBarrier publishes one BarrierEvent. Keyed by session_id so all
-// workers (which subscribe with unique per-worker consumer groups) read the
-// same event.
+// PublishBarrier applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (p *Producer) PublishBarrier(ctx context.Context, sessionID string, targetEpochNS uint64) error {
 	if p.noop {
 		return nil
@@ -265,15 +220,8 @@ func (p *Producer) PublishBarrier(ctx context.Context, sessionID string, targetE
 	return err
 }
 
-// PublishStatus publishes one benchmark.status.updated event. submission-api
-// consumes this and updates the runs row.
-//
-// This is the ONLY path through which terminal status ('completed', 'failed')
-// reaches PostgreSQL during normal operation. The hard rule is that the
-// controller is the sole producer of these events, and submission-api's
-// consumer is the sole writer of the terminal column value. The single
-// documented exception is the controller's startup recovery, which writes
-// 'failed' to runs directly (synchronously) before any consumer is alive.
+// PublishStatus applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (p *Producer) PublishStatus(ctx context.Context, evt topics.BenchmarkStatusUpdated) error {
 	if p.noop {
 		return nil
@@ -295,6 +243,8 @@ func (p *Producer) PublishStatus(ctx context.Context, evt topics.BenchmarkStatus
 	return err
 }
 
+// parseBrokers performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func parseBrokers(brokers string) []string {
 	parts := strings.Split(brokers, ",")
 	out := make([]string, 0, len(parts))
@@ -306,7 +256,8 @@ func parseBrokers(brokers string) []string {
 	return out
 }
 
-// recordProduce measures controller-owned control-plane topics.
+// recordProduce performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func recordProduce(topic string, start time.Time, err error) {
 	result := "ok"
 	if err != nil {

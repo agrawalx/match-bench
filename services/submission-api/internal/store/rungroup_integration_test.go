@@ -1,3 +1,8 @@
+// Package store defines tests for rungroup integration test.
+//
+// This file is part of the IICPC benchmarking platform and keeps its
+// responsibilities local to the surrounding package. It should be read with
+// the service-level design in design.md for broader operational context.
 package store
 
 import (
@@ -9,13 +14,8 @@ import (
 	"time"
 )
 
-// TestIntegration_RecomputeRunGroupStatus reproduces H5: the parent run-group
-// must NOT flip to a terminal status on the FIRST child failure while sibling
-// sessions are still in flight — doing so drops it from the one-active-per-
-// submission index and lets a re-trigger spawn a second active group. It becomes
-// 'failed' only once ALL children are terminal and at least one failed.
-//
-// Env-gated: needs a live Postgres (DATABASE_URL).
+// TestIntegration_RecomputeRunGroupStatus performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func TestIntegration_RecomputeRunGroupStatus(t *testing.T) {
 	dsn := strings.TrimSpace(os.Getenv("DATABASE_URL"))
 	if dsn == "" {
@@ -42,8 +42,6 @@ func TestIntegration_RecomputeRunGroupStatus(t *testing.T) {
 		t.Fatalf("insert group: %v", err)
 	}
 
-	// One child fails while the sibling is still 'requested' -> group must stay
-	// non-terminal ('running'), NOT 'failed'.
 	if err := st.UpdateRunStatus(ctx, a, "failed", "boom"); err != nil {
 		t.Fatalf("update A failed: %v", err)
 	}
@@ -61,7 +59,6 @@ func TestIntegration_RecomputeRunGroupStatus(t *testing.T) {
 		t.Fatalf("group status with one failed + one requested = %q, want running", gm.Status)
 	}
 
-	// All children now terminal, one failed -> group is 'failed'.
 	if err := st.UpdateRunStatus(ctx, b, "completed", ""); err != nil {
 		t.Fatalf("update B completed: %v", err)
 	}
@@ -77,14 +74,8 @@ func TestIntegration_RecomputeRunGroupStatus(t *testing.T) {
 	}
 }
 
-// TestIntegration_ListRunGroupsNilFilter reproduces the High finding on
-// GET /run-groups: a nil SubmissionIDs slice is sent by pgx as SQL NULL, and
-// cardinality(NULL::text[]) is NULL — not 0 — so the WHERE clause was never
-// true and an unfiltered listing returned zero rows, always. Fresh browsers
-// saw an empty run history forever. nil, empty, and populated filters must
-// all behave.
-//
-// Env-gated: needs a live Postgres (DATABASE_URL).
+// TestIntegration_ListRunGroupsNilFilter performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func TestIntegration_ListRunGroupsNilFilter(t *testing.T) {
 	dsn := strings.TrimSpace(os.Getenv("DATABASE_URL"))
 	if dsn == "" {

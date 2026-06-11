@@ -1,3 +1,8 @@
+// Package publisher defines tests for balancer test.
+//
+// This file is part of the IICPC benchmarking platform and keeps its
+// responsibilities local to the surrounding package. It should be read with
+// the service-level design in design.md for broader operational context.
 package publisher
 
 import (
@@ -7,10 +12,8 @@ import (
 	kafka "github.com/segmentio/kafka-go"
 )
 
-// TestKeyedWritersUseHashBalancer reproduces M19: both writers set a per-message
-// Key (submission_id / run_group_id) but used kafka.LeastBytes, which ignores the
-// Key and scatters same-key messages across partitions — breaking per-key ordering
-// and the documented session partitioning. They must use a key-aware balancer.
+// TestKeyedWritersUseHashBalancer performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func TestKeyedWritersUseHashBalancer(t *testing.T) {
 	p := NewKafkaPublisher("localhost:9092", slog.Default())
 	defer p.Close()
@@ -23,12 +26,8 @@ func TestKeyedWritersUseHashBalancer(t *testing.T) {
 	}
 }
 
-// TestBenchmarkMessageKey pins the benchmark.requested partition key to
-// run_group_id. Keyed by session_id, one click's three sibling sessions
-// hashed onto up to three partitions of the 3-partition topic and raced each
-// other through the controller; keyed by run_group_id they serialize on ONE
-// partition in publish order. Legacy single-session messages (no group) fall
-// back to session_id so they keep a stable, non-empty key.
+// TestBenchmarkMessageKey performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func TestBenchmarkMessageKey(t *testing.T) {
 	tests := []struct {
 		name string

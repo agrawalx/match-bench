@@ -1,3 +1,10 @@
+# k8s/build/spawner/deployment.yaml
+#
+# This file declares Kubernetes resources for k8s/build/spawner.
+# It is part of the IICPC platform configuration and should remain
+# aligned with the deployment and operations guidance in the README.
+# Keep comments at the file header so resource bodies stay declarative.
+
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -25,7 +32,6 @@ spec:
             - name: metrics
               containerPort: 9090
           env:
-            # In-cluster Loki push endpoint (logger appends /loki/api/v1/push).
             - name: LOKI_URL
               value: http://loki.observability.svc.cluster.local:3100
             - name: METRICS_PORT
@@ -83,22 +89,6 @@ spec:
                 secretKeyRef:
                   name: spawner-secret
                   key: harbor-password
-            # REGISTRY_PROVIDER=ecr makes the spawner pre-create the staging and
-            # production repositories via the ECR API before kaniko pushes and
-            # before crane promotes — ECR has no push-to-create, so without this
-            # every contestant's first push fails. Credentials come from the
-            # default AWS chain: on EKS, annotate the build-spawner
-            # ServiceAccount with an IAM role allowed to call
-            # ecr:CreateRepository (IRSA). Leave unset/commented for
-            # push-to-create registries (Harbor/ghcr).
-            # - name: REGISTRY_PROVIDER
-            #   value: ecr
-            # REGISTRY_INSECURE=true downgrades kaniko/trivy/syft/crane to plain
-            # HTTP / skipped TLS verification for the registry endpoints. Only
-            # flip this for a local dev registry served over plain HTTP. The old
-            # behavior of auto-downgrading any 10.*/172.*/192.168.* endpoint is
-            # gone (those are EKS VPC CIDRs); loopback and kind-registry
-            # endpoints remain auto-insecure for dev convenience.
             - name: REGISTRY_INSECURE
               value: "false"
           securityContext:

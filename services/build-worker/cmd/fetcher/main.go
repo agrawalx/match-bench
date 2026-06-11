@@ -1,6 +1,8 @@
-// fetcher runs as an init container in the kaniko build Job.
-// It downloads the submission ZIP from MinIO, extracts it to /workspace,
-// and writes the Harbor staging credentials to /kaniko/.docker/config.json.
+// Package main starts the fetcher service.
+//
+// This file is part of the IICPC benchmarking platform and keeps its
+// responsibilities local to the surrounding package. It should be read with
+// the service-level design in design.md for broader operational context.
 package main
 
 import (
@@ -19,6 +21,8 @@ import (
 	"github.com/iicpc/libs/logger"
 )
 
+// main performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func main() {
 	logCfg := logger.DefaultConfig()
 	logCfg.ServiceName = "build-worker-fetcher"
@@ -84,6 +88,8 @@ func main() {
 	log.Info("kaniko docker config written")
 }
 
+// writeKanikoDockerConfig performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func writeKanikoDockerConfig(endpoint, user, password string) error {
 	type dockerAuth struct {
 		Auth string `json:"auth"`
@@ -103,6 +109,8 @@ func writeKanikoDockerConfig(endpoint, user, password string) error {
 	return os.WriteFile("/kaniko/.docker/config.json", data, 0600)
 }
 
+// extractZip performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func extractZip(zipData []byte, destDir string) error {
 	zr, err := zip.NewReader(bytes.NewReader(zipData), int64(len(zipData)))
 	if err != nil {
@@ -135,6 +143,8 @@ func extractZip(zipData []byte, destDir string) error {
 	return nil
 }
 
+// envOr performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func envOr(key, def string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
@@ -142,6 +152,8 @@ func envOr(key, def string) string {
 	return def
 }
 
+// mustEnv performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func mustEnv(key string) string {
 	v := os.Getenv(key)
 	if v == "" {

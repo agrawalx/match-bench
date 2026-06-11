@@ -1,3 +1,8 @@
+// Package controller implements session behavior.
+//
+// This file is part of the IICPC benchmarking platform and keeps its
+// responsibilities local to the surrounding package. It should be read with
+// the service-level design in design.md for broader operational context.
 package controller
 
 import (
@@ -10,19 +15,8 @@ import (
 	"github.com/iicpc/schemas/topics"
 )
 
-// Session holds per-run state for one benchmark in flight.
-//
-// Lives in memory only — no PostgreSQL backing for session state. This is
-// safe because the controller is architecturally locked at a single
-// replica: if the process dies, every session in this map dies with it
-// and there is no other replica that needs to learn about them. The
-// startup recovery sweep on the next process re-reads the runs table,
-// finds any rows still in non-terminal status, and marks them failed.
-// User re-triggers via the frontend.
-//
-// Concurrent access is protected by sync.RWMutex on the SessionManager
-// (not here on Session itself — once a Session is constructed and inserted
-// into the map, its fields are only mutated by its own runner goroutine).
+// Session groups the state and dependencies used by this package.
+// Keep this type aligned with the runtime contract around it.
 type Session struct {
 	SessionID    string
 	SubmissionID string
@@ -32,42 +26,35 @@ type Session struct {
 	Status  string // mirrors topics.RunStatus*
 	Message string
 
-	// Populated after orchestrator allocates the slot.
 	SlotID   string
 	Endpoint *orchestrator.Endpoint
 
-	// Worker count for this session. Computed from the scenario's total task
-	// count and the per-pod task ceiling. Not a deployment-wide setting any
-	// longer — different scenarios produce different worker counts.
 	WorkerCount uint32
 
-	// Fan-in state. Keyed by worker_index so re-delivery is idempotent.
 	ReadyReceived map[uint32]topics.ReadySignal
 
-	// readyCh is fed by the bot.ready consumer; the runner goroutine drains
-	// it. Buffered so a sudden burst of ready signals does not block the
-	// consumer; capacity = WorkerCount * 2 is generous.
 	readyCh chan topics.ReadySignal
 
-	// cancel terminates the per-session runner goroutine.
 	cancel context.CancelFunc
 
 	CreatedAt time.Time
 }
 
-// SessionManager is a mutex-protected map of session_id → *Session.
+// SessionManager groups the state and dependencies used by this package.
+// Keep this type aligned with the runtime contract around it.
 type SessionManager struct {
 	mu       sync.RWMutex
 	sessions map[string]*Session
 }
 
+// NewSessionManager performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func NewSessionManager() *SessionManager {
 	return &SessionManager{sessions: make(map[string]*Session)}
 }
 
-// Add registers a new session. Returns the existing *Session if one already
-// exists for session_id — the caller decides what to do (the benchmark.requested
-// consumer treats a repeat as idempotent and does not start a second runner).
+// Add applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (m *SessionManager) Add(sess *Session) (*Session, bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -80,6 +67,8 @@ func (m *SessionManager) Add(sess *Session) (*Session, bool) {
 	return sess, false
 }
 
+// Get applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (m *SessionManager) Get(sessionID string) (*Session, bool) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -87,6 +76,8 @@ func (m *SessionManager) Get(sessionID string) (*Session, bool) {
 	return s, ok
 }
 
+// Drop applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (m *SessionManager) Drop(sessionID string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -94,8 +85,8 @@ func (m *SessionManager) Drop(sessionID string) {
 	metrics.Gauge("controller_active_sessions", "Active sessions tracked by the controller.", nil, float64(len(m.sessions)))
 }
 
-// Snapshot returns a slice of currently tracked session_ids. Used by
-// /healthz to surface load.
+// Snapshot applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (m *SessionManager) Snapshot() []string {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -106,10 +97,8 @@ func (m *SessionManager) Snapshot() []string {
 	return out
 }
 
-// DispatchReady delivers one bot.ready signal to the matching session.
-// Returns false when no session is tracked (logged by the caller — usually
-// means the message arrived after the session completed or before it was
-// created on a controller restart).
+// DispatchReady applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (m *SessionManager) DispatchReady(sig topics.ReadySignal) bool {
 	m.mu.RLock()
 	sess, ok := m.sessions[sig.SessionID]
@@ -121,7 +110,6 @@ func (m *SessionManager) DispatchReady(sig topics.ReadySignal) bool {
 	case sess.readyCh <- sig:
 		return true
 	default:
-		// Channel full. Should not happen with capacity = WorkerCount * 2.
 		return false
 	}
 }

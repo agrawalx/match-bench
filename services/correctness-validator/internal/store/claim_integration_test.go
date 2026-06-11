@@ -1,3 +1,8 @@
+// Package store defines tests for claim integration test.
+//
+// This file is part of the IICPC benchmarking platform and keeps its
+// responsibilities local to the surrounding package. It should be read with
+// the service-level design in design.md for broader operational context.
 package store
 
 import (
@@ -11,12 +16,8 @@ import (
 	"github.com/iicpc/correctness-validator/internal/validate"
 )
 
-// TestIntegration_SaveClaimIdempotent reproduces M26: Save must atomically CLAIM
-// a session so only the first writer persists + (the caller) publishes. A second
-// Save for the same session returns inserted=false, closing the SummaryStatus
-// check-then-act race between concurrent workers. LoadScore round-trips the score.
-//
-// Env-gated: needs DATABASE_URL.
+// TestIntegration_SaveClaimIdempotent performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func TestIntegration_SaveClaimIdempotent(t *testing.T) {
 	dsn := strings.TrimSpace(os.Getenv("DATABASE_URL"))
 	if dsn == "" {
@@ -63,25 +64,13 @@ func TestIntegration_SaveClaimIdempotent(t *testing.T) {
 	if ev.ContestantID != "team-claim" || ev.TotalFills != 4 || ev.ValidFills != 2 {
 		t.Errorf("LoadScore round-trip wrong: %+v", ev)
 	}
-	// The completeness counters must survive the summary round-trip: a
-	// re-published score (LoadScore path) has to carry the same coverage facts
-	// as the original publish, or a redelivery would silently strip the
-	// telemetry-completeness gate's inputs.
 	if ev.SentCount != 1000 || ev.AckedCount != 950 || ev.MatchedCount != 940 {
 		t.Errorf("LoadScore counts = sent %d acked %d matched %d, want 1000/950/940", ev.SentCount, ev.AckedCount, ev.MatchedCount)
 	}
 }
 
-// TestIntegration_SaveScoredOverwritesTimeout pins the status-column upsert
-// semantics behind the VALIDATION_TIMEOUT fallback redesign:
-//   - a timed_out placeholder claims like any first write,
-//   - a later REAL ('scored') Save overwrites the placeholder and reports
-//     claimed=true — the caller owns publishing the real score,
-//   - a 'scored' row is immutable: neither a repeat scored Save nor a timeout
-//     placeholder may touch it (a fabricated timeout can never beat a real
-//     validation to the permanent verdict).
-//
-// Env-gated: needs DATABASE_URL.
+// TestIntegration_SaveScoredOverwritesTimeout performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func TestIntegration_SaveScoredOverwritesTimeout(t *testing.T) {
 	dsn := strings.TrimSpace(os.Getenv("DATABASE_URL"))
 	if dsn == "" {
@@ -96,7 +85,6 @@ func TestIntegration_SaveScoredOverwritesTimeout(t *testing.T) {
 
 	sid := fmt.Sprintf("status-%d", time.Now().UnixNano())
 
-	// No row yet: SummaryStatus must report absent, not an error.
 	if status, exists, err := st.SummaryStatus(ctx, sid); err != nil || exists || status != "" {
 		t.Fatalf("SummaryStatus(missing) = (%q, %v, %v), want (\"\", false, nil)", status, exists, err)
 	}
@@ -117,13 +105,10 @@ func TestIntegration_SaveScoredOverwritesTimeout(t *testing.T) {
 		t.Fatalf("SummaryStatus after placeholder = (%q, %v, %v), want (%q, true, nil)", status, exists, err, StatusTimedOut)
 	}
 
-	// A repeat placeholder must not re-claim (timed_out never overwrites timed_out).
 	if claimed, err := st.Save(ctx, placeholder); err != nil || claimed {
 		t.Fatalf("repeat placeholder Save = (claimed=%v, err=%v), want (false, nil)", claimed, err)
 	}
 
-	// A REAL validation result overwrites the placeholder — and writes its
-	// violation log on the overwrite path, since the claim succeeded.
 	scored := Record{
 		SessionID:    sid,
 		ContestantID: "team-status",
@@ -163,8 +148,6 @@ func TestIntegration_SaveScoredOverwritesTimeout(t *testing.T) {
 		t.Errorf("violation rows after overwrite = %d, want 1", nviol)
 	}
 
-	// 'scored' is immutable: a repeat scored Save does not re-claim, and a late
-	// timeout placeholder can never clobber the real verdict.
 	if claimed, err := st.Save(ctx, scored); err != nil || claimed {
 		t.Fatalf("repeat scored Save = (claimed=%v, err=%v), want (false, nil)", claimed, err)
 	}

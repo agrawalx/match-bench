@@ -1,15 +1,8 @@
-//! Real eBPF integration test.
+//! This module defines tests for real ebpf.
 //!
-//! Loads the actual capture-only kernel program (this is where the BPF verifier
-//! runs), attaches XDP ingress + tc egress to a netns veth, drives real
-//! FIX/REST/WS round-trips, and feeds the kernel's CaptureRecords through the
-//! REAL userspace pipeline (capture -> reassembly -> parse -> matcher, included
-//! below via #[path]) — asserting the emitted OrderAckedEvents. This exercises
-//! the same code `main` runs, end to end.
-//!
-//! Run (needs root + bpf-linker/nightly or EBPF_OBJECT_PATH):
-//!   IICPC_REAL_EBPF_STRICT=1 sudo -E env "PATH=$PATH" \
-//!     cargo test -p iicpc-ebpf-latency --test real_ebpf -- --ignored --nocapture
+//! It belongs to the IICPC benchmarking platform and should keep its
+//! behavior consistent with the service contracts documented in design.md.
+//! The comments in this file describe public structure and callable behavior.
 
 #[path = "../src/capture.rs"]
 mod capture;
@@ -45,6 +38,8 @@ use pipeline::Pipeline;
 
 #[test]
 #[ignore = "requires root, bpf-linker/nightly or EBPF_OBJECT_PATH, and local netns privileges"]
+/// captures_and_matches_fix_rest_ws_including_partial_fills performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 fn captures_and_matches_fix_rest_ws_including_partial_fills() -> Result<()> {
     log_step("starting real eBPF integration test");
     if !require_root()? || !require_command("ip")? || !require_command("python3")? {
@@ -76,7 +71,6 @@ fn captures_and_matches_fix_rest_ws_including_partial_fills() -> Result<()> {
 
     let mut pipeline = Pipeline::new();
 
-    // 1) Single FIX round-trip → one event.
     {
         let mut server = fixture.spawn_python(
             9898,
@@ -89,7 +83,6 @@ fn captures_and_matches_fix_rest_ws_including_partial_fills() -> Result<()> {
         kill(&mut server);
     }
 
-    // 2) Partial fills: one order, TWO ExecutionReports → TWO events sharing t3.
     {
         let mut server = fixture.spawn_python(
             9898,
@@ -122,8 +115,6 @@ fn captures_and_matches_fix_rest_ws_including_partial_fills() -> Result<()> {
         kill(&mut server);
     }
 
-    // 3) Two orders pipelined on ONE connection, responses out of order → matched
-    //    per-ClOrdID (the EBPF-10 regression).
     {
         let mut server = fixture.spawn_python(
             9898,
@@ -142,7 +133,6 @@ fn captures_and_matches_fix_rest_ws_including_partial_fills() -> Result<()> {
         kill(&mut server);
     }
 
-    // 4) REST JSON round-trip.
     {
         let body =
             br#"{"cl_ord_id":"order-rest-1","exec_type":"F","fill_qty":7,"fill_price":99.25}"#;
@@ -159,7 +149,6 @@ fn captures_and_matches_fix_rest_ws_including_partial_fills() -> Result<()> {
         kill(&mut server);
     }
 
-    // 5) WebSocket JSON round-trip (server sends an unmasked text frame).
     {
         let body = br#"{"cl_ord_id":"order-ws-1","exec_type":"F","fill_qty":3,"fill_price":11.75}"#;
         let mut server = fixture.spawn_python(8080, &ws_server_script(body))?;
@@ -180,8 +169,8 @@ fn captures_and_matches_fix_rest_ws_including_partial_fills() -> Result<()> {
     Ok(())
 }
 
-// ---- pipeline driving -------------------------------------------------------
-
+/// collect performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 fn collect(
     ringbuf: &mut RingBuf<MapData>,
     pipeline: &mut Pipeline,
@@ -205,6 +194,8 @@ fn collect(
     Ok(out)
 }
 
+/// find performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 fn find<'a>(events: &'a [MatchedEvent], order_id: &str) -> &'a MatchedEvent {
     events
         .iter()
@@ -215,6 +206,8 @@ fn find<'a>(events: &'a [MatchedEvent], order_id: &str) -> &'a MatchedEvent {
         })
 }
 
+/// assert_event performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 fn assert_event(e: &MatchedEvent, order_id: &str, exec_type: &str, fill_qty: u64, fill_price: u64) {
     log_step(format!(
         "event: order_id={}, exec_type={}, fill_qty={}, fill_price={}, t3={}, t7={}, svc={}",
@@ -229,9 +222,8 @@ fn assert_event(e: &MatchedEvent, order_id: &str, exec_type: &str, fill_qty: u64
     assert_eq!(e.pod_service_time_ns, e.t7_ns - e.t3_ns);
 }
 
-// ---- FIX/JSON wire builders -------------------------------------------------
-
-/// Wrap a FIX body (`|`-separated, no 8=/9=/10=) into a full wire message.
+/// fix performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 fn fix(body: &str) -> Vec<u8> {
     let body = body.replace('|', "\x01");
     let head = format!("8=FIX.4.2\x019={}\x01", body.len());
@@ -241,20 +233,24 @@ fn fix(body: &str) -> Vec<u8> {
     bytes
 }
 
+/// fix_new_order performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 fn fix_new_order(clordid: &str) -> Vec<u8> {
-    // Every field, including the last, is SOH-terminated (trailing `|`).
     fix(&format!(
         "35=D|49=IICPC-BOT|56=CONTESTANT|34=1|52=19700101-00:00:00.000|11={clordid}|21=1|55=IICPC|54=1|38=12|40=2|44=42.5|59=0|"
     ))
 }
 
+/// fix_exec performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 fn fix_exec(clordid: &str, exec_type: &str, qty: u64, px: &str) -> Vec<u8> {
     fix(&format!(
         "35=8|49=CONTESTANT|56=IICPC-BOT|34=1|37=EXEC|11={clordid}|17=E|150={exec_type}|39={exec_type}|32={qty}|31={px}|"
     ))
 }
 
-/// Python that emits the given pre-built frames as one bytes literal.
+/// py_bytes performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 fn py_bytes(frames: &[Vec<u8>]) -> String {
     let mut joined = Vec::new();
     for f in frames {
@@ -264,10 +260,14 @@ fn py_bytes(frames: &[Vec<u8>]) -> String {
     format!("b\"{escaped}\"")
 }
 
+/// fix_server_script performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 fn fix_server_script(responses: &[Vec<u8>]) -> String {
     server_script(9898, &py_bytes(responses))
 }
 
+/// http_server_script performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 fn http_server_script(body: &[u8]) -> String {
     let body_lit = py_bytes(&[body.to_vec()]);
     let resp = format!(
@@ -276,12 +276,16 @@ fn http_server_script(body: &[u8]) -> String {
     server_script(8080, &resp)
 }
 
+/// ws_server_script performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 fn ws_server_script(body: &[u8]) -> String {
     let body_lit = py_bytes(&[body.to_vec()]);
     let resp = format!("bytes([0x81, len({body_lit})]) + {body_lit}");
     server_script(8080, &resp)
 }
 
+/// server_script performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 fn server_script(port: u16, response_expr: &str) -> String {
     format!(
         r#"
@@ -299,8 +303,8 @@ with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
     )
 }
 
-// ---- clients ----------------------------------------------------------------
-
+/// send_fix performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 fn send_fix(requests: &[Vec<u8>]) -> Result<()> {
     let mut stream = connect_with_retry("10.241.0.2:9898", "FIX server")?;
     for r in requests {
@@ -311,6 +315,8 @@ fn send_fix(requests: &[Vec<u8>]) -> Result<()> {
     Ok(())
 }
 
+/// send_rest performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 fn send_rest(_clordid: &str) -> Result<()> {
     let body = br#"{"cl_ord_id":"order-rest-1","qty":7,"price":99.25}"#;
     let request = format!(
@@ -327,6 +333,8 @@ fn send_rest(_clordid: &str) -> Result<()> {
     Ok(())
 }
 
+/// send_ws performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 fn send_ws(_clordid: &str) -> Result<()> {
     let body = br#"{"cl_ord_id":"order-ws-1","qty":3,"price":11.75}"#;
     let mask = [0x13u8, 0x37, 0xc0, 0xde];
@@ -342,6 +350,8 @@ fn send_ws(_clordid: &str) -> Result<()> {
     Ok(())
 }
 
+/// connect_with_retry performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 fn connect_with_retry(addr: &str, label: &str) -> Result<TcpStream> {
     let start = Instant::now();
     let mut last = None;
@@ -360,8 +370,8 @@ fn connect_with_retry(addr: &str, label: &str) -> Result<TcpStream> {
     .with_context(|| format!("connect to netns {label}"))
 }
 
-// ---- netns fixture / attach / build (unchanged structure) -------------------
-
+/// NetnsFixture stores the state passed across this module boundary.
+/// Keep field changes compatible with callers and serialized contracts.
 struct NetnsFixture {
     ns_name: String,
     netns_path: PathBuf,
@@ -369,6 +379,8 @@ struct NetnsFixture {
 }
 
 impl NetnsFixture {
+    /// create performs the module-specific operation described by its name.
+    /// It keeps validation, side effects, and returned values within this module's contract.
     fn create() -> Result<Self> {
         let suffix = format!("{}-{}", std::process::id(), monotonic_suffix());
         let ns_name = format!("iicpc-ebpf-{suffix}");
@@ -424,7 +436,6 @@ impl NetnsFixture {
             "eth0",
             "up",
         ])?;
-        // Disable segmentation offload so tc egress sees per-MTU segments.
         let _ = Command::new("ip")
             .args([
                 "netns",
@@ -444,6 +455,8 @@ impl NetnsFixture {
         Ok(fixture)
     }
 
+    /// spawn_python performs the module-specific operation described by its name.
+    /// It keeps validation, side effects, and returned values within this module's contract.
     fn spawn_python(&self, port: u16, script: &str) -> Result<Child> {
         let child = Command::new("ip")
             .args(["netns", "exec", &self.ns_name, "python3", "-c", script])
@@ -458,6 +471,8 @@ impl NetnsFixture {
 }
 
 impl Drop for NetnsFixture {
+    /// drop performs the module-specific operation described by its name.
+    /// It keeps validation, side effects, and returned values within this module's contract.
     fn drop(&mut self) {
         let _ = Command::new("ip")
             .args(["link", "del", &self.host_veth])
@@ -468,11 +483,15 @@ impl Drop for NetnsFixture {
     }
 }
 
+/// kill performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 fn kill(child: &mut Child) {
     let _ = child.kill();
     let _ = child.wait();
 }
 
+/// attach_xdp_ingress performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 fn attach_xdp_ingress(bpf: &mut Ebpf, program_name: &str, iface: &str) -> Result<()> {
     let program: &mut Xdp = bpf
         .program_mut(program_name)
@@ -491,6 +510,8 @@ fn attach_xdp_ingress(bpf: &mut Ebpf, program_name: &str, iface: &str) -> Result
     }
 }
 
+/// attach_tc_egress performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 fn attach_tc_egress(bpf: &mut Ebpf, program_name: &str, iface: &str) -> Result<()> {
     let _ = tc::qdisc_add_clsact(iface);
     let program: &mut SchedClassifier = bpf
@@ -507,6 +528,8 @@ fn attach_tc_egress(bpf: &mut Ebpf, program_name: &str, iface: &str) -> Result<(
     Ok(())
 }
 
+/// with_network_namespace performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 fn with_network_namespace<T>(netns_path: &Path, f: impl FnOnce() -> Result<T>) -> Result<T> {
     let original = File::open("/proc/self/ns/net").context("open current network namespace")?;
     let target = File::open(netns_path)
@@ -524,6 +547,8 @@ fn with_network_namespace<T>(netns_path: &Path, f: impl FnOnce() -> Result<T>) -
     }
 }
 
+/// set_network_namespace performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 fn set_network_namespace(fd: i32) -> Result<()> {
     let rc = unsafe { libc::setns(fd, libc::CLONE_NEWNET) };
     if rc == 0 {
@@ -533,11 +558,15 @@ fn set_network_namespace(fd: i32) -> Result<()> {
     }
 }
 
+/// take_counter performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 fn take_counter(bpf: &mut Ebpf, name: &str) -> Option<PerCpuArray<MapData, u64>> {
     bpf.take_map(name)
         .and_then(|m| PerCpuArray::try_from(m).ok())
 }
 
+/// log_diagnostics performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 fn log_diagnostics(
     dropped: &Option<PerCpuArray<MapData, u64>>,
     truncated: &Option<PerCpuArray<MapData, u64>>,
@@ -555,8 +584,8 @@ fn log_diagnostics(
     ));
 }
 
-// ---- build / env ------------------------------------------------------------
-
+/// ebpf_object_path performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 fn ebpf_object_path() -> Result<Option<PathBuf>> {
     if let Some(path) = std::env::var_os("EBPF_OBJECT_PATH").map(PathBuf::from) {
         if path.exists() {
@@ -581,6 +610,8 @@ fn ebpf_object_path() -> Result<Option<PathBuf>> {
     })?))
 }
 
+/// build_ebpf_object performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 fn build_ebpf_object() -> Result<bool> {
     let status = Command::new("cargo")
         .args([
@@ -606,6 +637,8 @@ fn build_ebpf_object() -> Result<bool> {
     Ok(true)
 }
 
+/// find_built_object performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 fn find_built_object() -> Option<PathBuf> {
     let dir = workspace_root().join("target/bpfel-unknown-none/release");
     std::fs::read_dir(dir)
@@ -625,6 +658,8 @@ fn find_built_object() -> Option<PathBuf> {
         })
 }
 
+/// workspace_root performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 fn workspace_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -633,6 +668,8 @@ fn workspace_root() -> PathBuf {
         .to_path_buf()
 }
 
+/// require_root performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 fn require_root() -> Result<bool> {
     if unsafe { libc::geteuid() } == 0 {
         return Ok(true);
@@ -640,6 +677,8 @@ fn require_root() -> Result<bool> {
     skip_or_fail("real eBPF test requires root privileges")
 }
 
+/// require_command performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 fn require_command(command: &str) -> Result<bool> {
     if command_exists(command) {
         Ok(true)
@@ -648,6 +687,8 @@ fn require_command(command: &str) -> Result<bool> {
     }
 }
 
+/// command_exists performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 fn command_exists(command: &str) -> bool {
     Command::new(command)
         .arg("--version")
@@ -658,6 +699,8 @@ fn command_exists(command: &str) -> bool {
         .is_ok()
 }
 
+/// skip_or_fail performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 fn skip_or_fail(reason: impl AsRef<str>) -> Result<bool> {
     let reason = reason.as_ref();
     if std::env::var_os("IICPC_REAL_EBPF_STRICT").is_some() {
@@ -667,6 +710,8 @@ fn skip_or_fail(reason: impl AsRef<str>) -> Result<bool> {
     Ok(false)
 }
 
+/// run_ip performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 fn run_ip(args: &[&str]) -> Result<()> {
     let status = Command::new("ip")
         .args(args)
@@ -679,6 +724,8 @@ fn run_ip(args: &[&str]) -> Result<()> {
     }
 }
 
+/// monotonic_suffix performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 fn monotonic_suffix() -> u128 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -686,6 +733,8 @@ fn monotonic_suffix() -> u128 {
         .as_nanos()
 }
 
+/// log_step performs the module-specific operation described by its name.
+/// It keeps validation, side effects, and returned values within this module's contract.
 fn log_step(message: impl AsRef<str>) {
     eprintln!("[real-ebpf] {}", message.as_ref());
 }

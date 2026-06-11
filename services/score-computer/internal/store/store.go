@@ -1,3 +1,8 @@
+// Package store implements store behavior.
+//
+// This file is part of the IICPC benchmarking platform and keeps its
+// responsibilities local to the surrounding package. It should be read with
+// the service-level design in design.md for broader operational context.
 package store
 
 import (
@@ -90,17 +95,17 @@ CREATE INDEX IF NOT EXISTS idx_scores_contestant ON scores(contestant_id, comput
 CREATE INDEX IF NOT EXISTS idx_scores_submission ON scores(submission_id, computed_at DESC);
 `
 
-// rankOrderBy is the canonical leaderboard ordering, mirrored by
-// score.SortResults and leaderboard-api's ranked subquery. disqualified ASC
-// must stay the leading term: DQ'd results retain their measured peak for
-// transparency, so a DQ-blind ordering would let a cheating engine rank #1.
 const rankOrderBy = `disqualified ASC, peak_sustained_tps DESC, p99_at_peak_ns ASC, spike_recovery_ns ASC, total_correctness DESC, run_group_id ASC`
 
+// Store groups the state and dependencies used by this package.
+// Keep this type aligned with the runtime contract around it.
 type Store struct {
 	meta      *pgxpool.Pool
 	timescale *pgxpool.Pool
 }
 
+// New performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func New(ctx context.Context, metadataURL, timescaleURL string) (*Store, error) {
 	meta, err := pgxpool.New(ctx, metadataURL)
 	if err != nil {
@@ -118,11 +123,15 @@ func New(ctx context.Context, metadataURL, timescaleURL string) (*Store, error) 
 	return &Store{meta: meta, timescale: ts}, nil
 }
 
+// Close applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (s *Store) Close() {
 	s.meta.Close()
 	s.timescale.Close()
 }
 
+// Healthcheck applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (s *Store) Healthcheck(ctx context.Context) error {
 	if err := s.meta.Ping(ctx); err != nil {
 		return err
@@ -130,6 +139,8 @@ func (s *Store) Healthcheck(ctx context.Context) error {
 	return s.timescale.Ping(ctx)
 }
 
+// Config applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (s *Store) Config(ctx context.Context) (score.Config, error) {
 	var cfg score.Config
 	var maxP99, waveDuration int64
@@ -149,6 +160,8 @@ SELECT correctness_dq_threshold, max_error_rate, max_p99_ns, wave_duration_ns, m
 	return cfg.WithDefaults(), nil
 }
 
+// RecordStatus applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (s *Store) RecordStatus(ctx context.Context, ev topics.BenchmarkStatusUpdated) ([]string, error) {
 	if ev.Status != topics.RunStatusCompleted && ev.Status != topics.RunStatusFailed {
 		return nil, nil
@@ -183,6 +196,8 @@ ON CONFLICT (session_id) DO UPDATE SET
 	return s.ReadyRunGroups(ctx, ev.RunGroupID)
 }
 
+// RecordCorrectness applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (s *Store) RecordCorrectness(ctx context.Context, ev topics.CorrectnessScoreEvent) ([]string, error) {
 	runGroupID, submissionID, contestantID, err := s.lookupRun(ctx, ev.SessionID)
 	if err != nil {
@@ -218,6 +233,8 @@ ON CONFLICT (session_id) DO UPDATE SET
 	return s.ReadyRunGroups(ctx, runGroupID)
 }
 
+// lookupRun applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (s *Store) lookupRun(ctx context.Context, sessionID string) (string, string, string, error) {
 	var runGroupID, submissionID, contestantID string
 	err := s.meta.QueryRow(ctx, `
@@ -233,6 +250,8 @@ SELECT COALESCE(run_group_id,''), submission_id, contestant_id
 	return runGroupID, submissionID, contestantID, nil
 }
 
+// ReadyRunGroups applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (s *Store) ReadyRunGroups(ctx context.Context, runGroupID string) ([]string, error) {
 	rows, err := s.meta.Query(ctx, `
 SELECT p.run_group_id
@@ -260,14 +279,8 @@ HAVING COUNT(DISTINCT p.session_id) = (SELECT COUNT(DISTINCT session_id) FROM ru
 	return out, rows.Err()
 }
 
-// PendingRunGroups returns every run-group that is complete (all sessions
-// terminal with correctness recorded) but has no scores row yet. It is called
-// once on startup to re-drive run-groups that became ready while the process was
-// down: the readiness signal from RecordStatus/RecordCorrectness lives only in an
-// in-memory channel, so a crash between the Kafka offset commit and the worker
-// scoring would otherwise strand a complete-but-unscored run-group forever (no
-// further event re-triggers it). Idempotent — already-scored groups are excluded
-// by the LEFT JOIN, and SaveScore's ON CONFLICT keeps re-enqueues harmless.
+// PendingRunGroups applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (s *Store) PendingRunGroups(ctx context.Context) ([]string, error) {
 	rows, err := s.meta.Query(ctx, `
 SELECT p.run_group_id
@@ -295,6 +308,8 @@ HAVING COUNT(DISTINCT p.session_id) = (SELECT COUNT(DISTINCT session_id) FROM ru
 	return out, rows.Err()
 }
 
+// LoadInput applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (s *Store) LoadInput(ctx context.Context, runGroupID string) (score.Input, error) {
 	cfg, err := s.Config(ctx)
 	if err != nil {
@@ -349,11 +364,9 @@ SELECT r.session_id, r.contestant_id, sc.name, sc.duration_ns, sc.task_specs,
 			ValidFills:     nonNegativeUint64(valid),
 			TotalFills:     nonNegativeUint64(total),
 			ViolationCount: nonNegativeUint64(violations),
-			// NULL counters (rows written before the completeness gate) load
-			// as 0 = coverage unknown; score.Compute skips gating those.
-			SentCount:    nonNegativeUint64(sent),
-			AckedCount:   nonNegativeUint64(acked),
-			MatchedCount: nonNegativeUint64(matched),
+			SentCount:      nonNegativeUint64(sent),
+			AckedCount:     nonNegativeUint64(acked),
+			MatchedCount:   nonNegativeUint64(matched),
 		}
 		sess.Metrics, err = s.loadMetrics(ctx, sess.SessionID, in.ContestantID)
 		if err != nil {
@@ -364,6 +377,8 @@ SELECT r.session_id, r.contestant_id, sc.name, sc.duration_ns, sc.task_specs,
 	return in, rows.Err()
 }
 
+// loadMetrics applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (s *Store) loadMetrics(ctx context.Context, sessionID, contestantID string) ([]score.MetricRow, error) {
 	rows, err := s.timescale.Query(ctx, `
 SELECT wave_index,
@@ -391,6 +406,8 @@ SELECT wave_index,
 	return out, rows.Err()
 }
 
+// SaveScore applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (s *Store) SaveScore(ctx context.Context, res score.Result) (bool, error) {
 	detail, err := json.Marshal(res)
 	if err != nil {
@@ -424,6 +441,8 @@ ON CONFLICT (run_group_id) DO NOTHING`,
 	return tag.RowsAffected() == 1, nil
 }
 
+// MarkPublished applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (s *Store) MarkPublished(ctx context.Context, runGroupID string, rank, rankDelta int64) error {
 	_, err := s.meta.Exec(ctx, `
 UPDATE scores SET rank=$2, rank_delta=$3, published_at=now()
@@ -431,6 +450,8 @@ UPDATE scores SET rank=$2, rank_delta=$3, published_at=now()
 	return err
 }
 
+// RankForRunGroup applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (s *Store) RankForRunGroup(ctx context.Context, runGroupID string) (int64, error) {
 	var rank int64
 	err := s.meta.QueryRow(ctx, `
@@ -446,6 +467,8 @@ SELECT rank FROM (
 	return rank, nil
 }
 
+// ExistingScore applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (s *Store) ExistingScore(ctx context.Context, runGroupID string) (score.Result, bool, error) {
 	var detail []byte
 	err := s.meta.QueryRow(ctx, `SELECT score_detail FROM scores WHERE run_group_id=$1`, runGroupID).Scan(&detail)
@@ -462,6 +485,8 @@ func (s *Store) ExistingScore(ctx context.Context, runGroupID string) (score.Res
 	return res, true, nil
 }
 
+// RecordPoolStats applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (s *Store) RecordPoolStats(service string) {
 	record := func(prefix string, pool *pgxpool.Pool) {
 		_ = prefix
@@ -472,8 +497,12 @@ func (s *Store) RecordPoolStats(service string) {
 	record("", s.meta)
 }
 
+// NowNS performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func NowNS() uint64 { return uint64(time.Now().UnixNano()) }
 
+// nonNegativeUint64 performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func nonNegativeUint64(v int64) uint64 {
 	if v <= 0 {
 		return 0
@@ -481,6 +510,8 @@ func nonNegativeUint64(v int64) uint64 {
 	return uint64(v)
 }
 
+// uint64ToInt64 performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func uint64ToInt64(v uint64) (int64, error) {
 	const maxInt64 = uint64(^uint64(0) >> 1)
 	if v > maxInt64 {

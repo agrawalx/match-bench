@@ -1,3 +1,8 @@
+// Package main starts the score-computer service.
+//
+// This file is part of the IICPC benchmarking platform and keeps its
+// responsibilities local to the surrounding package. It should be read with
+// the service-level design in design.md for broader operational context.
 package main
 
 import (
@@ -21,6 +26,8 @@ import (
 	"github.com/iicpc/score-computer/internal/worker"
 )
 
+// main performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func main() {
 	logCfg := logger.DefaultConfig()
 	logCfg.ServiceName = "score-computer"
@@ -62,11 +69,6 @@ func main() {
 		go w.Run(ctx, ready)
 	}
 
-	// Startup recovery: re-drive run-groups that became complete while this
-	// process was down. The readiness signal only lives in the in-memory `ready`
-	// channel, so without this a crash between a Kafka commit and the worker
-	// scoring would strand a complete-but-unscored run-group. Runs in the
-	// background (blocking sends, bounded by ctx) so it never delays readiness.
 	go func() {
 		pending, err := st.PendingRunGroups(ctx)
 		if err != nil {

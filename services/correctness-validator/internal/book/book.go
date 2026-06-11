@@ -1,10 +1,8 @@
-// Package book is the reference matching engine: a canonical price-time-priority
-// CLOB. It replays the delivery-ordered request stream and produces the fills a
-// correct exchange WOULD have generated, recorded per order_id for BOTH sides of
-// every trade. The validator diffs the contestant's reported per-order fills
-// against these reference fills — which sidesteps the maker/taker attribution
-// problem, because the reference engine knows every order (from orders.sent) and
-// assigns each trade's qty/price to both the taker and the maker order_id.
+// Package book implements book behavior.
+//
+// This file is part of the IICPC benchmarking platform and keeps its
+// responsibilities local to the surrounding package. It should be read with
+// the service-level design in design.md for broader operational context.
 package book
 
 import (
@@ -14,21 +12,16 @@ import (
 	"github.com/iicpc/correctness-validator/internal/model"
 )
 
-// Fill is one reference execution attributed to a single order_id (a trade
-// produces two: one for the taker, one for the maker), at the maker's resting
-// price (price-time priority).
+// Fill groups the state and dependencies used by this package.
+// Keep this type aligned with the runtime contract around it.
 type Fill struct {
 	OrderID string
 	Price   int64
 	Qty     uint64
 }
 
-// Trade is one reference match with both sides identified. The maker is the
-// resting order the FIFO/price-time engine picked (NOT taken from the contestant's
-// report — the validator infers the maker from the reference book), and the price
-// is always the maker's resting price. MakerSeq is the maker's FIFO arrival rank,
-// which lets the validator reason about queue position for time-priority and
-// cancel-replace checks.
+// Trade groups the state and dependencies used by this package.
+// Keep this type aligned with the runtime contract around it.
 type Trade struct {
 	MakerOrderID string
 	TakerOrderID string
@@ -37,11 +30,8 @@ type Trade struct {
 	MakerSeq     uint64
 }
 
-// RestingState is the end-of-replay snapshot of one order still in the book: its
-// side, price, FIFO arrival rank, and quantity the reference engine left unfilled.
-// The validator uses it to ask "was there an earlier same-price order the
-// reference left with remaining qty?" (time priority) and "what was already
-// resting at the new price level before this replace?" (cancel-replace).
+// RestingState groups the state and dependencies used by this package.
+// Keep this type aligned with the runtime contract around it.
 type RestingState struct {
 	OrderID   string
 	Side      model.Side
@@ -50,6 +40,8 @@ type RestingState struct {
 	Remaining uint64
 }
 
+// restingOrder groups the state and dependencies used by this package.
+// Keep this type aligned with the runtime contract around it.
 type restingOrder struct {
 	orderID   string
 	side      model.Side
@@ -59,14 +51,8 @@ type restingOrder struct {
 	availIdx  int    // index into Engine.avail for this resting order's window
 }
 
-// Availability is the effective_t3 window during which one order rested at a
-// (side, price) level with liquidity. EnterT3 is the order's own effective_t3;
-// ExitT3 is the effective_t3 of whatever fully consumed/cancelled it (or
-// math.MaxUint64 if still resting at end of replay). The validator uses these
-// windows to decide whether an aggressive (market/crossing-limit) fill matched
-// liquidity that genuinely existed near the aggressor's arrival — the fairness
-// analog of the resting-order cross-flow tie tolerance, since a LIVE engine
-// processes in socket-arrival order, not the offline effective_t3 order.
+// Availability groups the state and dependencies used by this package.
+// Keep this type aligned with the runtime contract around it.
 type Availability struct {
 	Side        model.Side
 	Price       int64
@@ -75,63 +61,60 @@ type Availability struct {
 	ExitT3      uint64
 }
 
+// priceLevel groups the state and dependencies used by this package.
+// Keep this type aligned with the runtime contract around it.
 type priceLevel struct {
 	price  int64
 	orders []*restingOrder // FIFO: front = oldest = time priority
 }
 
-// Engine is the reference CLOB. Not safe for concurrent use (one per session).
+// Engine groups the state and dependencies used by this package.
+// Keep this type aligned with the runtime contract around it.
 type Engine struct {
-	asks   *btree.BTreeG[*priceLevel] // ascending: best ask = Min
-	bids   *btree.BTreeG[*priceLevel] // descending: best bid = Min (highest price)
-	index  map[string]*restingOrder
-	seq    uint64
-	fills  []Fill
-	trades []Trade
-	// repriced records order_ids that lost time priority via a price-changing
-	// REPLACE (moved to the back of the new price level). A reported fill that
-	// jumps an earlier same-price order is classified as a cancel-replace priority
-	// loss (rather than a plain time-priority break) when the jumping order is here.
-	repriced map[string]bool
-	// seqByOrder is the FIFO arrival rank assigned to every order that ever rested,
-	// retained after the order leaves the book. Two same-(side,price) orders with
-	// seqByOrder[a] < seqByOrder[b] mean a arrived (and must fill) before b — the
-	// ground truth for time-priority and cancel-replace queue-position checks.
+	asks       *btree.BTreeG[*priceLevel] // ascending: best ask = Min
+	bids       *btree.BTreeG[*priceLevel] // descending: best bid = Min (highest price)
+	index      map[string]*restingOrder
+	seq        uint64
+	fills      []Fill
+	trades     []Trade
+	repriced   map[string]bool
 	seqByOrder map[string]uint64
-	// avail is the liquidity timeline: one record per order that ever rested,
-	// with the effective_t3 window it was available. Drives the aggressive-fill
-	// tolerance in the validator.
-	avail []Availability
+	avail      []Availability
 }
 
+// NewEngine performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func NewEngine() *Engine {
 	return &Engine{
-		asks:     btree.NewG[*priceLevel](32, func(a, b *priceLevel) bool { return a.price < b.price }),
-		bids:     btree.NewG[*priceLevel](32, func(a, b *priceLevel) bool { return a.price > b.price }),
+		asks:       btree.NewG[*priceLevel](32, func(a, b *priceLevel) bool { return a.price < b.price }),
+		bids:       btree.NewG[*priceLevel](32, func(a, b *priceLevel) bool { return a.price > b.price }),
 		index:      make(map[string]*restingOrder),
 		repriced:   make(map[string]bool),
 		seqByOrder: make(map[string]uint64),
 	}
 }
 
-// Repriced reports whether order_id lost time priority via a price-changing
-// REPLACE (it was moved to the back of the new price level).
+// Repriced applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (e *Engine) Repriced(orderID string) bool { return e.repriced[orderID] }
 
-// SeqOf returns the FIFO arrival rank of an order that ever rested (retained even
-// after it left the book), and whether the order ever rested at all.
+// SeqOf applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (e *Engine) SeqOf(orderID string) (uint64, bool) {
 	s, ok := e.seqByOrder[orderID]
 	return s, ok
 }
 
-// Fills returns every reference fill produced so far (taker + maker entries).
+// Fills applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (e *Engine) Fills() []Fill { return e.fills }
 
-// Trades returns every reference match with both sides identified, in match order.
+// Trades applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (e *Engine) Trades() []Trade { return e.trades }
 
-// Resting returns the end-of-replay book: order_id -> its unfilled resting state.
+// Resting applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (e *Engine) Resting() map[string]RestingState {
 	out := make(map[string]RestingState, len(e.index))
 	for id, ro := range e.index {
@@ -142,6 +125,8 @@ func (e *Engine) Resting() map[string]RestingState {
 	return out
 }
 
+// tree applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (e *Engine) tree(side model.Side) *btree.BTreeG[*priceLevel] {
 	if side == model.Buy {
 		return e.bids
@@ -149,9 +134,8 @@ func (e *Engine) tree(side model.Side) *btree.BTreeG[*priceLevel] {
 	return e.asks
 }
 
-// Process applies one delivery-ordered request to the book, generating reference
-// fills. NEW limit crosses then rests; NEW market is IOC (no rest); CANCEL/REPLACE
-// act on the referenced order.
+// Process applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (e *Engine) Process(o *model.Order) {
 	switch o.Kind {
 	case model.NewLimit:
@@ -165,9 +149,8 @@ func (e *Engine) Process(o *model.Order) {
 	}
 }
 
-// matchAndRest crosses an aggressor against the opposite book FIFO/price-first,
-// recording a fill for both sides of each trade; `rest` controls whether an
-// unfilled remainder is inserted (limit) or dropped (market, IOC).
+// matchAndRest applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (e *Engine) matchAndRest(o *model.Order, rest bool) {
 	remaining := o.Qty
 	opp := oppositeSide(o.Side)
@@ -178,8 +161,6 @@ func (e *Engine) matchAndRest(o *model.Order, rest bool) {
 		if !ok {
 			break
 		}
-		// Price gate for limit orders: a buy can only take asks <= its price; a
-		// sell can only take bids >= its price. Market orders ignore the gate.
 		if o.Kind == model.NewLimit && !crosses(o.Side, o.Price, level.price) {
 			break
 		}
@@ -215,11 +196,11 @@ func (e *Engine) matchAndRest(o *model.Order, rest bool) {
 	}
 }
 
+// insert applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (e *Engine) insert(o *model.Order, remaining uint64) {
 	e.seq++
 	ro := &restingOrder{orderID: o.OrderID, side: o.Side, price: o.Price, remaining: remaining, seq: e.seq}
-	// Open this order's availability window at its own effective_t3; ExitT3 stays
-	// "open" (MaxUint64) until it is fully consumed or cancelled.
 	ro.availIdx = len(e.avail)
 	e.avail = append(e.avail, Availability{
 		Side: o.Side, Price: o.Price, Participant: model.ParticipantOf(o.OrderID),
@@ -237,20 +218,20 @@ func (e *Engine) insert(o *model.Order, remaining uint64) {
 	}
 }
 
-// closeAvail stamps a resting order's availability window with the effective_t3
-// at which it left the book (consumed or cancelled). Idempotent — only the first
-// close sticks; orders still resting at end keep ExitT3 = MaxUint64.
+// closeAvail applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (e *Engine) closeAvail(ro *restingOrder, exitT3 uint64) {
 	if ro.availIdx >= 0 && ro.availIdx < len(e.avail) && e.avail[ro.availIdx].ExitT3 == math.MaxUint64 {
 		e.avail[ro.availIdx].ExitT3 = exitT3
 	}
 }
 
-// Availability returns every resting order's (side, price, participant, t3-window)
-// record from the replay — the liquidity timeline the validator uses for the
-// aggressive-fill tolerance check.
+// Availability applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (e *Engine) Availability() []Availability { return e.avail }
 
+// remove applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (e *Engine) remove(orderID string, exitT3 uint64) {
 	ro, ok := e.index[orderID]
 	if !ok {
@@ -272,9 +253,8 @@ func (e *Engine) remove(orderID string, exitT3 uint64) {
 	delete(e.index, orderID)
 }
 
-// replace modifies the referenced order. Price change -> back of the new level
-// (time priority lost). Same price, qty decrease -> in place (priority kept).
-// Same price, qty increase -> back of level (conservative CLOB rule).
+// replace applies behavior for its receiver performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func (e *Engine) replace(o *model.Order) {
 	ro, ok := e.index[o.OrigOrderID]
 	if !ok {
@@ -282,17 +262,11 @@ func (e *Engine) replace(o *model.Order) {
 	}
 	if o.Price == ro.price && o.Qty <= ro.remaining {
 		ro.remaining = o.Qty // qty-only decrease: keep position
-		// re-key the index under the new order id (the replace carries a new ClOrdID)
 		if o.OrderID != "" && o.OrderID != ro.orderID {
 			oldID := ro.orderID
 			delete(e.index, oldID)
 			ro.orderID = o.OrderID
 			e.index[o.OrderID] = ro
-			// A qty-decrease replace KEEPS queue position, so the new ClOrdID must
-			// inherit the original FIFO arrival rank — otherwise SeqOf(newID) misses
-			// and queueJump can't classify a later violation involving this order as
-			// time-priority / cancel-replace-loss (it would fall through to the wrong
-			// violation type; the fill stays flagged, only the label is wrong).
 			if s, ok := e.seqByOrder[oldID]; ok {
 				e.seqByOrder[o.OrderID] = s
 				delete(e.seqByOrder, oldID)
@@ -300,9 +274,6 @@ func (e *Engine) replace(o *model.Order) {
 		}
 		return
 	}
-	// price change or qty increase: remove and re-insert at the back of the level.
-	// A price change is the case that loses priority by amendment intent; record it
-	// so the validator can classify a queue-jump on it as a cancel-replace loss.
 	if o.Price != ro.price {
 		e.repriced[orReplaceID(o)] = true
 	}
@@ -310,6 +281,8 @@ func (e *Engine) replace(o *model.Order) {
 	e.insert(&model.Order{OrderID: orReplaceID(o), Side: o.Side, Price: o.Price}, o.Qty)
 }
 
+// orReplaceID performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func orReplaceID(o *model.Order) string {
 	if o.OrderID != "" {
 		return o.OrderID
@@ -317,6 +290,8 @@ func orReplaceID(o *model.Order) string {
 	return o.OrigOrderID
 }
 
+// crosses performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func crosses(aggressorSide model.Side, aggressorPrice, restingPrice int64) bool {
 	if aggressorSide == model.Buy {
 		return restingPrice <= aggressorPrice
@@ -324,6 +299,8 @@ func crosses(aggressorSide model.Side, aggressorPrice, restingPrice int64) bool 
 	return restingPrice >= aggressorPrice
 }
 
+// oppositeSide performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func oppositeSide(s model.Side) model.Side {
 	if s == model.Buy {
 		return model.Sell
@@ -331,6 +308,8 @@ func oppositeSide(s model.Side) model.Side {
 	return model.Buy
 }
 
+// min performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
 func min(a, b uint64) uint64 {
 	if a < b {
 		return a

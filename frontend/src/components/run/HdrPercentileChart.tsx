@@ -1,4 +1,9 @@
-'use client';
+/**
+ * This file defines frontend behavior for HdrPercentileChart.
+ * It is part of the IICPC frontend and keeps UI, API, or test behavior
+ * scoped to this module so callers can rely on stable boundaries.
+ */
+"use client";
 
 import {
   CartesianGrid,
@@ -9,23 +14,26 @@ import {
   Tooltip,
   XAxis,
   YAxis,
-} from 'recharts';
-import type { HdrSeries } from '@/utils/hdr';
+} from "recharts";
+import type { HdrSeries } from "@/utils/hdr";
 
-const COLORS = ['#3b82f6', '#f59e0b', '#10b981', '#ef4444'];
-// log-scale ticks on the "nines" axis: 0%, 90%, 99%, 99.9%, 99.99%
+const COLORS = ["#3b82f6", "#f59e0b", "#10b981", "#ef4444"];
 const TICKS = [1, 10, 100, 1000, 10000];
 
+/**
+ * ninesToLabel performs the module-specific operation described by its name.
+ * It keeps inputs, side effects, and returned values within this module's contract.
+ */
 function ninesToLabel(v: number): string {
-  if (v <= 1) return '0%';
+  if (v <= 1) return "0%";
   const p = 100 - 100 / v;
   return v >= 1000 ? `${p.toFixed(2)}%` : `${p.toFixed(0)}%`;
 }
 
-// HdrPercentileChart renders the canonical HdrHistogram (Gil Tene) "Latency by
-// Percentile Distribution": service time (t7-t3) on Y, percentile on a log
-// "nines" X-axis, one line per scenario. Unlike a histogram of p99 snapshots,
-// this is the true latency distribution decoded from hdr_encoded.
+/**
+ * HdrPercentileChart performs the module-specific operation described by its name.
+ * It keeps inputs, side effects, and returned values within this module's contract.
+ */
 export function HdrPercentileChart({ series }: { series: HdrSeries[] }) {
   if (!series.length) return null;
   const n = series[0].points.length;
@@ -41,33 +49,46 @@ export function HdrPercentileChart({ series }: { series: HdrSeries[] }) {
       <h3>Latency by Percentile Distribution</h3>
       <p style={{ opacity: 0.7, fontSize: 13, marginTop: 0 }}>
         service_time = algo processing at the veth (scored). response_time = the
-        bot&apos;s full round trip. The gap between them is the non-algo overhead
-        — coordinated omission + network + kernel queueing.
+        bot&apos;s full round trip. The gap between them is the non-algo
+        overhead — coordinated omission + network + kernel queueing.
       </p>
       <ResponsiveContainer width="100%" height={380}>
-        <LineChart data={data} margin={{ top: 8, right: 28, bottom: 28, left: 16 }}>
+        <LineChart
+          data={data}
+          margin={{ top: 8, right: 28, bottom: 28, left: 16 }}
+        >
           <CartesianGrid strokeDasharray="3 3" opacity={0.3} />
           <XAxis
             dataKey="nines"
             type="number"
             scale="log"
-            domain={[1, 'dataMax']}
+            domain={[1, "dataMax"]}
             ticks={TICKS}
             tickFormatter={ninesToLabel}
             height={44}
-            label={{ value: 'Percentile', position: 'insideBottom', offset: 2 }}
+            label={{ value: "Percentile", position: "insideBottom", offset: 2 }}
           />
           <YAxis
             width={68}
             tickFormatter={(v: number) => `${v}`}
-            label={{ value: 'latency (µs)', angle: -90, position: 'insideLeft', style: { textAnchor: 'middle' } }}
+            label={{
+              value: "latency (µs)",
+              angle: -90,
+              position: "insideLeft",
+              style: { textAnchor: "middle" },
+            }}
           />
           <Tooltip
             formatter={(v: number, name: string) => [`${v} µs`, name]}
             labelFormatter={(v: number) => `p${ninesToLabel(Number(v))}`}
           />
-          {/* Legend at the TOP so it never collides with the X-axis label. */}
-          <Legend verticalAlign="top" align="center" height={30} wrapperStyle={{ paddingBottom: 10 }} />
+          {}
+          <Legend
+            verticalAlign="top"
+            align="center"
+            height={30}
+            wrapperStyle={{ paddingBottom: 10 }}
+          />
           {series.map((s, i) => (
             <Line
               key={s.scenario}

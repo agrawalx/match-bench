@@ -117,7 +117,7 @@ func TestComputeDeterministicJSON(t *testing.T) {
 // It keeps validation, side effects, and returned values within this package's contract.
 func TestComputeNoRampDisqualifiedReturnsResult(t *testing.T) {
 	in := baseInput()
-	in.Sessions = in.Sessions[:2] // drop the ramp session
+	in.Sessions = in.Sessions[:2]
 	in.Sessions[0].Correct.ValidFills = 800
 	res, err := Compute(in)
 	if err != nil {
@@ -135,7 +135,7 @@ func TestComputeNoRampDisqualifiedReturnsResult(t *testing.T) {
 // It keeps validation, side effects, and returned values within this package's contract.
 func TestComputeNoRampWithoutDQReturnsError(t *testing.T) {
 	in := baseInput()
-	in.Sessions = in.Sessions[:2] // drop the ramp session
+	in.Sessions = in.Sessions[:2]
 	if _, err := Compute(in); !errors.Is(err, ErrMissingRampSession) {
 		t.Fatalf("err = %v, want ErrMissingRampSession", err)
 	}
@@ -174,7 +174,7 @@ func TestComputeCoverageAtThresholdKeepsViolationDQ(t *testing.T) {
 	in.Sessions[2].Correct.ValidFills = 850
 	in.Sessions[2].Correct.SentCount = 1000
 	in.Sessions[2].Correct.AckedCount = 960
-	in.Sessions[2].Correct.MatchedCount = 950 // 0.95 >= 0.90
+	in.Sessions[2].Correct.MatchedCount = 950
 	res, err := Compute(in)
 	if err != nil {
 		t.Fatal(err)
@@ -191,9 +191,9 @@ func TestComputeCoverageAtThresholdKeepsViolationDQ(t *testing.T) {
 // It keeps validation, side effects, and returned values within this package's contract.
 func TestComputeIncompleteTelemetryKeepsCorrectnessGates(t *testing.T) {
 	in := baseInput()
-	in.Sessions[0].Correct.ValidFills = 800 // 0.933 aggregate < 0.95 DQ threshold
+	in.Sessions[0].Correct.ValidFills = 800
 	in.Sessions[2].Correct.SentCount = 1000
-	in.Sessions[2].Correct.MatchedCount = 100 // 0.10 coverage — grossly incomplete
+	in.Sessions[2].Correct.MatchedCount = 100
 	res, err := Compute(in)
 	if err != nil {
 		t.Fatal(err)

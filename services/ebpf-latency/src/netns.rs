@@ -120,8 +120,8 @@ mod tests {
     /// It keeps validation, side effects, and returned values within this module's contract.
     fn uid_matches_but_wrong_container_is_rejected() {
         let line = "0::/kubepods.slice/.../kubepods-besteffort-pod5f3a9b2c_1d4e_4f6a_8b7c_0e1d2f3a4b5c.slice/cri-containerd-0000000000000000.scope\n";
-        assert!(cgroup_matches(line, &normalize(UID), None)); // uid still matches
-        assert!(!cgroup_matches(line, &normalize(UID), Some("9a8b7c6d"))); // wrong container
+        assert!(cgroup_matches(line, &normalize(UID), None));
+        assert!(!cgroup_matches(line, &normalize(UID), Some("9a8b7c6d")));
     }
 
     #[test]

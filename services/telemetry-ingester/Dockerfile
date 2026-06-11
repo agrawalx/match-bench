@@ -27,8 +27,6 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates librdkafka1 \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=builder /app/target/release/iicpc-telemetry-ingester /usr/local/bin/iicpc-telemetry-ingester
-# The stage-2 rollup binary (merges per-shard partials → metrics). Same image; the
-# rollup Deployment overrides the command to run this instead of the ingester.
 COPY --from=builder /app/target/release/rollup /usr/local/bin/telemetry-rollup
 USER 65532:65532
 ENTRYPOINT ["/usr/local/bin/iicpc-telemetry-ingester"]

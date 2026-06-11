@@ -106,12 +106,12 @@ fn synthetic(
     session: &str,
     contestant: &str,
 ) -> (Vec<OrderSentEvent>, Vec<OrderAckedEvent>, Expected) {
-    let base = 1_000_000_000_000u64; // arbitrary realtime-ns base
+    let base = 1_000_000_000_000u64;
     let sents = vec![
         sent(session, "o1", base, base + 1_000, base + 50_000, false),
         sent(session, "o2", base, base + 1_000, base + 50_000, false),
         sent(session, "o3", base, base + 1_000, base + 50_000, false),
-        sent(session, "o4", base, base + 1_000, 0, true), // timeout
+        sent(session, "o4", base, base + 1_000, 0, true),
     ];
     let ackeds = vec![
         acked(
@@ -122,7 +122,7 @@ fn synthetic(
             base + 110_000,
             "0",
             0,
-        ), // ack
+        ),
         acked(
             session,
             contestant,
@@ -131,7 +131,7 @@ fn synthetic(
             base + 160_000,
             "2",
             10,
-        ), // fill (same order)
+        ),
         acked(
             session,
             contestant,
@@ -140,7 +140,7 @@ fn synthetic(
             base + 120_000,
             "0",
             0,
-        ), // ack
+        ),
         acked(
             session,
             contestant,
@@ -149,7 +149,7 @@ fn synthetic(
             base + 130_000,
             "8",
             0,
-        ), // reject
+        ),
     ];
     (
         sents,

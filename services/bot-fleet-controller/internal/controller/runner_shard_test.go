@@ -18,16 +18,16 @@ func TestComputeWorkerCount(t *testing.T) {
 		totalTasks int
 		want       uint32
 	}{
-		{0, 1}, // degenerate; clamped to >= 1
+		{0, 1},
 		{1, 1},
 		{999, 1},
-		{1000, 1}, // exact fit
+		{1000, 1},
 		{1001, 2},
 		{2000, 2},
 		{2001, 3},
-		{5110, 6}, // ramp peak — 9 waves × 511 = 4599 → 5 pods at 1000/pod
-		{511, 1},  // constant baseline
-		{2555, 3}, // spike total — 511 baseline + 2044 spike
+		{5110, 6},
+		{511, 1},
+		{2555, 3},
 	}
 	for _, c := range cases {
 		got := computeWorkerCount(c.totalTasks, DefaultMaxTasksPerWorker)
@@ -42,7 +42,7 @@ func TestComputeWorkerCount(t *testing.T) {
 	if got := computeWorkerCount(2555, 511); got != 5 {
 		t.Errorf("fan-out: computeWorkerCount(2555, 511) = %d, want 5", got)
 	}
-	if got := computeWorkerCount(500, 0); got != 1 { // 0 falls back to default 1000
+	if got := computeWorkerCount(500, 0); got != 1 {
 		t.Errorf("zero ceiling falls back to default: got %d, want 1", got)
 	}
 }

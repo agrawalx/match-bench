@@ -116,10 +116,6 @@ pub async fn run(mut config: Config) -> Result<()> {
 
     let control_producer = kafka::control_producer(&config.kafka_brokers)?;
     let telemetry_producer = kafka::telemetry_producer(&config.kafka_brokers)?;
-    // Authoritative N for order_id sharding: the orders.sent topic's real partition
-    // count (source of truth), falling back to the configured ORDERS_PARTITIONS if
-    // metadata is unavailable. The eBPF capture derives the same N for orders.acked,
-    // so an order's sent + acked co-locate on one partition.
     if let Some(n) = kafka::topic_partition_count(&telemetry_producer, &config.orders_sent_topic) {
         if n != config.orders_partitions {
             tracing::info!(
@@ -491,9 +487,6 @@ struct PendingOrder {
     orig_order_id: String,
     target_send_ts_ns: u64,
     send_ts_ns: u64,
-    /// The session's barrier epoch (unix ns), copied onto the emitted
-    /// OrderSentEvent so the ingester can bucket waves deterministically (see
-    /// OrderSentEvent::barrier_epoch_ns). Same value for every order in a session.
     barrier_epoch_ns: u64,
     price: u64,
     qty: u64,
@@ -763,7 +756,7 @@ async fn fix_write_loop(
                     order_id: frame.order_id.clone(),
                     orig_order_id: frame.orig_order_id.clone(),
                     target_send_ts_ns,
-                    send_ts_ns: 0, // patched on successful write
+                    send_ts_ns: 0,
                     barrier_epoch_ns: task_start_ns.saturating_sub(task.start_offset_ns),
                     price: frame.price,
                     qty: frame.qty,
@@ -851,7 +844,7 @@ async fn fix_read_loop(
                 warn!(task_id, error = %err, "FIX read failed; reader exiting");
                 break;
             }
-            Err(_) => break, // drain deadline reached
+            Err(_) => break,
         };
         buf.extend_from_slice(&chunk[..n]);
 
@@ -1137,16 +1130,6 @@ async fn rw_write_loop(
             break;
         }
         let target_send_ts_ns = next_send_ns;
-        // Coordinated-omission catch-up pacing: only park on the timer when genuinely
-        // AHEAD of schedule. If the deadline has already passed (we're behind), send
-        // the due order immediately instead of sleeping. tokio's timer wheel quantizes
-        // every sleep to ~1ms — even past-due ones — which otherwise pins each task
-        // near ~1k/s and, with many tasks contending the timer driver, collapses
-        // aggregate throughput while CPU sits idle. Sending due orders immediately is
-        // the *correct* CO behaviour: target_send_ts_ns stays the fixed schedule, so
-        // schedule_slip / response_time still measure real lateness (engine/network
-        // backpressure), not a load-generator timer artifact. should_stop_sending at
-        // the loop head keeps cancel/task-end responsive without the sleep.
         if next_send_ns > unix_nanos() {
             tokio::select! {
                 _ = time::sleep_until(instant_from_unix_nanos(next_send_ns)) => {}
@@ -1269,8 +1252,6 @@ async fn emit_response(
 /// It keeps validation, side effects, and returned values within this module's contract.
 fn clordid_from_json(body: &[u8]) -> Option<String> {
     #[derive(serde::Deserialize)]
-    /// Resp stores the state passed across this module boundary.
-    /// Keep field changes compatible with callers and serialized contracts.
     struct Resp {
         cl_ord_id: Option<String>,
     }
@@ -1430,13 +1411,13 @@ async fn ws_read_loop(
                 warn!(task_id, error = %err, "WS read failed; reader exiting");
                 break;
             }
-            Ok(None) => break, // stream closed
-            Err(_) => break,   // drain deadline
+            Ok(None) => break,
+            Err(_) => break,
         };
         let body: Vec<u8> = match msg {
             WsMessage::Text(t) => t.into_bytes(),
             WsMessage::Binary(b) => b,
-            _ => continue, // ping/pong/close carry no execution report
+            _ => continue,
         };
         if let Some(clord_id) = clordid_from_json(&body) {
             emit_response(
@@ -1457,7 +1438,6 @@ async fn ws_read_loop(
 
 /// order_shape performs the module-specific operation described by its name.
 /// It keeps validation, side effects, and returned values within this module's contract.
-
 pub(crate) fn order_shape(profile: BotProfile, seq: u32, rng: &mut SmallRng) -> (u64, u64, Side) {
     match profile {
         BotProfile::Hft => {
@@ -1809,7 +1789,7 @@ mod tests {
         let config = Config::default();
 
         let mut ok = valid_spec();
-        ok.tasks[0].duration_ns = 1_000_000_000; // 1s
+        ok.tasks[0].duration_ns = 1_000_000_000;
         validate_spec(&config, &ok).expect("short workload must be accepted");
 
         let mut over = valid_spec();

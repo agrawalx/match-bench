@@ -203,6 +203,8 @@ pub async fn publish_bytes(
     Ok(())
 }
 
+/// topic_partition_count reads the broker metadata partition count for a topic.
+/// It returns None when metadata is unavailable or the topic cannot be found.
 pub fn topic_partition_count(producer: &KafkaProducer, topic: &str) -> Option<i32> {
     let md = producer
         .inner
@@ -218,6 +220,9 @@ pub fn topic_partition_count(producer: &KafkaProducer, topic: &str) -> Option<i3
     (n > 0).then_some(n as i32)
 }
 
+/// publish_to_partition sends a keyed payload to an explicit Kafka partition.
+/// It preserves co-partitioned telemetry ordering by bypassing producer-side
+/// partition selection.
 pub async fn publish_to_partition(
     producer: &KafkaProducer,
     topic: &str,
@@ -237,6 +242,9 @@ pub async fn publish_to_partition(
     Ok(())
 }
 
+/// wait_for_barrier consumes barrier messages until the requested session arrives.
+/// It commits malformed or unrelated messages and returns the matching barrier
+/// event before workload traffic starts.
 pub async fn wait_for_barrier(
     consumer: &KafkaConsumer,
     session_id: &str,

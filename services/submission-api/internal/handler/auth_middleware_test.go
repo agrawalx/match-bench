@@ -124,7 +124,7 @@ func TestRequireContestant(t *testing.T) {
 		name     string
 		request  func(t *testing.T) *http.Request
 		wantCode int
-		wantBody string // checked only on 200
+		wantBody string
 	}{
 		{
 			name: "valid signed token",

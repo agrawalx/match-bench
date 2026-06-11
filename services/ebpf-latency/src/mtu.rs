@@ -126,12 +126,12 @@ mod tests {
     /// It keeps validation, side effects, and returned values within this module's contract.
     fn mtu_clamp_target_only_clamps_downward() {
         let cases: &[(libc::c_int, usize, Option<libc::c_int>)] = &[
-            (9001, 1500, Some(1500)),  // EKS jumbo veth -> clamp to classic Ethernet
-            (1500, 1500, None),        // already at the clamp
-            (1400, 1500, None),        // never RAISE a smaller MTU
-            (9001, 0, None),           // 0 disables the clamp
-            (65536, 9000, Some(9000)), // loopback-sized down to a jumbo clamp
-            (1500, usize::MAX, None),  // unrepresentable clamp -> no action
+            (9001, 1500, Some(1500)),
+            (1500, 1500, None),
+            (1400, 1500, None),
+            (9001, 0, None),
+            (65536, 9000, Some(9000)),
+            (1500, usize::MAX, None),
         ];
         for &(current, clamp, want) in cases {
             assert_eq!(

@@ -7,6 +7,10 @@ import { SubmitClient } from "@/components/submit/SubmitClient";
 
 export const metadata = { title: "Submit - IICPC" };
 
+/**
+ * SubmitPage renders the benchmark submission workflow.
+ * It delegates stateful upload and build tracking behavior to SubmitClient.
+ */
 export default function SubmitPage() {
   return <SubmitClient />;
 }

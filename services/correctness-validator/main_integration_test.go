@@ -64,7 +64,7 @@ func TestIntegration_ValidateSession(t *testing.T) {
 		brokers:     brokers,
 		store:       st,
 		pub:         pub,
-		settleDelay: 0, // no settle wait in the test
+		settleDelay: 0,
 	}
 	if err := v.validateSession(ctx, sessionID); err != nil {
 		t.Fatalf("validateSession: %v", err)
@@ -167,7 +167,7 @@ func TestIntegration_TriggerConsumer(t *testing.T) {
 	const contestant = "team-trigger"
 
 	produceSession(ctx, t, brokers, sessionID, contestant)
-	produceStatus(ctx, t, brokers, sessionID, topics.RunStatusRunning) // ignored (non-terminal)
+	produceStatus(ctx, t, brokers, sessionID, topics.RunStatusRunning)
 	produceStatus(ctx, t, brokers, sessionID, topics.RunStatusCompleted)
 
 	st, err := store.New(ctx, dbURL)
@@ -196,7 +196,7 @@ func TestIntegration_TriggerConsumer(t *testing.T) {
 		select {
 		case <-tick.C:
 			if status, done, _ := st.SummaryStatus(ctx, sessionID); done && status == store.StatusScored {
-				return // consumer triggered validation and durably persisted a REAL score
+				return
 			}
 		case <-deadline:
 			t.Fatal("timed out waiting for the completed session to be validated")
@@ -236,7 +236,7 @@ func produceSession(ctx context.Context, t *testing.T, brokers []string, session
 // It keeps validation, side effects, and returned values within this package's contract.
 func writeMsgpack(ctx context.Context, t *testing.T, brokers []string, topic, key string, v any) {
 	t.Helper()
-	payload, err := msgpack.Marshal(v) // named maps, matching the Rust rmp_serde::to_vec_named producers
+	payload, err := msgpack.Marshal(v)
 	if err != nil {
 		t.Fatalf("msgpack marshal %s: %v", topic, err)
 	}
@@ -322,7 +322,7 @@ func readNewScore(ctx context.Context, t *testing.T, brokers []string, since map
 			m, err := r.ReadMessage(rctx)
 			cancel()
 			if err != nil {
-				break // caught up to watermark (deadline) or partition end
+				break
 			}
 			var ev topics.CorrectnessScoreEvent
 			if json.Unmarshal(m.Value, &ev) == nil && ev.SessionID == sessionID {

@@ -132,7 +132,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	r.Get("/health", healthHandler) // liveness: static, no dependencies
+	r.Get("/health", healthHandler)
 	r.Get("/ready", handler.Readiness(pgStore.Ping, log))
 	r.Handle("/metrics", metrics.Handler())
 

@@ -187,7 +187,7 @@ fn frame_http(buf: &[u8]) -> Frame {
     if header_is_chunked(&buf[..hdr_end]) {
         return match find(&buf[body_start..], b"0\r\n\r\n") {
             Some(rel) => {
-                let total = body_start + rel + 5; // include the "0\r\n\r\n" terminator
+                let total = body_start + rel + 5;
                 if total > MAX_HTTP_MESSAGE {
                     Frame::Resync(body_start)
                 } else {

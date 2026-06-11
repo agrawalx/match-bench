@@ -159,6 +159,8 @@ struct OrderSentBatchRef<'a> {
     events: &'a [OrderSentEvent],
 }
 
+/// shard_events groups pending sent-order events by their target partition.
+/// It drains the caller's buffer so each event is flushed exactly once.
 fn shard_events(
     events: &mut Vec<OrderSentEvent>,
     num_partitions: i32,
@@ -173,6 +175,9 @@ fn shard_events(
     by_part
 }
 
+/// flush publishes buffered telemetry events in partitioned msgpack batches.
+/// It chunks oversized groups and records per-partition send metrics for
+/// observability.
 async fn flush(
     producer: &KafkaProducer,
     topic: &str,
@@ -185,11 +190,8 @@ async fn flush(
         return Ok(());
     }
 
-    // Shard by destination partition (move events out — no clone).
     let by_part = shard_events(events, num_partitions);
 
-    // One message per (partition, size-bounded chunk); each owns its events so a
-    // failed publish can be retained without re-encoding.
     let mut msgs: Vec<(i32, Vec<u8>, Vec<OrderSentEvent>)> = Vec::new();
     for (part, mut group) in by_part {
         while !group.is_empty() {
@@ -205,7 +207,6 @@ async fn flush(
         }
     }
 
-    // Pipeline every publish, then await together (≈ one broker RTT).
     let results = futures::future::join_all(msgs.iter().map(|(part, payload, _)| {
         kafka::publish_to_partition(producer, topic, *part, session_id, payload)
     }))
@@ -219,7 +220,7 @@ async fn flush(
                 if first_err.is_none() {
                     first_err = Some(err);
                 }
-                events.extend(chunk); // retain for next flush
+                events.extend(chunk);
             }
         }
     }
@@ -259,6 +260,9 @@ mod tests {
         }
     }
 
+    /// shard_events_groups_every_event_to_its_partition checks partition grouping.
+    /// It verifies sharding drains the input and places every event on its hashed
+    /// Kafka partition.
     #[test]
     fn shard_events_groups_every_event_to_its_partition() {
         let n = 24;
@@ -286,6 +290,8 @@ mod tests {
         assert!(by_part.len() > 1, "events should spread across partitions");
     }
 
+    /// shard_events_spreads_a_single_session_across_partitions checks hash spread.
+    /// It ensures a busy session still uses many partitions through order ids.
     #[test]
     fn shard_events_spreads_a_single_session_across_partitions() {
         let n = 24;

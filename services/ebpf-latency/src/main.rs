@@ -67,11 +67,6 @@ struct Config {
     flush_interval: Duration,
     batch_size: usize,
     clamp_mtu: usize,
-    /// Partition count of orders.acked. The flush shards each batch by
-    /// partition_for(order_id, this) — the SAME hash bot-fleet uses for
-    /// orders.sent — so an order's acked event co-locates with its sent event on
-    /// one partition (the co-partitioning the distributed ingester joins on).
-    /// MUST equal the topic's real partition count (topic-init creates 24).
     orders_partitions: i32,
 }
 
@@ -145,9 +140,6 @@ async fn main() -> Result<()> {
     config.validate()?;
 
     let producer = kafka::telemetry_producer(&config.kafka_brokers)?;
-    // Authoritative N for order_id sharding: the orders.acked topic's real partition
-    // count, falling back to ORDERS_PARTITIONS. Must match the count bot-fleet uses
-    // for orders.sent so an order's sent + acked land on the same partition.
     if let Some(n) = kafka::topic_partition_count(&producer, &config.topic) {
         config.orders_partitions = n;
     }
@@ -313,7 +305,6 @@ async fn flush(
         }
     }
 
-    // Pipeline every publish to its explicit partition, then await together.
     let results = futures::future::join_all(msgs.iter().map(|(part, payload, _)| {
         kafka::publish_to_partition(
             producer,
@@ -349,7 +340,7 @@ async fn flush(
             "dropped oldest pending orders.acked events (publish backlog)"
         );
     }
-    let _ = publish_failed; // failures are logged + retained, never propagated (H16)
+    let _ = publish_failed;
     Ok(())
 }
 
@@ -759,10 +750,10 @@ mod tests {
     fn config_from_env_parses_capture_clamp_mtu() {
         let _guard = env_lock();
         let cases: &[(&str, usize)] = &[
-            ("9001", 9001),                      // explicit override
-            ("0", 0),                            // explicit disable
-            ("", DEFAULT_CLAMP_MTU),             // empty -> default
-            ("not-a-number", DEFAULT_CLAMP_MTU), // invalid -> default (warn)
+            ("9001", 9001),
+            ("0", 0),
+            ("", DEFAULT_CLAMP_MTU),
+            ("not-a-number", DEFAULT_CLAMP_MTU),
         ];
         for &(value, want) in cases {
             clear_test_env();
@@ -783,7 +774,7 @@ mod tests {
     fn config_validate_rejects_out_of_range_clamp_mtu() {
         let _guard = env_lock();
         let cases: &[(&str, bool)] = &[
-            ("0", true), // disabled
+            ("0", true),
             ("68", true),
             ("1500", true),
             ("65535", true),

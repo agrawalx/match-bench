@@ -54,7 +54,7 @@ func buildLean(target, conns uint32, durationNs uint64) []topics.TaskSpec {
 			rps++
 		}
 		if rps == 0 {
-			continue // target < conns: skip the zero-rps tail (validate_spec rejects 0)
+			continue
 		}
 		tasks = append(tasks, topics.TaskSpec{
 			TaskID:        i,
@@ -62,7 +62,7 @@ func buildLean(target, conns uint32, durationNs uint64) []topics.TaskSpec {
 			TargetRPS:     rps,
 			StartOffsetNs: 0,
 			DurationNs:    durationNs,
-			MarketPct:     0, // pure NewOrderSingle limit orders — no cancel/replace
+			MarketPct:     0,
 			CancelPct:     0,
 			ReplacePct:    0,
 		})

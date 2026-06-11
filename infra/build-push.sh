@@ -8,7 +8,6 @@ REGISTRY="885232248981.dkr.ecr.us-east-1.amazonaws.com"
 TAG="$(git rev-parse --short HEAD)"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
-# name:context:dockerfile  (context relative to repo root)
 IMAGES=(
   "auth-api:.:services/auth-api/Dockerfile"
   "submission-api:.:services/submission-api/Dockerfile"

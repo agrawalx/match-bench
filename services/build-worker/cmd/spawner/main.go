@@ -86,7 +86,7 @@ func main() {
 
 	jobCfg := k8sspawner.JobConfig{
 		Namespace:     envOr("K8S_NAMESPACE", "build"),
-		BuildNodePool: os.Getenv("BUILD_NODE_POOL"), // empty = no nodeSelector/toleration (dev)
+		BuildNodePool: os.Getenv("BUILD_NODE_POOL"),
 		SpawnerImage:  mustEnv("SPAWNER_IMAGE"),
 		KanikoImage:   envOr("KANIKO_IMAGE", "gcr.io/kaniko-project/executor:v1.23.2"),
 		TrivyImage:    envOr("TRIVY_IMAGE", "aquasec/trivy:0.51.4"),

@@ -171,7 +171,7 @@ mod tests {
         v.extend_from_slice(&server_port.to_le_bytes());
         v.extend_from_slice(&(payload.len() as u16).to_le_bytes());
         v.push(direction);
-        v.push(0); // _pad
+        v.push(0);
         v.extend_from_slice(payload);
         v
     }

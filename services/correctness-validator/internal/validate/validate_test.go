@@ -127,16 +127,16 @@ func TestDeterministic(t *testing.T) {
 // TestWindowsOverlap performs the package-specific operation described by its name.
 // It keeps validation, side effects, and returned values within this package's contract.
 func TestWindowsOverlap(t *testing.T) {
-	if !windowsOverlap(1000, 1500, 1600, 200) { // liquidity [1000,1500] touches 1400..1800 at 1500
+	if !windowsOverlap(1000, 1500, 1600, 200) {
 		t.Fatal("should overlap: avail exit 1500 within [1400,1800]")
 	}
-	if windowsOverlap(1000, 1300, 1600, 200) { // avail ended 1300, before 1400
+	if windowsOverlap(1000, 1300, 1600, 200) {
 		t.Fatal("should NOT overlap: avail exit 1300 before window 1400")
 	}
-	if !windowsOverlap(0, ^uint64(0), 5, 1) { // still-resting (exit=max) always overlaps
+	if !windowsOverlap(0, ^uint64(0), 5, 1) {
 		t.Fatal("still-resting liquidity should overlap any window")
 	}
-	if windowsOverlap(5000, ^uint64(0), 100, 50) { // avail entered 5000, after window hi=150
+	if windowsOverlap(5000, ^uint64(0), 100, 50) {
 		t.Fatal("should NOT overlap: avail enter 5000 after window hi 150")
 	}
 }

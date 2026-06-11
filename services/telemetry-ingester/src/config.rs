@@ -18,10 +18,6 @@ pub struct Config {
     pub redis_url: String,
     pub wave_ns: u64,
     pub snapshot_interval_ms: u64,
-    /// This replica's shard identity. Each ingester replica writes its partial
-    /// per-(session,wave) aggregates to metrics_partial tagged with this, so a
-    /// session sharded across replicas produces non-colliding partial rows that the
-    /// rollup merges. Defaults to the pod name (HOSTNAME); INGESTER_SHARD overrides.
     pub shard: String,
 }
 

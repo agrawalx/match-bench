@@ -466,7 +466,7 @@ func (m *Manager) ensureCapture(ctx context.Context, pod *corev1.Pod) error {
 	}
 	name := captureJobName(slotID)
 	if _, err := m.client.BatchV1().Jobs(m.namespace).Get(ctx, name, metav1.GetOptions{}); err == nil {
-		return nil // already created
+		return nil
 	} else if !apierrors.IsNotFound(err) {
 		return fmt.Errorf("get capture job: %w", err)
 	}
@@ -496,8 +496,8 @@ func (m *Manager) captureJobSpec(slotID, contestantID, nodeName, podUID, contain
 	}
 	privileged := true
 	autoMount := false
-	backoffLimit := int32(0) // no retries; a failed attach is reported, not looped
-	ttl := int32(300)        // self-clean finished Jobs after 5 min
+	backoffLimit := int32(0)
+	ttl := int32(300)
 	graceful := int64(5)
 	captureDeadline := captureJobActiveDeadlineSeconds
 	bpffsType := corev1.HostPathDirectoryOrCreate
@@ -535,7 +535,7 @@ func (m *Manager) captureJobSpec(slotID, contestantID, nodeName, podUID, contain
 			Name:            captureJobName(slotID),
 			Namespace:       m.namespace,
 			Labels:          labels,
-			OwnerReferences: ownerRefs, // GC the capture Job when the algo pod is deleted
+			OwnerReferences: ownerRefs,
 		},
 		Spec: batchv1.JobSpec{
 			BackoffLimit:            &backoffLimit,

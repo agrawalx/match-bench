@@ -19,6 +19,11 @@ export const metadata: Metadata = {
     "High-frequency trading algorithm benchmarking competition platform.",
 };
 
+/**
+ * RootLayout wires global providers and the application shell around pages.
+ * It keeps authentication, query state, and navigation available to every
+ * route rendered by the frontend app.
+ */
 export default function RootLayout({
   children,
 }: {

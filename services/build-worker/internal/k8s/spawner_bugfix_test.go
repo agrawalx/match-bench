@@ -301,7 +301,7 @@ func TestSetStatusSurvivesCancelledCtx(t *testing.T) {
 	s := bugfixSpawner(fake.NewSimpleClientset(), rec)
 
 	ctx, cancel := context.WithCancel(context.Background())
-	cancel() // simulate shutdown-cancelled request ctx
+	cancel()
 
 	s.setStatus(ctx, "sub", topics.StatusFailed, "boom")
 

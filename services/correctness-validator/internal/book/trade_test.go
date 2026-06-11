@@ -15,8 +15,8 @@ import (
 // It keeps validation, side effects, and returned values within this package's contract.
 func TestTradesCarryMakerTaker(t *testing.T) {
 	e := NewEngine()
-	e.Process(limit("S1", model.Sell, 100, 10)) // maker rests
-	e.Process(limit("B1", model.Buy, 100, 10))  // taker crosses
+	e.Process(limit("S1", model.Sell, 100, 10))
+	e.Process(limit("B1", model.Buy, 100, 10))
 	tr := e.Trades()
 	if len(tr) != 1 {
 		t.Fatalf("expected 1 trade, got %d: %+v", len(tr), tr)
@@ -34,9 +34,9 @@ func TestTradesCarryMakerTaker(t *testing.T) {
 // It keeps validation, side effects, and returned values within this package's contract.
 func TestTradesPreserveFIFOMakerOrder(t *testing.T) {
 	e := NewEngine()
-	e.Process(limit("S1", model.Sell, 100, 5)) // front
-	e.Process(limit("S2", model.Sell, 100, 5)) // behind S1
-	e.Process(market("B", model.Buy, 8))       // takes all of S1, then 3 of S2
+	e.Process(limit("S1", model.Sell, 100, 5))
+	e.Process(limit("S2", model.Sell, 100, 5))
+	e.Process(market("B", model.Buy, 8))
 	tr := e.Trades()
 	if len(tr) != 2 {
 		t.Fatalf("expected 2 trades, got %d: %+v", len(tr), tr)
@@ -53,8 +53,8 @@ func TestTradesPreserveFIFOMakerOrder(t *testing.T) {
 // It keeps validation, side effects, and returned values within this package's contract.
 func TestRestingSnapshot(t *testing.T) {
 	e := NewEngine()
-	e.Process(limit("S1", model.Sell, 100, 10)) // stays resting (front, seq smaller)
-	e.Process(limit("S2", model.Sell, 100, 10)) // stays resting (behind S1)
+	e.Process(limit("S1", model.Sell, 100, 10))
+	e.Process(limit("S2", model.Sell, 100, 10))
 	rest := e.Resting()
 	r1, ok1 := rest["S1"]
 	r2, ok2 := rest["S2"]

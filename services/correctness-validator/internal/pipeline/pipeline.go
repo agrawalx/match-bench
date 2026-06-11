@@ -34,7 +34,7 @@ func Assemble(sents []topics.OrderSentEvent, ackeds []topics.OrderAckedEvent) ([
 	for id, s := range sentByID {
 		acks := ackedByID[id]
 		if len(acks) == 0 {
-			continue // never delivered
+			continue
 		}
 		first := acks[0]
 		o := &model.Order{

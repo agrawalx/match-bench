@@ -74,8 +74,9 @@ const TIMESCALE_SETUP: &[&str] = &[
         schedule_interval => INTERVAL '10 seconds');",
 ];
 
-// The ingester writes PARTIALS (one row per shard); the rollup merges them into
-// `metrics`. $17 is the shard id.
+/// INSERT_SQL writes per-shard partial rows for later rollup into metrics.
+/// The final values include the shard id so the rollup can merge cumulative
+/// histograms across independent ingester shards.
 const INSERT_SQL: &str = "\
 INSERT INTO metrics_partial
     (time, session_id, contestant_id, wave_index, p50_ns, p90_ns, p99_ns, p999_ns, rt_p50_ns, rt_p90_ns, rt_p99_ns, tps_1s, error_rate, hdr_encoded, rt_hdr_encoded, slip_hdr_encoded, offered, errors, shard)
@@ -85,11 +86,12 @@ VALUES (to_timestamp($1::double precision / 1e9), $2, $3, $4, $5, $6, $7, $8, $9
 /// Keep field changes compatible with callers and serialized contracts.
 pub struct Store {
     pool: Pool,
-    /// This replica's shard id, written into every metrics_partial row.
     shard: String,
 }
 
 impl Store {
+    /// connect opens the Timescale/Postgres pool used by telemetry ingestion.
+    /// It carries the shard id that is written with each partial metrics row.
     pub async fn connect(url: &str, shard: String) -> Result<Self> {
         let pg_config: tokio_postgres::Config = url.parse().context("parse TIMESCALE_URL")?;
         let mgr = deadpool_postgres::Manager::from_config(
@@ -123,7 +125,6 @@ impl Store {
             .batch_execute(ADD_RT_COLUMNS)
             .await
             .context("add response-time columns")?;
-        // metrics_partial as a hypertable (best-effort, like metrics below).
         if let Err(e) = client
             .batch_execute(
                 "SELECT create_hypertable('metrics_partial', 'time', if_not_exists => TRUE, chunk_time_interval => INTERVAL '1 hour');",

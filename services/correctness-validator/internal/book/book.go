@@ -183,7 +183,7 @@ func (e *Engine) matchAndRest(o *model.Order, rest bool) {
 			if maker.remaining == 0 {
 				level.orders = level.orders[1:]
 				delete(e.index, maker.orderID)
-				e.closeAvail(maker, o.EffectiveT3) // maker fully consumed at the aggressor's t3
+				e.closeAvail(maker, o.EffectiveT3)
 			}
 		}
 		if len(level.orders) == 0 {
@@ -258,10 +258,10 @@ func (e *Engine) remove(orderID string, exitT3 uint64) {
 func (e *Engine) replace(o *model.Order) {
 	ro, ok := e.index[o.OrigOrderID]
 	if !ok {
-		return // can't replace an order that isn't resting (already filled/cancelled)
+		return
 	}
 	if o.Price == ro.price && o.Qty <= ro.remaining {
-		ro.remaining = o.Qty // qty-only decrease: keep position
+		ro.remaining = o.Qty
 		if o.OrderID != "" && o.OrderID != ro.orderID {
 			oldID := ro.orderID
 			delete(e.index, oldID)

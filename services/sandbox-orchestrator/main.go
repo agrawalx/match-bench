@@ -36,7 +36,7 @@ func main() {
 
 	port := envOr("PORT", "8080")
 	namespace := envOr("K8S_NAMESPACE", "sandbox")
-	runtimeClass := os.Getenv("RUNTIME_CLASS") // empty in dev k3s; "gvisor" in prod
+	runtimeClass := os.Getenv("RUNTIME_CLASS")
 	algoCPU := envOr("ALGO_CPU", "2")
 	algoMemory := envOr("ALGO_MEMORY", "1Gi")
 	nodePool := os.Getenv("SANDBOX_NODE_POOL")

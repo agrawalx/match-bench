@@ -20,12 +20,14 @@ pub const TOPIC_SCORES_CORRECTNESS: &str = "scores.correctness";
 pub const TOPIC_LEADERBOARD_UPDATES: &str = "leaderboard.updates";
 pub const TELEMETRY_PRICE_SCALE: u64 = 1_000_000_000;
 
+/// partition_for maps an order id onto the Kafka partition contract.
+/// It uses FNV-1a 64-bit hashing so sent and acked producers select the same
+/// partition deterministically for a given order id.
 pub fn partition_for(order_id: &str, num_partitions: i32) -> i32 {
     debug_assert!(num_partitions > 0, "num_partitions must be positive");
     if num_partitions <= 1 {
         return 0;
     }
-    // FNV-1a 64-bit.
     let mut hash: u64 = 0xcbf29ce484222325;
     for byte in order_id.as_bytes() {
         hash ^= u64::from(*byte);
@@ -409,8 +411,9 @@ mod tests {
         assert_eq!(value["ready_at_unix_nanos"], 123);
     }
 
-    // partition_for is the co-partition contract: an order_id maps to exactly one
-    // partition in range, deterministically and identically for both producers.
+    /// partition_for_is_in_range_and_deterministic checks range and stability.
+    /// It protects the producer co-partition contract used by sent and acked
+    /// telemetry topics.
     #[test]
     fn partition_for_is_in_range_and_deterministic() {
         let n = 24;
@@ -418,18 +421,16 @@ mod tests {
             let oid = format!("01890dd2-71f3-7abc-9def-0123456789ab_{}_{}_O", i % 200, i);
             let p = partition_for(&oid, n);
             assert!((0..n).contains(&p), "partition {p} out of range for {oid}");
-            // Deterministic: same input → same partition (both producers must agree).
             assert_eq!(p, partition_for(&oid, n));
         }
     }
 
-    // The same order_id must hash to the same partition regardless of which producer
-    // computes it — this is what co-locates sent⋈acked on one consumer.
+    /// partition_for_same_order_id_same_partition checks repeated hash identity.
+    /// It also verifies that a sample of ids spreads across multiple partitions.
     #[test]
     fn partition_for_same_order_id_same_partition() {
         let oid = "01890dd2-71f3-7abc-9def-0123456789ab_42_99_O";
         assert_eq!(partition_for(oid, 24), partition_for(oid, 24));
-        // Different order ids should not all collapse to one partition.
         let mut seen = std::collections::HashSet::new();
         for i in 0..1000 {
             seen.insert(partition_for(&format!("ord_{i}"), 24));
@@ -441,14 +442,15 @@ mod tests {
         );
     }
 
-    // Degenerate partition counts must not panic or divide by zero.
+    /// partition_for_handles_single_partition checks the degenerate partition case.
+    /// It ensures single-partition topics always map to partition zero.
     #[test]
     fn partition_for_handles_single_partition() {
         assert_eq!(partition_for("anything", 1), 0);
     }
 
-    // barrier_epoch_ns must round-trip through the msgpack-named wire format the
-    // producers and ingester use.
+    /// order_sent_event_barrier_epoch_round_trips checks msgpack compatibility.
+    /// It ensures barrier_epoch_ns survives the named-field wire format.
     #[test]
     fn order_sent_event_barrier_epoch_round_trips() {
         let ev = OrderSentEvent {
@@ -475,12 +477,11 @@ mod tests {
         assert_eq!(back.order_id, ev.order_id);
     }
 
-    // Deploy-compat: a message encoded WITHOUT barrier_epoch_ns (a pre-field
-    // producer) must still decode, defaulting the new field to 0 — so a rolling
-    // upgrade where old workers and new ingesters coexist does not break decoding.
+    /// order_sent_event_decodes_pre_field_message checks rolling upgrade safety.
+    /// It decodes an old producer payload without barrier_epoch_ns and verifies
+    /// the new field defaults cleanly.
     #[test]
     fn order_sent_event_decodes_pre_field_message() {
-        // Mirror of OrderSentEvent without the new field (an "old" producer).
         #[derive(Serialize)]
         struct OldOrderSentEvent {
             session_id: String,

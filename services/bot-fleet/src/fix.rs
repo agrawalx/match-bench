@@ -37,7 +37,7 @@ pub struct OrderFrame {
     pub fix: Vec<u8>,
     pub rest: Vec<u8>,
     pub ws_bytes: Vec<u8>,
-    pub tag52_offset: Option<usize>, // where timestamp bytes start in `fix` for in-place patching
+    pub tag52_offset: Option<usize>,
     pub payload_type: PayloadType,
     pub ord_type: OrdType,
 }
@@ -338,7 +338,7 @@ pub fn market_frame(
         bot_id,
         seq,
         None,
-        0, // market orders carry no price
+        0,
         qty,
         side,
         FrameKind::Market,
@@ -618,7 +618,7 @@ mod tests {
         );
         assert!(embedded_checksum_is_valid(&frame.fix));
 
-        let ns = 1_716_023_400_123_000_000_u64; // 2024-05-18T08:30:00.123Z
+        let ns = 1_716_023_400_123_000_000_u64;
         frame.patch_timestamp(ns);
 
         let expected = time::format_fix_timestamp(ns);

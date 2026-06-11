@@ -22,7 +22,7 @@ import (
 // It keeps validation, side effects, and returned values within this package's contract.
 func TestSessionStartFromID(t *testing.T) {
 	const id = "019e8a61-64f4-7383-b63d-728af69ca072"
-	const wantMS = int64(0x019e8a6164f4) // 1780438099188
+	const wantMS = int64(0x019e8a6164f4)
 
 	got, ok := sessionStartFromID(id)
 	if !ok {
@@ -155,7 +155,7 @@ func TestAckedCollectorDedup(t *testing.T) {
 	const sid = "sess-dedup"
 	fill := topics.OrderAckedEvent{SessionID: sid, OrderID: "A", ExecType: "2", FillQty: 5, FillPrice: 100, T7XDPEgressNS: 1000}
 	otherT7 := fill
-	otherT7.T7XDPEgressNS = 2000 // second partial fill: same order+exec, later egress
+	otherT7.T7XDPEgressNS = 2000
 	otherExec := fill
 	otherExec.ExecType = "1"
 	otherOrder := fill

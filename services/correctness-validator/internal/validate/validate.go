@@ -59,7 +59,7 @@ type Report struct {
 // It keeps validation, side effects, and returned values within this package's contract.
 func (r Report) CorrectnessScore() float64 {
 	if r.TotalFills == 0 {
-		return 1.0 // nothing to get wrong
+		return 1.0
 	}
 	return float64(r.ValidFills) / float64(r.TotalFills)
 }
@@ -251,7 +251,7 @@ func selfTrade(tradesByOrder map[string][]book.Trade, orderID string, price int6
 func queueJump(e *book.Engine, orderByID map[string]*model.Order, o *model.Order, price int64) (string, bool) {
 	mySeq, ok := e.SeqOf(o.OrderID)
 	if !ok {
-		return "", false // o never rested in the reference book, so it never queued
+		return "", false
 	}
 	var (
 		best    string
@@ -264,10 +264,10 @@ func queueJump(e *book.Engine, orderByID map[string]*model.Order, o *model.Order
 		}
 		otherSeq, ok := e.SeqOf(id)
 		if !ok || otherSeq >= mySeq {
-			continue // not earlier in the queue
+			continue
 		}
 		if replay.CrossFlowTie(o, other) {
-			continue // cross-flow tie within tolerance: contestant free to order either way
+			continue
 		}
 		if !found || otherSeq < bestSeq || (otherSeq == bestSeq && id < best) {
 			best, bestSeq, found = id, otherSeq, true

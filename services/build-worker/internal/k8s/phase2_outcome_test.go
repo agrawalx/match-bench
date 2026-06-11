@@ -54,8 +54,8 @@ func TestPhase2Outcome_BothSucceed_ReturnsAllStatuses(t *testing.T) {
 func TestPhase2Outcome_PartialFailure_PublishesNoSuccessStatus(t *testing.T) {
 	sbomErr := errors.New("sbom: job timed out")
 	oks, err := phase2Outcome(
-		closedStatuses(topics.StatusScanned), // scan succeeded
-		closedErrs(sbomErr),                  // sbom failed
+		closedStatuses(topics.StatusScanned),
+		closedErrs(sbomErr),
 	)
 	if err == nil {
 		t.Fatal("expected an error from the failed sbom job")

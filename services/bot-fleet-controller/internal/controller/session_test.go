@@ -22,7 +22,7 @@ func TestSessionManagerAddIsIdempotent(t *testing.T) {
 		t.Fatalf("first Add: existed=%v got=%v", existed, got)
 	}
 
-	s2 := newTestSession("sess-A") // same id, different pointer
+	s2 := newTestSession("sess-A")
 	got, existed = m.Add(s2)
 	if !existed {
 		t.Fatalf("expected second Add to report existed")

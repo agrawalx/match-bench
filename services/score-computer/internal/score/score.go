@@ -390,7 +390,7 @@ func spikeRecoveryNS(sessions []Session, waveDurationNS uint64) uint64 {
 		}
 	}
 	if peakP99 <= threshold {
-		return 0 // never rose meaningfully above baseline
+		return 0
 	}
 	for _, w := range waves {
 		if w > peakWave && sum[w].MaxP99NS <= threshold {

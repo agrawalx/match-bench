@@ -31,7 +31,7 @@ func New(brokers string) *Publisher {
 			Addr:                   kafka.TCP(list...),
 			Topic:                  topics.TopicScoresCorrectness,
 			Balancer:               &kafka.LeastBytes{},
-			RequiredAcks:           kafka.RequireAll, // control-plane durability
+			RequiredAcks:           kafka.RequireAll,
 			AllowAutoTopicCreation: false,
 			WriteTimeout:           10 * time.Second,
 		},

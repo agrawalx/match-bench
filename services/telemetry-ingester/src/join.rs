@@ -102,7 +102,7 @@ mod tests {
     fn observe_keeps_max_last_activity() {
         let mut t = FirstResponseTracker::new();
         t.observe("o1", 500);
-        t.observe("o1", 100); // out-of-order/older timestamp must not lower last-seen
+        t.observe("o1", 100);
         assert_eq!(t.evict_idle(750, 300), 0);
     }
 }

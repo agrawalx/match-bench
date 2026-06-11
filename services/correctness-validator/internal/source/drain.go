@@ -101,17 +101,19 @@ func (c *ackedCollector) handle(m kafka.Message) {
 // DrainSession performs the package-specific operation described by its name.
 // It keeps validation, side effects, and returned values within this package's contract.
 func DrainSession(ctx context.Context, brokers []string, sessionID string) ([]topics.OrderSentEvent, []topics.OrderAckedEvent, error) {
-	// orders.sent and orders.acked are independent topics drained into separate
-	// collectors, so drain them concurrently — halving wall-clock, which matters
-	// because each topic's drain is already a multi-partition fan-out bounded by
-	// the validation deadline.
 	sc := &sentCollector{sessionID: sessionID}
 	ac := newAckedCollector(sessionID)
 	var sentErr, ackedErr error
 	var wg sync.WaitGroup
 	wg.Add(2)
-	go func() { defer wg.Done(); sentErr = drainTopic(ctx, brokers, topics.TopicOrdersSent, sessionID, sc.handle) }()
-	go func() { defer wg.Done(); ackedErr = drainTopic(ctx, brokers, topics.TopicOrdersAcked, sessionID, ac.handle) }()
+	go func() {
+		defer wg.Done()
+		sentErr = drainTopic(ctx, brokers, topics.TopicOrdersSent, sessionID, sc.handle)
+	}()
+	go func() {
+		defer wg.Done()
+		ackedErr = drainTopic(ctx, brokers, topics.TopicOrdersAcked, sessionID, ac.handle)
+	}()
 	wg.Wait()
 	if sentErr != nil {
 		return nil, nil, fmt.Errorf("drain orders.sent: %w", sentErr)
@@ -127,8 +129,7 @@ func DrainSession(ctx context.Context, brokers []string, sessionID string) ([]to
 	return sc.events, ac.events, nil
 }
 
-// drainPartitionConcurrency bounds how many partition readers run at once. 
-
+// drainPartitionConcurrency bounds how many partition readers run at once.
 const drainPartitionConcurrency = 12
 
 // drainTopic performs the package-specific operation described by its name.
@@ -147,14 +148,9 @@ func drainTopic(ctx context.Context, brokers []string, topic, sessionID string, 
 		return fmt.Errorf("read partitions for %s: %w", topic, err)
 	}
 
-	// Cancel sibling readers as soon as one fails so a single partition error
-	// doesn't leave the rest draining to the deadline.
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	// handle mutates shared collector state and is not safe for concurrent use;
-	// serialize the (cheap) per-message append behind a mutex while the (slow)
-	// network reads run in parallel.
 	var mu sync.Mutex
 	guarded := func(m kafka.Message) {
 		mu.Lock()
@@ -206,7 +202,7 @@ func drainPartition(ctx context.Context, brokers []string, topic string, partiti
 		return err
 	}
 	if start >= last {
-		return nil // nothing in [start, watermark) — empty partition or no events in the session window
+		return nil
 	}
 	r := kafka.NewReader(kafka.ReaderConfig{
 		Brokers:   brokers,
@@ -225,7 +221,7 @@ func drainPartition(ctx context.Context, brokers []string, topic string, partiti
 			return fmt.Errorf("read %s/%d: %w", topic, partition, err)
 		}
 		handle(m)
-		if m.Offset >= last-1 { // reached the snapshotted watermark
+		if m.Offset >= last-1 {
 			break
 		}
 	}
@@ -287,17 +283,17 @@ func sessionStartFromID(sessionID string) (time.Time, bool) {
 	}
 	raw, err := hex.DecodeString(hexDigits)
 	if err != nil {
-		return time.Time{}, false // not a hex UUID (e.g. synthetic "itest-..." id)
+		return time.Time{}, false
 	}
 	if raw[6]>>4 != 7 {
 		return time.Time{}, false
 	}
 	var ms int64
-	for _, b := range raw[:6] { // first 48 bits, big-endian
+	for _, b := range raw[:6] {
 		ms = ms<<8 | int64(b)
 	}
 	if ms <= 0 {
-		return time.Time{}, false // implausible / zero timestamp — don't trust it
+		return time.Time{}, false
 	}
 	return time.UnixMilli(ms), true
 }

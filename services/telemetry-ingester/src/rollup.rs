@@ -1,19 +1,8 @@
-//! Stage-2 rollup: merges the per-shard partial aggregates written by the
-//! (horizontally scaled) ingester replicas into the canonical `metrics` table the
-//! readers consume.
+//! This module implements rollup behavior.
 //!
-//! Why a rollup at all: once a session is sharded across ingester replicas (by
-//! order_id partition), each replica only sees a SUBSET of the session's orders,
-//! so each writes a PARTIAL per-(session,wave) aggregate to `metrics_partial`,
-//! tagged with its shard id. A percentile cannot be averaged across shards, so we
-//! merge the underlying HDR sketches (lossless bucket addition) — done here, in
-//! the same crate that produced them, so the V2-deflate decode is native and
-//! exact. tps_1s sums across shards; error_rate is recomputed from summed
-//! offered/errors counts (a ratio can't be averaged).
-//!
-//! The merge runs over 1-second time buckets and is light: its input is the
-//! compact per-second per-shard partials, not the raw order firehose — so a single
-//! rollup keeps up, and if it ever needed to scale it shards cleanly by session_id.
+//! It belongs to the IICPC benchmarking platform and should keep its
+//! behavior consistent with the service contracts documented in design.md.
+//! The comments in this file describe public structure and callable behavior.
 
 use anyhow::{Context, Result};
 use hdrhistogram::serialization::Deserializer;
@@ -68,6 +57,9 @@ fn decode_into(acc: &mut Histogram<u64>, blob: &[u8]) {
     }
 }
 
+/// merge_one combines serialized HDR histograms into one accumulator.
+/// It skips invalid or empty blobs through decode_into and returns the merged
+/// histogram for percentile extraction.
 fn merge_one<'a>(blobs: impl Iterator<Item = &'a [u8]>) -> Histogram<u64> {
     let mut acc = new_hist();
     for blob in blobs {
@@ -126,31 +118,17 @@ pub fn merge_partials(rows: &[PartialRow]) -> Merged {
     build_merged(&svc, &rt, &slip, tps_1s, offered, errors)
 }
 
-/// roll_wave_buckets turns ONE wave's full partial history (all shards, all
-/// seconds, sorted ascending by bucket_ns) into the per-second `metrics` rows.
-///
-/// The histograms are CUMULATIVE per wave but each shard flushes on its own phase,
-/// so a given second may carry a partial from only SOME shards — and the shards
-/// even FINISH the wave in different seconds. Summing only the partials present in
-/// a bucket would therefore drop the absent shards' cumulative contribution (the
-/// last row of a wave could end up holding a single shard — the bug this fixes).
-/// Instead we carry each shard's LATEST cumulative blob forward (LOCF): a bucket's
-/// histograms = the merge of every shard's most-recent cumulative blob at-or-before
-/// that bucket. The final bucket therefore always reconstructs the whole wave
-/// across all shards. Counts (tps/offered/errors) are PER-INTERVAL, so they are
-/// summed over only the partials actually in that bucket (an absent shard
-/// contributed nothing that second).
+/// roll_wave_buckets converts a wave's partial history into metrics rows.
+/// It carries each shard's latest cumulative histograms forward while summing
+/// per-bucket interval counters.
 pub fn roll_wave_buckets(parts: &[PartialRow]) -> Vec<(i64, Merged)> {
     use std::collections::BTreeMap;
-    // shard -> its latest cumulative (svc, rt, slip) blobs seen so far.
     let mut latest: BTreeMap<String, (Vec<u8>, Vec<u8>, Vec<u8>)> = BTreeMap::new();
     let mut out = Vec::new();
     let mut i = 0;
     while i < parts.len() {
         let bucket_ns = parts[i].bucket_ns;
         let (mut tps, mut offered, mut errors) = (0.0f64, 0u64, 0u64);
-        // Fold every partial in this bucket: update its shard's carry-forward
-        // blobs, and sum its per-interval counts.
         while i < parts.len() && parts[i].bucket_ns == bucket_ns {
             let r = &parts[i];
             tps += r.tps_1s;
@@ -203,11 +181,17 @@ ON CONFLICT (time, session_id, wave_index) DO UPDATE SET
 const METRICS_UNIQUE_INDEX: &str =
     "CREATE UNIQUE INDEX IF NOT EXISTS metrics_session_wave_time ON metrics (time, session_id, wave_index);";
 
+/// Rollup stores the database pool used to merge partial telemetry rows.
+/// It owns schema setup and periodic aggregation from metrics_partial into the
+/// canonical metrics table.
 pub struct Rollup {
     pool: Pool,
 }
 
 impl Rollup {
+    /// connect opens the database pool used by rollup processing.
+    /// It parses TIMESCALE_URL-compatible connection strings and configures a
+    /// small async pool for periodic aggregation.
     pub async fn connect(url: &str) -> Result<Self> {
         let pg_config: tokio_postgres::Config = url.parse().context("parse TIMESCALE_URL")?;
         let mgr = deadpool_postgres::Manager::from_config(
@@ -225,6 +209,8 @@ impl Rollup {
         Ok(Self { pool })
     }
 
+    /// ensure_schema creates indexes required by idempotent rollup writes.
+    /// It prepares the metrics table conflict target before rollup cycles run.
     pub async fn ensure_schema(&self) -> Result<()> {
         let client = self.pool.get().await.context("get rollup conn")?;
         client
@@ -235,18 +221,11 @@ impl Rollup {
     }
 
     /// Roll up every (session, wave) that has a new partial in (from_ns, to_ns].
-    /// Because the histograms are CUMULATIVE per wave and shards flush on different
-    /// phases (and finish in different seconds), a correct bucket needs each shard's
-    /// latest cumulative blob carried forward — which needs the wave's FULL partial
-    /// history, not just this window's slice. So we use the window only to find
-    /// which waves changed, then reload each changed wave end-to-end and recompute
-    /// all its buckets via [`roll_wave_buckets`]. The upsert is idempotent (keyed on
-    /// (time, session, wave)), so recomputing a wave every tick while it streams is
-    /// safe; at benchmark scale a wave is ~20s of compact per-second partials.
-    /// Returns the number of merged rows written.
+    /// roll_window recomputes changed waves and writes merged metrics rows.
+    /// It uses the time window to find touched waves, then reloads each wave's
+    /// partial history so roll_wave_buckets can preserve shard carry-forward state.
     pub async fn roll_window(&self, from_ns: u64, to_ns: u64) -> Result<usize> {
         let client = self.pool.get().await.context("get rollup conn")?;
-        // Which (session, wave) changed in this window?
         let touched = client
             .query(
                 "SELECT DISTINCT session_id, wave_index FROM metrics_partial \
@@ -268,8 +247,6 @@ impl Rollup {
         for t in &touched {
             let session_id: String = t.get(0);
             let wave_index: i32 = t.get(1);
-            // Full partial history for this wave, ordered so roll_wave_buckets sees
-            // buckets ascending (and rows within a bucket in flush order).
             let rows = client
                 .query(
                     "SELECT (EXTRACT(EPOCH FROM date_trunc('second', time)) * 1e9)::bigint AS bucket_ns, \
@@ -332,25 +309,16 @@ impl Rollup {
     }
 }
 
-/// run is the rollup service loop: every `interval`, merge the newly-sealed buckets.
+/// run drives the rollup service loop on a fixed interval.
+/// It merges newly sealed buckets and advances the watermark only after a
+/// successful database write.
 pub async fn run(timescale_url: &str, interval: std::time::Duration) -> Result<()> {
     let rollup = Rollup::connect(timescale_url).await?;
     rollup.ensure_schema().await?;
-    // Start a little in the past so a fresh rollup picks up an in-flight run.
     let mut watermark_ns = floor_to_second(now_ns().saturating_sub(60_000_000_000));
     let mut ticker = tokio::time::interval(interval);
     loop {
         ticker.tick().await;
-        // Floor the window edge to a whole second. A bucket's per-shard partials
-        // are written at DIFFERENT sub-second offsets within their second (each
-        // replica flushes on its own phase), and roll_window buckets by
-        // date_trunc('second'). If a window edge fell mid-second it would split
-        // one shard into this tick and the other into the next — and the
-        // ON CONFLICT upsert REPLACES the row, so the bucket would keep only the
-        // last shard (silently dropping the others' orders). Second-aligned edges
-        // guarantee every shard for a given second lands in the same window, so
-        // merge_partials sees them all. (ROLLUP_LAG_NS still ensures the second is
-        // sealed before we cross its boundary.)
         let sealed_to = floor_to_second(now_ns().saturating_sub(ROLLUP_LAG_NS));
         if sealed_to <= watermark_ns {
             continue;
@@ -365,6 +333,9 @@ pub async fn run(timescale_url: &str, interval: std::time::Duration) -> Result<(
     }
 }
 
+/// now_ns returns the current Unix time in nanoseconds.
+/// It falls back to zero if the system clock cannot be represented as a
+/// positive duration since the Unix epoch.
 fn now_ns() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -372,10 +343,13 @@ fn now_ns() -> u64 {
         .unwrap_or(0)
 }
 
-/// Round a nanosecond instant DOWN to the start of its second. Window edges must
-/// be second-aligned so a bucket's per-shard partials are never split across two
-/// rollup ticks (see run()).
+/// NS_PER_SEC is the nanosecond scale used for rollup bucket alignment.
+/// Keeping it as a constant makes floor_to_second's boundary math explicit.
 const NS_PER_SEC: u64 = 1_000_000_000;
+
+/// floor_to_second rounds a nanosecond instant down to the start of its second.
+/// It keeps rollup windows second-aligned so per-shard partials stay in the
+/// same bucket.
 fn floor_to_second(ns: u64) -> u64 {
     (ns / NS_PER_SEC) * NS_PER_SEC
 }
@@ -385,6 +359,8 @@ mod tests {
     use super::*;
     use crate::aggregate::{new_hist, serialize_hist};
 
+    /// blob_from serializes sample values into the HDR format used by rows.
+    /// It builds realistic test blobs for merge and rollup assertions.
     fn blob_from(samples: &[u64]) -> Vec<u8> {
         let mut h = new_hist();
         for &s in samples {
@@ -393,6 +369,9 @@ mod tests {
         serialize_hist(&h)
     }
 
+    /// partial creates a minimal PartialRow for merge unit tests.
+    /// It fills service-time histograms while leaving response-time and slip
+    /// histograms empty.
     fn partial(tps: f64, offered: u64, errors: u64, svc: &[u64]) -> PartialRow {
         PartialRow {
             shard: String::new(),
@@ -406,9 +385,9 @@ mod tests {
         }
     }
 
-    // Build a per-shard cumulative partial for a given bucket. svc is the shard's
-    // CUMULATIVE sample set as of this bucket (mirrors the real ingester, whose
-    // per-wave histogram only grows).
+    /// shard_partial creates a cumulative per-shard partial for a bucket.
+    /// It mirrors the ingester behavior where each shard's per-wave histogram
+    /// only grows across flushes.
     fn shard_partial(
         shard: &str,
         bucket_ns: i64,
@@ -428,10 +407,9 @@ mod tests {
         }
     }
 
-    // The merged percentile must equal the percentile of the COMBINED raw samples
-    // — i.e. merging the per-shard HDR sketches is lossless. We compare against a
-    // single histogram built from all samples (HDR p99 is bucketed, so compare the
-    // sketch values, not raw quantiles).
+    /// merge_partials_equals_combined_histogram checks lossless HDR merging.
+    /// It compares merged shard sketches against one histogram built from all
+    /// raw samples.
     #[test]
     fn merge_partials_equals_combined_histogram() {
         let shard_a = vec![100u64, 200, 300, 400, 500];
@@ -439,7 +417,6 @@ mod tests {
 
         let merged = merge_partials(&[partial(5.0, 5, 1, &shard_a), partial(5.0, 5, 0, &shard_b)]);
 
-        // Reference: one histogram with ALL samples.
         let mut all = new_hist();
         for &s in shard_a.iter().chain(shard_b.iter()) {
             let _ = all.record(s);
@@ -448,28 +425,28 @@ mod tests {
         assert_eq!(merged.p99_ns, all.value_at_quantile(0.99));
         assert_eq!(merged.p999_ns, all.value_at_quantile(0.999));
 
-        // tps_1s sums; error_rate = Σerrors/Σoffered = 1/10.
         assert_eq!(merged.tps_1s, 10.0);
         assert!((merged.error_rate - 0.1).abs() < 1e-9);
 
-        // The merged blob re-decodes to the same distribution.
         let mut acc = new_hist();
         decode_into(&mut acc, &merged.hdr_encoded);
         assert_eq!(acc.value_at_quantile(0.99), all.value_at_quantile(0.99));
         assert_eq!(acc.len(), 10);
     }
 
-    // No offered → error_rate is 0, not NaN; empty/missing HDR blobs are tolerated.
+    /// merge_partials_handles_empty_and_zero_offered checks empty inputs.
+    /// It ensures absent offers produce a zero error rate and empty histograms do
+    /// not fail merging.
     #[test]
     fn merge_partials_handles_empty_and_zero_offered() {
         let merged = merge_partials(&[PartialRow::default(), partial(0.0, 0, 0, &[])]);
         assert_eq!(merged.error_rate, 0.0);
         assert_eq!(merged.tps_1s, 0.0);
-        // Empty histogram percentile is 0, not a panic.
         assert_eq!(merged.p99_ns, 0);
     }
 
-    // A single shard (the single-replica case) must pass through unchanged.
+    /// merge_partials_single_shard_is_identity checks the single-replica path.
+    /// It ensures a one-shard rollup preserves percentile and counter values.
     #[test]
     fn merge_partials_single_shard_is_identity() {
         let samples = vec![10u64, 20, 30, 40, 50, 999];
@@ -483,42 +460,39 @@ mod tests {
         assert!((merged.error_rate - (2.0 / 6.0)).abs() < 1e-9);
     }
 
-    // decoded count of a merged blob (proxy for "how many orders this row covers").
+    /// blob_count returns the decoded sample count from a merged HDR blob.
+    /// It acts as a compact proxy for how many orders a row covers.
     fn blob_count(blob: &[u8]) -> u64 {
         let mut h = new_hist();
         decode_into(&mut h, blob);
         h.len()
     }
+
+    /// blob_max returns the maximum decoded sample in a merged HDR blob.
+    /// It checks whether carried-forward shard tails survive rollup.
     fn blob_max(blob: &[u8]) -> u64 {
         let mut h = new_hist();
         decode_into(&mut h, blob);
         h.max()
     }
 
-    // THE bug this fixes: two shards flush a wave on different phases and FINISH in
-    // different seconds. Shard Y's last partial is at bucket 1; shard X keeps going
-    // to bucket 2. A naive per-bucket sum would make bucket 2 hold only X (Y
-    // dropped) — so the wave's final row (what the frontend shows) loses half the
-    // orders. LOCF carries Y's last cumulative forward, so the final bucket
-    // reconstructs the whole wave across both shards.
+    /// roll_wave_buckets_carries_forward_a_shard_that_finished_earlier protects LOCF.
+    /// It verifies the final wave bucket reconstructs all shards even when one
+    /// shard stops flushing earlier than another.
     #[test]
     fn roll_wave_buckets_carries_forward_a_shard_that_finished_earlier() {
-        // Cumulative-per-shard: X grows 2→3 samples; Y stops at 2 samples (bucket 1).
         let parts = vec![
-            shard_partial("Y", 1, 2.0, 2, &[400, 500]), // Y's first & LAST flush
+            shard_partial("Y", 1, 2.0, 2, &[400, 500]),
             shard_partial("X", 1, 2.0, 2, &[100, 200]),
-            shard_partial("X", 2, 1.0, 1, &[100, 200, 300]), // X continues; Y absent here
+            shard_partial("X", 2, 1.0, 1, &[100, 200, 300]),
         ];
         let rows = roll_wave_buckets(&parts);
         assert_eq!(rows.len(), 2, "one row per bucket");
 
-        // Bucket 1: both shards present → 4 orders.
         let (b1, m1) = &rows[0];
         assert_eq!(*b1, 1);
         assert_eq!(blob_count(&m1.hdr_encoded), 4);
 
-        // Bucket 2 (the wave's FINAL row): X's 3 + Y's carried-forward 2 = 5, and Y's
-        // tail (500) must still be present. The pre-fix code returned 3 here.
         let (b2, m2) = &rows[1];
         assert_eq!(*b2, 2);
         assert_eq!(
@@ -532,23 +506,24 @@ mod tests {
             "Y's tail must survive into the final bucket"
         );
 
-        // Counts are PER-INTERVAL (not carried): bucket 2 had only X's interval.
         assert_eq!(m2.tps_1s, 1.0);
     }
 
-    // Window edges must snap to whole seconds so a second's per-shard partials
-    // (written at differing sub-second offsets) never split across two ticks.
+    /// floor_to_second_snaps_down_to_second_boundary checks window alignment.
+    /// It prevents sub-second partials from being split across neighboring
+    /// rollup ticks.
     #[test]
     fn floor_to_second_snaps_down_to_second_boundary() {
         assert_eq!(floor_to_second(0), 0);
         assert_eq!(floor_to_second(NS_PER_SEC - 1), 0);
         assert_eq!(floor_to_second(NS_PER_SEC), NS_PER_SEC);
-        // 22:58:56.516806 → 22:58:56.000000 and 22:58:56.106774 → same bucket.
         let s = 56 * NS_PER_SEC;
         assert_eq!(floor_to_second(s + 106_774_000), s);
         assert_eq!(floor_to_second(s + 516_806_000), s);
     }
 
+    /// unhex decodes compact hexadecimal fixtures into bytes.
+    /// It supports ignored tests that compare production HDR blobs.
     fn unhex(s: &str) -> Vec<u8> {
         let s = s.trim();
         (0..s.len())
@@ -557,6 +532,8 @@ mod tests {
             .collect()
     }
 
+    /// pcts prints useful percentile diagnostics for ignored tail checks.
+    /// It is only used during explicit debugging runs with production blobs.
     fn pcts(label: &str, h: &Histogram<u64>) {
         eprintln!(
             "{label}: count={} max={:.3}ms p50={:.3} p90={:.3} p99={:.3} p99.9={:.3} p99.99={:.3} (ms)",
@@ -570,24 +547,18 @@ mod tests {
         );
     }
 
-    // Real-data tail check (run with the production blobs in env). Proves the
-    // rollup's cross-shard merge preserves the response-time tail (p99/p99.9/p99.99)
-    // bit-for-bit vs an independent merge of the same per-shard partials, and that
-    // nothing is clipped at the 60s HDR ceiling. Ignored by default; invoke with:
-    //   HDR_MERGED_HEX=<metrics.rt_hdr_encoded hex>
-    //   HDR_SHARDS_HEX=<shardA hex>,<shardB hex>
-    //   cargo test -p iicpc-telemetry-ingester rt_tail_matches_shard_merge -- --ignored --nocapture
+    /// rt_tail_matches_shard_merge checks production response-time tail blobs.
+    /// It is ignored by default and compares merged metrics against independent
+    /// per-shard HDR merges supplied through environment variables.
     #[test]
     #[ignore]
     fn rt_tail_matches_shard_merge() {
         let merged_hex = std::env::var("HDR_MERGED_HEX").expect("HDR_MERGED_HEX");
         let shards_hex = std::env::var("HDR_SHARDS_HEX").expect("HDR_SHARDS_HEX");
 
-        // The blob the rollup actually stored in `metrics` (what the frontend decodes).
         let mut from_metrics = new_hist();
         decode_into(&mut from_metrics, &unhex(&merged_hex));
 
-        // Independent re-merge of the per-shard partials (ground truth).
         let mut from_shards = new_hist();
         for h in shards_hex.split(',') {
             decode_into(&mut from_shards, &unhex(h));
@@ -596,7 +567,6 @@ mod tests {
         pcts("metrics(rollup) ", &from_metrics);
         pcts("shards(reference)", &from_shards);
 
-        // Lossless: every quantile of the stored blob equals the reference merge.
         for q in [0.50, 0.90, 0.99, 0.999, 0.9999, 1.0] {
             assert_eq!(
                 from_metrics.value_at_quantile(q),
@@ -605,13 +575,11 @@ mod tests {
             );
         }
         assert_eq!(from_metrics.len(), from_shards.len(), "total count differs");
-        // Heavy tail must actually be present (p99 < p99.9 < p99.99), i.e. not flattened.
         assert!(
             from_metrics.value_at_quantile(0.99) <= from_metrics.value_at_quantile(0.999)
                 && from_metrics.value_at_quantile(0.999) <= from_metrics.value_at_quantile(0.9999),
             "tail not monotonic — distribution flattened"
         );
-        // Nothing parked at the 60s ceiling (would mean clipped/dropped samples).
         const HDR_CEIL_NS: u64 = 60_000_000_000;
         assert!(
             from_metrics.max() < HDR_CEIL_NS,

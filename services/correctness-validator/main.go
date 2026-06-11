@@ -308,7 +308,7 @@ func (v *validator) runStatusConsumer(ctx context.Context, brokers []string, gro
 		MinBytes:       1,
 		MaxBytes:       1 << 20,
 		MaxWait:        200 * time.Millisecond,
-		CommitInterval: 0, // manual commit
+		CommitInterval: 0,
 		StartOffset:    kafka.FirstOffset,
 	})
 	defer reader.Close()
@@ -325,7 +325,7 @@ func (v *validator) runStatusConsumer(ctx context.Context, brokers []string, gro
 		var ev topics.BenchmarkStatusUpdated
 		if err := json.Unmarshal(m.Value, &ev); err != nil {
 			v.log.Error("unmarshal benchmark.status.updated", "error", err)
-			_ = reader.CommitMessages(ctx, m) // poison message — don't block the partition
+			_ = reader.CommitMessages(ctx, m)
 			continue
 		}
 		if ev.Status == topics.RunStatusCompleted {
@@ -334,7 +334,7 @@ func (v *validator) runStatusConsumer(ctx context.Context, brokers []string, gro
 			cancel()
 			if err != nil {
 				if ctx.Err() != nil {
-					return // shutdown: leave uncommitted for redelivery
+					return
 				}
 				if errors.Is(err, context.DeadlineExceeded) {
 					fallbackCtx, fallbackCancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -352,7 +352,7 @@ func (v *validator) runStatusConsumer(ctx context.Context, brokers []string, gro
 			}
 			if err != nil {
 				v.log.Error("validate session; will retry on redelivery", "session_id", ev.SessionID, "error", err)
-				continue // do NOT commit — retry on next poll / redelivery
+				continue
 			}
 		}
 		if err := reader.CommitMessages(ctx, m); err != nil {

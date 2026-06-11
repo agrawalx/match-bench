@@ -22,21 +22,14 @@ type Session struct {
 	SubmissionID string
 	ContestantID string
 	RunGroupID   string // parent group; included on every status update for rollup
-
 	Status  string // mirrors topics.RunStatus*
 	Message string
-
 	SlotID   string
 	Endpoint *orchestrator.Endpoint
-
 	WorkerCount uint32
-
 	ReadyReceived map[uint32]topics.ReadySignal
-
 	readyCh chan topics.ReadySignal
-
 	cancel context.CancelFunc
-
 	CreatedAt time.Time
 }
 

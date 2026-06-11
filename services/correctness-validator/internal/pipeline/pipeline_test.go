@@ -37,13 +37,13 @@ func TestEndToEndCleanSessionWithPhantomAndExcludedOrder(t *testing.T) {
 	sents := []topics.OrderSentEvent{
 		sent("B1", "BUY", "NEW", "LIMIT", 100, 10),
 		sent("S1", "SELL", "NEW", "LIMIT", 100, 10),
-		sent("NOACK", "BUY", "NEW", "LIMIT", 100, 5), // sent but never delivered (no acked)
+		sent("NOACK", "BUY", "NEW", "LIMIT", 100, 5),
 	}
 	fp := 100 * topics.TelemetryPriceScale
 	ackeds := []topics.OrderAckedEvent{
 		acked("B1", 5, 1, 10, "2", 10, fp),
 		acked("S1", 5, 2, 10, "2", 10, fp),
-		acked("ghost", 5, 3, 10, "2", 5, fp), // never sent -> phantom
+		acked("ghost", 5, 3, 10, "2", 5, fp),
 	}
 
 	orders, phantoms := Assemble(sents, ackeds)
@@ -73,13 +73,13 @@ func TestRunCountsTelemetryCompleteness(t *testing.T) {
 	sents := []topics.OrderSentEvent{
 		sent("B1", "BUY", "NEW", "LIMIT", 100, 10),
 		sent("S1", "SELL", "NEW", "LIMIT", 100, 10),
-		sent("NOACK", "BUY", "NEW", "LIMIT", 100, 5), // lost/absent ack -> not matched
+		sent("NOACK", "BUY", "NEW", "LIMIT", 100, 5),
 	}
 	ackeds := []topics.OrderAckedEvent{
-		acked("B1", 5, 1, 10, "0", 0, 0), // two responses for B1: one order, two acked events
+		acked("B1", 5, 1, 10, "0", 0, 0),
 		acked("B1", 5, 1, 10, "2", 10, fp),
 		acked("S1", 5, 2, 10, "2", 10, fp),
-		acked("ghost", 5, 3, 10, "2", 5, fp), // never sent -> counted as acked, not matched
+		acked("ghost", 5, 3, 10, "2", 5, fp),
 	}
 
 	_, counts, _ := Run(sents, ackeds)
@@ -96,15 +96,15 @@ func TestRunCountsTelemetryCompleteness(t *testing.T) {
 // TestRunScaledPriceDomain performs the package-specific operation described by its name.
 // It keeps validation, side effects, and returned values within this package's contract.
 func TestRunScaledPriceDomain(t *testing.T) {
-	const tick = uint64(10_000) // raw integer price the bot puts on the wire
+	const tick = uint64(10_000)
 	scaled := tick * topics.TelemetryPriceScale
 	sents := []topics.OrderSentEvent{
 		sent("MK", "SELL", "NEW", "LIMIT", tick, 10),
 		sent("TK", "BUY", "NEW", "LIMIT", tick, 10),
 	}
 	ackeds := []topics.OrderAckedEvent{
-		acked("MK", 5, 1, 10, "2", 10, scaled), // maker rests, then fills @ scaled price
-		acked("TK", 5, 2, 20, "2", 10, scaled), // taker crosses, fills @ scaled price
+		acked("MK", 5, 1, 10, "2", 10, scaled),
+		acked("TK", 5, 2, 20, "2", 10, scaled),
 	}
 	report, _, _ := Run(sents, ackeds)
 	if report.TotalFills != 2 {
@@ -123,7 +123,7 @@ func TestAssemblePrefersSentOrigOrderID(t *testing.T) {
 		{SessionID: "S", OrderID: "C1", Side: "BUY", PayloadType: "CANCEL", OrdType: "LIMIT", OrigOrderID: "REAL-TARGET"},
 	}
 	a := acked("C1", 7, 1, 10, "0", 0, 0)
-	a.OrigOrderID = "CONTESTANT-LIES" // contestant's echoed tag 41 disagrees with the bot
+	a.OrigOrderID = "CONTESTANT-LIES"
 	orders, _ := Assemble(sents, []topics.OrderAckedEvent{a})
 	if len(orders) != 1 {
 		t.Fatalf("expected 1 order, got %d", len(orders))
@@ -144,7 +144,7 @@ func TestAssembleMapsKindAndFlow(t *testing.T) {
 		acked("m1", 9, 1, 100, "2", 7, 50),
 		func() topics.OrderAckedEvent {
 			a := acked("c1", 9, 2, 100, "0", 0, 0)
-			a.OrigOrderID = "orig-1" // cancel carries tag 41
+			a.OrigOrderID = "orig-1"
 			return a
 		}(),
 	}

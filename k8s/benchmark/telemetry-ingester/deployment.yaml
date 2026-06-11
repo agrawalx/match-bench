@@ -54,7 +54,6 @@ spec:
                   key: REDIS_URL
             - name: KAFKA_CONSUMER_GROUP
               value: telemetry-ingester
-            # This replica's shard identity for metrics_partial rows (pod name).
             - name: INGESTER_SHARD
               valueFrom:
                 fieldRef:

@@ -14,11 +14,11 @@ func TestParticipantOf(t *testing.T) {
 		orderID string
 		want    string
 	}{
-		{"sess_42_7_O", "42"},            // simple session id
-		{"sess_42_7_M", "42"},            // market suffix
-		{"sess_42_7_C", "42"},            // cancel suffix
-		{"sess_42_7_R", "42"},            // replace suffix
-		{"my_long_sess_99_1234_O", "99"}, // session id contains underscores
+		{"sess_42_7_O", "42"},
+		{"sess_42_7_M", "42"},
+		{"sess_42_7_C", "42"},
+		{"sess_42_7_R", "42"},
+		{"my_long_sess_99_1234_O", "99"},
 		{"S_3_0_O", "3"},
 	}
 	for _, c := range cases {

@@ -6,18 +6,21 @@
 
 use std::{
     collections::BTreeMap,
+    future::Future,
+    pin::Pin,
     sync::{Arc, Mutex},
     time::Duration,
 };
 
 use anyhow::{Context, Result};
+use futures::stream::{FuturesUnordered, StreamExt};
 use serde::Serialize;
 use tokio::{
-    sync::mpsc::{self, error::TrySendError, Sender},
+    sync::mpsc::{self, Sender},
     task::JoinHandle,
     time,
 };
-use tracing::{error, warn};
+use tracing::error;
 
 use iicpc_schemas_rust::{partition_for, OrderSentEvent};
 
@@ -66,17 +69,14 @@ impl TelemetrySink {
 
     /// record performs the module-specific operation described by its name.
     /// It keeps validation, side effects, and returned values within this module's contract.
+    /// LOSSLESS: blocks on a full channel (backpressure) instead of dropping, so the
+    /// generator self-paces to the sustainable telemetry rate rather than discarding
+    /// measurement data. Only errors if the aggregator is gone (shutdown), which is
+    /// the single case we still count as dropped.
     pub async fn record(&self, event: OrderSentEvent) {
-        match self.tx.try_send(event) {
-            Ok(()) => {}
-            Err(TrySendError::Full(_)) => {
-                metrics::telemetry_dropped();
-                warn!("dropping telemetry event because channel is full");
-            }
-            Err(TrySendError::Closed(_)) => {
-                metrics::telemetry_dropped();
-                error!("dropping telemetry event because aggregator channel is closed");
-            }
+        if self.tx.send(event).await.is_err() {
+            metrics::telemetry_dropped();
+            error!("telemetry channel closed; dropping event");
         }
     }
 
@@ -103,8 +103,24 @@ impl TelemetrySink {
     }
 }
 
-/// run_aggregator performs the module-specific operation described by its name.
-/// It keeps validation, side effects, and returned values within this module's contract.
+/// Max events pulled from the channel per aggregator wake (recv_many), amortizing
+/// the select!/wake overhead across a slice instead of paying it per event.
+const RECV_BATCH: usize = 4096;
+
+/// AckFuture is a pending delivery, tagged with the number of events in its batch
+/// so completion can be accounted (flushed vs lost) without awaiting it inline.
+type AckFuture = Pin<Box<dyn Future<Output = (usize, Result<(), String>)> + Send>>;
+
+/// run_aggregator drains the event channel and publishes per-partition batches to
+/// Kafka WITHOUT blocking on each batch's delivery. The old design awaited delivery
+/// per flush (one broker round-trip serialized the whole drain → ~5.7k/s ceiling and
+/// 90% drops). Here a single `select!` loop interleaves three things: draining the
+/// channel into a per-partition batcher, enqueuing full chunks (rdkafka pipelines +
+/// batches them in the background), and accounting completed deliveries from an
+/// `inflight` set — so drain rate is decoupled from delivery latency. Backpressure
+/// is lossless: a full producer queue makes `enqueue_chunk` poll+retry, which stalls
+/// the drain, fills the channel, and blocks `record()` — the generator self-paces
+/// instead of dropping evidence.
 async fn run_aggregator(
     mut rx: mpsc::Receiver<OrderSentEvent>,
     producer: KafkaProducer,
@@ -112,39 +128,110 @@ async fn run_aggregator(
     session_id: String,
     worker_id: String,
     flush_interval: Duration,
-    batch_size: usize,
+    _batch_size: usize,
     num_partitions: i32,
 ) -> Result<()> {
     let mut ticker = time::interval(flush_interval);
-    let mut events = Vec::with_capacity(batch_size);
+    let mut batcher = PartitionBatcher::new(num_partitions);
+    let mut inflight: FuturesUnordered<AckFuture> = FuturesUnordered::new();
+    // Drain the channel in bulk (recv_many) rather than one event per wake: at high
+    // rates a single aggregator paid the select!/wake overhead per event, which was
+    // the next drain ceiling after the await-per-flush fix. One wake now pulls up to
+    // RECV_BATCH events and feeds them straight through the batcher.
+    let mut buf: Vec<OrderSentEvent> = Vec::with_capacity(RECV_BATCH);
 
     loop {
         tokio::select! {
             biased;
-            maybe_event = rx.recv() => {
-                match maybe_event {
-                    Some(event) => {
-                        events.push(event);
-                        if events.len() >= batch_size {
-                            if let Err(err) = flush(&producer, &topic, &session_id, &worker_id, num_partitions, &mut events).await {
-                                error!(error = %err, "failed to flush telemetry batch");
-                            }
-                        }
-                    }
-                    None => {
-                        if let Err(err) = flush(&producer, &topic, &session_id, &worker_id, num_partitions, &mut events).await {
-                            error!(error = %err, "failed to flush final telemetry batch");
-                            metrics::telemetry_dropped();
-                            events.clear();
-                        }
-                        return Ok(());
+            // Account finished deliveries first so `inflight` stays bounded.
+            Some((n, res)) = inflight.next(), if !inflight.is_empty() => account_delivery(n, res),
+            count = rx.recv_many(&mut buf, RECV_BATCH) => {
+                if count == 0 {
+                    break; // sink closed → drain to completion below
+                }
+                for event in buf.drain(..) {
+                    if let Some((part, chunk)) = batcher.push(event) {
+                        enqueue_chunk(&producer, &topic, &session_id, &worker_id, part, chunk, &mut inflight).await;
                     }
                 }
             }
             _ = ticker.tick() => {
-                if let Err(err) = flush(&producer, &topic, &session_id, &worker_id, num_partitions, &mut events).await {
-                    error!(error = %err, "failed to flush telemetry batch");
+                for (part, chunk) in batcher.drain_ready() {
+                    enqueue_chunk(&producer, &topic, &session_id, &worker_id, part, chunk, &mut inflight).await;
                 }
+            }
+        }
+    }
+
+    // Shutdown: flush whatever is buffered, then wait for every in-flight delivery.
+    for (part, chunk) in batcher.drain_ready() {
+        enqueue_chunk(&producer, &topic, &session_id, &worker_id, part, chunk, &mut inflight).await;
+    }
+    while let Some((n, res)) = inflight.next().await {
+        account_delivery(n, res);
+    }
+    Ok(())
+}
+
+fn account_delivery(n: usize, res: Result<(), String>) {
+    match res {
+        Ok(()) => metrics::telemetry_flushed(n),
+        Err(err) => {
+            metrics::telemetry_dropped_n(n);
+            error!(error = %err, count = n, "telemetry batch failed delivery after retries");
+        }
+    }
+}
+
+/// enqueue_chunk encodes one partition's chunk and enqueues it without awaiting
+/// delivery, retrying on a full producer queue (poll to drain, then retry) so events
+/// are never silently dropped. rdkafka owns retry/ordering for the in-flight message;
+/// the tagged DeliveryFuture is pushed to `inflight` for async accounting.
+async fn enqueue_chunk(
+    producer: &KafkaProducer,
+    topic: &str,
+    session_id: &str,
+    worker_id: &str,
+    partition: i32,
+    chunk: Vec<OrderSentEvent>,
+    inflight: &mut FuturesUnordered<AckFuture>,
+) {
+    let n = chunk.len();
+    let payload = match rmp_serde::to_vec_named(&OrderSentBatchRef {
+        session_id,
+        worker_id,
+        events: &chunk,
+    }) {
+        Ok(p) => p,
+        Err(err) => {
+            error!(error = %err, "encode orders.sent messagepack; dropping batch");
+            metrics::telemetry_dropped_n(n);
+            return;
+        }
+    };
+    loop {
+        match kafka::enqueue_to_partition(producer, topic, partition, session_id, &payload) {
+            Ok(Some(fut)) => {
+                inflight.push(Box::pin(async move {
+                    // DeliveryFuture resolves to Result<OwnedDeliveryResult, Canceled>;
+                    // OwnedDeliveryResult is Result<(partition,offset), (KafkaError, msg)>.
+                    match fut.await {
+                        Ok(Ok(_)) => (n, Ok(())),
+                        Ok(Err((err, _))) => (n, Err(err.to_string())),
+                        Err(canceled) => (n, Err(canceled.to_string())),
+                    }
+                }));
+                return;
+            }
+            Ok(None) => {
+                // Producer queue full — drain it and retry (lossless backpressure).
+                kafka::poll_producer(producer, Duration::from_millis(10));
+                time::sleep(Duration::from_millis(1)).await;
+            }
+            Err(err) => {
+                error!(error = %err, "enqueue orders.sent; dropping batch");
+                metrics::telemetry_dropped_n(n);
+                return;
             }
         }
     }
@@ -159,73 +246,42 @@ struct OrderSentBatchRef<'a> {
     events: &'a [OrderSentEvent],
 }
 
-fn shard_events(
-    events: &mut Vec<OrderSentEvent>,
+/// PartitionBatcher buffers events per destination partition (co-partitioned by
+/// order_id, same contract as the ingester) and emits a chunk the instant a
+/// partition reaches MAX_EVENTS_PER_BATCH, so the aggregator can enqueue it without
+/// waiting for a timer. `drain_ready` returns the partial remainder on tick/shutdown.
+/// No event is ever dropped here — everything pushed is either emitted or drained.
+struct PartitionBatcher {
     num_partitions: i32,
-) -> BTreeMap<i32, Vec<OrderSentEvent>> {
-    let mut by_part: BTreeMap<i32, Vec<OrderSentEvent>> = BTreeMap::new();
-    for e in events.drain(..) {
-        by_part
-            .entry(partition_for(&e.order_id, num_partitions))
-            .or_default()
-            .push(e);
-    }
-    by_part
+    by_part: BTreeMap<i32, Vec<OrderSentEvent>>,
 }
 
-async fn flush(
-    producer: &KafkaProducer,
-    topic: &str,
-    session_id: &str,
-    worker_id: &str,
-    num_partitions: i32,
-    events: &mut Vec<OrderSentEvent>,
-) -> Result<()> {
-    if events.is_empty() {
-        return Ok(());
-    }
-
-    // Shard by destination partition (move events out — no clone).
-    let by_part = shard_events(events, num_partitions);
-
-    // One message per (partition, size-bounded chunk); each owns its events so a
-    // failed publish can be retained without re-encoding.
-    let mut msgs: Vec<(i32, Vec<u8>, Vec<OrderSentEvent>)> = Vec::new();
-    for (part, mut group) in by_part {
-        while !group.is_empty() {
-            let take = group.len().min(MAX_EVENTS_PER_BATCH);
-            let chunk: Vec<OrderSentEvent> = group.drain(..take).collect();
-            let payload = rmp_serde::to_vec_named(&OrderSentBatchRef {
-                session_id,
-                worker_id,
-                events: &chunk,
-            })
-            .context("encode orders.sent messagepack")?;
-            msgs.push((part, payload, chunk));
+impl PartitionBatcher {
+    fn new(num_partitions: i32) -> Self {
+        Self {
+            num_partitions,
+            by_part: BTreeMap::new(),
         }
     }
 
-    // Pipeline every publish, then await together (≈ one broker RTT).
-    let results = futures::future::join_all(msgs.iter().map(|(part, payload, _)| {
-        kafka::publish_to_partition(producer, topic, *part, session_id, payload)
-    }))
-    .await;
-
-    let mut first_err = None;
-    for ((_, _, chunk), result) in msgs.into_iter().zip(results) {
-        match result {
-            Ok(()) => metrics::telemetry_flushed(chunk.len()),
-            Err(err) => {
-                if first_err.is_none() {
-                    first_err = Some(err);
-                }
-                events.extend(chunk); // retain for next flush
-            }
+    /// Buffer one event; return a ready (partition, chunk) if it just filled one.
+    fn push(&mut self, event: OrderSentEvent) -> Option<(i32, Vec<OrderSentEvent>)> {
+        let part = partition_for(&event.order_id, self.num_partitions);
+        let group = self.by_part.entry(part).or_default();
+        group.push(event);
+        if group.len() >= MAX_EVENTS_PER_BATCH {
+            Some((part, std::mem::take(group)))
+        } else {
+            None
         }
     }
-    match first_err {
-        None => Ok(()),
-        Some(err) => Err(err),
+
+    /// Drain every buffered (partial) chunk — for the flush ticker and shutdown.
+    fn drain_ready(&mut self) -> Vec<(i32, Vec<OrderSentEvent>)> {
+        std::mem::take(&mut self.by_part)
+            .into_iter()
+            .filter(|(_, v)| !v.is_empty())
+            .collect()
     }
 }
 
@@ -259,42 +315,58 @@ mod tests {
         }
     }
 
+    // The batcher is the lossless core of the new aggregator: every pushed event is
+    // either emitted in a full chunk or held for drain — nothing is dropped — and
+    // emitted chunks are exactly MAX (so they stay under the broker message ceiling),
+    // each event landing in its co-partition.
     #[test]
-    fn shard_events_groups_every_event_to_its_partition() {
+    fn partition_batcher_emits_and_drains_without_loss() {
         let n = 24;
-        let mut events: Vec<OrderSentEvent> = (0..5_000).map(test_event).collect();
-        let total = events.len();
-
-        let by_part = shard_events(&mut events, n);
-
-        assert!(
-            events.is_empty(),
-            "shard_events must drain the input buffer"
-        );
-        let regrouped: usize = by_part.values().map(Vec::len).sum();
-        assert_eq!(regrouped, total, "no events lost in sharding");
-        for (part, group) in &by_part {
-            for e in group {
-                assert_eq!(
-                    partition_for(&e.order_id, n),
-                    *part,
-                    "event {} placed in wrong partition",
-                    e.order_id
-                );
+        let total = 50_000usize;
+        let mut b = PartitionBatcher::new(n);
+        let mut emitted: Vec<(i32, Vec<OrderSentEvent>)> = Vec::new();
+        for i in 0..total {
+            if let Some(chunk) = b.push(test_event(i)) {
+                emitted.push(chunk);
             }
         }
-        assert!(by_part.len() > 1, "events should spread across partitions");
+        let drained = b.drain_ready();
+
+        let count: usize = emitted
+            .iter()
+            .chain(drained.iter())
+            .map(|(_, v)| v.len())
+            .sum();
+        assert_eq!(count, total, "no events lost across emit + drain");
+
+        for (_, chunk) in &emitted {
+            assert_eq!(
+                chunk.len(),
+                MAX_EVENTS_PER_BATCH,
+                "push emits only full chunks"
+            );
+        }
+        for (_, chunk) in &drained {
+            assert!(!chunk.is_empty() && chunk.len() < MAX_EVENTS_PER_BATCH);
+        }
+        for (part, chunk) in emitted.iter().chain(drained.iter()) {
+            for e in chunk {
+                assert_eq!(partition_for(&e.order_id, n), *part, "wrong partition");
+            }
+        }
     }
 
     #[test]
-    fn shard_events_spreads_a_single_session_across_partitions() {
+    fn partition_batcher_spreads_a_session_across_partitions() {
         let n = 24;
-        let mut events: Vec<OrderSentEvent> = (0..2_000).map(test_event).collect();
-        let by_part = shard_events(&mut events, n);
+        let mut b = PartitionBatcher::new(n);
+        for i in 0..2_000 {
+            let _ = b.push(test_event(i));
+        }
+        let used = b.drain_ready().len();
         assert!(
-            by_part.len() >= n as usize / 2,
-            "a busy session must use many partitions, used {}",
-            by_part.len()
+            used >= n as usize / 2,
+            "a busy session must use many partitions, used {used}"
         );
     }
 

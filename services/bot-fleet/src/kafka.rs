@@ -14,7 +14,7 @@ use rdkafka::{
     config::ClientConfig,
     consumer::{CommitMode, Consumer, StreamConsumer},
     message::Message,
-    producer::{FutureProducer, FutureRecord, Producer},
+    producer::{DeliveryFuture, FutureProducer, FutureRecord, Producer},
     Offset, TopicPartitionList,
 };
 
@@ -120,14 +120,23 @@ pub fn control_producer(brokers: &str) -> Result<KafkaProducer> {
 /// telemetry_producer performs the module-specific operation described by its name.
 /// It keeps validation, side effects, and returned values within this module's contract.
 pub fn telemetry_producer(brokers: &str) -> Result<KafkaProducer> {
+    // High-throughput, lossless telemetry producer. The aggregator enqueues batches
+    // WITHOUT awaiting delivery (enqueue_to_partition/send_result) and lets rdkafka's
+    // background threads pipeline + batch them — so a deep internal queue is what
+    // decouples the producer's drain rate from per-batch broker round-trips. linger
+    // accumulates a few ms of batches; lz4 shrinks the wire; the large
+    // queue.buffering bounds in-flight memory and provides backpressure (send_result
+    // returns QueueFull when saturated, which the aggregator handles losslessly).
     let inner: FutureProducer = ClientConfig::new()
         .set("bootstrap.servers", brokers)
         .set("acks", "1")
-        .set("linger.ms", "2")
+        .set("linger.ms", "5")
         .set("compression.type", "lz4")
-        .set("retries", "3")
+        .set("queue.buffering.max.messages", "1000000")
+        .set("queue.buffering.max.kbytes", "1048576") // 1 GiB in-flight ceiling
+        .set("retries", "2147483647")
         .set("retry.backoff.ms", "25")
-        .set("delivery.timeout.ms", "5000")
+        .set("delivery.timeout.ms", "120000")
         .create()
         .context("create kafka telemetry producer")?;
     Ok(KafkaProducer { inner })
@@ -235,6 +244,40 @@ pub async fn publish_to_partition(
         .await
         .map_err(|(err, _msg)| anyhow!("publish kafka message to partition {partition}: {err}"))?;
     Ok(())
+}
+
+/// enqueue_to_partition queues a message for an explicit partition WITHOUT awaiting
+/// delivery, returning the DeliveryFuture (resolves when the broker acks). This is
+/// the high-throughput path: the caller pipelines many enqueues and accounts
+/// deliveries asynchronously, instead of blocking one round-trip per message.
+///
+/// On a full internal queue rdkafka returns the record back; we surface that as
+/// `Ok(None)` so the caller can poll() + retry (lossless backpressure) rather than
+/// drop. A genuine enqueue error is returned as `Err`.
+pub fn enqueue_to_partition(
+    producer: &KafkaProducer,
+    topic: &str,
+    partition: i32,
+    key: &str,
+    payload: &[u8],
+) -> Result<Option<DeliveryFuture>> {
+    let record = FutureRecord::to(topic)
+        .key(key)
+        .payload(payload)
+        .partition(partition);
+    match producer.inner.send_result(record) {
+        Ok(fut) => Ok(Some(fut)),
+        Err((rdkafka::error::KafkaError::MessageProduction(rdkafka::types::RDKafkaErrorCode::QueueFull), _)) => {
+            Ok(None) // queue full — caller polls + retries
+        }
+        Err((err, _)) => Err(anyhow!("enqueue kafka message to partition {partition}: {err}")),
+    }
+}
+
+/// poll drives the producer's background delivery/callback queue. Call it when an
+/// enqueue reports QueueFull to let in-flight messages drain before retrying.
+pub fn poll_producer(producer: &KafkaProducer, timeout: Duration) {
+    producer.inner.poll(timeout);
 }
 
 pub async fn wait_for_barrier(

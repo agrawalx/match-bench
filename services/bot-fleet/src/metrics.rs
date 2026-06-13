@@ -15,7 +15,7 @@ use std::{
 
 use prometheus_client::{
     encoding::text::encode,
-    metrics::{counter::Counter, family::Family},
+    metrics::{counter::Counter, family::Family, histogram::Histogram},
     registry::Registry,
 };
 
@@ -34,6 +34,22 @@ struct Metrics {
     telemetry_dropped: Counter,
     telemetry_batches: Counter,
     telemetry_events_flushed: Counter,
+    // write_seconds: wall time spent inside write_all per order. This is the direct
+    // backpressure probe — if the drain stops reading, its TCP window closes and this
+    // grows. schedule_slip_seconds: send_ts - target_send_ts, i.e. how far behind the
+    // paced schedule each order actually went out (CPU OR backpressure lateness).
+    write_seconds: Histogram,
+    schedule_slip_seconds: Histogram,
+}
+
+/// send_buckets returns the shared bucket edges (seconds) for the per-order send
+/// histograms: 1us .. 1s, fine enough to separate "write returns instantly"
+/// (no backpressure) from "write blocks for ms" (drain not draining).
+fn send_buckets() -> impl Iterator<Item = f64> {
+    [
+        1e-6, 5e-6, 1e-5, 5e-5, 1e-4, 5e-4, 1e-3, 5e-3, 1e-2, 5e-2, 1e-1, 5e-1, 1.0,
+    ]
+    .into_iter()
 }
 
 static METRICS: LazyLock<Metrics> = LazyLock::new(|| {
@@ -48,6 +64,8 @@ static METRICS: LazyLock<Metrics> = LazyLock::new(|| {
     let telemetry_dropped = Counter::default();
     let telemetry_batches = Counter::default();
     let telemetry_events_flushed = Counter::default();
+    let write_seconds = Histogram::new(send_buckets());
+    let schedule_slip_seconds = Histogram::new(send_buckets());
 
     registry.register(
         "iicpc_bot_workloads",
@@ -94,6 +112,16 @@ static METRICS: LazyLock<Metrics> = LazyLock::new(|| {
         "Bot telemetry events flushed.",
         telemetry_events_flushed.clone(),
     );
+    registry.register(
+        "iicpc_bot_write_seconds",
+        "Wall time spent inside write_all per order (direct drain backpressure probe).",
+        write_seconds.clone(),
+    );
+    registry.register(
+        "iicpc_bot_schedule_slip_seconds",
+        "Per-order lateness: actual send_ts minus paced target_send_ts.",
+        schedule_slip_seconds.clone(),
+    );
 
     Metrics {
         registry,
@@ -106,6 +134,8 @@ static METRICS: LazyLock<Metrics> = LazyLock::new(|| {
         telemetry_dropped,
         telemetry_batches,
         telemetry_events_flushed,
+        write_seconds,
+        schedule_slip_seconds,
     }
 });
 
@@ -181,11 +211,28 @@ pub fn telemetry_dropped() {
     METRICS.telemetry_dropped.inc();
 }
 
+/// telemetry_dropped_n records that a whole batch of `events` was lost (e.g. a
+/// batch that failed delivery after all retries). Lossless operation aims to keep
+/// this at zero.
+pub fn telemetry_dropped_n(events: usize) {
+    METRICS.telemetry_dropped.inc_by(events as u64);
+}
+
 /// telemetry_flushed performs the module-specific operation described by its name.
 /// It keeps validation, side effects, and returned values within this module's contract.
 pub fn telemetry_flushed(events: usize) {
     METRICS.telemetry_batches.inc();
     METRICS.telemetry_events_flushed.inc_by(events as u64);
+}
+
+/// observe_send records the per-order write duration and schedule slip (both in
+/// nanoseconds at the call site). write_ns isolates drain backpressure; slip_ns is
+/// overall lateness vs the paced schedule.
+pub fn observe_send(write_ns: u64, slip_ns: u64) {
+    METRICS.write_seconds.observe(write_ns as f64 / 1e9);
+    METRICS
+        .schedule_slip_seconds
+        .observe(slip_ns as f64 / 1e9);
 }
 
 /// render performs the module-specific operation described by its name.
@@ -206,6 +253,7 @@ fn handle_client(mut stream: TcpStream) {
     };
     let request = String::from_utf8_lossy(&buf[..n]);
     let first_line = request.lines().next().unwrap_or("");
+
     if !first_line.starts_with("GET /metrics ") {
         let body = "not found\n";
         let response = format!(

@@ -774,10 +774,15 @@ async fn fix_write_loop(
             );
         }
 
+        let write_start_ns = unix_nanos();
         match time::timeout(write_timeout, write_half.write_all(&frame.fix)).await {
             Ok(Ok(())) => {
                 let send_ts_ns = unix_nanos();
                 metrics::order_sent();
+                metrics::observe_send(
+                    send_ts_ns.saturating_sub(write_start_ns),
+                    send_ts_ns.saturating_sub(target_send_ts_ns),
+                );
                 if let Some(p) = pending
                     .lock()
                     .expect("pending map poisoned")
@@ -1183,10 +1188,15 @@ async fn rw_write_loop(
             );
         }
 
+        let write_start_ns = unix_nanos();
         match time::timeout(write_timeout, writer.write_order(&frame)).await {
             Ok(Ok(())) => {
                 let send_ts_ns = unix_nanos();
                 metrics::order_sent();
+                metrics::observe_send(
+                    send_ts_ns.saturating_sub(write_start_ns),
+                    send_ts_ns.saturating_sub(target_send_ts_ns),
+                );
                 if let Some(p) = pending
                     .lock()
                     .expect("pending map poisoned")

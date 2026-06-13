@@ -74,6 +74,13 @@ resource "helm_release" "keda" {
 }
 
 resource "kubernetes_manifest" "gvisor_runtimeclass" {
+  # gVisor is OPTIONAL (we run RUNTIME_CLASS="" / runc for the benchmark and the
+  # minimal deploy). Off by default because kubernetes_manifest is the one resource
+  # type that needs a LIVE cluster at PLAN time — leaving it on makes the very first
+  # `terraform plan` fail before the cluster exists. Set enable_gvisor=true only
+  # after the cluster is up and you've installed the runsc RuntimeClass nodes.
+  count = var.enable_gvisor ? 1 : 0
+
   manifest = {
     apiVersion = "node.k8s.io/v1"
     kind       = "RuntimeClass"

@@ -514,6 +514,49 @@ pub fn execution_report_frame(fix_version: &str, seq: u64, clord_id: &str) -> Ve
 mod tests {
     use super::*;
 
+    // Offline serialization-cost breakdown for the raw-send bottleneck. build_frame
+    // currently serializes FIX + JSON + REST(HTTP) for EVERY order but only one is
+    // sent — this quantifies that waste and the FIX-vs-REST split. Run with:
+    //   cargo test -p iicpc-bot-fleet --lib serialization_cost -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn serialization_cost_breakdown() {
+        use std::time::Instant;
+        let n = 1_000_000u64;
+        let (fv, sid, host) = ("FIX.4.2", "01890dd2-71f3-7abc-9def-0123456789ab", "10.0.0.5:9898");
+
+        // all three (what build_frame does today, per order)
+        let t = Instant::now();
+        let mut sink = 0usize;
+        for seq in 0..n {
+            let f = order_frame(fv, sid, host, 42, seq, 10_000, 25, Side::Buy);
+            sink += f.fix.len() + f.rest.len() + f.ws_bytes.len();
+        }
+        let all3 = t.elapsed().as_nanos() / n as u128;
+
+        // FIX only
+        let t = Instant::now();
+        for seq in 0..n {
+            let oid = FrameKind::New.order_id(sid, 42, seq);
+            let body = build_fix_body(FrameKind::New, seq, &oid, None, 10_000, 25, Side::Buy);
+            sink += finalize_fix(fv, &body).len();
+        }
+        let fix_only = t.elapsed().as_nanos() / n as u128;
+
+        // REST only (JSON + HTTP request)
+        let t = Instant::now();
+        for seq in 0..n {
+            let oid = FrameKind::New.order_id(sid, 42, seq);
+            let json = build_json_payload(FrameKind::New, &oid, None, 10_000, 25, Side::Buy);
+            sink += build_rest_request("POST", host, "/orders", &json).len();
+        }
+        let rest_only = t.elapsed().as_nanos() / n as u128;
+
+        eprintln!("SERTIME ns/order  all3={all3}  fix_only={fix_only}  rest_only={rest_only}  (sink={sink})");
+        eprintln!("SERTIME implied max ser-only throughput/core: all3={}/s fix={}/s rest={}/s",
+            1_000_000_000 / all3.max(1), 1_000_000_000 / fix_only.max(1), 1_000_000_000 / rest_only.max(1));
+    }
+
     #[test]
     /// logon_and_first_orders_have_monotonic_seq_nums performs the module-specific operation described by its name.
     /// It keeps validation, side effects, and returned values within this module's contract.

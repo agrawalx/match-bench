@@ -100,7 +100,19 @@ module "spawner_irsa" {
   tags = var.tags
 }
 
+# Annotate the spawner ServiceAccount with its IRSA role so the build pipeline can
+# push contestant images to ECR. Off by default: the SA is created by the platform
+# manifests (k8s/build/spawner), which are applied AFTER terraform — so terraform
+# can't annotate it yet (it errors "ServiceAccount build-spawner does not exist").
+# The load-gen benchmark doesn't use the build pipeline (the drain image is
+# pre-pushed). When you DO need the spawner, deploy the platform first, then run:
+#   kubectl -n build annotate sa build-spawner \
+#     eks.amazonaws.com/role-arn=<module.spawner_irsa.iam_role_arn> --overwrite
+# (or set enable_spawner_irsa=true and re-apply once the SA exists). The IAM role
+# itself (module.spawner_irsa) is always created above; only the SA wiring is gated.
 resource "kubernetes_annotations" "spawner_sa_irsa" {
+  count = var.enable_spawner_irsa ? 1 : 0
+
   api_version = "v1"
   kind        = "ServiceAccount"
   metadata {

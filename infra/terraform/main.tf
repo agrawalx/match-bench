@@ -171,7 +171,14 @@ module "eks" {
         }
       }
 
-      cloudinit_pre_nodeadm = [
+      # Exclusive-core cpuset pinning for contestant algos (a contest-fairness
+      # feature). OFF for the load-gen benchmark (the contestant is a drain sink,
+      # not a latency-measured algo) and because this NodeConfig currently blocks
+      # the node from joining: setting reservedSystemCPUs is mutually exclusive with
+      # EKS's default kube/system-reserved CPU, so kubelet refuses to start and the
+      # node never registers. Re-enable (enable_sandbox_cpuset=true) only after that
+      # conflict is resolved and validated on a node.
+      cloudinit_pre_nodeadm = var.enable_sandbox_cpuset ? [
         {
           content_type = "application/node.eks.aws"
           content      = <<-EOT
@@ -188,7 +195,43 @@ module "eks" {
                   reservedSystemCPUs: "${var.sandbox_reserved_system_cpus}"
           EOT
         }
-      ]
+      ] : []
+    }
+
+    # Dedicated bot-fleet load-generator pool — the scaling variable for the
+    # throughput benchmark. Tainted (botworker=true:NoSchedule) + labelled so ONLY
+    # bot-fleet-worker pods land here (they carry the matching nodeSelector +
+    # toleration); nothing from the data/measurement plane or the contestant can
+    # contend for these cores. Scale the sweep by bumping desired_size (e.g. 1 -> 2).
+    botworker = {
+      ami_type       = "AL2023_x86_64_STANDARD"
+      instance_types = [var.botworker_instance_type]
+      min_size       = var.botworker_min_size
+      max_size       = var.botworker_max_size
+      desired_size   = var.botworker_desired_size
+
+      labels = {
+        pool = "botworker"
+      }
+
+      taints = {
+        botworker = {
+          key    = "botworker"
+          value  = "true"
+          effect = "NO_SCHEDULE"
+        }
+      }
+
+      block_device_mappings = {
+        xvda = {
+          device_name = "/dev/xvda"
+          ebs = {
+            volume_size           = var.botworker_disk_size
+            volume_type           = "gp3"
+            delete_on_termination = true
+          }
+        }
+      }
     }
   }
 

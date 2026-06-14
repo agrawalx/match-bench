@@ -1,0 +1,60 @@
+site_name: Match-Bench Architecture
+site_description: Fair, un-gameable benchmarking for high-frequency-trading algorithms
+site_url: https://agrawalx.github.io/match-bench/
+repo_url: https://github.com/agrawalx/match-bench
+repo_name: agrawalx/match-bench
+docs_dir: wiki
+theme:
+  name: material
+  palette:
+    - scheme: default
+      primary: indigo
+      toggle: { icon: material/weather-night, name: Dark mode }
+    - scheme: slate
+      primary: indigo
+      toggle: { icon: material/weather-sunny, name: Light mode }
+  features:
+    - navigation.sections
+    - navigation.top
+    - navigation.tracking
+    - toc.follow
+    - content.code.copy
+    - search.suggest
+    - search.highlight
+markdown_extensions:
+  - admonition
+  - attr_list
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.highlight:
+      anchor_linenums: false
+  - pymdownx.inlinehilite
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+nav:
+  - Home: index.md
+  - "The thesis & system overview": the-thesis-system-overview.md
+  - "Map of the system": map-of-the-system.md
+  - "Kafka Topology, Partitioning & Horizontal Scaling": kafka-topology-partitioning-horizontal-scaling.md
+  - "The benchmark run lifecycle": the-benchmark-run-lifecycle.md
+  - Services:
+      - "Submission API (Go)": submission-api-go.md
+      - "Build Pipeline & Sandbox Orchestrator (Go)": build-pipeline-sandbox-orchestrator-go.md
+      - "Bot-Fleet Controller (Go)": bot-fleet-controller-go.md
+      - "Bot-Fleet Load Generator (Rust)": bot-fleet-load-generator-rust.md
+      - "eBPF Latency Capture (Rust)": ebpf-latency-capture-rust.md
+      - "Telemetry Ingester & Rollup (Rust)": telemetry-ingester-rollup-rust.md
+      - "Correctness Validator (Go)": correctness-validator-go.md
+      - "Score Computer & Leaderboard API (Go)": score-computer-leaderboard-api-go.md
+      - "Platform Foundations: Auth, Shared Libraries & Schemas": platform-foundations-auth-shared-libraries-schemas.md
+  - "Benchmarking, Bottleneck Hunt & Scope for Improvement": benchmarking-bottleneck-hunt-scope-for-improvement.md
+  - "Deployment, Isolation & Observability": deployment-isolation-observability.md
+  - "Scope for Improvement": scope-for-improvement.md
+  - Appendix:
+      - "Appendix A · Glossary": appendix-a-glossary.md
+      - "Appendix B · Document provenance": appendix-b-document-provenance.md

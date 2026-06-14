@@ -1,0 +1,3 @@
+# Documentation site (MkDocs Material) — used by .github/workflows/docs.yml
+# Pinned to the stable 9.x line (the 2.0 pre-release drops plugins/theming).
+mkdocs-material>=9.5,<10

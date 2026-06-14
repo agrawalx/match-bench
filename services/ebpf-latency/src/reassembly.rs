@@ -87,7 +87,7 @@ impl Reassembler {
             match key {
                 Some(seq) => {
                     let (ts, data) = self.hold.remove(&seq).expect("key just found");
-                    let skip = self.next_seq.wrapping_sub(seq) as usize; // already-delivered prefix
+                    let skip = self.next_seq.wrapping_sub(seq) as usize;
                     self.append_contiguous(ts, &data[skip..]);
                 }
                 None => break,
@@ -297,9 +297,9 @@ mod tests {
     fn out_of_order_segments_are_reordered() {
         let mut r = Reassembler::new();
         r.push(0, 10, b"AAA");
-        let s = r.push(6, 30, b"CCC"); // arrives before BBB
+        let s = r.push(6, 30, b"CCC");
         assert!(s.reordered);
-        assert_eq!(r.available(), b"AAA"); // CCC held back
+        assert_eq!(r.available(), b"AAA");
         r.push(3, 20, b"BBB");
         assert_eq!(r.available(), b"AAABBBCCC");
         assert_eq!(r.timestamp_at(0), 10);
@@ -312,7 +312,7 @@ mod tests {
     /// It keeps validation, side effects, and returned values within this module's contract.
     fn overlapping_held_segment_tail_is_drained() {
         let mut r = Reassembler::new();
-        r.push(0, 10, b"AAA"); // next_seq = 3
+        r.push(0, 10, b"AAA");
         r.push(5, 30, b"XYZZ");
         assert_eq!(r.available(), b"AAA");
         r.push(3, 20, b"BBCC");
@@ -328,10 +328,10 @@ mod tests {
     /// It keeps validation, side effects, and returned values within this module's contract.
     fn gap_fill_push_reports_reorder() {
         let mut r = Reassembler::new();
-        r.push(0, 10, b"AAA"); // next_seq = 3
-        let held = r.push(6, 30, b"CCC"); // gap 3..6 -> held, frames nothing
+        r.push(0, 10, b"AAA");
+        let held = r.push(6, 30, b"CCC");
         assert!(held.reordered, "the holding push flags reorder");
-        let fill = r.push(3, 20, b"BBB"); // fills gap and drains CCC
+        let fill = r.push(3, 20, b"BBB");
         assert!(
             fill.reordered,
             "M31: the gap-filling push that delivers held bytes must flag reorder"
@@ -345,8 +345,8 @@ mod tests {
     fn truncation_reset_resyncs_without_stall() {
         let mut r = Reassembler::new();
         r.push(0, 10, b"AAA");
-        r.reset_for_truncation(); // a GSO/TSO super-frame was truncated and dropped
-        r.push(100, 20, b"BBB"); // far-ahead segment re-anchors cleanly (no gap stall)
+        r.reset_for_truncation();
+        r.push(100, 20, b"BBB");
         assert_eq!(r.available(), b"BBB");
         assert_eq!(r.timestamp_at(0), 20);
     }
@@ -357,7 +357,7 @@ mod tests {
     fn duplicate_retransmit_is_detected_and_ignored() {
         let mut r = Reassembler::new();
         r.push(0, 10, b"AAA");
-        let s = r.push(0, 11, b"AAA"); // full duplicate
+        let s = r.push(0, 11, b"AAA");
         assert_eq!(s.retransmitted_bytes, 3);
         assert_eq!(r.available(), b"AAA");
     }

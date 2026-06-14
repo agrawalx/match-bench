@@ -54,7 +54,7 @@ func KindFrom(payloadType, ordType string) Kind {
 		return Cancel
 	case "REPLACE":
 		return Replace
-	default: // NEW
+	default:
 		if ordType == "MARKET" {
 			return NewMarket
 		}

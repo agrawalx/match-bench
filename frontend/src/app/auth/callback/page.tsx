@@ -10,6 +10,11 @@ import { useRouter } from "next/navigation";
 import { useAuth } from "@/auth/useAuth";
 import styles from "./callback.module.css";
 
+/**
+ * CallbackPage completes the OAuth redirect flow in the browser.
+ * It validates callback params, exchanges the auth code, and returns users to
+ * their previous route or the leaderboard.
+ */
 export default function CallbackPage() {
   const { handleCallback } = useAuth();
   const router = useRouter();

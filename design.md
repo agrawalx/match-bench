@@ -1,8 +1,53 @@
-# IICPC — Design & Engineering
+# Match-Bench — Design & Engineering
 
-IICPC is a production HFT-algorithm benchmarking platform. A contestant submits a matching engine (FIX/REST/WS). The platform builds it (Kaniko → registry), sandboxes it (one algo pod per node, pinned cpuset, gVisor-optional), fires deterministic barrier-synced load from a Rust bot fleet, measures latency **in the kernel** with eBPF at the algo veth, joins telemetry into HDR histograms, validates correctness against a reference price-time-priority CLOB, scores peak-sustained-TPS behind latency and correctness gates, and serves a live Next.js leaderboard with Gil-Tene latency-by-percentile charts.
+Match-Bench is a high-frequency-trading algorithm benchmarking platform. A contestant submits a matching engine (FIX/REST/WS). The platform builds it (Kaniko → registry), sandboxes it (one algo pod per node, pinned cpuset, gVisor-optional), fires deterministic barrier-synced load from a Rust bot fleet, measures latency **in the kernel** with eBPF at the algo veth, joins telemetry into HDR histograms, validates correctness against a reference price-time-priority CLOB, scores peak-sustained-TPS behind latency and correctness gates, and serves a live Next.js leaderboard with Gil-Tene latency-by-percentile charts.
 
-This document is self-contained. Every optimization is stated as **problem → decision → why**, and every load-bearing claim cites `file:line` that was read in the source tree.
+This document is self-contained. It explains the implemented architecture, the engineering decisions behind it, and the invariants that make the benchmark fair and repeatable.
+
+---
+
+## 0. Architecture summary for reviewers
+
+### What was implemented
+
+Match-Bench is implemented as an event-driven benchmark platform for untrusted high-frequency-trading algorithms. A participant uploads a submission, the platform builds it into a container image, schedules it into a restricted Kubernetes sandbox, drives it with deterministic traffic, measures service latency from outside the participant process using eBPF, validates trading correctness against a reference order book, computes a gated score, and streams results to a live leaderboard.
+
+The platform is split into five architectural planes:
+
+- **Platform plane:** `submission-api`, `auth-api`, `leaderboard-api`, and the Next.js frontend handle user identity, uploads, benchmark triggers, read APIs, SSE updates, and run detail views.
+- **Build plane:** `build-worker` turns source bundles into runnable images, stores artifacts in MinIO/S3, and publishes submission status changes.
+- **Sandbox plane:** `sandbox-orchestrator` creates one isolated algo pod per run, applies hardening and resource controls, and starts a colocated `ebpf-latency` capture job.
+- **Benchmark plane:** `bot-fleet-controller`, `bot-fleet`, `telemetry-ingester`, `correctness-validator`, and `score-computer` coordinate load, collect telemetry, validate behavior, and compute scores.
+- **Data and observability plane:** Kafka carries asynchronous contracts, PostgreSQL stores metadata and scores, TimescaleDB stores time-series metrics and HDR blobs, Redis stores hot snapshots, MinIO/S3 stores uploaded artifacts, while Prometheus/Grafana/Loki support operations.
+
+### Main architectural decisions
+
+**Decision 1: Kafka as the service boundary -** Services communicate through typed Kafka topics such as `benchmark.requested`, `workload.assignments`, `bot.ready`, `barrier`, `orders.sent`, `orders.acked`, `scores.correctness`, and `leaderboard.updates`. This decouples build, run, measurement, validation, scoring, and UI updates while keeping each stage replayable and independently testable.
+
+**Decision 2: measure outside the contestant -** The scored service-time metric is not reported by the submitted algorithm. It is computed from eBPF timestamps taken at the algo pod network boundary: request ingress (`t3`) and response egress (`t7`). This keeps the measured party outside the measurement mechanism.
+
+**Decision 3: deterministic open-loop workload generation -** The bot fleet uses seeded task specs, fixed pacing, a readiness fan-in, and a barrier event so every contestant receives the same logical workload. The workload is open-loop so a slow algorithm cannot reduce future offered load by responding slowly.
+
+**Decision 4: Kubernetes is the isolation boundary -** The sandbox creates restricted pods with request/limit equality, integer CPU validation for cpuset pinning, read-only root filesystems, tmpfs writable paths, dropped capabilities, no service-account token, optional gVisor, and default-deny networking.
+
+**Decision 5: correctness gates scoring -** A fast algorithm is not allowed to win by violating exchange behavior. The correctness validator replays the captured order stream through a price-time-priority reference CLOB and score-computer gates throughput by correctness, p99 latency, error rate, and telemetry coverage.
+
+### End-to-end run lifecycle
+
+1. A user uploads a submission and requests a benchmark.
+2. `submission-api` stores metadata and publishes `benchmark.requested`.
+3. `bot-fleet-controller` allocates a sandbox slot through `sandbox-orchestrator`.
+4. `sandbox-orchestrator` starts the algo pod, service, and capture job.
+5. Bot workers connect, publish `bot.ready`, wait for a common barrier, then fire deterministic traffic.
+6. Bot workers publish `orders.sent`; eBPF capture publishes `orders.acked`.
+7. `telemetry-ingester` joins sent and acked streams into per-wave HDR histograms and hot metrics.
+8. `correctness-validator` replays the session and publishes `scores.correctness`.
+9. `score-computer` computes peak sustained TPS and writes leaderboard rows.
+10. `leaderboard-api` serves the latest state through REST and SSE to the frontend.
+
+### Current constraints and future roadmap
+
+The implemented system is strong on measurement integrity, deterministic load, and isolated execution. With more months of development, the highest-value additions would be: a production-grade multi-tenant scheduling policy, stronger supply-chain attestation for submitted images, automated benchmark calibration per node type, richer per-run forensic exports, stricter schema evolution tooling, disaster-recovery playbooks for Kafka/Postgres/Timescale, and a formal load-test certification suite that runs before every competition.
 
 ---
 

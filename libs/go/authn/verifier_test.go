@@ -43,8 +43,6 @@ func newTestJWKS(t *testing.T) *testJWKS {
 		j.fetches.Add(1)
 		j.mu.Lock()
 		defer j.mu.Unlock()
-		// jwk groups the state and dependencies used by this package.
-		// Keep this type aligned with the runtime contract around it.
 		type jwk struct {
 			Kty string `json:"kty"`
 			Kid string `json:"kid"`

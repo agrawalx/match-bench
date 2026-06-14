@@ -173,7 +173,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(ack.t3_ns, 100);
-        assert_eq!(fill.t3_ns, 100); // same t3
+        assert_eq!(fill.t3_ns, 100);
         assert_eq!(ack.t7_ns, 200);
         assert_eq!(fill.t7_ns, 350);
         assert_eq!(ack.exec_type, "0");
@@ -189,13 +189,13 @@ mod tests {
     fn per_clordid_isolation_across_pipelined_orders() {
         let mut m = Matcher::new();
         m.on_request("A", 100, 1, 5, 10, false);
-        m.on_request("B", 130, 1, 5, 20, false); // same flow, later request
+        m.on_request("B", 130, 1, 5, 20, false);
 
         let rb = m.on_response("B", 300, "2", 1, 0, "", false).unwrap();
         let ra = m.on_response("A", 320, "2", 1, 0, "", false).unwrap();
 
-        assert_eq!(rb.t3_ns, 130); // B's own t3, not A's
-        assert_eq!(ra.t3_ns, 100); // A's own t3
+        assert_eq!(rb.t3_ns, 130);
+        assert_eq!(ra.t3_ns, 100);
         assert_eq!(rb.pod_service_time_ns, 170);
         assert_eq!(ra.pod_service_time_ns, 220);
     }
@@ -215,7 +215,7 @@ mod tests {
     fn duplicate_request_bumps_retransmission_and_keeps_first_t3() {
         let mut m = Matcher::new();
         m.on_request("o1", 100, 1, 5, 10, false);
-        m.on_request("o1", 175, 1, 5, 10, false); // retransmit
+        m.on_request("o1", 175, 1, 5, 10, false);
         let e = m.on_response("o1", 200, "0", 0, 0, "", false).unwrap();
         assert_eq!(e.t3_ns, 100);
         assert_eq!(e.retransmission_count, 1);

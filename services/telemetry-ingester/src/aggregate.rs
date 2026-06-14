@@ -12,8 +12,8 @@ use iicpc_schemas_rust::{OrderAckedEvent, OrderSentEvent};
 
 use crate::join::FirstResponseTracker;
 
-pub const DEFAULT_WAVE_NS: u64 = 20_000_000_000; // 20 s ramp wave
-const HDR_MAX_NS: u64 = 60_000_000_000; // 60 s upper bound
+pub const DEFAULT_WAVE_NS: u64 = 20_000_000_000;
+const HDR_MAX_NS: u64 = 60_000_000_000;
 const HDR_SIGFIG: u8 = 3;
 pub const FIRST_RESP_IDLE_NS: u64 = 5_000_000_000;
 pub const WINDOW_IDLE_NS: u64 = 30_000_000_000;
@@ -43,13 +43,8 @@ pub struct Snapshot {
     pub rt_p99_ns: u64,
     pub tps_1s: f64,
     pub error_rate: f64,
-    /// Per-interval offered count and error count (timed_out + rejected). Stored
-    /// in metrics_partial so the rollup can merge error_rate across shards as
-    /// Σerrors/Σoffered (a ratio cannot be averaged); tps_1s sums directly.
     pub offered: u64,
     pub errors: u64,
-    /// V2-deflate-serialized cumulative service-time (t7-t3) histogram — the
-    /// scored metric, for offline analysis and the frontend percentile chart.
     pub hdr_encoded: Vec<u8>,
     pub rt_hdr_encoded: Vec<u8>,
     pub slip_hdr_encoded: Vec<u8>,
@@ -181,11 +176,6 @@ impl Aggregator {
     /// observe_sent performs the module-specific operation described by its name.
     /// It keeps validation, side effects, and returned values within this module's contract.
     pub fn observe_sent(&mut self, e: &OrderSentEvent) {
-        // Authoritative session start: the barrier epoch is identical for every
-        // order in the session, so every consumer computes the same wave_index even
-        // when the session is sharded across consumers. Overrides the
-        // earliest-timestamp-seen-locally fallback (which diverges per consumer).
-        // barrier_epoch_ns == 0 means a pre-field producer → keep the fallback.
         if e.barrier_epoch_ns > 0 {
             self.session_start
                 .insert(e.session_id.clone(), e.barrier_epoch_ns);
@@ -416,26 +406,21 @@ mod tests {
             payload_type: PayloadType::New,
             ord_type: OrdType::Limit,
             orig_order_id: String::new(),
-            barrier_epoch_ns: 0, // legacy/earliest-seen fallback for existing tests
+            barrier_epoch_ns: 0,
         }
     }
 
-    // Deterministic wave bucketing: with an authoritative barrier_epoch_ns, the wave
-    // index depends ONLY on the order's timestamp relative to the barrier — NOT on
-    // which events a consumer happens to see first. Two aggregators fed disjoint
-    // subsets of the same session (as distributed shards would be) must agree on the
-    // wave of any given order.
+    /// barrier_epoch_makes_wave_index_consumer_independent checks deterministic waves.
+    /// It ensures distributed shards compute the same wave from barrier_epoch_ns
+    /// without depending on which event each consumer sees first.
     #[test]
     fn barrier_epoch_makes_wave_index_consumer_independent() {
         let barrier = 1_000_000_000_000u64;
         let wave_ns = DEFAULT_WAVE_NS;
-        // An order sent 1.5 waves into the run.
         let t0 = barrier + wave_ns + wave_ns / 2;
         let mut ev = sent("sess", "sess_0_0_O", t0, t0, 0, false);
         ev.barrier_epoch_ns = barrier;
 
-        // Shard A sees an EARLIER order first; shard B sees only this one. Without
-        // the barrier, A and B would anchor session_start differently.
         let mut a = Aggregator::new(wave_ns);
         let mut earlier = sent("sess", "sess_0_1_O", barrier + 10, barrier + 10, 0, false);
         earlier.barrier_epoch_ns = barrier;
@@ -445,7 +430,6 @@ mod tests {
         let mut b = Aggregator::new(wave_ns);
         b.observe_sent(&ev);
 
-        // Both must bucket `ev` into wave 1 (floor(1.5) = 1), regardless of history.
         assert_eq!(a.wave_of("sess", t0), 1);
         assert_eq!(b.wave_of("sess", t0), 1);
         assert_eq!(a.wave_of("sess", t0), b.wave_of("sess", t0));
@@ -472,11 +456,11 @@ mod tests {
     /// It keeps validation, side effects, and returned values within this module's contract.
     fn late_streaming_fill_not_rescored() {
         let mut a = Aggregator::new(DEFAULT_WAVE_NS);
-        a.observe_acked(&acked("S", "o1", 0, 1_000_000_000, "0", 0)); // ACK -> scored
-        let _ = a.snapshot(1_500_000_000, 1.0); // o1 idle 0.5s -> kept
-        a.observe_acked(&acked("S", "o1", 0, 4_000_000_000, "1", 5)); // fill1 advances idle clock
-        let _ = a.snapshot(6_000_000_000, 1.0); // t7-based idle 2s -> kept (t3-based would evict)
-        a.observe_acked(&acked("S", "o1", 0, 6_500_000_000, "2", 5)); // fill2: known order, not re-scored
+        a.observe_acked(&acked("S", "o1", 0, 1_000_000_000, "0", 0));
+        let _ = a.snapshot(1_500_000_000, 1.0);
+        a.observe_acked(&acked("S", "o1", 0, 4_000_000_000, "1", 5));
+        let _ = a.snapshot(6_000_000_000, 1.0);
+        a.observe_acked(&acked("S", "o1", 0, 6_500_000_000, "2", 5));
         let snaps = a.snapshot(7_000_000_000, 1.0);
         let s = snaps
             .iter()
@@ -493,7 +477,7 @@ mod tests {
     /// It keeps validation, side effects, and returned values within this module's contract.
     fn sent_only_window_emits_no_row() {
         let mut a = Aggregator::new(DEFAULT_WAVE_NS);
-        a.observe_sent(&sent("S2", "o1", 0, 10, 0, true)); // timed out, never acked
+        a.observe_sent(&sent("S2", "o1", 0, 10, 0, true));
         let snaps = a.snapshot(1_000_000_000, 1.0);
         assert!(
             snaps.iter().all(|s| s.session_id != "S2"),
@@ -522,9 +506,9 @@ mod tests {
     /// wave_bucketing_by_elapsed_since_session_start performs the module-specific operation described by its name.
     /// It keeps validation, side effects, and returned values within this module's contract.
     fn wave_bucketing_by_elapsed_since_session_start() {
-        let mut a = Aggregator::new(DEFAULT_WAVE_NS); // 20s
+        let mut a = Aggregator::new(DEFAULT_WAVE_NS);
         let start = 1_000_000_000;
-        a.observe_acked(&acked("S", "o1", start, start + 1_000, "0", 0)); // wave 0
+        a.observe_acked(&acked("S", "o1", start, start + 1_000, "0", 0));
         a.observe_acked(&acked(
             "S",
             "o2",
@@ -532,7 +516,7 @@ mod tests {
             start + 19_000_001_000,
             "0",
             0,
-        )); // wave 0
+        ));
         a.observe_acked(&acked(
             "S",
             "o3",
@@ -540,14 +524,14 @@ mod tests {
             start + 21_000_001_000,
             "0",
             0,
-        )); // wave 1
+        ));
         let mut snaps = a.snapshot(start + 30_000_000_000, 1.0);
         snaps.sort_by_key(|s| s.wave_index);
         assert_eq!(snaps.len(), 2);
         assert_eq!(snaps[0].wave_index, 0);
-        assert_eq!(snaps[0].tps_1s, 2.0); // o1 + o2
+        assert_eq!(snaps[0].tps_1s, 2.0);
         assert_eq!(snaps[1].wave_index, 1);
-        assert_eq!(snaps[1].tps_1s, 1.0); // o3
+        assert_eq!(snaps[1].tps_1s, 1.0);
     }
 
     #[test]
@@ -555,13 +539,13 @@ mod tests {
     /// It keeps validation, side effects, and returned values within this module's contract.
     fn error_rate_from_timeouts_and_rejects() {
         let mut a = Aggregator::new(DEFAULT_WAVE_NS);
-        a.observe_sent(&sent("S", "o1", 1000, 1100, 0, true)); // timeout
+        a.observe_sent(&sent("S", "o1", 1000, 1100, 0, true));
         a.observe_sent(&sent("S", "o2", 1000, 1100, 5000, false));
         a.observe_sent(&sent("S", "o3", 1000, 1100, 5000, false));
         a.observe_sent(&sent("S", "o4", 1000, 1100, 5000, false));
-        a.observe_acked(&acked("S", "o2", 1000, 2000, "8", 0)); // reject
-        a.observe_acked(&acked("S", "o3", 1000, 2000, "0", 0)); // accept
-        a.observe_acked(&acked("S", "o4", 1000, 2000, "0", 0)); // accept
+        a.observe_acked(&acked("S", "o2", 1000, 2000, "8", 0));
+        a.observe_acked(&acked("S", "o3", 1000, 2000, "0", 0));
+        a.observe_acked(&acked("S", "o4", 1000, 2000, "0", 0));
         let snaps = a.snapshot(1_000_000_000, 1.0);
         assert_eq!(snaps.len(), 1);
         assert!((snaps[0].error_rate - 0.5).abs() < 1e-9);

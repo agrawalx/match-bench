@@ -52,7 +52,7 @@ func priceOf(e *Engine, id string) int64 {
 	for _, f := range e.Fills() {
 		if f.OrderID == id {
 			if price != -1 && price != f.Price {
-				return -2 // multiple prices
+				return -2
 			}
 			price = f.Price
 		}
@@ -64,8 +64,8 @@ func priceOf(e *Engine, id string) int64 {
 // It keeps validation, side effects, and returned values within this package's contract.
 func TestLimitCross(t *testing.T) {
 	e := NewEngine()
-	e.Process(limit("S1", model.Sell, 100, 10)) // rests
-	e.Process(limit("B1", model.Buy, 100, 10))  // crosses, fully fills
+	e.Process(limit("S1", model.Sell, 100, 10))
+	e.Process(limit("B1", model.Buy, 100, 10))
 	f := filled(e)
 	if f["B1"] != 10 || f["S1"] != 10 {
 		t.Fatalf("expected both filled 10, got %v", f)
@@ -79,8 +79,8 @@ func TestLimitCross(t *testing.T) {
 // It keeps validation, side effects, and returned values within this package's contract.
 func TestMarketWalksLevelsFIFO(t *testing.T) {
 	e := NewEngine()
-	e.Process(limit("S1", model.Sell, 100, 5)) // best level, first
-	e.Process(limit("S2", model.Sell, 100, 5)) // same level, second (FIFO after S1)
+	e.Process(limit("S1", model.Sell, 100, 5))
+	e.Process(limit("S2", model.Sell, 100, 5))
 	e.Process(limit("S3", model.Sell, 101, 10))
 	e.Process(market("B", model.Buy, 12))
 	f := filled(e)
@@ -120,11 +120,11 @@ func TestPricePriorityLowestAskFirst(t *testing.T) {
 func TestNonMarketableLimitRestsThenFills(t *testing.T) {
 	e := NewEngine()
 	e.Process(limit("Sask", model.Sell, 100, 10))
-	e.Process(limit("Bbid", model.Buy, 99, 10)) // below ask -> rests, no fill
+	e.Process(limit("Bbid", model.Buy, 99, 10))
 	if len(e.Fills()) != 0 {
 		t.Fatalf("non-marketable limit should not fill, got %v", e.Fills())
 	}
-	e.Process(limit("Scross", model.Sell, 99, 10)) // hits the resting bid
+	e.Process(limit("Scross", model.Sell, 99, 10))
 	f := filled(e)
 	if f["Bbid"] != 10 || f["Scross"] != 10 {
 		t.Fatalf("resting bid should fill when crossed: %v", f)
@@ -136,8 +136,8 @@ func TestNonMarketableLimitRestsThenFills(t *testing.T) {
 func TestPartialFillKeepsMakerFront(t *testing.T) {
 	e := NewEngine()
 	e.Process(limit("S1", model.Sell, 100, 10))
-	e.Process(limit("B1", model.Buy, 100, 4)) // partial: S1 leaves 6 resting
-	e.Process(limit("B2", model.Buy, 100, 6)) // fills S1's remaining 6
+	e.Process(limit("B1", model.Buy, 100, 4))
+	e.Process(limit("B2", model.Buy, 100, 6))
 	f := filled(e)
 	if f["S1"] != 10 || f["B1"] != 4 || f["B2"] != 6 {
 		t.Fatalf("partial fill accounting wrong: %v", f)
@@ -150,7 +150,7 @@ func TestCancelRemovesResting(t *testing.T) {
 	e := NewEngine()
 	e.Process(limit("S1", model.Sell, 100, 10))
 	e.Process(cancel("S1"))
-	e.Process(market("B", model.Buy, 10)) // book empty -> no fill
+	e.Process(market("B", model.Buy, 10))
 	if len(e.Fills()) != 0 {
 		t.Fatalf("cancelled order must not fill, got %v", e.Fills())
 	}
@@ -160,13 +160,13 @@ func TestCancelRemovesResting(t *testing.T) {
 // It keeps validation, side effects, and returned values within this package's contract.
 func TestReplacePriceChangeMovesLevel(t *testing.T) {
 	e := NewEngine()
-	e.Process(limit("B1", model.Buy, 100, 10))          // bid @100
-	e.Process(replace("B1_R", "B1", model.Buy, 99, 10)) // reprice down to 99
-	e.Process(limit("S@100", model.Sell, 100, 10))      // should NOT hit a 99 bid
+	e.Process(limit("B1", model.Buy, 100, 10))
+	e.Process(replace("B1_R", "B1", model.Buy, 99, 10))
+	e.Process(limit("S@100", model.Sell, 100, 10))
 	if len(e.Fills()) != 0 {
 		t.Fatalf("sell@100 must not fill a bid repriced to 99, got %v", e.Fills())
 	}
-	e.Process(limit("S@99", model.Sell, 99, 10)) // now crosses the repriced bid
+	e.Process(limit("S@99", model.Sell, 99, 10))
 	f := filled(e)
 	if f["B1_R"] != 10 || f["S@99"] != 10 {
 		t.Fatalf("repriced bid should fill at 99: %v", f)
@@ -178,9 +178,9 @@ func TestReplacePriceChangeMovesLevel(t *testing.T) {
 func TestReplaceQtyDecreaseKeepsPriority(t *testing.T) {
 	e := NewEngine()
 	e.Process(limit("S1", model.Sell, 100, 10))
-	e.Process(limit("S2", model.Sell, 100, 10))          // behind S1
-	e.Process(replace("S1_R", "S1", model.Sell, 100, 5)) // S1 qty 10->5, keeps front
-	e.Process(market("B", model.Buy, 6))                 // takes S1's 5 then S2's 1
+	e.Process(limit("S2", model.Sell, 100, 10))
+	e.Process(replace("S1_R", "S1", model.Sell, 100, 5))
+	e.Process(market("B", model.Buy, 6))
 	f := filled(e)
 	if f["S1_R"] != 5 || f["S2"] != 1 {
 		t.Fatalf("qty-decrease must keep front priority: %v", f)
@@ -191,13 +191,13 @@ func TestReplaceQtyDecreaseKeepsPriority(t *testing.T) {
 // It keeps validation, side effects, and returned values within this package's contract.
 func TestReplaceQtyDecreaseCarriesFIFORank(t *testing.T) {
 	e := NewEngine()
-	e.Process(limit("A", model.Sell, 100, 10)) // rests first
-	e.Process(limit("B", model.Sell, 100, 10)) // same level, behind A
+	e.Process(limit("A", model.Sell, 100, 10))
+	e.Process(limit("B", model.Sell, 100, 10))
 	seqA, ok := e.SeqOf("A")
 	if !ok {
 		t.Fatal("A must have a FIFO rank after resting")
 	}
-	e.Process(replace("A_R", "A", model.Sell, 100, 8)) // qty 10->8, keeps front
+	e.Process(replace("A_R", "A", model.Sell, 100, 8))
 
 	got, ok := e.SeqOf("A_R")
 	if !ok {

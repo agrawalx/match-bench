@@ -376,6 +376,8 @@ mod tests {
         }
     }
 
+    /// shard_events_spreads_a_single_session_across_partitions checks hash spread.
+    /// It ensures a busy session still uses many partitions through order ids.
     #[test]
     fn partition_batcher_spreads_a_session_across_partitions() {
         let n = 24;

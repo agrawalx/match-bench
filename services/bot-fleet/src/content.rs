@@ -203,9 +203,9 @@ impl TaskGenerator {
     /// It keeps validation, side effects, and returned values within this module's contract.
     fn emit_replace(&mut self, seq: u32, orig: Resting, repriced: u64) -> Action {
         let (price, qty) = if self.rng.gen_bool(0.5) {
-            (repriced, orig.qty) // reprice: new price, same qty
+            (repriced, orig.qty)
         } else {
-            (orig.price, (orig.qty / 2).max(1)) // shrink qty, same price
+            (orig.price, (orig.qty / 2).max(1))
         };
         let order_id = fix::replace_order_id(&self.session_id, self.task_id, u64::from(seq));
         self.push_resting(Resting {

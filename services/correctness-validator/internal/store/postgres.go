@@ -133,7 +133,7 @@ func (s *Store) Save(ctx context.Context, rec Record) (bool, error) {
 	if err != nil {
 		return false, fmt.Errorf("begin tx: %w", err)
 	}
-	defer tx.Rollback(ctx) //nolint:errcheck // no-op after commit
+	defer tx.Rollback(ctx)
 
 	tag, err := tx.Exec(ctx, `
 INSERT INTO correctness_summary

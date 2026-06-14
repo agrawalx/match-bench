@@ -1,6 +1,6 @@
-# IICPC Frontend
+# match-bench Frontend
 
-Next.js 14 App Router frontend for the IICPC algorithm benchmarking platform.
+Next.js 14 App Router frontend for the match-bench algorithm benchmarking platform.
 
 ## Development
 

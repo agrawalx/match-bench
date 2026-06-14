@@ -33,9 +33,9 @@ func replaceOrd(id, orig string, side model.Side, price int64, qty uint64, resp 
 func TestTimePriorityViolationFlagged(t *testing.T) {
 	fa := model.Flow{SrcIP: 1, SrcPort: 1}
 	ordered := []*model.Order{
-		ordWithFlow("S1", model.NewLimit, model.Sell, 100, 10, fa, 1, 10),               // front, no fill reported
-		ordWithFlow("S2", model.NewLimit, model.Sell, 100, 10, fa, 2, 20, fill(5, 100)), // behind S1, but reports a fill
-		ordWithFlow("B1", model.NewLimit, model.Buy, 100, 5, fa, 3, 30, fill(5, 100)),   // taker buys 5
+		ordWithFlow("S1", model.NewLimit, model.Sell, 100, 10, fa, 1, 10),
+		ordWithFlow("S2", model.NewLimit, model.Sell, 100, 10, fa, 2, 20, fill(5, 100)),
+		ordWithFlow("B1", model.NewLimit, model.Buy, 100, 5, fa, 3, 30, fill(5, 100)),
 	}
 	ordered = replay.Order(ordered)
 	r := Run(ordered, nil)
@@ -67,8 +67,8 @@ func TestTimePriorityCleanNotFlagged(t *testing.T) {
 // It keeps validation, side effects, and returned values within this package's contract.
 func TestSelfTradeViolationFlagged(t *testing.T) {
 	ordered := []*model.Order{
-		order("sess_7_1_O", model.NewLimit, model.Sell, 100, 10, fill(10, 100)), // bot 7 maker
-		order("sess_7_2_O", model.NewLimit, model.Buy, 100, 10, fill(10, 100)),  // bot 7 taker — SELF TRADE
+		order("sess_7_1_O", model.NewLimit, model.Sell, 100, 10, fill(10, 100)),
+		order("sess_7_2_O", model.NewLimit, model.Buy, 100, 10, fill(10, 100)),
 	}
 	r := Run(ordered, nil)
 	if r.SelfTrades == 0 {
@@ -89,8 +89,8 @@ func TestSelfTradeViolationFlagged(t *testing.T) {
 // It keeps validation, side effects, and returned values within this package's contract.
 func TestSelfTradeCleanNotFlagged(t *testing.T) {
 	ordered := []*model.Order{
-		order("sess_7_1_O", model.NewLimit, model.Sell, 100, 10, fill(10, 100)), // bot 7 maker
-		order("sess_9_2_O", model.NewLimit, model.Buy, 100, 10, fill(10, 100)),  // bot 9 taker
+		order("sess_7_1_O", model.NewLimit, model.Sell, 100, 10, fill(10, 100)),
+		order("sess_9_2_O", model.NewLimit, model.Buy, 100, 10, fill(10, 100)),
 	}
 	r := Run(ordered, nil)
 	if r.SelfTrades != 0 {
@@ -149,8 +149,8 @@ func TestCrossFlowTieSuppressesTimeViolation(t *testing.T) {
 	fa := model.Flow{SrcIP: 1, SrcPort: 1}
 	fb := model.Flow{SrcIP: 2, SrcPort: 2}
 	ordered := []*model.Order{
-		ordWithFlow("S1", model.NewLimit, model.Sell, 100, 10, fa, 1, 1000),               // effective_t3 1000
-		ordWithFlow("S2", model.NewLimit, model.Sell, 100, 10, fb, 1, 1050, fill(5, 100)), // effective_t3 1050, Δ50
+		ordWithFlow("S1", model.NewLimit, model.Sell, 100, 10, fa, 1, 1000),
+		ordWithFlow("S2", model.NewLimit, model.Sell, 100, 10, fb, 1, 1050, fill(5, 100)),
 		ordWithFlow("B1", model.NewLimit, model.Buy, 100, 5, fa, 2, 2000, fill(5, 100)),
 	}
 	ordered = replay.Order(ordered)
@@ -166,8 +166,8 @@ func TestCrossFlowBeyondToleranceFlagsTimeViolation(t *testing.T) {
 	fa := model.Flow{SrcIP: 1, SrcPort: 1}
 	fb := model.Flow{SrcIP: 2, SrcPort: 2}
 	ordered := []*model.Order{
-		ordWithFlow("S1", model.NewLimit, model.Sell, 100, 10, fa, 1, 1000),               // effective_t3 1000
-		ordWithFlow("S2", model.NewLimit, model.Sell, 100, 10, fb, 1, 1150, fill(5, 100)), // effective_t3 1150, Δ150
+		ordWithFlow("S1", model.NewLimit, model.Sell, 100, 10, fa, 1, 1000),
+		ordWithFlow("S2", model.NewLimit, model.Sell, 100, 10, fb, 1, 1150, fill(5, 100)),
 		ordWithFlow("B1", model.NewLimit, model.Buy, 100, 5, fa, 2, 2000, fill(5, 100)),
 	}
 	ordered = replay.Order(ordered)
@@ -183,7 +183,7 @@ func TestSameFlowStrictNoTolerance(t *testing.T) {
 	fa := model.Flow{SrcIP: 1, SrcPort: 1}
 	ordered := []*model.Order{
 		ordWithFlow("S1", model.NewLimit, model.Sell, 100, 10, fa, 1, 1000),
-		ordWithFlow("S2", model.NewLimit, model.Sell, 100, 10, fa, 2, 1001, fill(5, 100)), // Δ1ns, same flow
+		ordWithFlow("S2", model.NewLimit, model.Sell, 100, 10, fa, 2, 1001, fill(5, 100)),
 		ordWithFlow("B1", model.NewLimit, model.Buy, 100, 5, fa, 3, 2000, fill(5, 100)),
 	}
 	ordered = replay.Order(ordered)
@@ -203,7 +203,7 @@ func TestReportDeterministicFullSession(t *testing.T) {
 			ordWithFlow("sess_1_1_O", model.NewLimit, model.Sell, 100, 10, fa, 1, 10, fill(10, 100)),
 			ordWithFlow("sess_2_2_O", model.NewLimit, model.Buy, 100, 10, fb, 1, 20, fill(10, 100)),
 			ordWithFlow("sess_1_3_O", model.NewLimit, model.Sell, 101, 5, fa, 2, 30),
-			ordWithFlow("sess_3_4_O", model.NewLimit, model.Buy, 100, 5, fa, 3, 40, fill(5, 100)), // jumps queue maybe
+			ordWithFlow("sess_3_4_O", model.NewLimit, model.Buy, 100, 5, fa, 3, 40, fill(5, 100)),
 			ordWithFlow("sess_3_5_O", model.NewLimit, model.Buy, 200, 100, fb, 2, 50, fill(100, 200)),
 		}
 		return replay.Order(o)

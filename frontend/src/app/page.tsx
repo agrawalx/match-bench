@@ -5,6 +5,11 @@
  */
 import { redirect } from "next/navigation";
 
+/**
+ * HomePage redirects the root route into the primary leaderboard experience.
+ * It keeps the app entry point stable while letting the leaderboard own the
+ * first interactive screen.
+ */
 export default function HomePage() {
   redirect("/leaderboard");
 }

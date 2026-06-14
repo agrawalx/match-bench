@@ -57,13 +57,13 @@ func TestSpikeScenario_Shape(t *testing.T) {
 		at   time.Duration
 		want uint64
 	}{
-		{at: 0, want: 10_000},                // pre-spike baseline
-		{at: 24 * time.Second, want: 10_000}, // still pre-spike
-		{at: 25 * time.Second, want: 50_000}, // spike window opens
-		{at: 30 * time.Second, want: 50_000}, // mid-spike
-		{at: 34 * time.Second, want: 50_000}, // last full second of spike
-		{at: 35 * time.Second, want: 10_000}, // back to baseline
-		{at: 59 * time.Second, want: 10_000}, // tail baseline
+		{at: 0, want: 10_000},
+		{at: 24 * time.Second, want: 10_000},
+		{at: 25 * time.Second, want: 50_000},
+		{at: 30 * time.Second, want: 50_000},
+		{at: 34 * time.Second, want: 50_000},
+		{at: 35 * time.Second, want: 10_000},
+		{at: 59 * time.Second, want: 10_000},
 	}
 	for _, c := range cases {
 		got := sumRPSAt(s.TaskSpecs, c.at)
@@ -139,7 +139,7 @@ func TestConfig_Validation(t *testing.T) {
 	bad := []Config{
 		func() Config { c := DefaultConfig(); c.ConstantDuration = 0; return c }(),
 		func() Config { c := DefaultConfig(); c.ConstantTotalRPS = 0; return c }(),
-		func() Config { c := DefaultConfig(); c.SpikePeakRPS = 1000; return c }(), // < baseline
+		func() Config { c := DefaultConfig(); c.SpikePeakRPS = 1000; return c }(),
 	}
 	for i, c := range bad {
 		if _, err := BuildAll(c); err == nil {

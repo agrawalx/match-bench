@@ -1,12 +1,13 @@
-# IICPC
+<div align="center">
+  <img src="frontend/public/logo.png" alt="match-bench logo" width="100%" />
 
-> **Fair, repeatable benchmarking for high-frequency trading algorithms.**
+  <h3>Fair, repeatable benchmarking for high-frequency trading algorithms.</h3>
+  <p><em>A benchmark is only useful if nobody can game the measurement.</em></p>
+</div>
 
-IICPC lets participants upload trading algorithms, runs each submission in an isolated environment, sends every participant the same deterministic market workload, measures latency outside the participant's code, validates correctness, and publishes scores on a live leaderboard.
+---
 
-The platform is built for one principle: 
-
-> "**A benchmark is only useful if nobody can game the measurement.**"
+**match-bench** lets participants upload trading algorithms, runs each submission in an isolated environment, sends every participant the same deterministic market workload, measures latency outside the participant's code, validates correctness, and publishes scores on a live leaderboard.
 
 ## Table Of Contents
 
@@ -26,7 +27,7 @@ The platform is built for one principle:
 
 ## Overview
 
-IICPC is a multi-service benchmark platform for evaluating untrusted trading algorithms. A submitted algorithm is built into a container, deployed into a locked-down Kubernetes pod, driven by deterministic benchmark traffic, measured at the Linux network boundary, checked against a correctness model, and scored.
+match-bench is a multi-service benchmark platform for evaluating untrusted trading algorithms. A submitted algorithm is built into a container, deployed into a locked-down Kubernetes pod, driven by deterministic benchmark traffic, measured at the Linux network boundary, checked against a correctness model, and scored.
 
 ## Benchmark Snapshot
 
@@ -57,7 +58,7 @@ These numbers useful because they show the platform has room to scale before the
 
 ## How It Works
 
-For each submission, IICPC follows this flow:
+For each submission, match-bench follows this flow:
 
 1. The participant uploads an algorithm.
 2. The build system creates a runnable container image.
@@ -68,7 +69,7 @@ For each submission, IICPC follows this flow:
 7. The correctness validator checks whether the algorithm behaved correctly.
 8. The score computer produces the final leaderboard score.
 
-The important detail is where measurement happens. IICPC does not ask the submitted algorithm how fast it was. It observes network traffic from outside the algorithm and computes latency from those observations.
+The important detail is where measurement happens. match-bench does not ask the submitted algorithm how fast it was. It observes network traffic from outside the algorithm and computes latency from those observations.
 
 ## Architecture
 
@@ -111,7 +112,6 @@ ops/                       Prometheus, Grafana, Kafka, and operational config
 bootstrap/                 Secret templates and bootstrap notes
 docs/                      Local run and cloud deployment guides
 design.md                  Detailed engineering design
-testing_commands.md        Test command reference
 ```
 
 ## Getting Started
@@ -142,11 +142,8 @@ The AWS path uses EKS, ECR, Terraform, Kubernetes manifests, IRSA, KEDA, and the
 
 ## Architecture Document
 
-TODO: Add link to the final architecture document.
-
-Suggested target:
-
-- `docs/architecture.pdf` or an externally hosted architecture review document
+- [DeepWiki](https://deepwiki.com/akronim26/match-bench)
+- [Google Doc](https://docs.google.com/document/d/13tPoT2Bfk82HeOVpX94-9zFqoKTqFExBVFwyRXRliBk/edit?usp=sharing)
 
 ## Demo Video
 

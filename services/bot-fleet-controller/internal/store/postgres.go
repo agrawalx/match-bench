@@ -138,7 +138,7 @@ func (s *Store) MarkRunFailed(ctx context.Context, sessionID, message string) er
 // It keeps validation, side effects, and returned values within this package's contract.
 func (s *Store) MarkRunGroupFailed(ctx context.Context, runGroupID string) error {
 	if runGroupID == "" {
-		return nil // legacy single-session run with no parent group
+		return nil
 	}
 	if _, err := s.pool.Exec(ctx,
 		`UPDATE run_groups

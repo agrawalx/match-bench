@@ -65,7 +65,7 @@ async fn handle_connection(
     loop {
         let n = stream.read(&mut chunk).await.context("read")?;
         if n == 0 {
-            return Ok(()); // peer closed
+            return Ok(());
         }
         buf.extend_from_slice(&chunk[..n]);
 
@@ -76,7 +76,7 @@ async fn handle_connection(
             }
             order_count += 1;
             if drop_every > 0 && order_count.is_multiple_of(drop_every) {
-                continue; // intentional drop for watchdog tests
+                continue;
             }
             let Some(clord_id_bytes) = msg.clord_id else {
                 continue;

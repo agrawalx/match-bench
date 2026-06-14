@@ -55,7 +55,7 @@ func (c *Consumer) Start(ctx context.Context) {
 		m, err := c.reader.FetchMessage(ctx)
 		if err != nil {
 			if ctx.Err() != nil {
-				return // shutdown
+				return
 			}
 			recordConsume("fetch_error", 0)
 			c.log.Error("fetch message failed", "error", err)

@@ -95,7 +95,7 @@ func TestFullyReversedFlowCascadesToFirst(t *testing.T) {
 // It keeps validation, side effects, and returned values within this package's contract.
 func TestCrossFlowTieBrokenByFlowThenSeq(t *testing.T) {
 	fa := model.Flow{SrcIP: 1, SrcPort: 1}
-	fb := model.Flow{SrcIP: 1, SrcPort: 2} // same ip, higher port -> after fa
+	fb := model.Flow{SrcIP: 1, SrcPort: 2}
 	orders := []*model.Order{
 		{OrderID: "B", Flow: fb, TCPSeq: 5, T3Ns: 1000},
 		{OrderID: "A", Flow: fa, TCPSeq: 5, T3Ns: 1000},
@@ -110,8 +110,8 @@ func TestCrossFlowTieTolerance(t *testing.T) {
 	fa := model.Flow{SrcIP: 1, SrcPort: 1}
 	fb := model.Flow{SrcIP: 2, SrcPort: 2}
 	a := &model.Order{OrderID: "a", Flow: fa, EffectiveT3: 1000}
-	bClose := &model.Order{OrderID: "b", Flow: fb, EffectiveT3: 1050} // Δ50 < 100
-	bFar := &model.Order{OrderID: "b", Flow: fb, EffectiveT3: 1150}   // Δ150 >= 100
+	bClose := &model.Order{OrderID: "b", Flow: fb, EffectiveT3: 1050}
+	bFar := &model.Order{OrderID: "b", Flow: fb, EffectiveT3: 1150}
 	sameFlow := &model.Order{OrderID: "c", Flow: fa, EffectiveT3: 1050}
 
 	if !CrossFlowTie(a, bClose) {

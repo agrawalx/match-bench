@@ -137,7 +137,7 @@ async fn main() -> Result<()> {
 
     sleep(Duration::from_secs(1)).await;
 
-    let barrier_epoch_ns = 0u64; // populated below after ReadySignal lands
+    let barrier_epoch_ns = 0u64;
 
     let host = FIX_BIND.split(':').next().unwrap().to_string();
     let port: u16 = FIX_BIND.split(':').nth(1).unwrap().parse().unwrap();
@@ -182,7 +182,7 @@ async fn main() -> Result<()> {
     let barrier_epoch_ns = (std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
-        + Duration::from_millis(500)) // small safety gap, mimics the controller
+        + Duration::from_millis(500))
     .as_nanos() as u64;
 
     let barrier = BarrierEvent {
@@ -208,7 +208,7 @@ async fn main() -> Result<()> {
     let _ = worker_handle.await;
     let _ = echo.await;
 
-    let total_expected = TARGET_RPS as u64 * DURATION_SECS; // approx; allow ±10%
+    let total_expected = TARGET_RPS as u64 * DURATION_SECS;
     if events.len() < (total_expected as usize) * 9 / 10 {
         return Err(anyhow!(
             "expected ~{} events, got {} (below 90% threshold)",
@@ -264,7 +264,7 @@ async fn main() -> Result<()> {
     );
 
     let expected_dropped = events.len() as u64 / DROP_EVERY;
-    let dropped_tolerance = expected_dropped / 4 + 2; // ±25% + slack
+    let dropped_tolerance = expected_dropped / 4 + 2;
     let dropped_diff = timed_out_count.abs_diff(expected_dropped);
     if dropped_diff > dropped_tolerance {
         return Err(anyhow!(

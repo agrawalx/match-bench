@@ -30,7 +30,7 @@ func Order(orders []*model.Order) []*model.Order {
 			if !started || o.T3Ns > prev {
 				o.EffectiveT3 = o.T3Ns
 			} else {
-				o.EffectiveT3 = prev // promoted: predecessor's delivery time
+				o.EffectiveT3 = prev
 			}
 			prev = o.EffectiveT3
 			started = true

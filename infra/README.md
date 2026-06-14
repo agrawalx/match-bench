@@ -1,4 +1,4 @@
-# IICPC EKS Infrastructure-as-Code
+# match-bench EKS Infrastructure-as-Code
 
 This directory automates the EKS bring-up that `DEPLOYMENT_EKS.md` describes as a
 manual runbook. It is the same cluster — same node groups, same kubelet tuning,

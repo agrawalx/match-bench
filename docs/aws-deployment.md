@@ -1,6 +1,6 @@
 # AWS Deployment Guide
 
-This guide deploys IICPC to AWS EKS using Terraform, ECR, IRSA, KEDA, AWS Load Balancer Controller, gp3 storage, and the manifests under `k8s/`.
+This guide deploys match-bench to AWS EKS using Terraform, ECR, IRSA, KEDA, AWS Load Balancer Controller, gp3 storage, and the manifests under `k8s/`.
 
 For lower-level infrastructure details, read `infra/README.md`.
 

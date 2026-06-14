@@ -96,7 +96,7 @@ func CreateSlot(mgr *k8s.Manager, slots *store.SlotStore, log *slog.Logger) http
 		}
 		metrics.Histogram("slot_create_duration_seconds", "Sandbox slot create duration in seconds.", metrics.Labels("result", "ok"), metrics.SinceSeconds(start))
 
-		state, msg, _ := mgr.Refresh(ctx, req.SlotID) // newly created pod is in Pending
+		state, msg, _ := mgr.Refresh(ctx, req.SlotID)
 		slot := &store.Slot{
 			SlotID:    req.SlotID,
 			Image:     req.Image,

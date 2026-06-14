@@ -84,7 +84,7 @@ func main() {
 	go consumer.StartBotReady(ctx)
 
 	ready := handler.NewReadyState()
-	ready.MarkReady() // consumers are running
+	ready.MarkReady()
 
 	r := chi.NewRouter()
 	r.Use(middleware.RequestID)

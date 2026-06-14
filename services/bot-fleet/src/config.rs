@@ -23,12 +23,6 @@ pub struct Config {
     pub ready_topic: String,
     pub workload_failed_topic: String,
     pub orders_sent_topic: String,
-    /// orders_partitions is the partition count of the orders.sent topic. The
-    /// telemetry flush shards each batch by partition_for(order_id, this) and
-    /// publishes each sub-batch to its explicit partition, so an order's sent
-    /// event co-locates with its acked event (eBPF capture uses the same hash) on
-    /// one consumer — the co-partitioning a multi-replica ingester needs. MUST
-    /// equal the topic's real partition count (topic-init creates 24).
     pub orders_partitions: i32,
     pub telemetry_flush_interval: Duration,
     pub telemetry_batch_size: usize,

@@ -28,11 +28,11 @@ type jwksCache struct {
 	url    string
 	client *http.Client
 
-	mu        sync.RWMutex // guards keys + fetchedAt
+	mu        sync.RWMutex
 	keys      map[string]*rsa.PublicKey
 	fetchedAt time.Time
 
-	fetchMu sync.Mutex // single-flight: at most one in-flight JWKS fetch
+	fetchMu sync.Mutex
 }
 
 // newJWKSCache performs the package-specific operation described by its name.

@@ -185,7 +185,16 @@ async fn run_aggregator(
 
     // Shutdown: flush whatever is buffered, then wait for every in-flight delivery.
     for (part, chunk) in batcher.drain_ready() {
-        enqueue_chunk(&producer, &topic, &session_id, &worker_id, part, chunk, &mut inflight).await;
+        enqueue_chunk(
+            &producer,
+            &topic,
+            &session_id,
+            &worker_id,
+            part,
+            chunk,
+            &mut inflight,
+        )
+        .await;
     }
     while let Some((n, res)) = inflight.next().await {
         account_delivery(n, res);

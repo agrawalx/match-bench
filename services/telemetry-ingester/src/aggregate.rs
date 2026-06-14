@@ -608,7 +608,11 @@ mod tests {
         // Keep at least one live window so the session isn't pruned wholesale.
         a.observe_acked(&acked("S", "live", HDR_MAX_NS, HDR_MAX_NS + 1_000, "0", 0));
         let _ = a.snapshot(HDR_MAX_NS + 2_000_000_000, 1.0);
-        assert_eq!(a.timed_out_orders.len(), 0, "stale timed-out marker evicted");
+        assert_eq!(
+            a.timed_out_orders.len(),
+            0,
+            "stale timed-out marker evicted"
+        );
     }
 
     #[test]

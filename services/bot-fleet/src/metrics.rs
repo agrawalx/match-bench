@@ -260,9 +260,7 @@ pub fn observe_write(write_ns: u64, batch_size: usize) {
 
 /// observe_slip records one order's lateness vs its paced schedule (ns).
 pub fn observe_slip(slip_ns: u64) {
-    METRICS
-        .schedule_slip_seconds
-        .observe(slip_ns as f64 / 1e9);
+    METRICS.schedule_slip_seconds.observe(slip_ns as f64 / 1e9);
 }
 
 /// render performs the module-specific operation described by its name.

@@ -284,10 +284,17 @@ pub fn enqueue_to_partition(
         .partition(partition);
     match producer.inner.send_result(record) {
         Ok(fut) => Ok(Some(fut)),
-        Err((rdkafka::error::KafkaError::MessageProduction(rdkafka::types::RDKafkaErrorCode::QueueFull), _)) => {
+        Err((
+            rdkafka::error::KafkaError::MessageProduction(
+                rdkafka::types::RDKafkaErrorCode::QueueFull,
+            ),
+            _,
+        )) => {
             Ok(None) // queue full — caller polls + retries
         }
-        Err((err, _)) => Err(anyhow!("enqueue kafka message to partition {partition}: {err}")),
+        Err((err, _)) => Err(anyhow!(
+            "enqueue kafka message to partition {partition}: {err}"
+        )),
     }
 }
 

@@ -523,7 +523,11 @@ mod tests {
     fn serialization_cost_breakdown() {
         use std::time::Instant;
         let n = 1_000_000u64;
-        let (fv, sid, host) = ("FIX.4.2", "01890dd2-71f3-7abc-9def-0123456789ab", "10.0.0.5:9898");
+        let (fv, sid, host) = (
+            "FIX.4.2",
+            "01890dd2-71f3-7abc-9def-0123456789ab",
+            "10.0.0.5:9898",
+        );
 
         // all three (what build_frame does today, per order)
         let t = Instant::now();
@@ -553,8 +557,12 @@ mod tests {
         let rest_only = t.elapsed().as_nanos() / n as u128;
 
         eprintln!("SERTIME ns/order  all3={all3}  fix_only={fix_only}  rest_only={rest_only}  (sink={sink})");
-        eprintln!("SERTIME implied max ser-only throughput/core: all3={}/s fix={}/s rest={}/s",
-            1_000_000_000 / all3.max(1), 1_000_000_000 / fix_only.max(1), 1_000_000_000 / rest_only.max(1));
+        eprintln!(
+            "SERTIME implied max ser-only throughput/core: all3={}/s fix={}/s rest={}/s",
+            1_000_000_000 / all3.max(1),
+            1_000_000_000 / fix_only.max(1),
+            1_000_000_000 / rest_only.max(1)
+        );
     }
 
     #[test]

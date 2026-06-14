@@ -30,24 +30,28 @@ use iicpc_schemas_rust::{
 };
 
 fn env_or<T: std::str::FromStr>(k: &str, d: T) -> T {
-    std::env::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(d)
+    std::env::var(k)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(d)
 }
 fn now_ns() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos() as u64
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos() as u64
 }
 
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> Result<()> {
-    let brokers =
-        std::env::var("KAFKA_BROKERS").unwrap_or_else(|_| "kafka.data.svc.cluster.local:9092".into());
+    let brokers = std::env::var("KAFKA_BROKERS")
+        .unwrap_or_else(|_| "kafka.data.svc.cluster.local:9092".into());
     let rate: u64 = env_or("RATE", 500_000); // target orders/s across all threads (0 = blast)
     let dur: u64 = env_or("DURATION_S", 60);
     let threads: u64 = env_or("THREADS", 8);
     let parts: i32 = env_or("PARTITIONS", 24);
     let batch: u64 = env_or("BATCH", 2000);
-    let session = std::env::var("SESSION_ID").unwrap_or_else(|_| {
-        format!("inject-{:x}", now_ns())
-    });
+    let session = std::env::var("SESSION_ID").unwrap_or_else(|_| format!("inject-{:x}", now_ns()));
     let barrier = now_ns();
     eprintln!(
         "inject -> {brokers}  rate={rate}/s dur={dur}s threads={threads} parts={parts} batch={batch} session={session}"
@@ -123,6 +127,11 @@ async fn main() -> Result<()> {
                     e.0.push(sent);
                     e.1.push(acked);
                 }
+                // Serialize all partitions into OWNED buffers first (these outlive the
+                // DeliveryFutures, which borrow the payload). Then fire all sends and
+                // await delivery together — concurrent delivery instead of serial
+                // per-message round-trips (the serial version capped ~56k/s).
+                let mut bufs: Vec<(i32, Vec<u8>, Vec<u8>)> = Vec::with_capacity(by_part.len());
                 for (p, (sents, ackeds)) in by_part {
                     let sb = OrderSentBatch {
                         session_id: session.clone(),
@@ -134,20 +143,35 @@ async fn main() -> Result<()> {
                         contestant_id: "inject".into(),
                         events: ackeds,
                     };
-                    let sbuf = rmp_serde::to_vec(&sb).unwrap();
-                    let abuf = rmp_serde::to_vec(&ab).unwrap();
-                    let _ = producer
-                        .send(
-                            FutureRecord::to(TOPIC_ORDERS_SENT).partition(p).payload(&sbuf).key(&session),
+                    bufs.push((
+                        p,
+                        rmp_serde::to_vec(&sb).unwrap(),
+                        rmp_serde::to_vec(&ab).unwrap(),
+                    ));
+                }
+                let mut futs = Vec::with_capacity(bufs.len() * 2);
+                for (p, sbuf, abuf) in &bufs {
+                    futs.push(
+                        producer.send(
+                            FutureRecord::to(TOPIC_ORDERS_SENT)
+                                .partition(*p)
+                                .payload(sbuf)
+                                .key(&session),
                             Timeout::Never,
-                        )
-                        .await;
-                    let _ = producer
-                        .send(
-                            FutureRecord::to(TOPIC_ORDERS_ACKED).partition(p).payload(&abuf).key(&session),
+                        ),
+                    );
+                    futs.push(
+                        producer.send(
+                            FutureRecord::to(TOPIC_ORDERS_ACKED)
+                                .partition(*p)
+                                .payload(abuf)
+                                .key(&session),
                             Timeout::Never,
-                        )
-                        .await;
+                        ),
+                    );
+                }
+                for f in futs {
+                    let _ = f.await;
                 }
                 produced += batch;
                 total.fetch_add(batch, Ordering::Relaxed);
@@ -171,7 +195,11 @@ async fn main() -> Result<()> {
         while start.elapsed().as_secs() < dur {
             tokio::time::sleep(Duration::from_secs(2)).await;
             let now = rep_total.load(Ordering::Relaxed);
-            eprintln!("   injected/s={:.0}  total={}", (now - last) as f64 / 2.0, now);
+            eprintln!(
+                "   injected/s={:.0}  total={}",
+                (now - last) as f64 / 2.0,
+                now
+            );
             last = now;
         }
     });

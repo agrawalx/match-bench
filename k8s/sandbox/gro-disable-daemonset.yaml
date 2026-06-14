@@ -48,7 +48,7 @@ spec:
                 for i in $(ls /sys/class/net | grep -vE '^(lo|docker0)$'); do
                   ethtool -K "$i" gro off gso off tso off lro off 2>/dev/null || true
                 done
-                sleep 20
+                sleep 2
               done
           resources:
             requests: { cpu: 10m, memory: 32Mi }

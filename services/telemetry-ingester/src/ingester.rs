@@ -112,10 +112,12 @@ async fn flush(agg: &mut Aggregator, store: &Store, redis: &RedisSink, last_snap
     let snaps = agg.snapshot(now, interval_secs);
     metrics::set_join_buffer_size(agg.join_buffer_size());
     metrics::records_evicted(agg.last_evicted());
+    // finalized = orders that got a recorded latency sample this interval (real
+    // recorded-latency throughput), reported every tick regardless of snapshot rows.
+    metrics::records_finalized(agg.take_finalized());
     if snaps.is_empty() {
         return;
     }
-    metrics::records_finalized(snaps.len());
 
     let started = Instant::now();
     match store.write(&snaps).await {

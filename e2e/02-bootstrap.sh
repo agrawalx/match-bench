@@ -25,12 +25,16 @@ kubectl apply -f deploy-bench/kafka-gp3-throughput.yaml >/dev/null 2>&1 || true
 # ── 2. eBPF capture ON + contestant sizing (ALGO_MEMORY=4Gi: a matching engine holds
 #       the resting order book in RAM; 1Gi OOMs it). Orchestrator spawns the capture
 #       Job alongside each contestant slot. ──
-echo ">> [2/6] eBPF capture ON + contestant ALGO_CPU=2 / ALGO_MEMORY=4Gi"
+echo ">> [2/6] eBPF capture ON + contestant ALGO_CPU=4 / ALGO_MEMORY=8Gi"
+# c6i.2xlarge sandbox node = 8 vCPU / 16 GiB. Contestant ALGO_CPU=4 + capture ~3 +
+# kubelet/OS ~1 (cores); ALGO_MEMORY=8Gi leaves room for capture (512Mi) + system.
+# On the old 4-vCPU/8GiB node ALGO_CPU=2 + capture saturated it and a responding
+# contestant CFS-throttled at ~150-168k; 8 vCPU lets it clear 180k.
 kubectl -n sandbox set env deploy/sandbox-orchestrator \
   CAPTURE_ENABLED=true \
   CAPTURE_IMAGE="$REG/iicpc/ebpf-latency:$TAG" \
   SANDBOX_NODE_POOL=sandbox \
-  ALGO_CPU=2 ALGO_MEMORY=4Gi
+  ALGO_CPU=4 ALGO_MEMORY=8Gi
 
 # CAPTURE FIDELITY (REQUIRED on EKS — see README "Capture fidelity"). EKS nodes use
 # jumbo MTU 9001 with offloads on; the capture's CAPTURE_CAP is 1536B, so GSO/GRO

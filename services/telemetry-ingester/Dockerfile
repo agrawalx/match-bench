@@ -30,5 +30,7 @@ COPY --from=builder /app/target/release/iicpc-telemetry-ingester /usr/local/bin/
 # The stage-2 rollup binary (merges per-shard partials → metrics). Same image; the
 # rollup Deployment overrides the command to run this instead of the ingester.
 COPY --from=builder /app/target/release/rollup /usr/local/bin/telemetry-rollup
+# Synthetic pipeline-load injector (benchmark tool; run as a Job with command override).
+COPY --from=builder /app/target/release/inject /usr/local/bin/inject
 USER 65532:65532
 ENTRYPOINT ["/usr/local/bin/iicpc-telemetry-ingester"]

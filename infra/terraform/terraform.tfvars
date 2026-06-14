@@ -27,14 +27,18 @@ general_max_size      = 3
 general_desired_size  = 3
 
 # CONTESTANT / system-under-test (isolated): one algo pod + its co-located eBPF
-# capture Job. c6i.xlarge = 4 vCPU: contestant gets 2 vCPU, the other 2 run the
-# capture Job + kubelet/OS. reserved_system_cpus pins 2 cores to system so the
-# algo's 2 are clean WHEN cpuset is enabled.
-sandbox_instance_type        = "c6i.xlarge"
+# capture Job. c6i.2xlarge = 8 vCPU. On the old c6i.xlarge (4 vCPU) the contestant
+# (ALGO_CPU=2) + the capture (~3 cores) saturated the node, so a responding sink
+# CFS-throttled at ~150-168k and spike/ramp collapsed past the knee. 8 vCPU gives
+# contestant ALGO_CPU=4 + capture ~3 + kubelet/OS ~1 -> >180k delivered WITH the
+# eBPF latency capture keeping up. (Changing instance_type RECREATES the managed
+# node group: the c6i.xlarge sandbox node is drained and replaced by a c6i.2xlarge;
+# the sandbox taint/label + gro-disable DaemonSet re-apply automatically.)
+sandbox_instance_type        = "c6i.2xlarge"
 sandbox_min_size             = 1
 sandbox_max_size             = 1
 sandbox_desired_size         = 1
-sandbox_reserved_system_cpus = "0,1" # 2 of 4 cores for system+capture; algo gets 2,3
+sandbox_reserved_system_cpus = "0,1" # only used WHEN cpuset is enabled (currently off)
 # Exclusive integer cpusets for the contestant (true core isolation). Kept OFF
 # until the known NodeConfig conflict (reservedSystemCPUs vs EKS kube-reserved ->
 # kubelet won't start) is fixed and validated. With it off, the contestant still

@@ -137,6 +137,10 @@ pub struct Aggregator {
     timed_out_orders: HashMap<String, u64>,
     wave_ns: u64,
     last_evicted: usize,
+    /// Orders finalized (matched -> first service_time sample recorded) since the
+    /// last snapshot. Reported as iicpc_telemetry_records_finalized so the dashboard
+    /// shows real recorded-latency throughput (NOT snapshot row count).
+    finalized: usize,
 }
 
 impl Aggregator {
@@ -151,7 +155,14 @@ impl Aggregator {
             timed_out_orders: HashMap::new(),
             wave_ns: wave_ns.max(1),
             last_evicted: 0,
+            finalized: 0,
         }
+    }
+
+    /// take_finalized returns the count of orders finalized since the last call and
+    /// resets the running counter.
+    pub fn take_finalized(&mut self) -> usize {
+        std::mem::take(&mut self.finalized)
     }
 
     /// wave_of performs the module-specific operation described by its name.
@@ -237,6 +248,7 @@ impl Aggregator {
 
         if self.first_response.observe(&e.order_id, e.t7_xdp_egress_ns) {
             record(&mut w.service_time, e.pod_service_time_ns);
+            self.finalized += 1;
             w.responded += 1;
             if is_reject(&e.exec_type) {
                 w.rejected += 1;

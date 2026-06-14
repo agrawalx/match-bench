@@ -9,8 +9,10 @@
 #       MinIO, telemetry-ingester(+rollup), correctness-validator, controllers, APIs,
 #       score-computer, build-spawner, observability, frontend. 3 nodes so the
 #       measurement plane has CPU headroom (at 2 it pinned ~95% and starved telemetry).
-#   - sandbox  x1 (c6i.xlarge, 4 vCPU): SYSTEM-UNDER-TEST — the contestant pod
-#       (ALGO_CPU=2, ALGO_MEMORY=4Gi) + its privileged eBPF capture (filters :9898).
+#   - sandbox  x1 (c6i.2xlarge, 8 vCPU / 16 GiB): SYSTEM-UNDER-TEST — the contestant
+#       pod (ALGO_CPU=4, ALGO_MEMORY=8Gi) + its privileged eBPF capture (~3 cores). 8 vCPU
+#       so a responding contestant + the capture both fit (>180k delivered without the
+#       contestant CFS-throttling, which on the old 4-vCPU node capped it at ~150-168k).
 #   - botworker x1 (c6i.xlarge, 4 vCPU, max 2): LOAD GENERATOR. One node sustains
 #       ~600k+/s (telemetry off). Bump botworker_desired_size to 2 for a horizontal-
 #       scaling sweep (max_size already allows it).
@@ -29,8 +31,9 @@ general_min_size      = 2
 general_max_size      = 3
 general_desired_size  = 3
 
-# Contestant / SUT — one node; contestant gets 2 vCPU, capture + system get the rest.
-sandbox_instance_type        = "c6i.xlarge"
+# Contestant / SUT — one c6i.2xlarge (8 vCPU): contestant ALGO_CPU=4, capture ~3,
+# kubelet/OS ~1. (Changing instance_type RECREATES the managed node group.)
+sandbox_instance_type        = "c6i.2xlarge"
 sandbox_min_size             = 1
 sandbox_max_size             = 1
 sandbox_desired_size         = 1

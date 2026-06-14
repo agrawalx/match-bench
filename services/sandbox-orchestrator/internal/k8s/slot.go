@@ -592,7 +592,11 @@ func captureResources() corev1.ResourceRequirements {
 			corev1.ResourceMemory: resource.MustParse("256Mi"),
 		},
 		Limits: corev1.ResourceList{
-			corev1.ResourceCPU:    resource.MustParse("2"),
+			// 4 (was 2): the userspace drain+parse+publish wants ~3 cores at >150k
+			// delivered; a 2-core cap CFS-throttled it -> ringbuf drops. Burstable
+			// (request stays 200m), so this is safe on a 4-vCPU node and lets the
+			// capture use its needed cores on the c6i.2xlarge (8 vCPU) sandbox node.
+			corev1.ResourceCPU:    resource.MustParse("4"),
 			corev1.ResourceMemory: resource.MustParse("512Mi"),
 		},
 	}

@@ -33,7 +33,7 @@ its own, but the recommended order for a newcomer is top to bottom.
 | 5 | **Service reference** (one section each) | The internals of every microservice |
 | 6 | [Benchmarking, bottleneck hunt & scope for improvement](#benchmarking-bottleneck-hunt--scope-for-improvement) | The numbers we measured, how we found and killed each bottleneck, and what's left |
 | 7 | [Deployment, isolation & observability](#deployment-isolation--observability) | How it's deployed on Kubernetes/EKS and how fairness is enforced |
-| 8 | [Scope for improvement (consolidated)](#scope-for-improvement--the-honest-open-items) | Every open gap across the platform, grounded in code, ordered by impact |
+| 8 | [Scope for improvement (consolidated)](#scope-for-improvement) | Every open gap across the platform, ordered by impact |
 | 9 | [Appendix: glossary](#appendix-a--glossary) | Terminology used throughout this document |
 
 **Service reference index**
@@ -127,7 +127,6 @@ e2e/               full end-to-end suite (every service on) + the reference cont
 bench/             the ~2M orders/s platform self-benchmark tier
 deploy-bench/      the load-generator capacity sweep (drain sink, 1→2 nodes)
 deploy-local/      local k3s bring-up + HDR plots
-design.md          the detailed engineering-rationale companion
 ```
 
 ---
@@ -523,7 +522,7 @@ slots, one capture process per algorithm under test, produce-only to
   ceiling on per-message event count; throughput is recovered by request-level
   batching and compression, not by larger messages.
 
-### 6. Limitations / scope for improvement (grounded in code)
+### 6. Limitations / scope for improvement
 
 - **Firehose partition count caps per-session worker fan-out at 24** (prod) /
   96 (bench), enforced by `validateWorkerCapacity` (`producer.go:90`). Raising
@@ -577,54 +576,51 @@ sequenceDiagram
     participant ALGO as algo pod
     participant BF as bot-fleet workers
     participant EB as eBPF capture
-    participant ING as telemetry-ingester(+rollup)
+    participant ING as telemetry-ingester
     participant VAL as correctness-validator
     participant SC as score-computer
     participant LB as leaderboard-api
 
-    Note over U,BW: PHASE 1 — BUILD (once per artifact)
+    Note over U,BW: PHASE 1 - BUILD (once per artifact)
     U->>FE: upload algorithm.zip
     FE->>SUB: POST /submit
     SUB->>SUB: validate zip + sha256 dedup
-    SUB-->>+BW: submission.build.requested (key=submission_id)
-    Note right of BW: Kaniko build → Trivy scan → Syft SBOM → image
-    BW->>BW: write status uploaded→…→ready to Postgres
-    BW--)-SUB: submission.status.updated (audit; no consumer)
-    FE->>SUB: poll GET /submissions/{id} → "ready"
+    SUB->>BW: submission.build.requested [key submission_id]
+    Note right of BW: Kaniko build, Trivy scan, Syft SBOM, image
+    BW->>BW: write status uploaded..ready to Postgres
+    FE->>SUB: poll GET /submissions/id until ready
 
-    Note over U,LB: PHASE 2 — BENCHMARK (per run click → N sessions)
+    Note over U,LB: PHASE 2 - BENCHMARK (per run click, N sessions)
     U->>FE: click Run
-    FE->>SUB: POST /submissions/{id}/benchmark
-    SUB->>SUB: tx: run_group + N child runs (UUIDv7)
-    SUB-->>+CTL: benchmark.requested ×N (key=run_group_id)
-    CTL->>SUB: status=deploying (benchmark.status.updated)
-    CTL->>+SO: HTTP POST /slots {slot_id=session_id, image, port}
+    FE->>SUB: POST /submissions/id/benchmark
+    SUB->>SUB: tx run_group + N child runs, UUIDv7
+    SUB->>CTL: benchmark.requested xN [key run_group_id]
+    CTL->>SUB: status deploying via benchmark.status.updated
+    CTL->>SO: HTTP POST /slots [slot_id = session_id]
     SO->>ALGO: create Guaranteed-QoS algo pod + Service
-    SO->>EB: spawn privileged eBPF capture Job on algo's node
-    CTL->>SO: poll GET /slots/{id} until ready → endpoint host:port
-    SO-->>-CTL: ready {host, port}
-    CTL->>CTL: shard tasks → N WorkloadSpecs
-    CTL-->>BF: workload.assignments (partition = worker_index % 24)
-    Note right of BF: KEDA scales workers on this topic's lag
-    BF->>ALGO: connect FIX/REST/WS (pre-warm, before barrier)
-    BF-->>CTL: bot.ready (key=session_id:worker_id)
-    CTL->>CTL: fan in all ready → status=waiting_ready
-    CTL-->>BF: barrier (epoch = now + 500ms, post-fan-in)
-    CTL->>SUB: status=running
+    SO->>EB: spawn privileged eBPF capture Job on algo node
+    CTL->>SO: poll GET /slots until ready
+    SO->>CTL: ready, returns host and port
+    CTL->>CTL: shard tasks into N WorkloadSpecs
+    CTL->>BF: workload.assignments [partition = worker_index mod 24]
+    Note right of BF: KEDA scales workers on this topic lag
+    BF->>ALGO: connect FIX/REST/WS, pre-warm before barrier
+    BF->>CTL: bot.ready [key session_id colon worker_id]
+    CTL->>CTL: fan in all ready, status waiting_ready
+    CTL->>BF: barrier, epoch = now + 500ms, post fan-in
+    CTL->>SUB: status running
     BF->>ALGO: fire deterministic orders at target epoch
-    BF-->>ING: orders.sent (msgpack, part=FNV1a(order_id))
-    ALGO->>EB: responses cross the pod veth (t3/t7 stamped)
-    EB-->>ING: orders.acked (msgpack, part=FNV1a(order_id))
-    ING->>ING: join sent⇄acked locally → HDR → TimescaleDB+Redis
-    CTL->>SO: DELETE /slots/{id} (run end)
-    CTL-->>VAL: status=completed (benchmark.status.updated)
-    deactivate CTL
-    VAL->>VAL: settle 10s → drain orders.sent/acked → reference CLOB replay
-    VAL-->>+SC: scores.correctness (key=session_id)
-    SC->>SC: all sessions terminal+scored? → compute gates + rank
-    SC-->>+LB: leaderboard.updates (key=run_group_id)
-    LB-->>-FE: SSE update → live leaderboard
-    deactivate SC
+    BF->>ING: orders.sent [msgpack, partition FNV1a of order_id]
+    ALGO->>EB: responses cross the pod veth, t3 and t7 stamped
+    EB->>ING: orders.acked [msgpack, partition FNV1a of order_id]
+    ING->>ING: join sent and acked locally, HDR to TimescaleDB + Redis
+    CTL->>SO: DELETE /slots, run end
+    CTL->>VAL: status completed via benchmark.status.updated
+    VAL->>VAL: settle 10s, drain orders, reference CLOB replay
+    VAL->>SC: scores.correctness [key session_id]
+    SC->>SC: all sessions terminal and scored, compute gates + rank
+    SC->>LB: leaderboard.updates [key run_group_id]
+    LB->>FE: SSE update, live leaderboard
 ```
 
 ### Step-by-step (the contract at each hop)
@@ -652,7 +648,7 @@ sequenceDiagram
 3. **Run trigger.** `POST /submissions/{id}/benchmark` gates on
    `status=ready` + a non-empty `image_ref`, enforces "one active run-group per
    submission" via a partial unique index, then in one transaction inserts a
-   `run_group` plus **one child `run` per scenario** (constant/spike/ramp) — each
+   `run_group` plus **one child `run()` per scenario** (constant/spike/ramp) — each
    with a fresh UUIDv7 `session_id` — and produces **`benchmark.requested`** per
    session, keyed by `run_group_id`.
 4. **Deploy the sandbox.** bot-fleet-controller (group `bot-fleet-controller`)
@@ -832,7 +828,7 @@ On startup, the service builds the constant/spike/ramp scenarios in code (`scena
 
 **Consumes `benchmark.status.updated`** — 3 partitions (`ops/kafka/create-topics.sh:38`), **consumer group `submission-api-benchmark-status`**. Produced by the bot-fleet-controller keyed so that a session's updates are ordered; the group lets the (currently 2) replicas split partitions, so status fan-in scales horizontally with partition count.
 
-(The order-id co-partition `partition_for()` FNV-1a hash in `schemas/rust/src/lib.rs:26` governs the high-volume `orders.sent`/`orders.acked`/`workload.assignments` topics — 24 partitions each — which submission-api does **not** touch.)
+(The order-id co-partition `partition_for` FNV-1a hash in `schemas/rust/src/lib.rs:26` governs the high-volume `orders.sent`/`orders.acked`/`workload.assignments` topics — 24 partitions each — which submission-api does **not** touch.)
 
 ### Metrics
 
@@ -914,7 +910,7 @@ Each status transition is *dual-written*: published to Kafka **and** written to 
 
 **Metrics.** `build_jobs_created_total{mode}`, `build_jobs_failed_total{mode}`, `build_phase_total/_duration_seconds{phase,result}`, `build_request_duration_seconds`, `harbor_promote_total`, plus Kafka/DB families.
 
-**Limitations / scope-for-improvement (grounded in code):**
+**Limitations / scope-for-improvement:**
 - **Strictly serial per replica + at-most-3-parallel cluster-wide** — the consumer blocks on each ~minutes-long build before committing/fetching the next; throughput is bounded by the 3 partitions of `submission.build.requested`, not by node capacity.
 - **No retries on transient Job failure** — `BackoffLimit=0` means a flaky kaniko/registry blip fails the whole submission as `failed` (terminal in the DB rank guard).
 - **Only 3 languages** are buildable (cpp/rust/go) and the Dockerfile templates are hardcoded (`generate.go:26-71`); `BuildType`/`Protocol` from the request are not used to select build logic.
@@ -946,7 +942,7 @@ func (m *Manager) containerResources() corev1.ResourceRequirements {
 }
 ```
 
-Crucially, `validateConfig` **rejects non-integer CPU** at startup (`strconv.Atoi(cfg.CPU)` and `cpu.MilliValue()%1000 != 0`, `slot.go:122`). A millicpu value like `"2000m"` is still Guaranteed yet the CPU manager *silently skips* exclusive pinning, dropping the algo into CFS bandwidth throttling and a tail-latency cliff — so the integer-core gate is what actually makes pinning engage. Prod default `ALGO_CPU=2`, `ALGO_MEMORY=1Gi` (`deployment.yaml:46-49`).
+Crucially, `validateConfig` **rejects non-integer CPU** at startup (`strconv.Atoi(cfg.CPU)` and `cpu.MilliValue%1000 != 0`, `slot.go:122`). A millicpu value like `"2000m"` is still Guaranteed yet the CPU manager *silently skips* exclusive pinning, dropping the algo into CFS bandwidth throttling and a tail-latency cliff — so the integer-core gate is what actually makes pinning engage. Prod default `ALGO_CPU=2`, `ALGO_MEMORY=1Gi` (`deployment.yaml:46-49`).
 
 **Algo pod hardening.** `RestartPolicy=Never`, `ActiveDeadlineSeconds=3600` (auto-reap leaked pods), `AutomountServiceAccountToken=false`, read-only rootfs with four tmpfs `emptyDir{Medium:Memory}` mounts for `/tmp,/var/tmp,/var/log,/var/run`, drop `ALL` caps, `AllowPrivilegeEscalation=false`, `RuntimeDefault` seccomp (`slot.go:336-376`). Optional CNI bandwidth throttling via `kubernetes.io/{egress,ingress}-bandwidth` annotations (prod `100M`). A TCP-socket readiness probe on the algo port (1s period, 30 failures) drives the `ready` transition (`slot.go:358`). `RuntimeClassName` (gVisor) is set only if `RUNTIME_CLASS` is non-empty — prod ships `RUNTIME_CLASS=""` (gVisor optional), so isolation then leans on the hardened context + default-deny netpol.
 
@@ -962,7 +958,7 @@ Crucially, `validateConfig` **rejects non-integer CPU** at startup (`strconv.Ato
 
 **Scaling model.** Effectively a **singleton** (`replicas: 1`). It is not KEDA-autoscaled; the unit of horizontal scale is *sandbox nodes* (one Guaranteed-pinned algo pod fills a node), not orchestrator replicas. The orchestrator itself is light (mints pods, polls state) and would only contend if many sessions started simultaneously. Because cluster state is the source of truth and the in-memory map is rebuilt on boot, the singleton can restart safely — but two replicas would race on the same slot id without external coordination, and the in-memory map isn't shared.
 
-**Limitations / scope-for-improvement (grounded in code):**
+**Limitations / scope-for-improvement:**
 - **Single replica, in-memory slot map** — horizontal scale would need leader election or a shared store; the map is purely a cache rebuilt from k8s on restart.
 - **Capture is restricted to `ports {8080, 9898}`** when enabled (`capturablePorts`, `slot.go:43,141`) — any other algo port is rejected with `ErrInvalidRequest`, a hardcoded cap tied to the eBPF program's expectations.
 - **Polling, not watching** — controller readiness is discovered by `WaitForReady` polling every 500ms against `GET /slots`, and capture spawn happens only when a `Refresh` observes `Ready` (so capture attaches *after* the algo is already serving, a small race window for the earliest packets).
@@ -1034,19 +1030,19 @@ func computeWorkerCount(totalTasks, maxTasksPerWorker int) uint32 {
 }
 ```
 
-Tasks are then **round-robin sharded** by index into per-worker buckets (`shard = i % workerCount`, `runner.go:348-351`), and one `WorkloadSpec` is built per worker carrying its `WorkerIndex`, the total `WorkerCount`, the resolved target host/port, and that worker's task slice (`runner.go:353-371`). The `GlobalSeed` is identical across all specs so every contestant gets the same logical workload (design Decision 3).
+Tasks are then **round-robin sharded** by index into per-worker buckets (`shard = i % workerCount`, `runner.go:348-351`), and one `WorkloadSpec` is built per worker carrying its `WorkerIndex`, the total `WorkerCount`, the resolved target host/port, and that worker's task slice (`runner.go:353-371`). The `GlobalSeed` is identical across all specs so every contestant gets the same logical workload.
 
-#### The 1 WorkloadSpec → 1 partition → 1 worker pod mapping (design §4.7)
+#### The 1 WorkloadSpec → 1 partition → 1 worker pod mapping
 
 `workload.assignments` has **24 partitions** (`ops/kafka/create-topics.sh:39`, `topic-init-job.yaml:52`). The controller pins each spec to a specific partition rather than letting Kafka hash it. It uses a custom `workerIndexBalancer` that reads the spec's `WorkerIndex` (stashed in `kafka.Message.WriterData`) and computes `partition = worker_index % numPartitions` (`producer.go:71-86`, `buildWorkloadMessages` at `producer.go:155-171`). The message key is `session_id:worker_index` for traceability, but the partition is decided by `WriterData`, not the key hash.
 
-The reason (design §4.7): librdkafka's default `range,roundrobin` assignor (range wins) would hand one consumer pod a **contiguous block** of partitions, so multiple specs would land on one pod and run **serially** — the extra specs would miss the barrier and the run would be collision-degraded. By pinning spec `i` to partition `i` and having the workers consume with the **roundrobin** assignment strategy (`schemas/rust .../kafka.rs`, per design §4.7), each spec reaches a **distinct pod**, provided the bot-fleet has `replicas ≥ worker_count`. That is exactly the KEDA pre-scale caveat the producer logs (`producer.go:142-146`).
+The reason: librdkafka's default `range,roundrobin` assignor (range wins) would hand one consumer pod a **contiguous block** of partitions, so multiple specs would land on one pod and run **serially** — the extra specs would miss the barrier and the run would be collision-degraded. By pinning spec `i` to partition `i` and having the workers consume with the **roundrobin** assignment strategy (`schemas/rust .../kafka.rs`, per), each spec reaches a **distinct pod**, provided the bot-fleet has `replicas ≥ worker_count`. That is exactly the KEDA pre-scale caveat the producer logs (`producer.go:142-146`).
 
 A hard guard enforces the invariant: before publishing, the controller reads the live partition count from Kafka metadata (cached after first read, `producer.go:175-195`) and rejects the run if `worker_count > partitions`, with a precise error explaining that two specs would otherwise share a partition (`validateWorkerCapacity`, `producer.go:88-101`). In practice this caps a single run at **24 workers**.
 
-This partitioning is what drives the worker fan-out and how the bot fleet scales horizontally: the unit of horizontal scale is the partition. Adding worker pods (up to 24) lets distinct WorkloadSpecs execute in parallel; the bot-fleet *workers* (not the controller) are KEDA-autoscaled 2→50 on `workload.assignments` lag (design §4.10), bounded to ≤24 effective by this layout.
+This partitioning is what drives the worker fan-out and how the bot fleet scales horizontally: the unit of horizontal scale is the partition. Adding worker pods (up to 24) lets distinct WorkloadSpecs execute in parallel; the bot-fleet *workers* (not the controller) are KEDA-autoscaled 2→50 on `workload.assignments` lag, bounded to ≤24 effective by this layout.
 
-### Barrier-after-fan-in / fresh go-time (design §4.4)
+### Barrier-after-fan-in / fresh go-time
 
 The controller does **not** embed the barrier epoch in the WorkloadSpec. It waits for all ready signals first (`awaitReady`), then computes:
 
@@ -1064,18 +1060,18 @@ and publishes a `BarrierEvent{SessionID, TargetEpochUnixNanos}` to the `barrier`
 - **Full fan-in** → proceed to barrier (`ready_signals_total{result=full}`).
 - **Deadline with zero signals** → hard error `"no ready signals before deadline"`, run fails (`ready_none_total`).
 - **Deadline with partial fan-in** → log a warning, count `ready_partial_total`, and **proceed anyway** with whatever workers reported. This is a deliberate degrade-don't-stall choice, but it means a run can fire with fewer-than-intended workers and still be scored.
-- **Context cancelled** → return `ctx.Err()`.
+- **Context cancelled** → return `ctx.Err`.
 
 ### `benchmark.status.updated` emission
 
-Every `transition` builds a `BenchmarkStatusUpdated{SessionID, SubmissionID, RunGroupID, Status, Message, UpdatedAt}` and publishes it keyed by `session_id` (`runner.go:242-259`, `producer.go:225-244`). `RunGroupID` is carried on every event so the frontend/SSE and the score rollup can correlate sibling sessions of the same run-group. The terminal `completed` status on the happy path is what triggers the downstream correctness validator (design §6.14 / line 809).
+Every `transition` builds a `BenchmarkStatusUpdated{SessionID, SubmissionID, RunGroupID, Status, Message, UpdatedAt}` and publishes it keyed by `session_id` (`runner.go:242-259`, `producer.go:225-244`). `RunGroupID` is carried on every event so the frontend/SSE and the score rollup can correlate sibling sessions of the same run-group. The terminal `completed` status on the happy path is what triggers the downstream correctness validator.
 
 ### Failure handling & cleanup
 
 Every failure path routes through `fail` → `transition(RunStatusFailed, ...)`, and crucially calls `releaseSlot` to DELETE the orchestrator slot so a failed run never leaks a sandbox pod (`runner.go:170-172,181,191,201`). Two notable design choices:
 
-- `fail`, `publishFailure`, and `releaseSlot` all create a **fresh 10s `context.Background()`** rather than reusing the run's (possibly already-cancelled) context, so cleanup and the failure status still get published even when the run was torn down by shutdown (`runner.go:263-299`).
-- On `ctx.Done()` *during the run wait*, the controller releases the slot and marks the run failed with `"controller shutdown during run"` (`runner.go:210-218`).
+- `fail`, `publishFailure`, and `releaseSlot` all create a **fresh 10s `context.Background`** rather than reusing the run's (possibly already-cancelled) context, so cleanup and the failure status still get published even when the run was torn down by shutdown (`runner.go:263-299`).
+- On `ctx.Done` *during the run wait*, the controller releases the slot and marks the run failed with `"controller shutdown during run"` (`runner.go:210-218`).
 - An **early failure** before a `Session` exists (e.g. scenario load failure, zero-task scenario) uses `publishFailure` to still emit a `failed` status (`runner.go:79-87,270-286`).
 
 #### Startup recovery (crash safety for a singleton)
@@ -1096,7 +1092,7 @@ The `workload.failed` topic exists (3 partitions, `create-topics.sh:42`, `topics
 | `barrier` | produce | 3 | `kafka.Hash` on key = `session_id` — all of a session's consumers see the same barrier deterministically | — |
 | `benchmark.status.updated` | produce | 3 | `kafka.Hash` on key = `session_id` — keeps a session's status events ordered on one partition | — |
 
-Note: `benchmark.requested` and `bot.ready` use FetchMessage + manual commit with `CommitInterval: 0` (commit explicitly after processing), giving at-least-once delivery (`consumer.go:34-51`). The producer uses `RequiredAcks: RequireAll`, `Async: false`, `AllowAutoTopicCreation: false` for all three writers (`producer.go:44-53`) — the control plane is durability-first (design §4.8).
+Note: `benchmark.requested` and `bot.ready` use FetchMessage + manual commit with `CommitInterval: 0` (commit explicitly after processing), giving at-least-once delivery (`consumer.go:34-51`). The producer uses `RequiredAcks: RequireAll`, `Async: false`, `AllowAutoTopicCreation: false` for all three writers (`producer.go:44-53`) — the control plane is durability-first.
 
 The `workload.assignments` partitioning is the lever for horizontal worker fan-out: each `WorkloadSpec` deterministically lands on its own partition, so adding bot-worker replicas (KEDA-scaled on this topic's lag) lets distinct specs run in true parallel up to the 24-partition ceiling.
 
@@ -1106,7 +1102,7 @@ The **controller itself is a singleton**: `replicas: 1`, `strategy: Recreate` (`
 
 The thing that scales is the **bot-fleet of workers**, fanned out by the 24-partition `workload.assignments` topic (workers KEDA-scaled 2→50, effective ≤24 per run). The controller is the fixed orchestration point that drives them.
 
-**Bottlenecks / limits grounded in code:**
+**Bottlenecks / limits:**
 
 - **Single-threaded run throughput.** `StartBenchmarkRequested` runs `runner.Run` synchronously and commits only after the *entire* run (including the full scenario wall-clock), so a single controller serialises concurrent benchmark requests on a partition. With 3 `benchmark.requested` partitions and one consumer instance, at most 3 partitions' worth of work is interleaved, but each is blocked end-to-end on `runner.Run`. This is the dominant throughput ceiling for *number of concurrent runs*.
 - **24-worker hard cap per run** from `validateWorkerCapacity` (`producer.go:88-101`), driven by the fixed 24-partition layout. Larger scenarios cannot exceed this without repartitioning the topic or raising `MAX_TASKS_PER_WORKER` (which packs more tasks per worker instead).
@@ -1146,7 +1142,7 @@ flowchart TD
 | Module | Role |
 |---|---|
 | `src/main.rs` | Boot: Loki guard, Prometheus server on `:9090`, then `worker::run(Config::from_env())`. |
-| `src/config.rs` | Env-driven `Config`; topic names from the shared schema crate; `validate()` invariants. |
+| `src/config.rs` | Env-driven `Config`; topic names from the shared schema crate; `validate` invariants. |
 | `src/worker.rs` (68 KB, the core) | Consume loop, spec validation, connect fan-out, barrier wait, the three protocol task runners, the **pacer**, the pending-map + watchdog. |
 | `src/content.rs` | `TaskGenerator` — seeded, deterministic order stream (limit/market/cancel/replace) with a bounded resting-order ledger. |
 | `src/fix.rs` | Pre-rendered wire frames (`OrderFrame` holding `fix`/`rest`/`ws_bytes`); O(1) in-place FIX `SendingTime` patch. |
@@ -1159,10 +1155,10 @@ flowchart TD
 
 `run()` (`worker.rs:105`) ensures topics, builds a **control producer** and a **telemetry producer**, reads the live partition count of `orders.sent` from broker metadata (overriding `ORDERS_PARTITIONS` so the telemetry co-partition hash always matches reality, `worker.rs:119-128`), then loops on `workload.assignments` with manual offset commit. A spawned task watches SIGINT/SIGTERM and trips a `watch`-channel `CancelToken` for graceful drain (`worker.rs:142-160`). Each `WorkloadSpec` is handled by `run_workload()`:
 
-1. **Validate** (`validate_spec`, `worker.rs:288`): non-empty tasks, `task_count ≤ max_bots_per_worker`, `target_rps>0`, `duration_ns>0`, valid `worker_index < worker_count`, wire-safe identifiers, and — critically — that **worst-case wall time** (barrier wait + max(`start_offset_ns`+`duration_ns`) + 5 s drain) is below `max.poll.interval.ms`. The assignment offset commits only *after* the run, so a run that outlives the poll ceiling would trigger a Kafka rebalance and **re-deliver mid-run** (duplicate execution) — this guard rejects such specs up front (`worker.rs:324-334`, design §4.9).
+1. **Validate** (`validate_spec`, `worker.rs:288`): non-empty tasks, `task_count ≤ max_bots_per_worker`, `target_rps>0`, `duration_ns>0`, valid `worker_index < worker_count`, wire-safe identifiers, and — critically — that **worst-case wall time** (barrier wait + max(`start_offset_ns`+`duration_ns`) + 5 s drain) is below `max.poll.interval.ms`. The assignment offset commits only *after* the run, so a run that outlives the poll ceiling would trigger a Kafka rebalance and **re-deliver mid-run** (duplicate execution) — this guard rejects such specs up front (`worker.rs:324-334`).
 2. **Connect fan-out** (`connect_tasks`, `worker.rs:381`): resolve the target once, then a `JoinSet` connects every task concurrently. **Nagle is disabled on every connection** — `set_nodelay(true)` is set on the FIX, REST, and plain-WS sockets at connect (`worker.rs:1594`, `:1610`, `:1620`) so a small order frame is put on the wire immediately rather than held by Nagle's algorithm; FIX additionally sends a logon frame, REST keeps the socket alive, WS dials `ws://host:port/`. Failed connects are dropped and counted, not fatal — connections are **pre-warmed before the barrier** so connect latency never contaminates the measured spike.
 3. **Publish `ReadySignal`** to `bot.ready` (acks=all), keyed `session_id:worker_id`, reporting `connected_count` for the controller's fan-in.
-4. **Barrier wait** (`kafka::wait_for_barrier`, `kafka.rs:307`): a *per-worker* consumer group (`{group}-barrier-{worker_id}`, deliberately **not** per-session so it is stable across runs, `worker.rs:343`) reads `barrier` until a `BarrierEvent` matching this `session_id` arrives, yielding `target_epoch_unix_nanos` — a fresh, post-fan-in go-time (design §4.4). Hard timeout `BARRIER_WAIT = 120 s`.
+4. **Barrier wait** (`kafka::wait_for_barrier`, `kafka.rs:307`): a *per-worker* consumer group (`{group}-barrier-{worker_id}`, deliberately **not** per-session so it is stable across runs, `worker.rs:343`) reads `barrier` until a `BarrierEvent` matching this `session_id` arrives, yielding `target_epoch_unix_nanos` — a fresh, post-fan-in go-time. Hard timeout `BARRIER_WAIT = 120 s`.
 5. **Fire** (`fire_workload`): one Tokio task per connected task, each running the protocol-appropriate loop set; the shared `TelemetrySink` is then `close()`d to drain remaining telemetry.
 
 ### The open-loop pacer with catch-up (the throughput fix)
@@ -1193,27 +1189,27 @@ while frames.len() < batch_max && next_send_ns <= now_ns {   // drain every DUE 
 
 *Caption (`worker.rs:786-815`):* the `while next_send_ns <= now_ns` loop is the catch-up — a task that fell behind emits a batch larger than one to re-converge on schedule, instead of being timer-rate-limited; a task under the ceiling still paces normally and writes batches of one. Pacing semantics are unchanged: `interval_ns = 1e9 / target_rps` (`worker.rs:750`) advances by a fixed step regardless of how fast the contestant answers.
 
-**Coordinated-omission correctness (design §4.2).** The intended fire time `target_send_ts_ns` is pushed to `targets` **before** the sleep and before the write. A slow contestant whose backed-up TCP window stalls `write_all` therefore produces a monotonically growing `send_ts_ns − target_send_ts_ns` gap — the CO signal — captured per order as `schedule_slip` (`worker.rs:867-868`). It does *not* let the generator silently slow down its own schedule; `next_send_ns` keeps advancing on the ideal clock.
+**Coordinated-omission correctness.** The intended fire time `target_send_ts_ns` is pushed to `targets` **before** the sleep and before the write. A slow contestant whose backed-up TCP window stalls `write_all` therefore produces a monotonically growing `send_ts_ns − target_send_ts_ns` gap — the CO signal — captured per order as `schedule_slip` (`worker.rs:867-868`). It does *not* let the generator silently slow down its own schedule; `next_send_ns` keeps advancing on the ideal clock.
 
 **Backpressure, not death.** The FIX writer deliberately does **not** impose a per-write timeout (`_write_timeout` is unused, `worker.rs:710-712`). When the contestant can't drain, its receive window fills and `write_all` blocks; TCP flow control then paces *this* task down to the contestant's honest service rate, so aggregate load plateaus at the sink's capacity instead of overshooting. A short timeout did the opposite — `write_all` isn't cancel-safe, so a timeout left a partial frame and forced the task to exit; under sustained backpressure *every* loaded task exited at once and offered load collapsed to zero. A genuinely dead peer still surfaces as a write error and exits the writer. (REST/WS still use a per-write timeout via `time::timeout(write_timeout, …)`, `worker.rs:1247`, since they are not the headline-throughput path.)
 
 **In-flight cap (closed-loop safety valve).** A per-task `MAX_INFLIGHT` (`BOT_MAX_INFLIGHT_PER_TASK`, default 10,000, `worker.rs:741`) bounds the pending map: at the cap the writer backpressures (1 ms parks) instead of issuing more, so a slow contestant or stalled telemetry path can't grow memory unbounded and OOM the worker. A healthy contestant sits at `rate × RTT`, orders of magnitude under the cap, so it never false-throttles.
 
-### Pre-rendered, zero-GC wire frames (design §4.1)
+### Pre-rendered, zero-GC wire frames
 
-`OrderFrame` (`fix.rs:31`) holds **pre-built bytes for all three protocols** — `fix: Vec<u8>`, `rest: Vec<u8>` (a full HTTP request), `ws_bytes: Vec<u8>` — plus the parsed `order_id`/`price`/`qty`/`side`/`payload_type`/`ord_type`. The only hot-path mutation is `patch_timestamp` (`fix.rs:48`): it overwrites the 21-byte FIX `SendingTime` (tag 52) in place and repairs the checksum with **O(1) delta arithmetic** (sum the byte deltas, adjust mod 256) rather than re-rendering or re-summing the whole frame. A GC pause or per-message heap allocation during a wave would inject jitter into the measured schedule; Rust + reused buffers (`frames`/`targets`/`batch_buf` are allocated once per task and `clear()`ed each iteration, `worker.rs:763-765`) keeps the pacer's hot path to: clock read → buffer copy → one TCP write.
+`OrderFrame` (`fix.rs:31`) holds **pre-built bytes for all three protocols** — `fix: Vec<u8>`, `rest: Vec<u8>` (a full HTTP request), `ws_bytes: Vec<u8>` — plus the parsed `order_id`/`price`/`qty`/`side`/`payload_type`/`ord_type`. The only hot-path mutation is `patch_timestamp` (`fix.rs:48`): it overwrites the 21-byte FIX `SendingTime` (tag 52) in place and repairs the checksum with **O(1) delta arithmetic** (sum the byte deltas, adjust mod 256) rather than re-rendering or re-summing the whole frame. A GC pause or per-message heap allocation during a wave would inject jitter into the measured schedule; Rust + reused buffers (`frames`/`targets`/`batch_buf` are allocated once per task and `clear`ed each iteration, `worker.rs:763-765`) keeps the pacer's hot path to: clock read → buffer copy → one TCP write.
 
-### Deterministic content generation (design §4.5)
+### Deterministic content generation
 
 `TaskGenerator` (`content.rs:102`) is seeded with `global_seed ^ task_id`, so a fast and a slow algo receive the **byte-identical** stream — cross-contestant fairness. The RNG draw order is a fixed determinism contract. Order kind is chosen from the per-task `market/cancel/replace` mix; cancel/replace targets are drawn from the bot's *own* bounded `VecDeque` ledger of recently-rested orders (never from observed fills, so the stream can't diverge on contestant behavior). The ledger uses `VecDeque` with `pop_front`/`swap_remove_back` (both O(1)) — a prior `Vec::remove(0)` memmove dominated CPU (~87% in profiling) at high rates with `cancel_pct=0` (`content.rs:109-113`).
 
-### Three-loop send/recv capture across protocols (design §4.3)
+### Three-loop send/recv capture across protocols
 
 Every protocol runs the same **three concurrent loops** in a `JoinSet`, sharing one `pending: Arc<Mutex<HashMap<order_id, PendingOrder>>>`:
 
 - **write loop** — the pacer above; inserts each order into `pending` (with `send_ts_ns=0`), writes, then patches `send_ts_ns` on success.
 - **read loop** — drains responses and matches them to `pending` by client order id: FIX matches tag-11 `ClOrdID` on ExecutionReports (`MsgType=8`, `fix_read_loop` `worker.rs:895`); REST frames responses by `Content-Length` *or* chunked transfer-encoding and pulls `cl_ord_id` from JSON (`rest_read_loop` + `next_http_response`, handling pipelined responses); WS reads each frame's JSON `cl_ord_id`. On a match it removes the entry (first-response-wins) and records an `OrderSentEvent` with `recv_done_ts_ns` (r9) and `timed_out=false`.
-- **watchdog loop** (`worker.rs:985`, design §4.12) — every 250 ms evicts orders older than `RESPONSE_TIMEOUT_NS = 5 s`, recording them as `timed_out=true` (`recv_done_ts_ns=0`); on the **final tick** it evicts *everything* still pending — including writes still in flight (`send_ts_ns==0`) — so **every offered order is accounted** as either matched or timed-out. No phantom drops, which the coordinated-omission and coverage scoring gates depend on.
+- **watchdog loop** (`worker.rs:985`) — every 250 ms evicts orders older than `RESPONSE_TIMEOUT_NS = 5 s`, recording them as `timed_out=true` (`recv_done_ts_ns=0`); on the **final tick** it evicts *everything* still pending — including writes still in flight (`send_ts_ns==0`) — so **every offered order is accounted** as either matched or timed-out. No phantom drops, which the coordinated-omission and coverage scoring gates depend on.
 
 All three loops run until `drain_end_ns = task_end_ns + RESPONSE_TIMEOUT_NS`, giving a 5 s post-send drain window for late responses.
 
@@ -1235,13 +1231,13 @@ flowchart LR
   AGG -->|msgpack OrderSentBatch, partition-explicit| OS[orders.sent<br/>24 partitions]
 ```
 
-### Telemetry flush path: pipelined, size-bounded, co-partitioned (design §4.6)
+### Telemetry flush path: pipelined, size-bounded, co-partitioned
 
-`TelemetrySink::record()` (`telemetry.rs:93`) sends each `OrderSentEvent` over a bounded mpsc channel (`telemetry_channel_capacity`, default 65,536). It is **lossless by backpressure**: a full channel makes `record()` `.await` rather than drop, so the generator self-paces to the sustainable telemetry rate (a dropped event would mean a permanent hole in the HDR histogram). The only counted drop is the channel being closed at shutdown.
+`TelemetrySink::record` (`telemetry.rs:93`) sends each `OrderSentEvent` over a bounded mpsc channel (`telemetry_channel_capacity`, default 65,536). It is **lossless by backpressure**: a full channel makes `record` `.await` rather than drop, so the generator self-paces to the sustainable telemetry rate (a dropped event would mean a permanent hole in the HDR histogram). The only counted drop is the channel being closed at shutdown.
 
 A single background `run_aggregator` (`telemetry.rs:144`) drives a `biased` `select!` over three arms: (1) account completed deliveries from a `FuturesUnordered` `inflight` set first (keeps it bounded), (2) `recv_many` up to 4,096 events per wake into a `PartitionBatcher`, (3) a flush ticker (default 5 ms) that drains partial batches. The `PartitionBatcher` (`telemetry.rs:283`) buckets events by `partition_for(order_id, num_partitions)` and emits a chunk the instant a partition reaches `MAX_EVENTS_PER_BATCH = 1000` (~360 KB, safely under the 1 MiB `max.message.bytes`). Each chunk is msgpack-encoded as `OrderSentBatch` (`rmp_serde::to_vec_named`) and **enqueued without awaiting delivery** via `enqueue_to_partition` (`send_result`), letting rdkafka pipeline and batch in the background — this decouples drain rate from per-batch broker RTT, which is the core fix (the old await-per-flush loop serialized one round-trip per batch → ~5.7k/s ceiling and ~90% drops). A full producer queue surfaces as `Ok(None)`; the aggregator polls + retries (lossless backpressure) rather than dropping.
 
-`BOT_DISABLE_TELEMETRY=1` makes `record()` a no-op and skips the aggregator entirely — used to measure *raw send capacity* against a drain contestant, where there's no validation and a single-broker Kafka can't absorb one event per order.
+`BOT_DISABLE_TELEMETRY=1` makes `record` a no-op and skips the aggregator entirely — used to measure *raw send capacity* against a drain contestant, where there's no validation and a single-broker Kafka can't absorb one event per order.
 
 ### Kafka topics
 
@@ -1262,11 +1258,11 @@ The hand-rolled Prometheus registry (`metrics.rs`) exposes, among others: `iicpc
 
 **Stateless, partition-sharded, KEDA-autoscaled.** Each worker holds no durable state; its only "ownership" is the set of `workload.assignments` partitions Kafka assigns it. The `ScaledObject` (`k8s/benchmark/bot-fleet/scaledobject.yaml`) scales on a **Kafka consumer-lag trigger**: topic `workload.assignments`, group `bot-fleet`, `lagThreshold "1"`, `offsetResetPolicy: earliest`, **min 2 / max 50** replicas, 5 s polling. `earliest` is required so an unconsumed backlog registers as lag (with `latest` a fresh group reads zero lag and never scales up). The unit of horizontal scale is **one worker per partition**, bounding effective parallelism to the 24-partition layout (`worker_count ≤ 24`); the controller pins each spec to `worker_index % N` so distinct specs reach distinct pods. Deterministic large runs should pre-scale rather than wait on lag. The deployment pins workers to a tainted `botworker` node pool so load generation doesn't crowd the measurement plane.
 
-**Per-pod ceiling.** A single pod's raw generation ceiling is exercised by the per-pod generation-ceiling ramp (design §4.11): three *serial* constant-RPS scenarios at 20k / 60k / 150k aggregate RPS over a **fixed 256-connection fan**, pure new-limit orders (Market/Cancel/Replace = 0), 120 s each — produced by `services/submission-api/cmd/loadgen-seed/main.go` (`buildLean` spreads `target/conns` rps per task with a +1 remainder). bot-fleet honors this purely through `target_rps` pacing and `start_offset_ns` staggering in the `TaskSpec`s; there is no ramp logic *inside* the worker. Resource limits are `cpu: 3` / `memory: 6Gi` (the 6 Gi sized to the worst-case in-flight cap: ≤1000 tasks × 10k in-flight × ~350 B ≈ 3.5 GiB pending + 1 GiB Kafka queue + runtime). An init container clamps `eth0` MTU to 1500 and disables segmentation offload so eBPF latency capture (1536 B cap) doesn't truncate FIX frames.
+**Per-pod ceiling.** A single pod's raw generation ceiling is exercised by the per-pod generation-ceiling ramp: three *serial* constant-RPS scenarios at 20k / 60k / 150k aggregate RPS over a **fixed 256-connection fan**, pure new-limit orders (Market/Cancel/Replace = 0), 120 s each — produced by `services/submission-api/cmd/loadgen-seed/main.go` (`buildLean` spreads `target/conns` rps per task with a +1 remainder). bot-fleet honors this purely through `target_rps` pacing and `start_offset_ns` staggering in the `TaskSpec`s; there is no ramp logic *inside* the worker. Resource limits are `cpu: 3` / `memory: 6Gi` (the 6 Gi sized to the worst-case in-flight cap: ≤1000 tasks × 10k in-flight × ~350 B ≈ 3.5 GiB pending + 1 GiB Kafka queue + runtime). An init container clamps `eth0` MTU to 1500 and disables segmentation offload so eBPF latency capture (1536 B cap) doesn't truncate FIX frames.
 
 **Bottleneck.** Per the project's benchmark findings, the residual single-node ceiling after the catch-up fix is the host's veth/network path (CPU is no longer the limit once writes are coalesced); horizontal scale across the 24 partitions on separate nodes is how the platform exceeds a single node's ~tens-of-k orders/s. Telemetry — single aggregator per worker, single-broker Kafka in the smoke cluster — is the other practical ceiling (hence `BOT_DISABLE_TELEMETRY` for raw-capacity runs).
 
-### Limitations / scope for improvement (grounded in code)
+### Limitations / scope for improvement
 
 - **`worker_count ≤ 24`** is a hard structural cap from the 24-partition `workload.assignments`/`orders.sent` layout; scaling past 24 generators per session requires re-partitioning both topics in lockstep (the co-partition contract couples them).
 - **One telemetry aggregator task per worker** (`telemetry.rs:62-72`) — the per-pod telemetry drain is a single Tokio task; it has been hardened (recv_many, pipelined enqueue) but is still the serial point if a single pod must emit far above its in-flight ceiling.
@@ -1285,9 +1281,9 @@ The hand-rolled Prometheus registry (`metrics.rs`) exposes, among others: `iicpc
 
 The component is split into a deliberately **dumb kernel program and a smart userspace binary**. This split is the heart of the design: the in-kernel BPF program does the absolute minimum (parse eth/ip/tcp headers, stamp a timestamp, copy the TCP payload to a ring buffer), which keeps the BPF verifier surface tiny and — critically — keeps the captured bytes opaque, so a contestant's protocol layout (FIX field order, HTTP header order, WS masking) cannot break the capture.
 
-### Why this measurement is un-gameable (design §2)
+### Why this measurement is un-gameable
 
-- **Kernel-stamped, outside the sandbox.** Both stamps come from `bpf_ktime_get_ns()` (helper id 5) called from `try_xdp_ingress` and `try_tc_egress`; the single stamp site is `ebpf.rs:276` (`ptr::addr_of_mut!((*rec).timestamp_ns).write(bpf_ktime_get_ns())`). XDP is chosen for ingress because it fires *before* the kernel network stack, giving the most faithful "order entered the pod" point; tc egress is the only hook available for the response leg.
+- **Kernel-stamped, outside the sandbox.** Both stamps come from `bpf_ktime_get_ns` (helper id 5) called from `try_xdp_ingress` and `try_tc_egress`; the single stamp site is `ebpf.rs:276` (`ptr::addr_of_mut!((*rec).timestamp_ns).write(bpf_ktime_get_ns())`). XDP is chosen for ingress because it fires *before* the kernel network stack, giving the most faithful "order entered the pod" point; tc egress is the only hook available for the response leg.
 - **Skew-invariant.** Both stamps are `CLOCK_MONOTONIC` from the *same node*, and the scored subtraction `t7 − t3` is computed in the monotonic domain at `matcher.rs:118` (`let pod_service_time_ns = t7_ns.saturating_sub(inflight.t3_ns)`). Userspace samples a `realtime − monotonic` offset *once* at startup (`pipeline.rs:146` `realtime_minus_monotonic_ns`) and adds the **same** `clock_offset_ns` to both stamps (`pipeline.rs:42` `to_realtime`) purely to align with the bot fleet's realtime `t0/t1/r9` for diagnostics. Because the offset is added to both, it cancels exactly in the difference — the scored metric needs no PTP/NTP and is immune to NTP steps and inter-node drift.
 - **Syscall-model-agnostic (io_uring-proof).** Stamping at the *packet* boundary (veth), not the *syscall* boundary, means the measurement is identical for `recv`/`recvmsg`/`recvmmsg`/io_uring. A tracepoint-on-syscall approach would emit zero events for an io_uring contestant and silently bias scoring by I/O model; the wire-boundary capture has no such blind spot.
 
@@ -1328,10 +1324,10 @@ Three per-CPU counters back the metrics: `DROPPED_EVENTS` (ringbuf full, `ebpf.r
 A single multi-threaded Tokio runtime drives one `select!` loop (`main.rs:183`):
 
 1. **`capture.rs`** decodes the ring-buffer ABI: a fixed little-endian 28-byte header + `captured_len` payload bytes, validating `captured_len ≤ available ≤ CAPTURE_CAP`. It derives `Transport::Fix` (port 9898) vs `Transport::HttpWs` (8080) and the `FlowKey {client_ip, client_port}`.
-2. **`reassembly.rs`** keeps one `Reassembler` per `(FlowKey, Direction)`. It performs wrap-safe 32-bit TCP sequence reassembly: in-order append, out-of-order hold (`BTreeMap` by seq, capped at 64 segments), overlap/retransmit detection, and gap-fill. `marks: Vec<(abs_offset, ts, seq)>` records the byte offset where each segment landed so that **`timestamp_at(offset)` attributes a message's `t3`/`t7` to the segment carrying its *first* byte** — the correct stamp when one message straddles two segments or several messages coalesce into one (verified: `reassembly.rs:285`, `:270`). `reset_for_truncation()` re-anchors the stream after a truncated capture.
+2. **`reassembly.rs`** keeps one `Reassembler` per `(FlowKey, Direction)`. It performs wrap-safe 32-bit TCP sequence reassembly: in-order append, out-of-order hold (`BTreeMap` by seq, capped at 64 segments), overlap/retransmit detection, and gap-fill. `marks: Vec<(abs_offset, ts, seq)>` records the byte offset where each segment landed so that **`timestamp_at(offset)` attributes a message's `t3`/`t7` to the segment carrying its *first* byte** — the correct stamp when one message straddles two segments or several messages coalesce into one (`reassembly.rs:285`, `:270`). `reset_for_truncation` re-anchors the stream after a truncated capture.
 3. **`parse.rs`** is fully **layout-agnostic** — no fixed offsets. FIX is framed by `9=BodyLength` then field-scanned for tags `35/11/41/150/39/32/31`; HTTP by `Content-Length` or chunked terminator; WebSocket by frame length + mask bit (rejecting wrong-direction masking). It returns `Frame::Message(n) | Incomplete | Resync(skip)`, where `Resync` lets the parser recover after a corrupt/truncated stream instead of stalling.
-4. **`matcher.rs`** holds an `inflight: HashMap<ClOrdID, Inflight>`. `on_request` records `t3` once (a duplicate request bumps `retransmission_count` but keeps the first `t3`); `on_response` does `get_mut` (not remove), so **every** ExecutionReport for an order — ACK, each partial fill — emits its own `MatchedEvent`, all sharing the request's single `t3`. Matching is **per-`ClOrdID`, not FIFO**, so pipelined orders that complete out of order still get the right `t3` (verified: `matcher.rs:166`, `:189`). Idle inflight entries are evicted after 5 s; a hard cap of 1M entries evicts the oldest.
-5. **`pipeline.rs`** ties it together and owns the monotonic→realtime offset. On each capture it detects truncation as `cap.payload_len > cap.payload.len()` and, if so, `reset_for_truncation()` instead of feeding corrupt bytes.
+4. **`matcher.rs`** holds an `inflight: HashMap<ClOrdID, Inflight>`. `on_request` records `t3` once (a duplicate request bumps `retransmission_count` but keeps the first `t3`); `on_response` does `get_mut` (not remove), so **every** ExecutionReport for an order — ACK, each partial fill — emits its own `MatchedEvent`, all sharing the request's single `t3`. Matching is **per-`ClOrdID`, not FIFO**, so pipelined orders that complete out of order still get the right `t3` (`matcher.rs:166`, `:189`). Idle inflight entries are evicted after 5 s; a hard cap of 1M entries evicts the oldest.
+5. **`pipeline.rs`** ties it together and owns the monotonic→realtime offset. On each capture it detects truncation as `cap.payload_len > cap.payload.len` and, if so, `reset_for_truncation` instead of feeding corrupt bytes.
 
 #### Truncation re-anchor (the MTU/GSO safety valve)
 
@@ -1351,7 +1347,7 @@ Because the kernel records the *true* IP-derived `payload_len` but copies at mos
 #### Losslessness on shutdown and under broker pressure
 
 - **SIGTERM/SIGINT (retain-on-failure).** Kubernetes stops the per-slot Job with SIGTERM; both signals flush the buffered `orders.acked` tail and `return Ok(())` → exit 0, so teardown loses no events and the Job completes `Succeeded` (`main.rs:185`, `ShutdownSignal` `main.rs:218`).
-- **Non-blocking drain.** `drain_ringbuf` is synchronous and never `.await`s on Kafka; `flush` enqueues via `send_result` (`enqueue_to_partition`), polls+retries once on `QueueFull`, then **drops the batch** (`main.rs:309`). `orders.acked` is loss-tolerant, and graceful latency-coverage loss is far better than stalling the drain and overflowing the 64 MiB ring (the prior blocking `send().await` froze the capture at ~107k/s).
+- **Non-blocking drain.** `drain_ringbuf` is synchronous and never `.await`s on Kafka; `flush` enqueues via `send_result` (`enqueue_to_partition`), polls+retries once on `QueueFull`, then **drops the batch** (`main.rs:309`). `orders.acked` is loss-tolerant, and graceful latency-coverage loss is far better than stalling the drain and overflowing the 64 MiB ring (the prior blocking `send.await` froze the capture at ~107k/s).
 
 ### Kafka
 
@@ -1376,16 +1372,16 @@ Concretely:
 
 ### EKS jumbo-frame fidelity issue & the deployment-layer fix
 
-The 1536-byte `CAPTURE_CAP` is safe **only if on-wire frames stay ≤ ~1500 B**. EKS VPC-CNI nodes default to **MTU 9001 (jumbo) with GSO/TSO/GRO on**, so a single super-frame exceeds `CAPTURE_CAP`, gets truncated, corrupts FIX framing, resets reassembly, and silently loses **~98% of latency samples** while the run still "succeeds" (`e2e/README.md:57`). Two layers defend against this:
+The 1536-byte `CAPTURE_CAP` is safe **only if on-wire frames stay ≤ ~1500 B**. EKS VPC-CNI nodes default to **MTU 9001 (jumbo) with GSO/TSO/GRO on**, so a single super-frame exceeds `CAPTURE_CAP`, gets truncated, corrupts FIX framing, resets reassembly, and silently loses **~98% of latency samples** while the run still "succeeds". Two layers defend against this:
 
 1. **In-component (best-effort, at attach time, inside the algo netns):** the loader runs `ethtool -K <iface> {tso,gso,gro,lro} off` (`disable_offloads`, `main.rs:430`) and clamps the interface MTU to `CAPTURE_CLAMP_MTU` (default 1500; `0` disables) via raw `SIOCGIFMTU`/`SIOCSIFMTU` ioctls — no iproute2 needed in the image (`mtu.rs`). The clamp **only ever lowers** the MTU (`mtu_clamp_target`) and is best-effort: failure logs loudly but never aborts the capture.
-2. **At the deployment layer (the real fix on EKS):** because generic-mode XDP and cross-node coalescing happen *outside* the algo veth, the fix is config-only with no code change — the bot-fleet worker's `net-tune` initContainer sets *its* `eth0` to MTU 1500 + GSO/TSO off (sender side), and `k8s/sandbox/gro-disable-daemonset.yaml` disables **GRO on the sandbox nodes' host interfaces** (receiver side) so cross-node request segments aren't re-coalesced before the capture sees them (`e2e/README.md:66`, `e2e/02-bootstrap.sh:43-48`). With both, match rate goes from ~2% to **~99.9%**, `TRUNCATED_CAPTURES` and `iicpc_ebpf_ringbuf_dropped` stay ~0, and `unmatched_responses` drops from millions to a handful.
+2. **At the deployment layer (the real fix on EKS):** because generic-mode XDP and cross-node coalescing happen *outside* the algo veth, the fix is config-only with no code change — the bot-fleet worker's `net-tune` initContainer sets *its* `eth0` to MTU 1500 + GSO/TSO off (sender side), and `k8s/sandbox/gro-disable-daemonset.yaml` disables **GRO on the sandbox nodes' host interfaces** (receiver side) so cross-node request segments aren't re-coalesced before the capture sees them (`e2e/02-bootstrap.sh:43-48`). With both, match rate goes from ~2% to **~99.9%**, `TRUNCATED_CAPTURES` and `iicpc_ebpf_ringbuf_dropped` stay ~0, and `unmatched_responses` drops from millions to a handful.
 
 ### Metrics
 
 A tiny hand-rolled HTTP server on `:9090/metrics` (`metrics.rs`) exposes Prometheus counters. The operationally important ones:
 - `iicpc_ebpf_ringbuf_dropped` — kernel ring buffer overflowed (drain can't keep up). Should be ~0; nonzero means CPU-starved drain.
-- `unmatched_responses` (logged from `pipeline.unmatched_responses()`, `main.rs:200`) — responses seen with no prior request capture to pair. The canonical signal that the capture-fidelity (truncation) problem above is occurring.
+- `unmatched_responses` (logged from `pipeline.unmatched_responses`, `main.rs:200`) — responses seen with no prior request capture to pair. The canonical signal that the capture-fidelity (truncation) problem above is occurring.
 - Also: `iicpc_ebpf_events_decoded`, `_decode_errors`, `_events_flushed`, `_flushes`, `iicpc_ebpf_acked_dropped` (Kafka `QueueFull` graceful drops), `_reordering_detected`, `_retransmissions`, `iicpc_ebpf_attach{result}`.
 
 ### Data flow
@@ -1404,7 +1400,7 @@ flowchart LR
   MA -->|OrderAckedBatch msgpack, key=order_id FNV-1a| KA[(Kafka orders.acked - 24 parts)]
 ```
 
-### Limitations / scope for improvement (grounded in code)
+### Limitations / scope for improvement
 
 - **Single-NIC singleton, CPU-bound drain.** One capture per contestant veth; the whole userspace pipeline is one drain loop on one ring. A hot contestant can only be helped with more CPU on its one pod, not more replicas. Sharding the ring by RX queue / per-CPU consumer would lift the per-contestant ceiling but is not implemented.
 - **Hardcoded port set {9898, 8080}** in the BPF program (`ebpf.rs:32-34`). A slot on any other port would come up healthy and emit an empty `orders.acked` stream — a silent measurement failure (the orchestrator guards this with a `capturablePorts` preflight, but the kernel cap is fixed at compile time).
@@ -1461,7 +1457,7 @@ pub fn partition_for(order_id: &str, num_partitions: i32) -> i32 {
 }
 ```
 
-The bot-fleet sent-producer groups events with `partition_for(&event.order_id, num_partitions)` and sends each chunk to that explicit `.partition()` (`services/bot-fleet/src/telemetry.rs:298`, `services/bot-fleet/src/kafka.rs:281-284`); the eBPF acked-producer does the identical `batch_by_partition` keyed on `partition_for(&e.order_id, ...)` (`services/ebpf-latency/src/main.rs:286-288`). Both order producers are Rust, so they share the one `partition_for` implementation — there is no Go twin (the only Go consumer, the correctness-validator, reads all partitions directly rather than recomputing). **Consequence:** for any given `order_id`, its sent event and its acked event always land on the *same partition number* in their respective topics. Kafka's consumer-group rebalance assigns whole partitions to consumers, so a replica that owns partition *p* of `orders.sent` is the same replica that owns partition *p* of `orders.acked` — it therefore sees **both halves of every order it is responsible for, with zero cross-replica coordination**. The sent↔acked join is a purely local in-memory `HashMap` lookup.
+The bot-fleet sent-producer groups events with `partition_for(&event.order_id, num_partitions)` and sends each chunk to that explicit `.partition` (`services/bot-fleet/src/telemetry.rs:298`, `services/bot-fleet/src/kafka.rs:281-284`); the eBPF acked-producer does the identical `batch_by_partition` keyed on `partition_for(&e.order_id, ...)` (`services/ebpf-latency/src/main.rs:286-288`). Both order producers are Rust, so they share the one `partition_for` implementation — there is no Go twin (the only Go consumer, the correctness-validator, reads all partitions directly rather than recomputing). **Consequence:** for any given `order_id`, its sent event and its acked event always land on the *same partition number* in their respective topics. Kafka's consumer-group rebalance assigns whole partitions to consumers, so a replica that owns partition *p* of `orders.sent` is the same replica that owns partition *p* of `orders.acked` — it therefore sees **both halves of every order it is responsible for, with zero cross-replica coordination**. The sent↔acked join is a purely local in-memory `HashMap` lookup.
 
 #### Kafka contract summary
 
@@ -1526,7 +1522,7 @@ A "wave" is a `wave_ns` slice (default **20 s**, `DEFAULT_WAVE_NS`) of a session
 - **Percentiles** (`p50/p90/p99/p999`, `rt_p50/p90/p99`) are read from histograms that are **never reset** — so they reflect the wave's whole life (cumulative distribution).
 - **`tps_1s` / `error_rate` / `offered` / `errors`** come from integer counters that are **zeroed every snapshot** (`aggregate.rs:301-306`) — so they reflect just this interval.
 
-Each snapshot serializes **three HDR blobs** with `V2DeflateSerializer` (`aggregate.rs:296-298, 343-347`): `hdr_encoded`=service_time, `rt_hdr_encoded`=response_time, `slip_hdr_encoded`=schedule_slip. This is the **coordinated-omission decomposition**: to see CO offline you need algo-time, full round-trip, and back-pressure as separate curves. Because each blob is cumulative-per-wave, the downstream merge contract is **last-blob-per-wave then HDR-add across waves** — never sum all rows, which would double-count the cumulative prefix (the same discipline is mirrored in the JS frontend `hdr.ts` and the Python plotter, per design.md §5.5).
+Each snapshot serializes **three HDR blobs** with `V2DeflateSerializer` (`aggregate.rs:296-298, 343-347`): `hdr_encoded`=service_time, `rt_hdr_encoded`=response_time, `slip_hdr_encoded`=schedule_slip. This is the **coordinated-omission decomposition**: to see CO offline you need algo-time, full round-trip, and back-pressure as separate curves. Because each blob is cumulative-per-wave, the downstream merge contract is **last-blob-per-wave then HDR-add across waves** — never sum all rows, which would double-count the cumulative prefix (the same discipline is mirrored in the JS frontend `hdr.ts` and the Python plotter).
 
 ### Tail-censoring fix: `service p99 ≤ response p99`
 
@@ -1546,7 +1542,7 @@ These bounds keep a single replica's memory proportional to *in-flight* orders, 
 
 Each replica writes to `metrics_partial` tagged with its `shard` id (`INGESTER_SHARD`, defaulting to pod name via `HOSTNAME`; `config.rs:39-43`, `store.rs:80-83`). The `telemetry-rollup` singleton (`bin/rollup.rs`) periodically (default 1 s) merges these into the canonical `metrics` table on a sealed-bucket watermark:
 
-- `run` (`rollup.rs:315-334`) advances a `watermark_ns`; it only rolls up buckets older than `ROLLUP_LAG_NS = 3 s` (so every shard's partial for that second has landed). The watermark advances **only after a successful DB write**, so a failed tick is retried.
+- `run()` (`rollup.rs:315-334`) advances a `watermark_ns`; it only rolls up buckets older than `ROLLUP_LAG_NS = 3 s` (so every shard's partial for that second has landed). The watermark advances **only after a successful DB write**, so a failed tick is retried.
 - `roll_window` finds `DISTINCT (session_id, wave_index)` touched in the window, reloads each wave's **full** partial history ordered by 1-second bucket, and calls `roll_wave_buckets`.
 - `roll_wave_buckets` (`rollup.rs:124-156`) implements **last-observation-carried-forward per shard**: per 1-second bucket it sums the per-interval counters (`tps`, `offered`, `errors`) across shards, but keeps each shard's *latest cumulative* HDR blob in a `BTreeMap<shard, blobs>` — so a shard that stopped flushing earlier still contributes its final cumulative tail to later buckets (test `roll_wave_buckets_carries_forward_a_shard_that_finished_earlier`).
 - The merge itself is **lossless native HDR addition** — decode each shard's V2-deflate blob and `add()` into one accumulator, then read true merged percentiles:
@@ -1577,7 +1573,7 @@ fn merge_one<'a>(blobs: impl Iterator<Item = &'a [u8]>) -> Histogram<u64> {
 - **KEDA:** **none for this tier.** There is a KEDA `ScaledObject` for bot-fleet but no autoscaler for telemetry-ingester or rollup — both are fixed-replica Deployments. Scaling out is a manual `replicas` bump (≤24 for the ingester).
 - **Bottlenecks:** (1) the ingester aggregation hot path is single-threaded per replica — at very high event rates one replica is CPU-bound on msgpack decode + HDR record, which is exactly why partition-sharding exists. (2) The rollup is a single process doing a per-tick full-history reload + HDR decode per touched wave; many concurrent waves/shards make it the throughput limiter and the reason for the 3 s seal lag. (3) The DB pool (8 ingester / 4 rollup) caps write concurrency.
 
-### Limitations / scope for improvement (grounded in code)
+### Limitations / scope for improvement
 
 - **Rollup cannot scale horizontally** (singleton by construction; no partitioning of `metrics_partial`); it is also the only place that produces canonical `metrics`, so it is a single point of throughput limitation under many-shard fan-in.
 - **No KEDA / HPA** on either deployment — capacity is provisioned, not autoscaled; an undersized replica count silently drops telemetry (loss-tolerant by design, visible only via `records_evicted` / consumer lag).
@@ -1676,7 +1672,7 @@ Notably the engine **infers maker/taker rather than trusting the contestant**: t
 5. **CancelReplaceLoss** — the *same* queue-jump situation, but the jumping order was `repriced`: a price-changing REPLACE forfeited its queue position, so its fill ahead of an order already resting at the new level is the violation (`validate.go:219-228`, `flagJump`).
 6. **SelfTrade** — the reference match for this fill has the *same participant* (bot_id, parsed by `model.ParticipantOf` from the order_id) on both sides (`stream.go:139-142`).
 
-**Queue-jump auto-split (design 6.3).** `flagJump` is the single entry point for both Time and CancelReplaceLoss; it consults `engine.Repriced(orderID)` to decide which to record (`validate.go:219-228`). The jumper itself is found by `queueJump` (`stream.go:175-201`): among orders *still resting* ahead of the filled order at the same price/side with a *lower* seq (and not a cross-flow tie), pick the earliest. The streaming rewrite deliberately checks only the **real queue** (orders actually resting) rather than every order that ever existed at that price (`stream.go:11-12`).
+**Queue-jump auto-split.** `flagJump` is the single entry point for both Time and CancelReplaceLoss; it consults `engine.Repriced(orderID)` to decide which to record (`validate.go:219-228`). The jumper itself is found by `queueJump` (`stream.go:175-201`): among orders *still resting* ahead of the filled order at the same price/side with a *lower* seq (and not a cross-flow tie), pick the earliest. The streaming rewrite deliberately checks only the **real queue** (orders actually resting) rather than every order that ever existed at that price (`stream.go:11-12`).
 
 Under/short-reporting is never penalized — the diff only ever flags *excess* or *wrong* fills, so an engine that simply does less than optimal is not punished as incorrect.
 
@@ -1684,15 +1680,15 @@ Under/short-reporting is never penalized — the diff only ever flags *excess* o
 
 A live in-sandbox engine sees orders in *socket-readable* order; the reference must replay them in the order TCP userspace would have delivered. `replay.Order`/`replay.Less` (`replay/order.go`) impose this:
 
-- **TCP head-of-line promotion (design 6.4).** Within each flow (`SrcIP:SrcPort`), sort by wraparound-safe `tcp_seq`, then promote each order's `EffectiveT3` to the running-max of T3 (`order.go:27-37`). A packet reordered on the wire is buffered by TCP until its predecessor arrives, so its *effective* delivery time is its predecessor's — the contestant is never accountable for kernel/wire reordering it could not observe.
+- **TCP head-of-line promotion.** Within each flow (`SrcIP:SrcPort`), sort by wraparound-safe `tcp_seq`, then promote each order's `EffectiveT3` to the running-max of T3 (`order.go:27-37`). A packet reordered on the wire is buffered by TCP until its predecessor arrives, so its *effective* delivery time is its predecessor's — the contestant is never accountable for kernel/wire reordering it could not observe.
 - **Global order** — stable sort by `(EffectiveT3, Flow, TCPSeq)` (`order.go:42-51`).
-- **100ns cross-flow tie tolerance (design 6.5).** `CrossFlowTie` returns true only for orders on *different* flows whose `EffectiveT3` differ by `< TieToleranceNs` (100, `order.go:14,71-76`). Below the eBPF timestamp jitter floor the platform cannot prove which arrived first, so time-priority/queue-jump violations between such pairs are suppressed (`stream.go:193`, `validate.go:269`). Within a single flow the byte stream is unambiguous, so the check stays strict.
+- **100ns cross-flow tie tolerance.** `CrossFlowTie` returns true only for orders on *different* flows whose `EffectiveT3` differ by `< TieToleranceNs` (100, `order.go:14,71-76`). Below the eBPF timestamp jitter floor the platform cannot prove which arrived first, so time-priority/queue-jump violations between such pairs are suppressed (`stream.go:193`, `validate.go:269`). Within a single flow the byte stream is unambiguous, so the check stays strict.
 
-### Aggressive-fill tolerance (design 6.5.1)
+### Aggressive-fill tolerance
 
 Market/IOC fills depend entirely on which liquidity rested at the *instant* the order was processed, and a live engine cannot observe `effective_t3`. To avoid penalizing a correct market-filling engine for an interleaving it could not see, the engine records each resting order's **availability window** `[enter_t3, exit_t3]` — enter = its `EffectiveT3`, exit = the `EffectiveT3` of whatever consumed/cancelled it, or `+∞` if still resting (`book.go:54-62,247-251,266-270`). When `AGGRESSIVE_FILL_TOLERANCE_US > 0` (default **0 = strict**, `main.go:60`), a reported fill the reference didn't produce is *accepted* if non-self opposite liquidity at that price was genuinely resting within `±tolerance` of the aggressor's `EffectiveT3` (`validate.go:116-137`, `windowsOverlap` at `validate.go:306-313`). Overfill and self-trade are *never* tolerated. (This tolerance path is currently implemented in the **batch** `validate.Run`; the streaming `scoreOrder` reproduces the default strict path exactly — see *Limitations*.)
 
-### Price-scale reconciliation (design 6.6)
+### Price-scale reconciliation
 
 `orders.sent.price` is a raw FIX tag-44 integer; `orders.acked.fill_price` is fixed-point ×1e9 from the kernel parser. Without rescaling, every fill would be a phantom price violation. `pipeline.AssembleOrder` lifts the reference order price into the eBPF domain by multiplying by `topics.TelemetryPriceScale` (= `1_000_000_000`) at assembly time (`pipeline.go:36`, `schemas/go/topics/topics.go:23`), so reference and reported prices are compared in the same units.
 
@@ -1733,7 +1729,7 @@ Per-session **memory is bounded** by the streaming design: O(live reference book
 
 **Bottleneck:** within a session, work is serial — a single goroutine k-way-merges all 24×2 partitions and feeds one engine, so a single huge session cannot be parallelized internally; its drain (network) + replay (CPU) latency is the floor, with `VALIDATION_TIMEOUT_MS` (60s) the hard cap before the recoverable timeout placeholder.
 
-### Limitations / scope for improvement (grounded in code)
+### Limitations / scope for improvement
 
 - **Deployed as a single replica, no KEDA.** `k8s/benchmark/correctness-validator/deployment.yaml` sets `replicas: 1`; there is no `ScaledObject` for this service. The code is replica-safe (claim + group), but the autoscaling story is unrealized — scaling is currently only the in-process `VALIDATOR_CONCURRENCY`.
 - **Two parallel diff implementations.** The codebase carries both the legacy **batch** path (`validate.Run` + `pipeline.Run` + `source.DrainSession`, which buffers the whole session) and the newer **streaming, bounded-memory single-pass** path (`validate.StreamValidator` + `source.StreamSession`). `main.go` wires only the streaming path; the batch path is documented as "being retired" (`book.go:84-87`) but is still present (and still backs the aggressive-fill tolerance feature). Confirmed: the streaming rewrite is recent and is asserted score-identical to batch for the default strict path (`stream.go:1-13`, validated in `v2_test.go`/`stream_test.go`).
@@ -1780,7 +1776,7 @@ Per run-group it produces (`score.Result`, `internal/score/score.go:118`):
 - **`spike_recovery_ns`** — how long after a spike the engine took to fall back within 110%
   of its baseline p99.
 - **`total_correctness`** — `Σ valid_fills / Σ total_fills` across all sessions.
-- **`disqualified` + `disqualification_code`** — DQ verdict (design §6.13).
+- **`disqualified` + `disqualification_code`** — DQ verdict.
 - **`incomplete_telemetry`** — set when any session's telemetry coverage
   (`matched/sent`) fell below `min_coverage` (0.90), which *suppresses* violation-based DQ.
 
@@ -1822,7 +1818,7 @@ a crash can never silently drop a score.
 #### The scoring computation (`score.Compute`, score.go:138)
 
 1. **Aggregate correctness** across sessions; `< 0.95` → `correctness_below_threshold`
-   (design §6.12 DQ gate). Each session's own ratio is also gated →
+   (DQ gate). Each session's own ratio is also gated →
    `session_correctness_below_threshold`.
 2. **Telemetry-coverage gate.** For each session, `coverage = matched/sent`; if any session
    is below `min_coverage` (0.90) the run is flagged `incomplete_telemetry` and the result
@@ -1831,7 +1827,7 @@ a crash can never silently drop a score.
 3. **Wave schedule reconstruction.** `WaveSchedule` (`score.go:252`) rebuilds the offered-RPS
    profile per 20 s wave from the ramp scenario's `TaskSpec`s by integrating each task's
    `TargetRPS` over its overlap with the wave window.
-4. **Peak-sustained-TPS gate (design §6.12).** Walk the schedule in wave order, **skip wave 0**
+4. **Peak-sustained-TPS gate.** Walk the schedule in wave order, **skip wave 0**
    (warmup), and gate each wave on the **median of its per-second p99** (`StableP99NS` via
    `medianU64`) — *not* the worst second — plus a *max* error-rate gate. Stop at the first
    failing wave; peak = last passing wave's offered RPS. Break-on-first-failure keeps peak
@@ -1862,13 +1858,13 @@ samples feed the median. (Redis here is used only for liveness/`ZADD` helpers, n
 Once computed, the worker does three SQL steps then one Kafka publish:
 
 1. **`SaveScore`** — `INSERT … ON CONFLICT (run_group_id) DO NOTHING` (store.go:411). The full
-   `score.Result` is also stored as `score_detail` JSONB. The `RowsAffected()==1` return is the
+   `score.Result` is also stored as `score_detail` JSONB. The `RowsAffected==1` return is the
    **idempotency latch**: a second worker (or a redelivery) that loses the insert race returns
    without publishing, so each run-group emits exactly one leaderboard update.
-2. **`RankForRunGroup`** — a `ROW_NUMBER() OVER (ORDER BY <rankOrderBy>)` window over the
+2. **`RankForRunGroup`** — a `ROW_NUMBER OVER (ORDER BY <rankOrderBy>)` window over the
    *entire* `scores` table (store.go:455). The order is `disqualified ASC, peak_sustained_tps
    DESC, p99_at_peak_ns ASC, spike_recovery_ns ASC, total_correctness DESC, run_group_id ASC`
-   (design §6.13 — DQ-ascending leads, so any DQ'd entry sorts below all qualified ones).
+   (DQ-ascending leads, so any DQ'd entry sorts below all qualified ones).
    `idx_scores_sort_v3` (store.go:92) is the covering index for exactly this order.
 3. **`MarkPublished`** — writes `rank`, `rank_delta`, `published_at`.
 4. **Publish** the `LeaderboardUpdateEvent`.
@@ -1904,9 +1900,9 @@ session/run-group), so 3 is intentional.
   (`k8s/benchmark/score-computer/deployment.yaml:14`); **no KEDA/HPA**. Horizontal scale is
   *possible but unused*: the consumer groups would rebalance partitions, and the
   `ON CONFLICT DO NOTHING` latch makes double-scoring safe — but the per-run-group cost is a
-  full-table `ROW_NUMBER()` rank, and the work is bursty (one batch per finished run-group),
+  full-table `ROW_NUMBER` rank, and the work is bursty (one batch per finished run-group),
   so a single replica with internal worker concurrency is the chosen unit.
-- **Bottleneck:** the global `ROW_NUMBER()` rank query scales O(rows) per scored run-group;
+- **Bottleneck:** the global `ROW_NUMBER` rank query scales O(rows) per scored run-group;
   fine at contest scale (hundreds of run-groups), would need an incremental/Redis-ZSET rank if
   the table grew large.
 
@@ -1923,7 +1919,7 @@ session/run-group), so 3 is intentional.
   framing, `recompute_run_group_status` lives in `submission-api`
   (`services/submission-api/internal/store/postgres.go:437`) and `total_score` is a *sort alias*
   in leaderboard-api's read store (mapped to `total_correctness`, store.go:501). score-computer's
-  closest analogues are the `ReadyRunGroups` readiness query and the `RankForRunGroup` window.
+  closest analogues are the `ReadyRunGroups()` readiness query and the `RankForRunGroup` window.
 
 ---
 
@@ -1982,7 +1978,7 @@ leaderboard query only:
 
 #### Read queries (read/store.go)
 
-- **Leaderboard list** (`Leaderboard`, store.go:111): a `ROW_NUMBER() OVER (ORDER BY
+- **Leaderboard list** (`Leaderboard`, store.go:111): a `ROW_NUMBER OVER (ORDER BY
   <rankedOrder>)` subquery — the **same canonical order** as score-computer's `rankOrderBy`,
   so rank is consistent across services — wrapped with optional filters (run_group / submission
   / contestant / `team_name ILIKE`) and an opaque base64 offset cursor (`limit+1` fetched to
@@ -2096,7 +2092,7 @@ These are the small, cross-cutting pieces that every other component leans on: t
 
 **Key subtlety — it does NOT verify the ID token signature.** `parseClaims` (`main.go:320`) only base64url-decodes the JWT payload to read `sub`/`email`/`nonce`; it never checks the signature. This is acceptable here because the token was just received directly from Google over TLS in the code exchange. Signature verification is the job of the *consumer* services (`submission-api`), which independently re-verify any bearer token against Google's JWKS via the shared `libs/go/authn` verifier (see (b)). `auth-api` mints no tokens of its own: `platform_token` is simply the Google `id_token` passed through (`responseFromToken`, `main.go:313`).
 
-**Auth model and its current toggle.** The intended model: the frontend signs in with Google, gets an `id_token`, and presents it as a `Bearer` token to `submission-api`, which verifies it and binds the submission/run to a `contestant_id` (= Google `sub`). **In the current e2e/demo deployment, auth is turned off.** The e2e frontend runs with no login ("no sign-in — auth is removed", `e2e/README.md:35`; "frontend(auth off)", `e2e/README.md:100`). On the API side this is gated by `AUTH_REQUIRED` (default `true`) in `submission-api/main.go:140`: when set to `false`, the router mounts `OptionalContestant` instead of `RequireContestant`, which **never rejects a request** and derives identity from an *unverified* `sub` claim if a token is present, else from `DEFAULT_CONTESTANT_ID` (`auth.go:66-76`, `submission-api/main.go:149-155`). So in the e2e deployment `auth-api` is effectively dormant and `submission-api` short-circuits verification.
+**Auth model and its current toggle.** The intended model: the frontend signs in with Google, gets an `id_token`, and presents it as a `Bearer` token to `submission-api`, which verifies it and binds the submission/run to a `contestant_id` (= Google `sub`). **In the current e2e/demo deployment, auth is turned off.** The e2e/demo frontend runs with no login. On the API side this is gated by `AUTH_REQUIRED` (default `true`) in `submission-api/main.go:140`: when set to `false`, the router mounts `OptionalContestant` instead of `RequireContestant`, which **never rejects a request** and derives identity from an *unverified* `sub` claim if a token is present, else from `DEFAULT_CONTESTANT_ID` (`auth.go:66-76`, `submission-api/main.go:149-155`). So in the e2e deployment `auth-api` is effectively dormant and `submission-api` short-circuits verification.
 
 > **Note — auth in the shipped demo.** The code fully supports JWT verification
 > (`RequireContestant` + `authn.NewVerifier`, with `auth_middleware_test.go`
@@ -2134,9 +2130,9 @@ if lokiClient != nil {
 
 #### Prometheus metrics (`libs/go/metrics`)
 
-The Go metrics package is unusual and worth calling out: it is a **closed catalog**, not an open registry. All ~70 metrics are declared up front in `projectMetricCatalog()` (`metrics.go:270-339`) — every counter/gauge/histogram name, help text, label set, and (for histograms) bucket layout the entire platform is allowed to emit. At runtime `Counter`/`Gauge`/`Histogram` (`metrics.go:100-150`) look the metric up by name; if it was never registered in the catalog, or the kind/labels/buckets don't match, the sample is **silently dropped and an `iicpc_metrics_registry_errors_total` error counter is incremented** (`metric`, `metrics.go:196-221`) rather than registered ad-hoc. This guarantees consistent cardinality and naming (everything is namespaced `iicpc_*`) across all services and makes a typo a no-op instead of a new time series. `HTTPMiddleware` (`http.go:56`) wraps any `http.Handler` to emit `http_requests_total` + `http_request_duration_seconds` labeled by `{service, method, path, status}`, using a `statusRecorder` that also implements `Flush`/`Unwrap` so it stays SSE/streaming-transparent. The shared serving pattern: `metrics.StartServer(addr)` (`metrics.go:160`) spins up a `/metrics` listener (default `:9090`), or services mount `metrics.Handler()` directly on their existing router (`submission-api/main.go:137`). Eight Go services use these helpers (`correctness-validator`, `build-worker` worker/spawner, `sandbox-orchestrator`, `score-computer`, `bot-fleet-controller`, `leaderboard-api`, `submission-api`).
+The Go metrics package is unusual and worth calling out: it is a **closed catalog**, not an open registry. All ~70 metrics are declared up front in `projectMetricCatalog` (`metrics.go:270-339`) — every counter/gauge/histogram name, help text, label set, and (for histograms) bucket layout the entire platform is allowed to emit. At runtime `Counter`/`Gauge`/`Histogram` (`metrics.go:100-150`) look the metric up by name; if it was never registered in the catalog, or the kind/labels/buckets don't match, the sample is **silently dropped and an `iicpc_metrics_registry_errors_total` error counter is incremented** (`metric`, `metrics.go:196-221`) rather than registered ad-hoc. This guarantees consistent cardinality and naming (everything is namespaced `iicpc_*`) across all services and makes a typo a no-op instead of a new time series. `HTTPMiddleware` (`http.go:56`) wraps any `http.Handler` to emit `http_requests_total` + `http_request_duration_seconds` labeled by `{service, method, path, status}`, using a `statusRecorder` that also implements `Flush`/`Unwrap` so it stays SSE/streaming-transparent. The shared serving pattern: `metrics.StartServer(addr)` (`metrics.go:160`) spins up a `/metrics` listener (default `:9090`), or services mount `metrics.Handler` directly on their existing router (`submission-api/main.go:137`). Eight Go services use these helpers (`correctness-validator`, `build-worker` worker/spawner, `sandbox-orchestrator`, `score-computer`, `bot-fleet-controller`, `leaderboard-api`, `submission-api`).
 
-> Note: `libs/rust` ships only the `logger` crate — there is no shared Rust metrics library. Rust data-plane services (`telemetry-ingester`, `bot-fleet`, `ebpf-latency`) expose their own `iicpc_telemetry_*` / service-local Prometheus series directly (design §8 / §5.12).
+> Note: `libs/rust` ships only the `logger` crate — there is no shared Rust metrics library. Rust data-plane services (`telemetry-ingester`, `bot-fleet`, `ebpf-latency`) expose their own `iicpc_telemetry_*` / service-local Prometheus series directly (/ §5.12).
 
 ### (c) `schemas/go` + `schemas/rust` — the single Kafka contract, mirrored across languages
 
@@ -2150,7 +2146,7 @@ This is the keystone of the whole platform: one set of topic-name constants and 
 
 **Forward-compat via `serde(default)`.** New fields on hot-path structs are added with `#[serde(default)]` (Rust) / a zero-value (Go) so that an old producer's message — missing the new field entirely — still decodes cleanly into the new struct, with the field defaulting to zero. `barrier_epoch_ns` on `OrderSentEvent` is the worked example (`lib.rs:163`), and there are two tests guarding it: `order_sent_event_barrier_epoch_round_trips` (`lib.rs:455`) confirms it survives a msgpack round-trip, and `order_sent_event_decodes_pre_field_message` (`lib.rs:484`) literally encodes an *old* struct lacking the field and decodes it into the new one, asserting the field defaults to 0. This is exactly the rolling-upgrade story: you can deploy a new consumer before the new producer (or vice versa) without a coordinated flag day.
 
-**The cross-language co-partition guarantee — `partition_for()`.** This is the genuinely elegant bit. The hot topics `orders.sent` and `orders.acked` are **24 partitions each** (`create-topics.sh`), and a given order is produced to *both* topics by completely different services — `bot-fleet` (Rust) emits `orders.sent`, `ebpf-latency` (Rust) emits `orders.acked`. For a stateless consumer to join the "sent" and "acked" sides of one order locally (no cross-partition shuffle), both producers must independently put that order on the *same partition number*. They do so by hashing the `order_id` with a fixed FNV-1a 64-bit hash:
+**The cross-language co-partition guarantee — `partition_for`.** This is the genuinely elegant bit. The hot topics `orders.sent` and `orders.acked` are **24 partitions each** (`create-topics.sh`), and a given order is produced to *both* topics by completely different services — `bot-fleet` (Rust) emits `orders.sent`, `ebpf-latency` (Rust) emits `orders.acked`. For a stateless consumer to join the "sent" and "acked" sides of one order locally (no cross-partition shuffle), both producers must independently put that order on the *same partition number*. They do so by hashing the `order_id` with a fixed FNV-1a 64-bit hash:
 
 ```rust
 pub fn partition_for(order_id: &str, num_partitions: i32) -> i32 {
@@ -2209,7 +2205,7 @@ flowchart LR
     K -->|same partition per order_id| ING[ingester / validator fleet]
 ```
 
-### Limitations / scope for improvement (grounded in code)
+### Limitations / scope for improvement
 
 - **Auth is off in the shipped demo.** `AUTH_REQUIRED=false` + `OptionalContestant` means identity is taken from an *unverified* token or a static default (`auth.go:66-76`); `auth-api` is deployed but unused. Re-enabling is a config flip; until then there is no authn/authz in the running benchmark system.
 - **`auth-api` does no signature verification of the ID token** (`parseClaims`, `main.go:320`) — safe only because the token comes straight from Google in the exchange; any reuse of that function on an untrusted token would be a vulnerability.
@@ -2226,7 +2222,7 @@ flowchart LR
 
 This section is the definitive record of *how the platform was measured*, *what it
 actually generates and measures losslessly*, *every bottleneck found and removed*, and
-*the honest open items* that remain. Every number traces to a data file, a benchmark
+*the open items* that remain. Every number traces to a data file, a benchmark
 script, or a source line. The platform's own design goal is "we generate ~2M orders/s
 and measure latency at the kernel without lying about the tail" — this section shows the
 evidence behind that claim, the parts that are validated, and the parts that are still
@@ -2256,8 +2252,8 @@ confound but one*:
   `iicpc_bot_orders_sent` rate (incremented on socket-write success at
   `services/bot-fleet/src/worker.rs:780` / `:1189`). This is the *cleanest* possible
   generation number: "how fast can we put orders on the wire," with telemetry also off
-  (`BOT_DISABLE_TELEMETRY=1`). `deploy-bench/README.md:1-7` states the intent verbatim;
-  `deploy-bench/drain-scale-sweep.sh:1-8` implements the telemetry-off mode.
+  (`BOT_DISABLE_TELEMETRY=1`); `deploy-bench/drain-scale-sweep.sh` implements this
+  telemetry-off mode.
 
 - **Echo contestant (measurement capacity).** A µs-fast acker that answers *every* order,
   so the contestant is never the bottleneck and eBPF always has a response to stamp. With
@@ -2273,21 +2269,19 @@ confound but one*:
   (port of the validator's reference engine) that *qualifies* (correctness ≥ 0.95). This
   is the only flow that produces real correctness verdicts + HDR latency; it is bounded
   by the validator's and book's memory, so its scenarios are sized to stay under the
-  delivered ceiling (`e2e/README.md:31, 49-55`).
+  delivered ceiling.
 
 **Telemetry ON vs OFF — and why both numbers exist.** Telemetry IS the measurement
 record; you cannot score what you dropped. But telemetry has its own pipeline ceiling.
 So generation is reported twice: telemetry-**off** (raw send capacity, the upper bound)
 and telemetry-**on** (durable, the production ceiling). The gap between them is itself a
-bottleneck signal — `docs/tps-serialization-audit.md:12-36` is built entirely around the
-discipline of checking `iicpc_bot_orders_sent` vs `iicpc_bot_telemetry_events_flushed`
-*before* acting, because a telemetry cap presents as a "low TPS" symptom (see §3c).
+bottleneck signal — the discipline is to check `iicpc_bot_orders_sent` vs
+`iicpc_bot_telemetry_events_flushed` *before* acting, because a telemetry cap presents as a "low TPS" symptom (see §3c).
 
 **Why latency is kernel-stamped, not load-gen-timed.** Service time `t7−t3` is measured by
 the eBPF capture at the contestant's veth (XDP ingress / tc egress), independent of the
 load-gen's scheduling jitter and the contestant's userspace accounting. This is *the*
-reason worker-side latency aggregation is explicitly not used for the scored metric
-(`docs/platform-performance-and-scaling.md:317-325`, design.md:60).
+reason worker-side latency aggregation is explicitly not used for the scored metric.
 
 ```mermaid
 flowchart LR
@@ -2301,14 +2295,14 @@ flowchart LR
 
 ---
 
-### 2. The numbers (verbatim from the data files)
+### 2. The numbers
 
-**A. Validated ceilings** (`e2e/README.md:77-90`):
+**A. Validated ceilings**:
 
 | layer | ceiling | notes |
 |---|---|---|
 | generation, telemetry OFF (drain) | **~600–790k/s per botworker node** | scales ~linearly with nodes |
-| telemetry ON (single worker → 1 broker) | **~445k/s** | lossless `record()` backpressure |
+| telemetry ON (single worker → 1 broker) | **~445k/s** | lossless `record` backpressure |
 | measurement pipeline (capture→Kafka→ingester) | **lossless ≥ ~144k samples/s**, ceiling not yet reached | with the capture-fidelity fix |
 | single echo contestant pod (cross-node) | **~150k delivered/s** | one pod + one TCP conn/task; caps before the pipeline |
 | kernel-stamped service-time p99 | **~98 µs healthy** | eBPF, independent of load-gen jitter |
@@ -2321,9 +2315,9 @@ flowchart LR
 | sent/s | 0 | 64,983 | **747,911** | 709,571 | 678,401 | 640,374 | 628,931 | 550,374 | 0 |
 
 Peak **~748k/s**, sustained **~600–710k/s** on a single 4-vCPU node. (The first/last
-buckets are warm-up/drain.) `deploy-bench/drain-raw-tps.png` plots this run.
-`docs/platform-performance-and-scaling.md:90-92` independently reports a 60 s run of
-**47,401,664 orders = ~790k/s** at 3.94/4 cores (93% user, 7% kernel) — consistent.
+buckets are warm-up/drain.) `deploy-bench/drain-raw-tps.png` plots this run. A separate
+60 s run measured **47,401,664 orders = ~790k/s** at 3.94/4 cores (93% user, 7% kernel),
+consistent with this.
 
 > **Note — node-scaling sweep.** The 1→2-node sweep data file
 > (`deploy-bench/scale-sweep-off.tsv`) is not yet populated, so near-linear
@@ -2345,20 +2339,18 @@ sandbox node — `deploy-bench/measure-capacity-sweep.tsv`):
 | 400 | 299,421 | 0       | 0       | 0.0000 | 0/0/0 | STALL |
 | 500 | 364,159 | 0       | 0       | 0.0000 | 0/0/0 | STALL |
 
-**Honest interpretation (do not over-read this table):** the verdicts are
+**Reading this table:** the verdicts are
 **non-monotonic** — 200k passes CLEAN while 150k STALLs, and 50k/100k pass but 250k+
 fail. That pattern is the signature of **a single-pod / single-node ceiling around the
 low-100s-of-k delivered, plus run-to-run variance**, not a clean "this rate works, above
 it doesn't" cliff. The decisive evidence: at the STALL steps the loss counters are all
 **zero** while `decoded/flushed` collapse to 0 — i.e. nothing is being *dropped*; the
 echo contestant simply isn't *delivering* acks at that offered rate (the run stalled, no
-responses to stamp). This is exactly the **~150k single-pod-contestant ceiling** of
-`e2e/README.md:84` showing up as run-to-run jitter at the boundary. The lossless number
-to trust from this harness is the verified one: **≥ ~144k samples/s with zero drops**
-(`e2e/README.md:83`; matches the 200k row's 140,992 flushed). The measurement pipeline's
-*own* ceiling is **not yet reached** — to find it you must stop bottlenecking on one
-echo pod (more responder pods / more cores), per `e2e/README.md:87-90` and
-`docs/horizontal-scaling.md:179-181`.
+responses to stamp). This is exactly the **~150k single-pod-contestant ceiling** showing up as run-to-run
+jitter at the boundary. The lossless number to trust from this harness is **≥ ~144k
+samples/s with zero drops** (matches the 200k row's 140,992 flushed). The measurement
+pipeline's *own* ceiling is **not yet reached** — to find it you must stop bottlenecking
+on one echo pod (more responder pods / more cores).
 
 > The `*` on the 100k row: it is marked CLEAN by the script's verdict but its coverage is
 > 0.89 (< the 0.99 COV_MIN gate). Treat it as a borderline/variance result, not a clean
@@ -2376,11 +2368,10 @@ from the Rust V2-deflate HDR blobs by an independent Python `hdrh` cross-check
 
 The tail rises with load shape (ramp's climbing waves > spike's burst > constant's flat),
 exactly as expected. These are small-n local runs (n≈20–60 per scenario in the `.hgrm`
-files) — directional, not the EKS production tail (~98–120 µs p99 healthy,
-`e2e/README.md:85`, `docs/platform-performance-and-scaling.md:21`).
+files) — directional, not the EKS production tail (~98–120 µs p99 healthy).
 
-**E. The 2M/s tier target** (`bench/README.md`, `bench/bench.tfvars`,
-`bench/kafka-bench.sh`, all confirmed against the files):
+**E. The 2M/s tier target** (`bench/bench.tfvars`,
+`bench/kafka-bench.sh`):
 
 | knob | e2e | **bench (2M/s tier)** |
 |---|---|---|
@@ -2388,11 +2379,11 @@ files) — directional, not the EKS production tail (~98–120 µs p99 healthy,
 | Kafka | 1 broker, gp3-250 | **2-broker KRaft**, dedicated pool, gp3-500 (`kafka-bench.sh:12`, default `KBROKERS=2`) |
 | topics | 24 part | **96 part, RF=1** (`kafka-bench.sh:76-80`, transient bench data) |
 | ingesters | 2 | **8** (`kafka-bench.sh:88`) |
-| nodes / vCPU | 5 / 32 | **8 / 44** (needs a vCPU quota bump, `bench/cluster.md:6-12`) |
+| nodes / vCPU | 5 / 32 | **8 / 44** (needs a vCPU quota bump) |
 
-This is a **documented target, not a validated run** — `bench/README.md:50-54` lists the
-two open verifications explicitly: eBPF capture throughput at 2M/s (one capture
-producing ~2M acks/s) and echo capacity at 2M/s are both UNVERIFIED. The drain variant
+This is a **documented target, not a validated run**: the two open verifications are
+eBPF capture throughput at 2M/s (one capture producing ~2M acks/s) and echo capacity at
+2M/s, both UNVERIFIED. The drain variant
 (send + telemetry + ingester capacity) is the first thing to validate now that Kafka is
 multi-broker.
 
@@ -2407,7 +2398,7 @@ re-verified with a number. They are presented in the order they were hit.
 
 - **Symptom.** Each load-gen task pinned near ~1k orders/s *regardless of `target_rps`*,
   with the host CPU sitting >85% idle. Proof: a single task targeting 1,000,000/s emitted
-  **53,868 orders in 60 s = ~898/s** (`docs/throughput-bottlenecks.md:48`).
+  **53,868 orders in 60 s = ~898/s**.
 - **Root cause.** The pacer called `tokio::time::sleep_until` before *every* order;
   tokio's timer wheel has a ~1 ms minimum granularity, so even a 20 µs interval — or a
   deadline already in the past — cost ~1 ms. Tasks were parked on timers, not working.
@@ -2415,8 +2406,7 @@ re-verified with a number. They are presented in the order they were hit.
   (`services/bot-fleet/src/worker.rs:786` FIX-batch loop, `:1210` REST/WS loop): only
   park on the timer when *ahead* of schedule; if the deadline already passed, send
   immediately and re-arm to the next slot.
-- **Result.** A single task sustains **~58–68k/s (≈65–75×)**
-  (`docs/throughput-bottlenecks.md:20-21, 62`; `docs/platform-performance-and-scaling.md:14`).
+- **Result.** A single task sustains **~58–68k/s (≈65–75×)**.
   Verified in code; the FNV/CO contract is unchanged (§3d).
 
 This is the single most load-bearing line in the load generator — caption below:
@@ -2441,33 +2431,29 @@ flamegraph (`docs/bot-worker-flamegraph.svg`):
 - **`push_resting` O(n) memmove (87% of CPU).** The resting-order ledger was a `Vec`
   doing `Vec::remove(0)` on every order once full. Fixed to a `VecDeque` with O(1)
   `pop_front`/`swap_remove_back` (`services/bot-fleet/src/content.rs:113, 228-242`).
-  Per-order CPU ~42 µs → ~5 µs (`docs/platform-performance-and-scaling.md:68-79`).
-- **One unbuffered `write()` syscall per order (27% kernel CPU).** Added `BOT_WRITE_BATCH`
+  Per-order CPU ~42 µs → ~5 µs.
+- **One unbuffered `write` syscall per order (27% kernel CPU).** Added `BOT_WRITE_BATCH`
   (default 64) coalescing of *already-due* backlog orders into one `write_all`
   (`services/bot-fleet/src/worker.rs:717-811`; the batch only ever coalesces the catch-up
-  backlog, so the schedule is never distorted). Kernel syscall share ~27% → ~2%
-  (`docs/platform-performance-and-scaling.md:84-92`). Combined, these took a single node to
+  backlog, so the schedule is never distorted). Kernel syscall share ~27% → ~2%. Combined, these took a single node to
   the ~790k/s in §2B.
 
 #### (b) The single-node veth/loopback wall (local only — gone on EKS)
 
 - **Symptom.** With the code cap removed, throughput *decreased* as connections increased
   (1 task 58–67k > 4 tasks 37.5k > 8 tasks ~30k) while the host stayed >85% idle and both
-  the worker (<1 core) and engine (<2 cores) were idle
-  (`docs/throughput-bottlenecks.md:78-83`).
+  the worker (<1 core) and engine (<2 cores) were idle.
 - **Root cause.** On a single laptop node, every order and its TCP signalling traverse one
   shared **veth pair + kernel CNI datapath** (~15–17 µs/op), which has limited parallelism;
-  adding flows adds latency, not throughput. Ruled out as code: `TCP_NODELAY` is set
+  adding flows adds latency, not throughput. This is not a code-level issue: `TCP_NODELAY` is set
   (`worker.rs:1594/1610/1620`), the runtime
   is multi-thread at the CPU count, and a drain sink (no acks) didn't beat the ack engine —
   the wall is upstream of the engine entirely.
 - **Fix.** None in code — this is a **hardware/environment artifact**, deliberately *not*
   "fixed." The EKS topology removes it: the bot fleet and the contestant are pinned to
   *separate* tainted node pools (`botworker` vs `sandbox`), so traffic rides a real
-  cross-node NIC with multi-queue RSS + offloads instead of one shared veth
-  (`docs/throughput-bottlenecks.md:106-130`). It is documented as S2 in the serialization
-  audit specifically so it is never re-investigated as a code bug
-  (`docs/tps-serialization-audit.md:61-71`).
+  cross-node NIC with multi-queue RSS + offloads instead of one shared veth. It is documented as S2 in the serialization
+  audit specifically so it is never re-investigated as a code bug.
 - **Result.** The wall does not appear on EKS; per-node generation reaches the ~600–790k/s
   in §2A/B. (The cross-node behavior — "more connections compound" — is argued from the
   NIC/RSS mechanism, not yet swept; see §4.)
@@ -2476,14 +2462,12 @@ flamegraph (`docs/bot-worker-flamegraph.svg`):
 
 - **Symptom.** Lossless (telemetry-persisted) send capped at **~5.7k orders/s** on EKS
   while raw send hit ~60k/s, with **~90–97% of telemetry events dropped** and a `warn!`
-  log storm (~57k logs/s) burning CPU (`docs/bot-fleet-tps-plan.md:9-15, 20-29`;
-  `docs/platform-performance-and-scaling.md:96-99`).
+  log storm (~57k logs/s) burning CPU.
 - **Root cause.** The per-worker aggregator was a *single* task that **awaited Kafka
   delivery inside each flush** (24-partition `join_all`); while flushing it did not drain
   the channel, so a ~175 ms flush let the channel fill and the old `try_send` dropped ~90%.
   Net drain ≈ 1000 events / 175 ms ≈ 5.7k/s. The producer config itself was already fast —
-  the limiter was the *await-delivery-per-flush, single-task* design
-  (`docs/bot-fleet-tps-plan.md:22-29`).
+  the limiter was the *await-delivery-per-flush, single-task* design.
 - **Fix.** Rewrote `services/bot-fleet/src/telemetry.rs`:
   1. **No inline delivery await** — a `select!` loop interleaves channel-drain and
      chunk-enqueue; deliveries are accounted asynchronously via
@@ -2495,16 +2479,14 @@ flamegraph (`docs/bot-worker-flamegraph.svg`):
      batches via a unit-tested `PartitionBatcher` (`telemetry.rs:155`) keyed by
      `partition_for(order_id, N)` (`telemetry.rs:298`) — the same FNV-1a co-partition
      contract the ingester relies on.
-  4. **Lossless backpressure, not drops** — `record()` now `tx.send(event).await` blocks on
+  4. **Lossless backpressure, not drops** — `record` now `tx.send(event).await` blocks on
      a full 65536-deep channel rather than dropping (`telemetry.rs:87-90` and the LOSSLESS
      comment; producer queue is a hard 1 GiB that blocks, not grows).
 - **Result.** Drops → **~0%**; the durable ceiling rose to the **~445k/s single-broker**
-  number (`e2e/README.md:82`; `docs/platform-performance-and-scaling.md:18, 94-110`). The
+  number. The
   remaining named lever is the **single aggregator drain** — the audit's T1 "shard the
-  aggregator across M tasks" is identified but **not yet done**
-  (`docs/tps-serialization-audit.md:90-113`), and on the ingester side, `auto.offset.reset`
-  is `latest` (a correctness gotcha that reads as loss if the ingester starts late —
-  `docs/tps-serialization-audit.md:163-168`).
+  aggregator across M tasks" is identified but **not yet done**, and on the ingester side, `auto.offset.reset`
+  is `latest` (a correctness gotcha that reads as loss if the ingester starts late —).
 
 #### (d) Coordinated-omission correctness (t0 before sleep)
 
@@ -2515,23 +2497,20 @@ flamegraph (`docs/bot-worker-flamegraph.svg`):
   when the order actually goes out (`services/bot-fleet/src/worker.rs:1209` for REST/WS;
   the FIX loop pushes `next_send_ns` into `targets` at `:809` while stepping the schedule at
   `:811`). So `schedule_slip = real_send − target` measures *true* lateness; when offered
-  load exceeds capacity, slip grows unbounded — the correct CO signal
-  (`docs/throughput-bottlenecks.md:64-70`).
+  load exceeds capacity, slip grows unbounded — the correct CO signal.
 - **Result.** Pacing does **not** distort the measurement. The *scored* latency is `t7−t3`
   (kernel-stamped, independent of pacing entirely), so even the schedule-slip subtlety only
-  affects the secondary `response_time`, never the gated metric
-  (`docs/platform-performance-and-scaling.md:64-67`).
+  affects the secondary `response_time`, never the gated metric.
 
 #### (e) Ingester drops / backpressure → distributed co-partition + 2-stage rollup
 
 - **Symptom.** A single ingester replica couldn't be scaled out: two naïve replicas would
   split a window's HDR histogram across pods, corrupting percentiles; under load a single
-  replica dropped telemetry and back-pressured the worker (the audit's T2/T3 coupling,
-  `docs/tps-serialization-audit.md:114-145`).
+  replica dropped telemetry and back-pressured the worker (the audit's T2/T3 coupling).
 - **Root cause.** No co-partitioning meant an order's `sent` and `acked` events could land
   on different consumers, so a replica couldn't join locally; and HDR percentiles aren't
   averageable across shards.
-- **Fix (4 parts, `docs/platform-performance-and-scaling.md:146-167`, verified in code):**
+- **Fix (4 parts,, verified in code):**
   1. **Co-partition the `sent ⋈ acked` join by `order_id`** with a shared FNV-1a
      `partition_for(order_id, N)` (`schemas/rust/src/lib.rs:26-38`); both producers publish
      each sub-batch to the explicit matching partition — bot-fleet `orders.sent`
@@ -2543,11 +2522,11 @@ flamegraph (`docs/bot-worker-flamegraph.svg`):
   3. **Two-stage native HDR rollup** — ingester replicas write per-shard PARTIAL rows; a
      separate `telemetry-rollup` binary merges per `(session, wave, 1s-bucket)` natively
      (HDR V2-deflate decode → add → re-encode) and upserts the final `metrics` table, with
-     `floor_to_second()` alignment + LOCF carry-forward, both unit-tested.
+     `floor_to_second` alignment + LOCF carry-forward, both unit-tested.
   4. **Scale-out** to `replicas: 2` + a rollup deployment.
 - **Result.** Smoke (local): **144,024 orders → 2 shards summing to exactly 144,024 (zero
   drops)** → merged → valid HDR
-  (`docs/platform-performance-and-scaling.md:169-171`; ≥144k lossless in §2A). Max useful
+  (≥144k lossless in §2A). Max useful
   ingester replicas = partition count (24 e2e / 96 bench); the bench tier runs 8
   (`kafka-bench.sh:88`). Consumer group `telemetry-ingester`
   (`services/telemetry-ingester/src/config.rs:30`).
@@ -2556,8 +2535,7 @@ flamegraph (`docs/bot-worker-flamegraph.svg`):
 
 - **Symptom.** On EKS, latency runs "succeeded" but `service_time` was near-empty and
   `unmatched_responses` was in the millions — **~98% of latency samples silently lost**;
-  the capture logged `truncated oversized captures (check GSO/TSO off)`
-  (`e2e/README.md:57-64`).
+  the capture logged `truncated oversized captures (check GSO/TSO off)`.
 - **Root cause.** EKS VPC-CNI nodes default to **MTU 9001 (jumbo) with segmentation
   offloads on**. The eBPF capture copies at most `CAPTURE_CAP = 1536 B` per frame
   (`services/ebpf-latency/src/ebpf.rs:37`), so any GSO/TSO/GRO super-frame is **truncated** →
@@ -2573,8 +2551,7 @@ flamegraph (`docs/bot-worker-flamegraph.svg`):
      **sandbox nodes' host interfaces** so cross-node request segments aren't re-coalesced
      before the generic-mode XDP capture sees them (`gro-disable-daemonset.yaml:1-9`).
   `02-bootstrap.sh` applies both.
-- **Result.** Match rate **~2% → ~99.9%**, `iicpc_ebpf_ringbuf_dropped` ~0
-  (`e2e/README.md:73-75, 142`). Note that the in-pod offload/MTU clamp at capture
+- **Result.** Match rate **~2% → ~99.9%**, `iicpc_ebpf_ringbuf_dropped` ~0. Note that the in-pod offload/MTU clamp at capture
   attach is not enough on its own for EKS cross-node traffic: a *sender* initContainer
   and a *host-level* GRO DaemonSet are also required, because GRO re-coalesces on the
   host ENI before the capture's netns sees the packet. All three layers are in the
@@ -2592,17 +2569,17 @@ flamegraph (`docs/bot-worker-flamegraph.svg`):
   timed-out sent event it marks the order (`aggregate.rs:198-203`) and a later matching ack
   is dropped from the latency histograms (`aggregate.rs:226-251`). The timed-out map is
   idle-evicted at 15 s to bound memory.
-- **Result.** `service p99 ≤ response p99` always holds (`e2e/README.md:143`); the gated
+- **Result.** `service p99 ≤ response p99` always holds; the gated
   latency metric can't be gamed by, or polluted by, abandoned orders.
 
 ---
 
-### 4. Scope for improvement (honest open items, grounded in code/docs)
+### 4. Scope for improvement
 
 These are the *real* gaps, each tied to a file:
 
-1. **The 2M/s tier is a target, not a validated run.** `bench/README.md:50-54` names two
-   UNVERIFIED items: (a) **eBPF capture throughput at 2M/s** (one capture producing ~2M
+1. **The 2M/s tier is a target, not a validated run.** Two items remain
+   UNVERIFIED: (a) **eBPF capture throughput at 2M/s** (one capture producing ~2M
    acks/s) and (b) **echo contestant capacity at 2M/s**. Only the drain variant (send +
    telemetry + ingester) is ready to validate first.
 
@@ -2612,24 +2589,21 @@ These are the *real* gaps, each tied to a file:
    `deploy-bench/drain-scale-sweep.sh "1 2"` to populate it.
 
 3. **Single-pod contestant ceiling ~150k delivered/s.** One echo pod with one TCP
-   connection per task caps before the measurement pipeline does
-   (`e2e/README.md:84`, `docs/horizontal-scaling.md:124-128`). This is exactly what makes
+   connection per task caps before the measurement pipeline does. This is exactly what makes
    the measure-capacity-sweep non-monotonic (§2C). To find the pipeline's *own* ceiling you
    must add responder pods / cores; until then the measurement ceiling (>144k) is a *floor*,
    not the true limit.
 
 4. **Telemetry-on per-worker ceiling (~445k) < telemetry-off (~600–790k).** The single
-   broker caps durable telemetry at ~445k/s (`docs/horizontal-scaling.md:70-72`), and the
+   broker caps durable telemetry at ~445k/s, and the
    audit's **T1 aggregator-shard** fix is identified but **not implemented** —
-   `record()` still drains through one task per worker
-   (`docs/tps-serialization-audit.md:90-113`). The 2-broker split + aggregator sharding are
+   `record` still drains through one task per worker. The 2-broker split + aggregator sharding are
    the named levers to close the gap.
 
 5. **Single-replica / non-sharded components.**
    - **correctness-validator does NOT shard** — it matches every order against a reference
      book, so memory + wall-clock scale with *total order volume*; it's "the least-scalable
-     component" and OOMs/timeouts if a run overshoots the delivered ceiling
-     (`docs/horizontal-scaling.md:129-136, 158`). Its concurrent partition drain
+     component" and OOMs/timeouts if a run overshoots the delivered ceiling. Its concurrent partition drain
      (`drainPartitionConcurrency = 12`,
      `services/correctness-validator/internal/source/drain.go:133`) fixed the 240 s→18 s
      *startup* cost but not the volume bound.
@@ -2640,27 +2614,23 @@ These are the *real* gaps, each tied to a file:
    conflict (`reservedSystemCPUs` is mutually exclusive with EKS auto kube/system-reserved,
    so the kubelet won't start); the contestant still gets 2 vCPU via Guaranteed QoS, but
    the capture shares the sandbox node's other 2 vCPU and can be starved if the contestant
-   is given all cores (`docs/platform-performance-and-scaling.md:268-272`,
-   `docs/horizontal-scaling.md:124-128`).
+   is given all cores.
 
 7. **Run-to-run benchmark variance.** The measure-capacity-sweep verdicts are
    non-monotonic (200k CLEAN, 150k STALL) and the 100k row's coverage (0.89) misses the
    0.99 gate (`deploy-bench/measure-capacity-sweep.tsv`). Single-pod/single-node runs need
    repetition + averaging before any boundary number is trusted.
 
-8. **Auth is disabled for the benchmark flow.** The frontend runs with sign-in removed
-   (`e2e/README.md:36, 144`) — fine for a benchmark harness, a gap for a multi-tenant
+8. **Auth is disabled for the benchmark flow.** The frontend runs with sign-in removed — fine for a benchmark harness, a gap for a multi-tenant
    contest. Production multi-tenant scheduling + supply-chain attestation are the
    headline future work.
 
 9. **Ingester `auto.offset.reset=latest` + auto-commit** means a late-starting ingester
-   skips the backlog and *reads as* telemetry loss when it isn't
-   (`docs/tps-serialization-audit.md:163-168`). An operational footgun to pin before
+   skips the backlog and *reads as* telemetry loss when it isn't. An operational footgun to pin before
    re-measuring loss.
 
 10. **Local HDR latency numbers are small-n / directional.** The `.hgrm` percentiles
-    (§2D) come from n≈20–60 local k3s samples; the EKS healthy p99 is ~98–120 µs
-    (`e2e/README.md:85`). The local plots demonstrate the pipeline, not the production tail.
+    (§2D) come from n≈20–60 local k3s samples; the EKS healthy p99 is ~98–120 µs. The local plots demonstrate the pipeline, not the production tail.
 
 ---
 
@@ -2684,7 +2654,7 @@ and **five distinctly-purposed EKS managed node groups**, all on the `AL2023_x86
 AMI. Each non-general group is **tainted** so that nothing schedules onto it unless it
 explicitly tolerates the taint — a taint, not a mere label, because a label-only
 `nodeSelector` keeps *your* pods off a node but does not stop EKS system pods or future
-workloads from landing there (DEPLOYMENT_EKS.md §2.1). The taint flips the default to
+workloads from landing there. The taint flips the default to
 "nothing lands here unless invited," which is the correct posture for an isolation boundary.
 
 | Node group | Label / taint | Default type | Role / plane | desired (e2e / bench) |
@@ -2793,7 +2763,7 @@ All data services except Kafka are **single-replica StatefulSets** — see Limit
 
 ### 3. Fairness & isolation — how the measurement stays fair
 
-The fairness guarantees from design.md §3 are enforced not in prose but in
+The platform's fairness guarantees are enforced not in prose but in
 `services/sandbox-orchestrator/internal/k8s/slot.go`, which programmatically constructs every
 untrusted contestant pod. Verified against the manifests:
 
@@ -2814,15 +2784,15 @@ untrusted contestant pod. Verified against the manifests:
    ```
    *Notable: it rejects fractional cores up front — a `500m` algo can never get a pinned
    cpuset, so the platform fails fast rather than silently producing an unfair measurement.*
-   `containerResources()` (slot.go:607) then deep-copies the same `ResourceList` into both
+   `containerResources` (slot.go:607) then deep-copies the same `ResourceList` into both
    Requests and Limits, guaranteeing QoS.
 
 2. **Zero-disk-I/O untrusted pod.** The algo pod has **no PVC**. Its writable paths
    (`/tmp`, `/var/tmp`, `/var/log`, `/var/run`) are RAM-backed `emptyDir{ medium: Memory }`
-   tmpfs (`writableVolumes()`/`writableMounts()`, slot.go:404-430) so a contestant can't
+   tmpfs (`writableVolumes`/`writableMounts`, slot.go:404-430) so a contestant can't
    perturb the measurement via disk contention and leaves no on-disk residue.
 
-3. **Hardened untrusted-pod spec** (`podSpec()`, slot.go:318-399): `RestartPolicyNever`,
+3. **Hardened untrusted-pod spec** (`podSpec`, slot.go:318-399): `RestartPolicyNever`,
    `ActiveDeadlineSeconds=3600` (a wedged algo self-terminates), `AutomountServiceAccountToken:
    false` (no API credentials), and a per-container `SecurityContext` with
    `ReadOnlyRootFilesystem`, `AllowPrivilegeEscalation:false`, `Capabilities.Drop:[ALL]`, and
@@ -2871,7 +2841,7 @@ untrusted contestant pod. Verified against the manifests:
    running and silently producing no latency data.
 
 10. **The instrument never steals the measured cores.** The capture Job
-    (`captureJobSpec()`/`captureResources()`, slot.go:491-603, and
+    (`captureJobSpec`/`captureResources`, slot.go:491-603, and
     `k8s/benchmark/ebpf-latency/job-template.yaml`) requests only `200m` CPU but is allowed
     to burst to `4` — i.e. **Burstable** QoS (request < limit). Because the algo pod is
     Guaranteed with a pinned cpuset, the bursty capture physically cannot run on the
@@ -2911,7 +2881,7 @@ samples. Two complementary fixes are required because the request traverses two 
 Both are needed because the sender fix only clamps frames leaving the load generator, while
 the receiver fix prevents the sandbox host from re-coalescing them on arrival. The capture
 image itself *also* runs `ethtool … off` inside the algo netns at attach time
-(DEPLOYMENT_EKS.md §3.5) — that handles the veth, while the DaemonSet handles the host NIC.
+— that handles the veth, while the DaemonSet handles the host NIC.
 With offloads off, live runs saw `TRUNCATED_CAPTURES` fall from thousands to ~13–24 and
 `DROPPED_EVENTS` stay zero.
 
@@ -2981,13 +2951,13 @@ ingress only from `ingress-nginx` and egress only to the three API pods + DNS
   submission lifecycle `queued → building → scanning → promoting → ready` (or `failed`),
   with last-20-lines build-log tail on failure and a "still queued >90 s — is the build-worker
   running?" hint.
-- **Auth removed.** `authDisabled()` is **hardcoded `true`** (`frontend/src/config/platform.ts:44`)
+- **Auth removed.** `authDisabled` is **hardcoded `true`** (`frontend/src/config/platform.ts:44`)
   — explicitly *not* a build arg, so it cannot silently fall back to the OAuth path if an arg
   is omitted at build time. `AuthProvider` (`frontend/src/auth/AuthProvider.tsx`) branches on
   it to a `DisabledAuthProvider` that supplies a fixed "always-authenticated" context with a
   synthetic **unsigned** JWT whose `sub` is the default contestant; the backend runs
   `AUTH_REQUIRED=false` and trusts (does not verify) that claim. The visitor is always the
-  default contestant (`defaultContestantId()`, must match the submission-api's
+  default contestant (`defaultContestantId`, must match the submission-api's
   `DEFAULT_CONTESTANT_ID`). The Google-OAuth `auth-api` + `RealAuthProvider` code remain in
   the tree but are dead paths in this benchmark build.
 
@@ -3013,7 +2983,7 @@ so the init Job is the single source of topic truth):
 | Topic | Partitions | Partition key & why | Consumer group (this plane) | How it scales |
 |---|---|---|---|---|
 | `workload.assignments` | **24** | keyed so each worker task maps to a partition; KEDA reads this topic's lag | `bot-fleet` (the workers) | up to 24 workers consume disjoint partitions in parallel → linear load-gen scale-out, capped by partition count |
-| `orders.sent` | **24** | **co-partitioned by `order_id`** via FNV-1a `partition_for()` (`schemas/rust/src/lib.rs`; Rust-only, no Go twin) | telemetry-ingester (`telemetry-ingester`) | `orders.sent` and `orders.acked` use the **same** key/partition count so a given order's sent + acked land in the **same partition**, letting an ingester replica own a partition and join the two streams locally without a network shuffle |
+| `orders.sent` | **24** | **co-partitioned by `order_id`** via FNV-1a `partition_for` (`schemas/rust/src/lib.rs`; Rust-only, no Go twin) | telemetry-ingester (`telemetry-ingester`) | `orders.sent` and `orders.acked` use the **same** key/partition count so a given order's sent + acked land in the **same partition**, letting an ingester replica own a partition and join the two streams locally without a network shuffle |
 | `orders.acked` | **24** | same FNV-1a `order_id` hash; **produced by the eBPF capture** | telemetry-ingester | co-partition join (above); 24 partitions = up to 24 ingester replicas |
 
 Control topics (`submission.build.requested`, `benchmark.requested`, `barrier`, `bot.ready`,
@@ -3038,7 +3008,7 @@ the same tag (`variables.tf:257-266`).
 
 - **Local k3s (dev/demo)** — single node, flannel + built-in NetworkPolicy enforcement,
   `local-path` storage, local registry mirror with `imagePullPolicy: Never`, `RUNTIME_CLASS=""`,
-  no cpuset pinning (single shared node), port-forward instead of an ALB (DEPLOYMENT_EKS.md §0).
+  no cpuset pinning (single shared node), port-forward instead of an ALB.
 - **EKS (prod)** — managed control plane + ≥2 tainted node groups, VPC CNI with
   `enableNetworkPolicy=true` **and `ENABLE_PREFIX_DELEGATION=true`** (`main.tf:97-107`), gp3 via
   EBS-CSI as default StorageClass (`addons.tf:8-27`), ECR immutable tags
@@ -3052,12 +3022,10 @@ Postgres/Kafka/MinIO/other contestants. `infra/scripts/netpol-deny-test.sh` is t
 it launches a probe pod in `sandbox`, asserts Postgres is **unreachable** (egress denied) and
 public egress **works**, and refuses the deploy otherwise.
 
-**The minimal-cost smoke profile** is `2× m6i.xlarge general + 1× c6i.2xlarge sandbox` (~$22/day,
-DEPLOYMENT_EKS.md §2.2), with scenarios reseeded small; the sandbox group **floors at one
+**The minimal-cost smoke profile** is `2× m6i.xlarge general + 1× c6i.2xlarge sandbox` (~$22/day), with scenarios reseeded small; the sandbox group **floors at one
 c6i.2xlarge** because going smaller breaks the integer-core cpuset the measurement depends on.
 
-**EKS Free-plan 2-vCPU caveat (confirmed).** DEPLOYMENT_EKS.md §1.0 and
-`infra/terraform/terraform.tfvars:1-4` warn that AWS accounts on the **new Free plan**
+**EKS Free-plan 2-vCPU caveat.** `infra/terraform/terraform.tfvars:1-4` warns that AWS accounts on the **new Free plan**
 (mid-2025+) can only launch free-tier instance types — the largest being `m7i-flex.large` at
 **2 vCPU / 8 GB** — and any other type fails the node-group Auto Scaling launch with *"The
 specified instance type is not eligible for Free Tier."* The platform **cannot run correctly on
@@ -3070,7 +3038,7 @@ local k3s, and the repo ships the proper paid-account cluster config.
 
 ---
 
-### 9. Limitations & scope for improvement (grounded in code)
+### 9. Limitations & scope for improvement
 
 - **Single-replica data tier.** Postgres, TimescaleDB, Redis, MinIO, Loki, Prometheus, and
   Grafana are all `replicas: 1` — no HA, and each is a single point of failure. EBS is
@@ -3102,7 +3070,7 @@ local k3s, and the repo ships the proper paid-account cluster config.
 
 ---
 
-## Scope for Improvement — the honest open items
+## Scope for Improvement
 
 This page consolidates every limitation flagged in the service sections, grouped
 by theme and ordered roughly by impact. Each item is grounded in a file or
@@ -3120,8 +3088,7 @@ is the real gap between what the code does today and what the design aspires to.
    `sandbox-orchestrator/internal/k8s/slot.go:117`, `:607`) is correct and ready;
    it's the node config that's blocked. **This is the single biggest measurement-
    fidelity gap** — "fair, exclusive cores" is currently quota-only.
-2. **The 2M/s tier is a documented target, not a validated run**
-   (`bench/README.md:50-54`). Two pieces are explicitly UNVERIFIED: eBPF capture
+2. **The 2M/s tier is a documented target, not a validated run**. Two pieces are explicitly UNVERIFIED: eBPF capture
    throughput at ~2M acks/s (a single capture pod) and echo-contestant capacity
    at 2M/s. The drain variant (send + telemetry + ingester) is the first thing to
    validate now that Kafka is multi-broker.
@@ -3140,7 +3107,7 @@ is the real gap between what the code does today and what the design aspires to.
    smoke cluster. It does not block the multi-worker 2M/s path (one aggregator
    *per worker*), but it is the named lever to close the telemetry-on gap.
 5. **Auth is disabled in the shipped demo.** `AUTH_REQUIRED=false` +
-   `OptionalContestant` (submission-api) and a hardcoded `authDisabled()=true`
+   `OptionalContestant` (submission-api) and a hardcoded `authDisabled=true`
    (`frontend/src/config/platform.ts:44`) mean identity comes from an *unverified*
    token or a static default. The capability exists and is tested; it's toggled
    off — a gap for a real multi-tenant contest, not for a benchmark harness.
@@ -3178,7 +3145,7 @@ is the real gap between what the code does today and what the design aspires to.
 - **Telemetry-on per-worker ceiling (~445k/s) < telemetry-off (~600–790k/s).**
   The single broker in the smoke cluster caps durable telemetry, and the
   serialization audit's **T1 "shard the aggregator across M tasks"** lever is
-  identified but **not implemented** — `record()` still drains through one Tokio
+  identified but **not implemented** — `record` still drains through one Tokio
   task per worker. The 2-broker split + aggregator sharding are the named fixes.
 - **1→2-node linear scaling is argued from architecture, not measured.**
   `deploy-bench/scale-sweep-off.tsv` has only zero rows; "2 nodes ≈ 1.9×" rests on
@@ -3193,7 +3160,7 @@ is the real gap between what the code does today and what the design aspires to.
   fan-in; `RecoverInFlightRuns` only fails them out cleanly). `telemetry-rollup`
   is a single process doing per-tick full-history HDR merges — the serialization
   point for final percentiles. `score-computer` is effectively a singleton whose
-  per-run-group cost is a global `ROW_NUMBER()` rank (O(rows)); fine at contest
+  per-run-group cost is a global `ROW_NUMBER` rank (O(rows)); fine at contest
   scale, would need an incremental/ZSET rank if the table grew large.
 - **No KEDA on most scale-ready services.** Only bot-fleet autoscales. The
   ingester, validator, score-computer, leaderboard-api, and submission-api are
@@ -3339,6 +3306,5 @@ is the real gap between what the code does today and what the design aspires to.
 This document was generated by reading the repository's source code directly
 (June 2026), one indexing pass per component plus cross-cutting passes for
 Kafka/scaling, benchmarking, and deployment. Every non-obvious claim is cited to a
-`path:line`. `design.md` and the `e2e/` docs were used as corroboration. The
-diagrams here are freshly derived from the code rather than from the older files
-under `mermaids/`.
+`path:line`. The diagrams here are freshly derived from the code rather than from the
+older files under `mermaids/`.

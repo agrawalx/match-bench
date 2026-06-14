@@ -7,7 +7,9 @@ package k8s
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"strings"
 
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/ecr"
@@ -26,6 +28,35 @@ func (c *awsECRClient) CreateRepository(ctx context.Context, repositoryName stri
 		RepositoryName: &repositoryName,
 	})
 	return err
+}
+
+// DockerConfigJSON returns a docker config.json (as a string) that authorizes push/pull
+// against ECR, using a fresh GetAuthorizationToken from the pod's IRSA credentials. The
+// token is valid ~12h; callers should refresh it per build. Kaniko, Trivy and Syft all
+// read this format (via /kaniko/.docker/config.json or $DOCKER_CONFIG).
+func (c *awsECRClient) DockerConfigJSON(ctx context.Context) (string, error) {
+	out, err := c.api.GetAuthorizationToken(ctx, &ecr.GetAuthorizationTokenInput{})
+	if err != nil {
+		return "", fmt.Errorf("ecr get authorization token: %w", err)
+	}
+	if len(out.AuthorizationData) == 0 || out.AuthorizationData[0].AuthorizationToken == nil {
+		return "", fmt.Errorf("ecr returned no authorization data")
+	}
+	ad := out.AuthorizationData[0]
+	host := ""
+	if ad.ProxyEndpoint != nil {
+		host = strings.TrimPrefix(*ad.ProxyEndpoint, "https://")
+	}
+	cfg := map[string]any{
+		"auths": map[string]any{
+			host: map[string]string{"auth": *ad.AuthorizationToken},
+		},
+	}
+	b, err := json.Marshal(cfg)
+	if err != nil {
+		return "", fmt.Errorf("marshal docker config: %w", err)
+	}
+	return string(b), nil
 }
 
 // newAWSECRClient performs the package-specific operation described by its name.

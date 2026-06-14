@@ -226,6 +226,10 @@ func (f *fakeECRClient) CreateRepository(_ context.Context, repositoryName strin
 	return f.err
 }
 
+func (f *fakeECRClient) DockerConfigJSON(_ context.Context) (string, error) {
+	return `{"auths":{"registry.test":{"auth":"QVdTOnRva2Vu"}}}`, nil
+}
+
 // ecrAlreadyExistsErr groups the state and dependencies used by this package.
 // Keep this type aligned with the runtime contract around it.
 type ecrAlreadyExistsErr struct{}

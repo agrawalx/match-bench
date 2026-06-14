@@ -29,6 +29,8 @@ spec:
         - port: 9000
           protocol: TCP
 
+    # 443 for ECR pull/push + HTTPS package mirrors; 80 for apt (deb.debian.org is HTTP) in
+    # the generated Dockerfile's runtime stage (ca-certificates install).
     - to:
         - ipBlock:
             cidr: 0.0.0.0/0
@@ -38,6 +40,8 @@ spec:
               - 192.168.0.0/16
       ports:
         - port: 443
+          protocol: TCP
+        - port: 80
           protocol: TCP
 
     - to:
@@ -117,6 +121,16 @@ spec:
             cidr: 172.20.0.0/16
       ports:
         - port: 5000
+          protocol: TCP
+
+    # Kubernetes API server (ClusterIP, first IP of the service CIDR). The spawner needs it to
+    # create build/scan/sbom Jobs and the ECR docker-config Secret; otherwise blocked by the
+    # "except RFC1918" carve-out on the 0.0.0.0/0:443 rule above.
+    - to:
+        - ipBlock:
+            cidr: 172.20.0.1/32
+      ports:
+        - port: 443
           protocol: TCP
 
     - to:

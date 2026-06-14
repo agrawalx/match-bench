@@ -13,7 +13,7 @@ import type {
   RunDetail,
   ThroughputWindow,
 } from "@/types/run";
-import { deriveHdrSeries, type HdrSeries } from "@/utils/hdr";
+import { deriveHdrByScenario, type HdrScenario } from "@/utils/hdr";
 
 /**
  * useRunDetail performs the module-specific operation described by its name.
@@ -26,7 +26,7 @@ export function useRunDetail(runGroupId: string | null) {
     detail: RunDetail;
     histogram?: LatencyHistogram;
     throughput?: ThroughputWindow[];
-    hdrSeries?: HdrSeries[];
+    hdrByScenario?: HdrScenario[];
   }>({
     queryKey: ['run-detail', runGroupId],
     enabled: Boolean(runGroupId),
@@ -35,18 +35,19 @@ export function useRunDetail(runGroupId: string | null) {
       const detail = await getRunDetail(runGroupId, token ?? '');
       const histogram = deriveLatencyHistogram(detail);
       const throughput = deriveThroughput(detail);
-      const hdrSeries = deriveHdrSeries(detail);
-      return { detail, histogram, throughput, hdrSeries };
+      const hdrByScenario = deriveHdrByScenario(detail);
+      return { detail, histogram, throughput, hdrByScenario };
     },
+    // Poll only while the run is still in progress. Once every session is terminal
+    // (completed/failed) we stop — regardless of whether a score has been computed yet.
+    // (Previously an unscored-but-finished run polled the full ~8 MB payload forever.)
     refetchInterval: (query) => {
       const detail = query.state.data?.detail;
       if (!detail) return 2500;
-      if (!detail.score) return 2500;
-      return detail.sessions.some(
+      const live = detail.sessions.some(
         (session) => !["completed", "failed"].includes(session.status),
-      )
-        ? 2500
-        : false;
+      );
+      return live ? 2500 : false;
     },
   });
 
@@ -54,7 +55,7 @@ export function useRunDetail(runGroupId: string | null) {
     data: query.data?.detail,
     histogram: query.data?.histogram,
     throughput: query.data?.throughput,
-    hdrSeries: query.data?.hdrSeries,
+    hdrByScenario: query.data?.hdrByScenario,
     isLoading: query.isLoading,
     error: query.error,
   };

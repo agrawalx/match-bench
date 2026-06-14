@@ -33,6 +33,7 @@ struct Metrics {
     ringbuf_dropped: Counter,
     flushes: Counter,
     events_flushed: Counter,
+    acked_dropped: Counter,
     reordering: Counter,
     retransmissions: Counter,
     attach: ResultFamily,
@@ -48,6 +49,7 @@ static METRICS: LazyLock<Metrics> = LazyLock::new(|| {
     let ringbuf_dropped = Counter::default();
     let flushes = Counter::default();
     let events_flushed = Counter::default();
+    let acked_dropped = Counter::default();
     let reordering = Counter::default();
     let retransmissions = Counter::default();
     let attach = ResultFamily::default();
@@ -74,6 +76,11 @@ static METRICS: LazyLock<Metrics> = LazyLock::new(|| {
         events_flushed.clone(),
     );
     registry.register(
+        "iicpc_ebpf_acked_dropped",
+        "orders.acked events dropped because the Kafka producer queue was full (non-blocking drain; graceful degradation).",
+        acked_dropped.clone(),
+    );
+    registry.register(
         "iicpc_ebpf_reordering_detected",
         "eBPF observations where packet reordering was detected.",
         reordering.clone(),
@@ -96,6 +103,7 @@ static METRICS: LazyLock<Metrics> = LazyLock::new(|| {
         ringbuf_dropped,
         flushes,
         events_flushed,
+        acked_dropped,
         reordering,
         retransmissions,
         attach,
@@ -157,6 +165,12 @@ pub fn ringbuf_dropped(total: u64) {
 pub fn flushed(events: usize) {
     METRICS.flushes.inc();
     METRICS.events_flushed.inc_by(events as u64);
+}
+
+/// acked_dropped records orders.acked events dropped because the Kafka producer
+/// queue was full (non-blocking drain — graceful degradation under broker pressure).
+pub fn acked_dropped(events: usize) {
+    METRICS.acked_dropped.inc_by(events as u64);
 }
 
 /// attach_ok performs the module-specific operation described by its name.

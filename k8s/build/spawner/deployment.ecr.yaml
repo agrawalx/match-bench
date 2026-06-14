@@ -1,0 +1,102 @@
+# k8s/build/spawner/deployment.ecr.yaml
+#
+# ECR variant of the build-worker spawner Deployment (the default deployment.yaml targets
+# Harbor). Registry auth is via IRSA: the build-spawner ServiceAccount must be annotated with
+# eks.amazonaws.com/role-arn=<iicpc-prod-build-spawner role>. The spawner mints a short-lived
+# ECR-token docker-config Secret that the kaniko/trivy/syft jobs mount. The HARBOR_*_ENDPOINT
+# vars are reused as the ECR registry host (the spawner builds <endpoint>/<project>/<id>:latest
+# and creates the ECR repo via the AWS API). Apply AFTER the base k8s/build manifests.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: spawner
+  namespace: build
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: spawner
+  template:
+    metadata:
+      labels:
+        app: spawner
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/path: /metrics
+        prometheus.io/port: "9090"
+    spec:
+      serviceAccountName: build-spawner
+      containers:
+        - name: spawner
+          image: 885232248981.dkr.ecr.us-east-1.amazonaws.com/iicpc/spawner:e2e1
+          ports:
+            - name: metrics
+              containerPort: 9090
+          env:
+            - name: REGISTRY_PROVIDER
+              value: "ecr"
+            - name: AWS_REGION
+              value: us-east-1
+            - name: LOKI_URL
+              value: http://loki.observability.svc.cluster.local:3100
+            - name: METRICS_PORT
+              value: "9090"
+            - name: ENVIRONMENT
+              value: prod
+            - name: SPAWNER_IMAGE
+              value: 885232248981.dkr.ecr.us-east-1.amazonaws.com/iicpc/spawner:e2e1
+            - name: K8S_NAMESPACE
+              value: build
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: spawner-secret
+                  key: database-url
+            - name: MINIO_ENDPOINT
+              value: minio.data.svc.cluster.local:9000
+            - name: MINIO_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: spawner-secret
+                  key: minio-access-key
+            - name: MINIO_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: spawner-secret
+                  key: minio-secret-key
+            - name: MINIO_BUCKET
+              value: submissions
+            - name: JOB_SECRET_NAME
+              value: spawner-secret
+            - name: KAFKA_BROKERS
+              value: kafka.data.svc.cluster.local:9092
+            - name: KAFKA_GROUP_ID
+              value: build-worker-spawner
+            # ECR registry host reused via the Harbor endpoint vars (no Harbor auth in ECR mode).
+            - name: HARBOR_STAGING_ENDPOINT
+              value: 885232248981.dkr.ecr.us-east-1.amazonaws.com
+            - name: HARBOR_PRODUCTION_ENDPOINT
+              value: 885232248981.dkr.ecr.us-east-1.amazonaws.com
+            - name: HARBOR_PROJECT
+              value: iicpc
+            - name: REGISTRY_INSECURE
+              value: "false"
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            capabilities:
+              drop:
+                - ALL
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532

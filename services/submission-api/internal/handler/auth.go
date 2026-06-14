@@ -60,6 +60,21 @@ func RequireContestant(v TokenVerifier, log *slog.Logger) func(http.Handler) htt
 	}
 }
 
+// OptionalContestant disables authentication: it never rejects a request. The
+// contestant identity is taken from an unverified bearer-token `sub` claim when one
+// is present, otherwise it falls back to defaultID. Use only when AUTH_REQUIRED=false.
+func OptionalContestant(defaultID string, log *slog.Logger) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			sub := unverifiedSubClaim(bearerToken(r))
+			if sub == "" {
+				sub = defaultID
+			}
+			next.ServeHTTP(w, r.WithContext(withContestantID(r.Context(), sub)))
+		})
+	}
+}
+
 // InsecureTrustSubClaim performs the package-specific operation described by its name.
 // It keeps validation, side effects, and returned values within this package's contract.
 func InsecureTrustSubClaim(log *slog.Logger) func(http.Handler) http.Handler {

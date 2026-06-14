@@ -46,7 +46,6 @@ const DEFAULT_TC_EGRESS_PROGRAM: &str = "iicpc_tc_egress";
 const DEFAULT_FLUSH_INTERVAL: Duration = Duration::from_millis(5);
 const DEFAULT_BATCH_SIZE: usize = 4096;
 const EVICT_INTERVAL: Duration = Duration::from_secs(1);
-const MAX_PENDING_EVENTS: usize = 100_000;
 const MAX_EVENTS_PER_BATCH: usize = 1000;
 const DEFAULT_CLAMP_MTU: usize = 1500;
 
@@ -184,18 +183,34 @@ async fn run(config: Config, producer: KafkaProducer) -> Result<()> {
     let mut evict_ticker = time::interval(EVICT_INTERVAL);
     let mut last_dropped = 0u64;
     let mut last_truncated = 0u64;
+    let mut decoded_total = 0u64;
+    let mut last_decoded = 0u64;
+    let mut stats_tick = 0u64;
     let mut shutdown = ShutdownSignal::new()?;
 
     loop {
         tokio::select! {
             sig = shutdown.recv() => {
                 info!(signal = sig, "shutdown signal received; flushing buffered orders.acked tail");
-                flush(&producer, &config, &mut events).await?;
+                flush(&producer, &config, &mut events);
                 return Ok(());
             }
             _ = ticker.tick() => {
-                drain_ringbuf(&mut ringbuf, &mut pipeline, &producer, &config, &mut events).await?;
-                flush(&producer, &config, &mut events).await?;
+                decoded_total += drain_ringbuf(&mut ringbuf, &mut pipeline, &producer, &config, &mut events);
+                flush(&producer, &config, &mut events);
+                // Periodic pipeline visibility: decoded = capture records read off the ringbuf
+                // (both directions), unmatched_responses = responses seen with no prior request
+                // capture to pair against, pending = matched events buffered for the next flush.
+                stats_tick += 1;
+                if stats_tick % 10 == 0 && decoded_total != last_decoded {
+                    info!(
+                        decoded = decoded_total,
+                        unmatched_responses = pipeline.unmatched_responses(),
+                        pending = events.len(),
+                        "eBPF pipeline stats"
+                    );
+                    last_decoded = decoded_total;
+                }
                 report_counter(&dropped_events, &mut last_dropped, "eBPF ring buffer dropped events");
                 report_counter(&truncated_captures, &mut last_truncated, "eBPF truncated oversized captures (check GSO/TSO off)");
             }
@@ -235,16 +250,26 @@ impl ShutdownSignal {
 
 /// drain_ringbuf performs the module-specific operation described by its name.
 /// It keeps validation, side effects, and returned values within this module's contract.
-async fn drain_ringbuf(
+// drain_ringbuf reads ALL currently-available capture records off the kernel ring
+// buffer and processes them. It is SYNCHRONOUS and NON-BLOCKING: ringbuf.next()
+// returns None when empty, and flush() never blocks (non-blocking enqueue), so the
+// drain can never stall on Kafka. This is the fix for the capture freeze — the old
+// flush did a blocking send().await that, on a backed-up broker, stalled the drain
+// for up to 5s and overflowed the 64 MiB ring buffer.
+fn drain_ringbuf(
     ringbuf: &mut RingBuf<MapData>,
     pipeline: &mut Pipeline,
     producer: &KafkaProducer,
     config: &Config,
     events: &mut Vec<MatchedEvent>,
-) -> Result<()> {
+) -> u64 {
+    let mut decoded = 0u64;
     while let Some(item) = ringbuf.next() {
         match capture::decode(&item) {
-            Ok(cap) => pipeline.process(&cap, events),
+            Ok(cap) => {
+                decoded += 1;
+                pipeline.process(&cap, events);
+            }
             Err(err) => {
                 metrics::decode_error();
                 warn!(error = %err, "dropping malformed capture record");
@@ -252,105 +277,117 @@ async fn drain_ringbuf(
             }
         }
         if events.len() >= config.batch_size {
-            flush(producer, config, events).await?;
+            flush(producer, config, events);
         }
     }
-    Ok(())
+    decoded
 }
 
-/// flush performs the module-specific operation described by its name.
-/// It keeps validation, side effects, and returned values within this module's contract.
-async fn flush(
-    producer: &KafkaProducer,
-    config: &Config,
+// batch_by_partition drains `events` into per-partition chunks (co-partitioned by
+// order_id so each order's acked event lands on the same partition the worker's
+// sent event did), each chunk <= MAX_EVENTS_PER_BATCH. Pure + unit-tested.
+fn batch_by_partition(
     events: &mut Vec<MatchedEvent>,
-) -> Result<()> {
-    if events.is_empty() {
-        return Ok(());
-    }
-
+    orders_partitions: i32,
+) -> Vec<(i32, Vec<MatchedEvent>)> {
     let mut by_part: BTreeMap<i32, Vec<MatchedEvent>> = BTreeMap::new();
     for e in events.drain(..) {
         by_part
-            .entry(partition_for(&e.order_id, config.orders_partitions))
+            .entry(partition_for(&e.order_id, orders_partitions))
             .or_default()
             .push(e);
     }
-
-    let mut msgs: Vec<(i32, Vec<u8>, Vec<MatchedEvent>)> = Vec::new();
+    let mut out = Vec::new();
     for (part, mut group) in by_part {
         while !group.is_empty() {
             let take = group.len().min(MAX_EVENTS_PER_BATCH);
-            let chunk: Vec<MatchedEvent> = group.drain(..take).collect();
-            let event_refs = chunk
-                .iter()
-                .map(|e| OrderAckedEventRef {
-                    session_id: &config.session_id,
-                    contestant_id: &config.contestant_id,
-                    order_id: &e.order_id,
-                    src_ip: e.src_ip,
-                    src_port: e.src_port,
-                    tcp_seq: e.tcp_seq,
-                    t3_xdp_ingress_ns: e.t3_ns,
-                    t7_xdp_egress_ns: e.t7_ns,
-                    pod_service_time_ns: e.pod_service_time_ns,
-                    exec_type: &e.exec_type,
-                    fill_qty: e.fill_qty,
-                    fill_price: e.fill_price,
-                    orig_order_id: &e.orig_order_id,
-                    reordering_detected: e.reordering_detected,
-                    retransmission_count: e.retransmission_count,
-                })
-                .collect::<Vec<_>>();
-            let batch = OrderAckedBatchRef {
+            out.push((part, group.drain(..take).collect()));
+        }
+    }
+    out
+}
+
+/// flush enqueues all buffered orders.acked events to Kafka WITHOUT blocking the
+/// ring-buffer drain. Each per-partition batch is enqueued via the non-blocking
+/// send_result path; on QueueFull we poll the producer once and retry, then DROP the
+/// batch (orders.acked is loss-tolerant — graceful latency-coverage loss is far
+/// better than stalling the drain and overflowing the 64 MiB kernel ring buffer,
+/// which is what froze the capture at ~107k/s). Delivery is fire-and-forget:
+/// rdkafka's FutureProducer background thread drives delivery of the returned futures.
+fn flush(producer: &KafkaProducer, config: &Config, events: &mut Vec<MatchedEvent>) {
+    if events.is_empty() {
+        return;
+    }
+    for (part, chunk) in batch_by_partition(events, config.orders_partitions) {
+        let event_refs = chunk
+            .iter()
+            .map(|e| OrderAckedEventRef {
                 session_id: &config.session_id,
                 contestant_id: &config.contestant_id,
-                events: &event_refs,
-            };
-            let payload =
-                rmp_serde::to_vec_named(&batch).context("encode orders.acked messagepack")?;
-            msgs.push((part, payload, chunk));
-        }
-    }
-
-    // Pipeline every publish to its explicit partition, then await together.
-    let results = futures::future::join_all(msgs.iter().map(|(part, payload, _)| {
-        kafka::publish_to_partition(
-            producer,
-            &config.topic,
-            *part,
-            &config.contestant_id,
-            payload,
-        )
-    }))
-    .await;
-
-    let mut publish_failed = false;
-    for ((_, _, chunk), result) in msgs.into_iter().zip(results) {
-        match result {
-            Ok(()) => {
-                for event in &chunk {
-                    metrics::event_decoded(event.reordering_detected, event.retransmission_count);
-                }
-                metrics::flushed(chunk.len());
-            }
+                order_id: &e.order_id,
+                src_ip: e.src_ip,
+                src_port: e.src_port,
+                tcp_seq: e.tcp_seq,
+                t3_xdp_ingress_ns: e.t3_ns,
+                t7_xdp_egress_ns: e.t7_ns,
+                pod_service_time_ns: e.pod_service_time_ns,
+                exec_type: &e.exec_type,
+                fill_qty: e.fill_qty,
+                fill_price: e.fill_price,
+                orig_order_id: &e.orig_order_id,
+                reordering_detected: e.reordering_detected,
+                retransmission_count: e.retransmission_count,
+            })
+            .collect::<Vec<_>>();
+        let batch = OrderAckedBatchRef {
+            session_id: &config.session_id,
+            contestant_id: &config.contestant_id,
+            events: &event_refs,
+        };
+        let payload = match rmp_serde::to_vec_named(&batch) {
+            Ok(p) => p,
             Err(err) => {
-                publish_failed = true;
-                warn!(error = %err, "publish orders.acked failed; retaining for retry");
-                events.extend(chunk);
+                warn!(error = %err, "encode orders.acked messagepack; dropping batch");
+                metrics::acked_dropped(chunk.len());
+                continue;
+            }
+        };
+        // Non-blocking enqueue. One poll+retry on QueueFull, then drop (never block
+        // the drain). Fire-and-forget the DeliveryFuture.
+        let mut enqueued = false;
+        for attempt in 0..2 {
+            match kafka::enqueue_to_partition(
+                producer,
+                &config.topic,
+                part,
+                &config.contestant_id,
+                &payload,
+            ) {
+                Ok(Some(_fut)) => {
+                    enqueued = true;
+                    break;
+                }
+                Ok(None) => {
+                    if attempt == 0 {
+                        kafka::poll_producer(producer, Duration::from_millis(0));
+                    }
+                }
+                Err(err) => {
+                    warn!(error = %err, "enqueue orders.acked failed; dropping batch");
+                    break;
+                }
             }
         }
+        if enqueued {
+            for event in &chunk {
+                metrics::event_decoded(event.reordering_detected, event.retransmission_count);
+            }
+            metrics::flushed(chunk.len());
+        } else {
+            metrics::acked_dropped(chunk.len());
+        }
     }
-    if events.len() > MAX_PENDING_EVENTS {
-        let drop = events.len() - MAX_PENDING_EVENTS;
-        events.drain(0..drop);
-        warn!(
-            dropped = drop,
-            "dropped oldest pending orders.acked events (publish backlog)"
-        );
-    }
-    let _ = publish_failed; // failures are logged + retained, never propagated (H16)
-    Ok(())
+    kafka::poll_producer(producer, Duration::from_millis(0));
 }
 
 /// take_counter performs the module-specific operation described by its name.
@@ -577,6 +614,59 @@ mod tests {
     use iicpc_schemas_rust::OrderAckedBatch;
     use std::sync::{Mutex, OnceLock};
 
+    fn mk_event(order_id: &str) -> MatchedEvent {
+        MatchedEvent {
+            order_id: order_id.to_string(),
+            src_ip: 0,
+            src_port: 0,
+            tcp_seq: 0,
+            t3_ns: 0,
+            t7_ns: 0,
+            pod_service_time_ns: 0,
+            exec_type: "FILL".to_string(),
+            fill_qty: 0,
+            fill_price: 0,
+            orig_order_id: String::new(),
+            reordering_detected: false,
+            retransmission_count: 0,
+        }
+    }
+
+    // The pure batching the non-blocking flush relies on: every event drained,
+    // chunked to <= MAX_EVENTS_PER_BATCH, and co-partitioned by order_id so an
+    // order's acked event lands on the same partition its sent event did.
+    #[test]
+    fn batch_by_partition_drains_all_events_chunked_and_co_partitioned() {
+        let n = 8i32;
+        let mut events: Vec<MatchedEvent> =
+            (0..2500).map(|i| mk_event(&format!("ord-{i}"))).collect();
+        let batches = batch_by_partition(&mut events, n);
+
+        assert!(events.is_empty(), "events must be fully drained");
+        let total: usize = batches.iter().map(|(_, c)| c.len()).sum();
+        assert_eq!(total, 2500, "no events lost");
+        for (part, chunk) in &batches {
+            assert!(*part >= 0 && *part < n, "partition in range");
+            assert!(
+                chunk.len() <= MAX_EVENTS_PER_BATCH,
+                "chunk respects max batch size"
+            );
+            for e in chunk {
+                assert_eq!(
+                    partition_for(&e.order_id, n),
+                    *part,
+                    "co-partitioned by order_id"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn batch_by_partition_empty_is_empty() {
+        let mut events: Vec<MatchedEvent> = Vec::new();
+        assert!(batch_by_partition(&mut events, 24).is_empty());
+    }
+
     const ENV_KEYS: &[&str] = &[
         "KAFKA_BROKERS",
         "ORDERS_ACKED_TOPIC",
@@ -679,10 +769,8 @@ mod tests {
             retransmission_count: 1,
         }];
 
-        flush(&producer, &config, &mut events)
-            .await
-            .expect("flush orders.acked to Kafka");
-        assert!(events.is_empty(), "flush should clear events after publish");
+        flush(&producer, &config, &mut events);
+        assert!(events.is_empty(), "flush should clear events after enqueue");
 
         let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
         loop {

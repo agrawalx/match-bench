@@ -1,0 +1,22 @@
+# tokio FIX echo contestant. The build-worker runs `cargo build --release --bin
+# fix_echo` in a sandbox with HTTPS (443) egress, so tokio is fetched from
+# crates.io. (The fix-acker is dep-free std-only; this trades that for tokio's
+# higher accept/echo throughput.)
+# Standalone crate: built in isolation by the build-worker (and in its Dockerfile),
+# not part of the repo workspace.
+[workspace]
+
+[package]
+name = "fix-echo"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "fix_echo"
+path = "src/main.rs"
+
+[dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util"] }
+
+[profile.release]
+opt-level = 3

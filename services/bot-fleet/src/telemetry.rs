@@ -35,6 +35,10 @@ use crate::{
 pub struct TelemetrySink {
     tx: Sender<OrderSentEvent>,
     handle: Arc<Mutex<Option<JoinHandle<Result<()>>>>>,
+    // When false (BOT_DISABLE_TELEMETRY=1), record() is a no-op and no aggregator is
+    // spawned. Used to measure raw send capacity on a drain contestant, where there is
+    // no validation and single-broker Kafka cannot absorb a telemetry event per order.
+    enabled: bool,
 }
 
 impl TelemetrySink {
@@ -50,20 +54,33 @@ impl TelemetrySink {
         batch_size: usize,
         num_partitions: i32,
     ) -> Self {
+        let enabled = !matches!(
+            std::env::var("BOT_DISABLE_TELEMETRY").as_deref(),
+            Ok("1") | Ok("true")
+        );
         let (tx, rx) = mpsc::channel(capacity);
-        let handle = tokio::spawn(run_aggregator(
-            rx,
-            producer,
-            topic,
-            session_id,
-            worker_id,
-            flush_interval,
-            batch_size,
-            num_partitions,
-        ));
+        let handle = if enabled {
+            Some(tokio::spawn(run_aggregator(
+                rx,
+                producer,
+                topic,
+                session_id,
+                worker_id,
+                flush_interval,
+                batch_size,
+                num_partitions,
+            )))
+        } else {
+            tracing::warn!(
+                "BOT_DISABLE_TELEMETRY set: telemetry recording disabled (send-capacity benchmark mode)"
+            );
+            drop(rx);
+            None
+        };
         Self {
             tx,
-            handle: Arc::new(Mutex::new(Some(handle))),
+            handle: Arc::new(Mutex::new(handle)),
+            enabled,
         }
     }
 
@@ -74,6 +91,9 @@ impl TelemetrySink {
     /// measurement data. Only errors if the aggregator is gone (shutdown), which is
     /// the single case we still count as dropped.
     pub async fn record(&self, event: OrderSentEvent) {
+        if !self.enabled {
+            return;
+        }
         if self.tx.send(event).await.is_err() {
             metrics::telemetry_dropped();
             error!("telemetry channel closed; dropping event");

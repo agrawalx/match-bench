@@ -39,9 +39,15 @@ func main() {
 	minioBucket := envOr("MINIO_BUCKET", "submissions")
 	minioSSL := os.Getenv("MINIO_USE_SSL") == "true"
 	artifactPath := mustEnv("ARTIFACT_PATH")
-	harborEndpoint := mustEnv("HARBOR_STAGING_ENDPOINT")
-	harborUser := mustEnv("HARBOR_USER")
-	harborPassword := mustEnv("HARBOR_PASSWORD")
+	// ECR mode: the kaniko docker-config comes from a mounted Secret (read-only), so the
+	// fetcher only fetches the artifact + Dockerfile and does NOT write/require Harbor creds.
+	ecrMode := os.Getenv("REGISTRY_PROVIDER") == "ecr"
+	var harborEndpoint, harborUser, harborPassword string
+	if !ecrMode {
+		harborEndpoint = mustEnv("HARBOR_STAGING_ENDPOINT")
+		harborUser = mustEnv("HARBOR_USER")
+		harborPassword = mustEnv("HARBOR_PASSWORD")
+	}
 
 	ctx := context.Background()
 
@@ -81,6 +87,10 @@ func main() {
 	}
 	log.Info("dockerfile written to /workspace")
 
+	if ecrMode {
+		log.Info("ECR mode: skipping kaniko docker config (provided via mounted secret)")
+		return
+	}
 	if err := writeKanikoDockerConfig(harborEndpoint, harborUser, harborPassword); err != nil {
 		log.Error("kaniko config failed", "error", err)
 		os.Exit(1)

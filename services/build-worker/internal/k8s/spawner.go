@@ -89,9 +89,50 @@ type JobConfig struct {
 // Implementations should preserve the caller-visible contract.
 type ECRRepositoryClient interface {
 	CreateRepository(ctx context.Context, repositoryName string) error
+	// DockerConfigJSON returns a fresh docker config.json authorizing ECR push/pull.
+	DockerConfigJSON(ctx context.Context) (string, error)
 }
 
 var newECRClient = newAWSECRClient
+
+// ecrDockerSecretName is the Opaque Secret (key "config.json") the spawner mints with a
+// fresh ECR auth token before each build; kaniko/trivy/syft jobs mount it for registry auth.
+const ecrDockerSecretName = "build-ecr-dockercfg"
+
+// ensureDockerConfigSecret (ECR mode only) refreshes the registry-auth Secret used by the
+// build/scan/sbom jobs. ECR tokens last ~12h; refreshing per build keeps it valid.
+func (s *Spawner) ensureDockerConfigSecret(ctx context.Context) error {
+	cfgJSON, err := s.ecr.DockerConfigJSON(ctx)
+	if err != nil {
+		return err
+	}
+	sec := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: ecrDockerSecretName, Namespace: s.cfg.Namespace},
+		Type:       corev1.SecretTypeOpaque,
+		Data:       map[string][]byte{"config.json": []byte(cfgJSON)},
+	}
+	api := s.client.CoreV1().Secrets(s.cfg.Namespace)
+	if _, err := api.Update(ctx, sec, metav1.UpdateOptions{}); err != nil {
+		if apierrors.IsNotFound(err) {
+			_, cerr := api.Create(ctx, sec, metav1.CreateOptions{})
+			return cerr
+		}
+		return err
+	}
+	return nil
+}
+
+// dockerCfgSecretVolume is the read-only volume (key config.json) trivy/syft mount and point
+// $DOCKER_CONFIG at, for ECR pull auth.
+func dockerCfgSecretVolume() corev1.Volume {
+	return corev1.Volume{
+		Name: "dockercfg",
+		VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{
+			SecretName: ecrDockerSecretName,
+			Items:      []corev1.KeyToPath{{Key: "config.json", Path: "config.json"}},
+		}},
+	}
+}
 
 // Spawner groups the state and dependencies used by this package.
 // Keep this type aligned with the runtime contract around it.
@@ -181,6 +222,15 @@ func (s *Spawner) Run(ctx context.Context, msg topics.SubmissionBuildRequested) 
 		log.Error("ensure staging repository failed", "error", err)
 		s.setStatus(ctx, id, topics.StatusFailed, fmt.Sprintf("ensure staging repository: %v", err))
 		return
+	}
+	if s.ecr != nil {
+		if err := s.ensureDockerConfigSecret(ctx); err != nil {
+			recordBuildPhase("build", phaseStart, "error")
+			recordBuildRequest("error")
+			log.Error("ensure ECR docker-config secret failed", "error", err)
+			s.setStatus(ctx, id, topics.StatusFailed, fmt.Sprintf("ensure ecr auth: %v", err))
+			return
+		}
 	}
 	if err := s.createJob(ctx, s.buildJobSpec(buildJobName, msg, stagingRef, dockerfileB64)); err != nil {
 		recordBuildPhase("build", phaseStart, "error")
@@ -278,34 +328,40 @@ func (s *Spawner) Run(ctx context.Context, msg topics.SubmissionBuildRequested) 
 	}
 	log.Info("phase 2 complete")
 
-	productionRef := fmt.Sprintf("%s/%s/%s:latest", s.cfg.HarborProductionEndpoint, s.cfg.HarborProject, id)
-	phaseStart = time.Now()
-	if err := s.ensureRepository(ctx, productionRef); err != nil {
-		recordBuildPhase("promote", phaseStart, "error")
-		recordBuildRequest("error")
-		log.Error("ensure production repository failed", "error", err)
-		s.setStatus(ctx, id, topics.StatusFailed, fmt.Sprintf("ensure production repository: %v", err))
-		return
+	// ECR is a single registry: there is no separate staging→production promote, so the
+	// kaniko-built staging image IS the final image. (The Harbor path copies between two
+	// distinct registries.) Skipping promote also avoids a redundant same-ref crane copy.
+	productionRef := stagingRef
+	if s.ecr == nil {
+		productionRef = fmt.Sprintf("%s/%s/%s:latest", s.cfg.HarborProductionEndpoint, s.cfg.HarborProject, id)
+		phaseStart = time.Now()
+		if err := s.ensureRepository(ctx, productionRef); err != nil {
+			recordBuildPhase("promote", phaseStart, "error")
+			recordBuildRequest("error")
+			log.Error("ensure production repository failed", "error", err)
+			s.setStatus(ctx, id, topics.StatusFailed, fmt.Sprintf("ensure production repository: %v", err))
+			return
+		}
+		auth := crane.WithAuth(authn.FromConfig(authn.AuthConfig{
+			Username: s.cfg.HarborUser,
+			Password: s.cfg.HarborPassword,
+		}))
+		copyOptions := []crane.Option{auth, crane.WithContext(ctx)}
+		if s.registryInsecure(s.cfg.HarborStagingEndpoint) || s.registryInsecure(s.cfg.HarborProductionEndpoint) {
+			copyOptions = append(copyOptions, crane.Insecure)
+		}
+		if err := crane.Copy(stagingRef, productionRef, copyOptions...); err != nil {
+			recordBuildPhase("promote", phaseStart, "error")
+			metrics.Counter("harbor_promote_total", "Harbor image promotions by result.", metrics.Labels("result", "error"), 1)
+			recordBuildRequest("error")
+			log.Error("harbor promote failed", "error", err)
+			s.setStatus(ctx, id, topics.StatusFailed, fmt.Sprintf("promote staging→production: %v", err))
+			return
+		}
+		recordBuildPhase("promote", phaseStart, "ok")
+		metrics.Counter("harbor_promote_total", "Harbor image promotions by result.", metrics.Labels("result", "ok"), 1)
+		log.Info("image promoted to production", "ref", productionRef)
 	}
-	auth := crane.WithAuth(authn.FromConfig(authn.AuthConfig{
-		Username: s.cfg.HarborUser,
-		Password: s.cfg.HarborPassword,
-	}))
-	copyOptions := []crane.Option{auth, crane.WithContext(ctx)}
-	if s.registryInsecure(s.cfg.HarborStagingEndpoint) || s.registryInsecure(s.cfg.HarborProductionEndpoint) {
-		copyOptions = append(copyOptions, crane.Insecure)
-	}
-	if err := crane.Copy(stagingRef, productionRef, copyOptions...); err != nil {
-		recordBuildPhase("promote", phaseStart, "error")
-		metrics.Counter("harbor_promote_total", "Harbor image promotions by result.", metrics.Labels("result", "error"), 1)
-		recordBuildRequest("error")
-		log.Error("harbor promote failed", "error", err)
-		s.setStatus(ctx, id, topics.StatusFailed, fmt.Sprintf("promote staging→production: %v", err))
-		return
-	}
-	recordBuildPhase("promote", phaseStart, "ok")
-	metrics.Counter("harbor_promote_total", "Harbor image promotions by result.", metrics.Labels("result", "ok"), 1)
-	log.Info("image promoted to production", "ref", productionRef)
 
 	if err := s.updater.UpdateImageRef(ctx, id, productionRef); err != nil {
 		recordBuildRequest("error")
@@ -416,6 +472,22 @@ func (s *Spawner) buildJobSpec(jobName string, msg topics.SubmissionBuildRequest
 		kanikoArgs = append(kanikoArgs, "--insecure-registry="+s.cfg.HarborStagingEndpoint)
 	}
 
+	// kaniko reads /kaniko/.docker/config.json. Harbor: the fetcher writes it into an
+	// emptyDir. ECR: mount the spawner-minted token Secret (read-only) instead.
+	kanikoConfigVol := corev1.Volume{
+		Name:         "kaniko-config",
+		VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
+	}
+	if s.ecr != nil {
+		kanikoConfigVol = corev1.Volume{
+			Name: "kaniko-config",
+			VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{
+				SecretName: ecrDockerSecretName,
+				Items:      []corev1.KeyToPath{{Key: "config.json", Path: "config.json"}},
+			}},
+		}
+	}
+
 	return &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      jobName,
@@ -448,10 +520,7 @@ func (s *Spawner) buildJobSpec(jobName string, msg topics.SubmissionBuildRequest
 							Name:         "workspace",
 							VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
 						},
-						{
-							Name:         "kaniko-config",
-							VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
-						},
+						kanikoConfigVol,
 					},
 					InitContainers: []corev1.Container{
 						{
@@ -500,6 +569,23 @@ func (s *Spawner) scanJobSpec(jobName, submissionID, stagingRef string) *batchv1
 	}
 	scanArgs = append(scanArgs, stagingRef)
 
+	scanEnv := []corev1.EnvVar{{Name: "TRIVY_CACHE_DIR", Value: "/tmp/trivy-cache"}}
+	scanVols := []corev1.Volume{
+		{Name: "tmp", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
+	}
+	scanMounts := []corev1.VolumeMount{{Name: "tmp", MountPath: "/tmp"}}
+	if s.ecr != nil {
+		// Trivy reads $DOCKER_CONFIG/config.json for registry auth.
+		scanEnv = append(scanEnv, corev1.EnvVar{Name: "DOCKER_CONFIG", Value: "/dockercfg"})
+		scanVols = append(scanVols, dockerCfgSecretVolume())
+		scanMounts = append(scanMounts, corev1.VolumeMount{Name: "dockercfg", MountPath: "/dockercfg", ReadOnly: true})
+	} else {
+		scanEnv = append(scanEnv,
+			corev1.EnvVar{Name: "TRIVY_USERNAME", ValueFrom: s.secretKeyRef("harbor-user")},
+			corev1.EnvVar{Name: "TRIVY_PASSWORD", ValueFrom: s.secretKeyRef("harbor-password")},
+		)
+	}
+
 	return &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      jobName,
@@ -519,22 +605,14 @@ func (s *Spawner) scanJobSpec(jobName, submissionID, stagingRef string) *batchv1
 					SecurityContext: podSecurityContext(),
 					Tolerations:     s.buildTolerations(),
 					NodeSelector:    s.buildNodeSelector(),
-					Volumes: []corev1.Volume{
-						{Name: "tmp", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
-					},
+					Volumes:         scanVols,
 					Containers: []corev1.Container{
 						{
-							Name:  "scan",
-							Image: s.cfg.TrivyImage,
-							Args:  scanArgs,
-							Env: []corev1.EnvVar{
-								{Name: "TRIVY_USERNAME", ValueFrom: s.secretKeyRef("harbor-user")},
-								{Name: "TRIVY_PASSWORD", ValueFrom: s.secretKeyRef("harbor-password")},
-								{Name: "TRIVY_CACHE_DIR", Value: "/tmp/trivy-cache"},
-							},
-							VolumeMounts: []corev1.VolumeMount{
-								{Name: "tmp", MountPath: "/tmp"},
-							},
+							Name:            "scan",
+							Image:           s.cfg.TrivyImage,
+							Args:            scanArgs,
+							Env:             scanEnv,
+							VolumeMounts:    scanMounts,
 							SecurityContext: containerSecurityContext(),
 						},
 					},
@@ -552,17 +630,30 @@ func (s *Spawner) sbomJobSpec(jobName, submissionID, stagingRef string) *batchv1
 	backoff := int32(0)
 	authority := strings.SplitN(stagingRef, "/", 2)[0]
 	sbomEnv := []corev1.EnvVar{
-		{Name: "SYFT_REGISTRY_AUTH_AUTHORITY", Value: authority},
-		{Name: "SYFT_REGISTRY_AUTH_USERNAME", ValueFrom: s.secretKeyRef("harbor-user")},
-		{Name: "SYFT_REGISTRY_AUTH_PASSWORD", ValueFrom: s.secretKeyRef("harbor-password")},
 		{Name: "TMPDIR", Value: "/tmp"},
 		{Name: "XDG_CACHE_HOME", Value: "/tmp/.cache"},
 	}
-	if s.registryInsecure(s.cfg.HarborStagingEndpoint) {
+	sbomVols := []corev1.Volume{
+		{Name: "tmp", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
+	}
+	sbomMounts := []corev1.VolumeMount{{Name: "tmp", MountPath: "/tmp"}}
+	if s.ecr != nil {
+		// Syft (go-containerregistry) reads $DOCKER_CONFIG/config.json for registry auth.
+		sbomEnv = append(sbomEnv, corev1.EnvVar{Name: "DOCKER_CONFIG", Value: "/dockercfg"})
+		sbomVols = append(sbomVols, dockerCfgSecretVolume())
+		sbomMounts = append(sbomMounts, corev1.VolumeMount{Name: "dockercfg", MountPath: "/dockercfg", ReadOnly: true})
+	} else {
 		sbomEnv = append(sbomEnv,
-			corev1.EnvVar{Name: "SYFT_REGISTRY_INSECURE_USE_HTTP", Value: "true"},
-			corev1.EnvVar{Name: "SYFT_REGISTRY_INSECURE_SKIP_TLS_VERIFY", Value: "true"},
+			corev1.EnvVar{Name: "SYFT_REGISTRY_AUTH_AUTHORITY", Value: authority},
+			corev1.EnvVar{Name: "SYFT_REGISTRY_AUTH_USERNAME", ValueFrom: s.secretKeyRef("harbor-user")},
+			corev1.EnvVar{Name: "SYFT_REGISTRY_AUTH_PASSWORD", ValueFrom: s.secretKeyRef("harbor-password")},
 		)
+		if s.registryInsecure(s.cfg.HarborStagingEndpoint) {
+			sbomEnv = append(sbomEnv,
+				corev1.EnvVar{Name: "SYFT_REGISTRY_INSECURE_USE_HTTP", Value: "true"},
+				corev1.EnvVar{Name: "SYFT_REGISTRY_INSECURE_SKIP_TLS_VERIFY", Value: "true"},
+			)
+		}
 	}
 
 	return &batchv1.Job{
@@ -584,9 +675,7 @@ func (s *Spawner) sbomJobSpec(jobName, submissionID, stagingRef string) *batchv1
 					SecurityContext: podSecurityContext(),
 					Tolerations:     s.buildTolerations(),
 					NodeSelector:    s.buildNodeSelector(),
-					Volumes: []corev1.Volume{
-						{Name: "tmp", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
-					},
+					Volumes:         sbomVols,
 					Containers: []corev1.Container{
 						{
 							Name:  "sbom",
@@ -596,10 +685,8 @@ func (s *Spawner) sbomJobSpec(jobName, submissionID, stagingRef string) *batchv1
 								"-o", "spdx-json",
 								"-q",
 							},
-							Env: sbomEnv,
-							VolumeMounts: []corev1.VolumeMount{
-								{Name: "tmp", MountPath: "/tmp"},
-							},
+							Env:             sbomEnv,
+							VolumeMounts:    sbomMounts,
 							SecurityContext: containerSecurityContext(),
 						},
 					},
@@ -612,17 +699,26 @@ func (s *Spawner) sbomJobSpec(jobName, submissionID, stagingRef string) *batchv1
 // fetcherEnv applies behavior for its receiver performs the package-specific operation described by its name.
 // It keeps validation, side effects, and returned values within this package's contract.
 func (s *Spawner) fetcherEnv(msg topics.SubmissionBuildRequested, dockerfileB64 string) []corev1.EnvVar {
-	return []corev1.EnvVar{
+	env := []corev1.EnvVar{
 		{Name: "MINIO_ENDPOINT", Value: s.cfg.MinioEndpoint},
 		{Name: "MINIO_ACCESS_KEY", ValueFrom: s.secretKeyRef("minio-access-key")},
 		{Name: "MINIO_SECRET_KEY", ValueFrom: s.secretKeyRef("minio-secret-key")},
 		{Name: "MINIO_BUCKET", Value: s.cfg.MinioBucket},
 		{Name: "ARTIFACT_PATH", Value: msg.ArtifactPath},
-		{Name: "HARBOR_STAGING_ENDPOINT", ValueFrom: s.secretKeyRef("harbor-staging-endpoint")},
-		{Name: "HARBOR_USER", ValueFrom: s.secretKeyRef("harbor-user")},
-		{Name: "HARBOR_PASSWORD", ValueFrom: s.secretKeyRef("harbor-password")},
 		{Name: "DOCKERFILE_B64", Value: dockerfileB64},
 	}
+	if s.ecr != nil {
+		// ECR mode: the kaniko docker-config comes from the mounted Secret, so the fetcher
+		// only fetches the artifact + Dockerfile and must NOT try to write Harbor creds.
+		env = append(env, corev1.EnvVar{Name: "REGISTRY_PROVIDER", Value: "ecr"})
+		return env
+	}
+	env = append(env,
+		corev1.EnvVar{Name: "HARBOR_STAGING_ENDPOINT", ValueFrom: s.secretKeyRef("harbor-staging-endpoint")},
+		corev1.EnvVar{Name: "HARBOR_USER", ValueFrom: s.secretKeyRef("harbor-user")},
+		corev1.EnvVar{Name: "HARBOR_PASSWORD", ValueFrom: s.secretKeyRef("harbor-password")},
+	)
+	return env
 }
 
 // secretKeyRef applies behavior for its receiver performs the package-specific operation described by its name.

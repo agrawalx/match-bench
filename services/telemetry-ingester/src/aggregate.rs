@@ -17,6 +17,14 @@ const HDR_MAX_NS: u64 = 60_000_000_000; // 60 s upper bound
 const HDR_SIGFIG: u8 = 3;
 pub const FIRST_RESP_IDLE_NS: u64 = 5_000_000_000;
 pub const WINDOW_IDLE_NS: u64 = 30_000_000_000;
+/// How long an order_id stays marked as client-timed-out. The load gen abandons an
+/// order at RESPONSE_TIMEOUT (5s), so a straggler's late ack almost always egresses
+/// within a few seconds of that — 15s leaves a wide margin to exclude it. Kept short
+/// on purpose: under overload (high timeout rate) this map grows as timeout_rate ×
+/// this window, so a long window (e.g. the 60s HDR ceiling) would OOM the ingester
+/// before the 5s join buffer does. The rare ack later than 15s slips into
+/// service_time, but its pod_service_time is already >15s so it barely perturbs p99.
+const TIMED_OUT_IDLE_NS: u64 = 15_000_000_000;
 
 #[derive(Debug, Clone, PartialEq)]
 /// Snapshot stores the state passed across this module boundary.
@@ -123,6 +131,10 @@ pub struct Aggregator {
     session_start: HashMap<String, u64>,
     session_contestant: HashMap<String, String>,
     first_response: FirstResponseTracker,
+    /// order_id -> last-seen ns for orders the load generator timed out (client
+    /// abandoned). Their late acks are excluded from service_time/fill_latency so
+    /// those histograms stay over the same population as response_time.
+    timed_out_orders: HashMap<String, u64>,
     wave_ns: u64,
     last_evicted: usize,
 }
@@ -136,6 +148,7 @@ impl Aggregator {
             session_start: HashMap::new(),
             session_contestant: HashMap::new(),
             first_response: FirstResponseTracker::new(),
+            timed_out_orders: HashMap::new(),
             wave_ns: wave_ns.max(1),
             last_evicted: 0,
         }
@@ -183,6 +196,11 @@ impl Aggregator {
         w.offered += 1;
         if e.timed_out {
             w.timed_out += 1;
+            // Mark the order so its (possibly much later) ack is excluded from
+            // service_time — the client gave up, so there is no comparable
+            // response_time sample. Keyed on the order's own time for eviction.
+            let mark = self.timed_out_orders.entry(e.order_id.clone()).or_insert(0);
+            *mark = (*mark).max(t1.max(t0));
         }
         if t1 >= t0 {
             record(&mut w.schedule_slip, t1 - t0);
@@ -199,6 +217,15 @@ impl Aggregator {
         let t3 = e.t3_xdp_ingress_ns;
         self.session_contestant
             .insert(e.session_id.clone(), e.contestant_id.clone());
+        // Drop late acks for orders the load generator already timed out: response_time
+        // never saw them, so letting their pod_service_time into service_time/fill_latency
+        // would make the two histograms cover different populations (service p99 could
+        // then exceed response p99, which is impossible per order). Keep the marker alive
+        // for any further late events (streaming fills) on the same order.
+        if let Some(mark) = self.timed_out_orders.get_mut(&e.order_id) {
+            *mark = (*mark).max(e.t7_xdp_egress_ns);
+            return;
+        }
         let wave = self.wave_of(&e.session_id, t3);
         let w = self
             .windows
@@ -285,6 +312,8 @@ impl Aggregator {
         self.session_contestant
             .retain(|s, _| live.contains(s.as_str()));
         self.last_evicted = self.first_response.evict_idle(now_ns, FIRST_RESP_IDLE_NS);
+        self.timed_out_orders
+            .retain(|_, &mut seen| now_ns.saturating_sub(seen) < TIMED_OUT_IDLE_NS);
         out
     }
 
@@ -524,6 +553,66 @@ mod tests {
         let snaps = a.snapshot(1_000_000_000, 1.0);
         assert_eq!(snaps.len(), 1);
         assert!((snaps[0].error_rate - 0.5).abs() < 1e-9);
+    }
+
+    // An order the load generator abandoned (client-side RESPONSE_TIMEOUT) carries
+    // no response_time sample (observe_sent excludes timed_out). The pod can still
+    // egress a late response, so eBPF emits an acked with a huge pod_service_time.
+    // Recording that into service_time while response_time omits it makes the two
+    // histograms cover different populations, so service p99 can exceed response p99
+    // — impossible per order. The aggregator must exclude a timed-out order's ack
+    // from service_time so both metrics see the same "answered in time" population.
+    #[test]
+    fn timed_out_order_excluded_from_service_time() {
+        let mut a = Aggregator::new(DEFAULT_WAVE_NS);
+        // In-time order: completed sent (response_time = 100us) + 50us service.
+        a.observe_sent(&sent("S", "good", 1_000, 1_000, 101_000, false));
+        a.observe_acked(&acked("S", "good", 1_000, 51_000, "0", 0));
+        // Abandoned order: timed_out sent seen first (as in production: the 5s
+        // watchdog fires hundreds of ms before the straggler egresses), then a 10s ack.
+        a.observe_sent(&sent("S", "slow", 2_000, 2_000, 0, true));
+        a.observe_acked(&acked("S", "slow", 2_000, 10_000_002_000, "0", 0));
+
+        let snaps = a.snapshot(1_000_000_000, 1.0);
+        assert_eq!(snaps.len(), 1);
+        let s = &snaps[0];
+        assert_eq!(
+            s.p99_ns,
+            hist_q(50_000),
+            "service_time must reflect only the in-time order, never the 10s straggler"
+        );
+        assert!(
+            s.p99_ns <= s.rt_p99_ns,
+            "service p99 ({}) must not exceed response p99 ({})",
+            s.p99_ns,
+            s.rt_p99_ns
+        );
+    }
+
+    // Regression guard: for a NORMAL (non-timed-out) order the eBPF ack (egress) is
+    // typically consumed before the worker's completed sent event (recv). Such an
+    // order is not in the timed-out set, so service_time must still be recorded.
+    #[test]
+    fn ack_before_completed_sent_still_records_service() {
+        let mut a = Aggregator::new(DEFAULT_WAVE_NS);
+        a.observe_acked(&acked("S", "o1", 1_000, 51_000, "0", 0));
+        a.observe_sent(&sent("S", "o1", 1_000, 1_000, 51_500, false));
+        let snaps = a.snapshot(1_000_000_000, 1.0);
+        assert_eq!(snaps.len(), 1);
+        assert_eq!(snaps[0].p50_ns, hist_q(50_000));
+    }
+
+    // The timed-out marker is reclaimed once the order is older than the longest
+    // recordable service window, so the set cannot grow unbounded across a run.
+    #[test]
+    fn timed_out_markers_are_evicted() {
+        let mut a = Aggregator::new(DEFAULT_WAVE_NS);
+        a.observe_sent(&sent("S", "slow", 1_000, 1_000, 0, true));
+        assert_eq!(a.timed_out_orders.len(), 1);
+        // Keep at least one live window so the session isn't pruned wholesale.
+        a.observe_acked(&acked("S", "live", HDR_MAX_NS, HDR_MAX_NS + 1_000, "0", 0));
+        let _ = a.snapshot(HDR_MAX_NS + 2_000_000_000, 1.0);
+        assert_eq!(a.timed_out_orders.len(), 0, "stale timed-out marker evicted");
     }
 
     #[test]

@@ -4,6 +4,8 @@
 //! behavior consistent with the service contracts documented in design.md.
 //! The comments in this file describe public structure and callable behavior.
 
+use std::collections::VecDeque;
+
 use iicpc_schemas_rust::{BotProfile, PayloadType, Side};
 use rand::{rngs::SmallRng, Rng, SeedableRng};
 
@@ -104,7 +106,11 @@ pub struct TaskGenerator {
     session_id: String,
     task_id: u64,
     seq: u32,
-    ledger: Vec<Resting>,
+    // Bounded ring of recently-rested orders, used to pick targets for cancel/replace.
+    // VecDeque so the bound is enforced with O(1) pop_front instead of Vec::remove(0),
+    // which memmoves the whole ledger on every push once full — at high order rates with
+    // cancel_pct=0 that memmove dominated CPU (~87% in profiling).
+    ledger: VecDeque<Resting>,
 }
 
 impl TaskGenerator {
@@ -124,7 +130,7 @@ impl TaskGenerator {
             session_id,
             task_id,
             seq: 0,
-            ledger: Vec::new(),
+            ledger: VecDeque::with_capacity(MAX_RESTING_ORDERS),
         }
     }
 
@@ -221,9 +227,9 @@ impl TaskGenerator {
     /// It keeps validation, side effects, and returned values within this module's contract.
     fn push_resting(&mut self, resting: Resting) {
         if self.ledger.len() >= MAX_RESTING_ORDERS {
-            self.ledger.remove(0); // drop oldest to bound memory
+            self.ledger.pop_front(); // O(1) drop oldest to bound memory
         }
-        self.ledger.push(resting);
+        self.ledger.push_back(resting);
     }
 
     /// take_resting performs the module-specific operation described by its name.
@@ -233,7 +239,8 @@ impl TaskGenerator {
             return None;
         }
         let idx = self.rng.gen_range(0..self.ledger.len());
-        Some(self.ledger.remove(idx))
+        // swap_remove_back is O(1); ordering of the ledger doesn't matter for random picks.
+        self.ledger.swap_remove_back(idx)
     }
 }
 

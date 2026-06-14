@@ -40,6 +40,19 @@ struct Metrics {
     // paced schedule each order actually went out (CPU OR backpressure lateness).
     write_seconds: Histogram,
     schedule_slip_seconds: Histogram,
+    // write_batch_size: number of orders coalesced into each write_all. With batching
+    // off (BOT_WRITE_BATCH=1) this is always 1; under load it shows how effectively
+    // catch-up batching amortises the per-write syscall.
+    write_batch_size: Histogram,
+}
+
+/// batch_buckets returns bucket edges for the per-write batch-size histogram
+/// (1 .. 4096 orders/write).
+fn batch_buckets() -> impl Iterator<Item = f64> {
+    [
+        1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0, 256.0, 512.0, 1024.0, 4096.0,
+    ]
+    .into_iter()
 }
 
 /// send_buckets returns the shared bucket edges (seconds) for the per-order send
@@ -66,6 +79,7 @@ static METRICS: LazyLock<Metrics> = LazyLock::new(|| {
     let telemetry_events_flushed = Counter::default();
     let write_seconds = Histogram::new(send_buckets());
     let schedule_slip_seconds = Histogram::new(send_buckets());
+    let write_batch_size = Histogram::new(batch_buckets());
 
     registry.register(
         "iicpc_bot_workloads",
@@ -122,6 +136,11 @@ static METRICS: LazyLock<Metrics> = LazyLock::new(|| {
         "Per-order lateness: actual send_ts minus paced target_send_ts.",
         schedule_slip_seconds.clone(),
     );
+    registry.register(
+        "iicpc_bot_write_batch_size",
+        "Orders coalesced into each write_all syscall.",
+        write_batch_size.clone(),
+    );
 
     Metrics {
         registry,
@@ -136,6 +155,7 @@ static METRICS: LazyLock<Metrics> = LazyLock::new(|| {
         telemetry_events_flushed,
         write_seconds,
         schedule_slip_seconds,
+        write_batch_size,
     }
 });
 
@@ -199,6 +219,11 @@ pub fn order_sent() {
     METRICS.orders_sent.inc();
 }
 
+/// orders_sent_by records a whole batch of `n` orders sent in one write.
+pub fn orders_sent_by(n: usize) {
+    METRICS.orders_sent.inc_by(n as u64);
+}
+
 /// order_write_error performs the module-specific operation described by its name.
 /// It keeps validation, side effects, and returned values within this module's contract.
 pub fn order_write_error() {
@@ -225,11 +250,16 @@ pub fn telemetry_flushed(events: usize) {
     METRICS.telemetry_events_flushed.inc_by(events as u64);
 }
 
-/// observe_send records the per-order write duration and schedule slip (both in
-/// nanoseconds at the call site). write_ns isolates drain backpressure; slip_ns is
-/// overall lateness vs the paced schedule.
-pub fn observe_send(write_ns: u64, slip_ns: u64) {
+/// observe_write records one write_all: its wall duration (ns) and how many orders
+/// were coalesced into it. write_ns isolates drain backpressure; batch_size shows how
+/// effectively catch-up batching amortises the per-write syscall.
+pub fn observe_write(write_ns: u64, batch_size: usize) {
     METRICS.write_seconds.observe(write_ns as f64 / 1e9);
+    METRICS.write_batch_size.observe(batch_size as f64);
+}
+
+/// observe_slip records one order's lateness vs its paced schedule (ns).
+pub fn observe_slip(slip_ns: u64) {
     METRICS
         .schedule_slip_seconds
         .observe(slip_ns as f64 / 1e9);

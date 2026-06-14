@@ -80,6 +80,11 @@ type Engine struct {
 	repriced   map[string]bool
 	seqByOrder map[string]uint64
 	avail      []Availability
+	// evicted accumulates the order IDs removed from the book during the current
+	// Process call (maker fully consumed, cancel, replace-remove). The streaming
+	// validator drains it after each Process to finalize departed orders. The batch
+	// path never drains it (small: ids only) and is being retired.
+	evicted []string
 }
 
 // NewEngine performs the package-specific operation described by its name.
@@ -112,6 +117,43 @@ func (e *Engine) Fills() []Fill { return e.fills }
 // Trades applies behavior for its receiver performs the package-specific operation described by its name.
 // It keeps validation, side effects, and returned values within this package's contract.
 func (e *Engine) Trades() []Trade { return e.trades }
+
+// DrainFills returns the fills produced since the last drain and clears the buffer,
+// so a streaming consumer attributes them per-order without the engine retaining
+// O(session) fills. (Batch callers use Fills() and never drain.)
+func (e *Engine) DrainFills() []Fill {
+	f := e.fills
+	e.fills = nil
+	return f
+}
+
+// DrainTrades returns + clears trades produced since the last drain (see DrainFills).
+func (e *Engine) DrainTrades() []Trade {
+	t := e.trades
+	e.trades = nil
+	return t
+}
+
+// DrainEvicted returns + clears the order IDs removed from the book during the
+// Process call(s) since the last drain, so the streaming validator can finalize them.
+func (e *Engine) DrainEvicted() []string {
+	ev := e.evicted
+	e.evicted = nil
+	return ev
+}
+
+// Forget drops the per-order metadata (seq, repriced) for an order the streaming
+// validator has finalized, bounding those maps to live orders. Batch never calls it.
+func (e *Engine) Forget(orderID string) {
+	delete(e.seqByOrder, orderID)
+	delete(e.repriced, orderID)
+}
+
+// IsResting reports whether the order is currently in the book.
+func (e *Engine) IsResting(orderID string) bool {
+	_, ok := e.index[orderID]
+	return ok
+}
 
 // Resting applies behavior for its receiver performs the package-specific operation described by its name.
 // It keeps validation, side effects, and returned values within this package's contract.
@@ -183,6 +225,7 @@ func (e *Engine) matchAndRest(o *model.Order, rest bool) {
 			if maker.remaining == 0 {
 				level.orders = level.orders[1:]
 				delete(e.index, maker.orderID)
+				e.evicted = append(e.evicted, maker.orderID)
 				e.closeAvail(maker, o.EffectiveT3) // maker fully consumed at the aggressor's t3
 			}
 		}
@@ -251,6 +294,7 @@ func (e *Engine) remove(orderID string, exitT3 uint64) {
 		}
 	}
 	delete(e.index, orderID)
+	e.evicted = append(e.evicted, orderID)
 }
 
 // replace applies behavior for its receiver performs the package-specific operation described by its name.

@@ -155,6 +155,40 @@ variable "botworker_disk_size" {
   default     = 50
 }
 
+variable "kafka_instance_type" {
+  description = <<-EOT
+    Instance type for the dedicated Kafka broker pool (2M/s bench). Kafka throughput
+    is sequential-disk + page-cache bound; m6i.xlarge (4 vCPU / 16 GiB) gives useful
+    page cache and ample EBS bandwidth for ~270 MB/s per broker (3 brokers ≈ 800
+    MB/s aggregate). Bump to m6i.2xlarge to push past ~3M/s.
+  EOT
+  type        = string
+  default     = "m6i.xlarge"
+}
+
+variable "kafka_min_size" {
+  type    = number
+  default = 0
+}
+
+variable "kafka_max_size" {
+  description = "Upper bound for the broker pool (3 for a 3-broker KRaft quorum)."
+  type        = number
+  default     = 3
+}
+
+variable "kafka_desired_size" {
+  description = "Brokers to run. 0 = e2e (single broker on a general node, no dedicated pool). 3 = bench."
+  type        = number
+  default     = 0
+}
+
+variable "kafka_disk_size" {
+  description = "gp3 ROOT volume (GiB) for kafka nodes. Broker LOG data is a separate gp3 PVC (StorageClass-tuned throughput), not this volume."
+  type        = number
+  default     = 80
+}
+
 
 variable "enable_spawner_irsa" {
   description = <<-EOT

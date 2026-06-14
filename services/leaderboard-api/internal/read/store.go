@@ -267,6 +267,11 @@ SELECT r.session_id, sc.name, r.status
 		if sd.Timeline == nil {
 			sd.Timeline = []MetricPoint{}
 		}
+		// The run-detail view fetches all sessions and (when live) polls. The HDR percentile
+		// chart only needs the latest HDR snapshot per wave, so drop the (large, base64) blobs
+		// from every other point — keeping the numeric timeline intact. This shrinks the
+		// payload by ~100x (one HDR blob per wave instead of one per metric point).
+		keepLastPerWaveHDR(sd.Timeline)
 		d.Sessions = append(d.Sessions, sd)
 	}
 	if err := rows.Err(); err != nil {
@@ -280,6 +285,24 @@ SELECT r.session_id, sc.name, r.status
 		d.Violations = []ViolationEntry{}
 	}
 	return d, err
+}
+
+// keepLastPerWaveHDR clears the HDR base64 blobs (hdr/rt/slip) on every metric point except
+// the latest one per wave_index. The timeline is ordered by time, so the last occurrence of a
+// wave is its newest. Numeric fields are left untouched. Used to slim the run-detail payload;
+// the per-session /api/charts endpoint keeps full HDR.
+func keepLastPerWaveHDR(tl []MetricPoint) {
+	lastIdx := make(map[int]int, len(tl))
+	for i := range tl {
+		lastIdx[tl[i].WaveIndex] = i
+	}
+	for i := range tl {
+		if lastIdx[tl[i].WaveIndex] != i {
+			tl[i].HDREncoded = ""
+			tl[i].RTHDREncoded = ""
+			tl[i].SlipHDREncoded = ""
+		}
+	}
 }
 
 // Chart applies behavior for its receiver performs the package-specific operation described by its name.

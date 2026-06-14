@@ -35,6 +35,20 @@ const HTTP_WS_PORT: u16 = 8080;
 
 #[cfg(target_arch = "bpf")]
 const CAPTURE_CAP: usize = 1536;
+// Maximum payload bytes copied per packet into the capture buffer. The length passed to
+// bpf_*_load_bytes must satisfy the kernel 6.1 BPF verifier (EKS AL2023), whose ARG_CONST_SIZE
+// length arg requires the register to carry umin ≥ 1 (else a zero-size probe fails with "R3 min
+// value is outside of the allowed memory range") AND umax ≤ value_size - payload_off. See
+// capture_len for how those bounds are established (read_volatile + relational guards) and why
+// oversized payloads are clamped to this constant rather than skipped/masked. COPY_CAP ==
+// CAPTURE_CAP ⇒ off 28 + 1536 = 1564 ≤ 1568 value_size.
+#[cfg(target_arch = "bpf")]
+const COPY_CAP: usize = CAPTURE_CAP;
+// Minimum payload length we capture. Must be ≥ 2 so the `len < MIN_CAPTURE_LEN` guard in
+// capture_len lowers to a relational JLT (which the verifier uses to raise umin), not a JEQ
+// against 0 (which it doesn't). See capture_len for the full rationale.
+#[cfg(target_arch = "bpf")]
+const MIN_CAPTURE_LEN: usize = 2;
 #[cfg(target_arch = "bpf")]
 const CAPTURE_HEADER_LEN: usize = 28;
 
@@ -132,6 +146,51 @@ static DROPPED_EVENTS: PerCpuArray<u64> = PerCpuArray::with_max_entries(1, 0);
 #[map]
 static TRUNCATED_CAPTURES: PerCpuArray<u64> = PerCpuArray::with_max_entries(1, 0);
 
+/// capture_len returns the number of payload bytes to copy into the capture buffer, or None
+/// to skip this packet. It bounds the result to [MIN_CAPTURE_LEN, COPY_CAP] in a form the
+/// kernel 6.1 BPF verifier accepts as the ARG_CONST_SIZE length of bpf_*_load_bytes.
+///
+/// Two non-obvious verifier facts shape this:
+///
+/// 1. The length is read through read_volatile so the optimizer treats it as opaque. Without
+///    that, LLVM rewrites a compare on `payload_len` (= pkt_end - payload_off) into a compare
+///    on the operands (e.g. `pkt_end == payload_off`); the verifier then refines the pointer
+///    registers but NOT the length register, leaving the length unbounded at the call.
+///
+/// 2. ARG_CONST_SIZE requires the length register to carry umin ≥ 1, else the verifier runs a
+///    zero-size probe that fails with "R3 min value is outside of the allowed memory range".
+///    But JEQ/JNE against 0 (`len == 0` / `len != 0`) does NOT raise umin: the verifier tracks
+///    bounds as intervals, and removing the single point 0 from [0, MAX] is unrepresentable, so
+///    umin stays 0. Only RELATIONAL comparisons tighten umin. So we test `len < MIN_CAPTURE_LEN`
+///    with MIN_CAPTURE_LEN = 2, which lowers to an unsigned JLT (not reducible to an equality)
+///    and tightens the fall-through to umin ≥ 2. `len > COPY_CAP` (JGT) tightens umax ≤ COPY_CAP.
+///    Both bounds survive inlining and the spill/reload to the call.
+///
+/// Empty/1-byte payloads (< MIN_CAPTURE_LEN) are skipped — never real FIX. Oversized payloads
+/// are CLAMPED to COPY_CAP, not skipped: the tc egress hook runs before GSO segmentation in
+/// __dev_queue_xmit, so it sees the large pre-segmentation skb whenever the server coalesces
+/// responses (independent of `ethtool gso off`, which only governs on-wire framing). Skipping
+/// would drop every response in a coalesced packet; clamping captures the leading COPY_CAP
+/// bytes and the userspace parser recovers whatever complete FIX messages fit (the rest are a
+/// sampled loss, fine for a latency distribution). Returning the CONSTANT COPY_CAP keeps the
+/// length verifier-trivial on that path (umin = umax = COPY_CAP). We do NOT clamp with a
+/// saturating min (folds to a bound the verifier can't see) or an AND-mask (resets umin to 0).
+#[cfg(target_arch = "bpf")]
+#[inline(always)]
+fn capture_len(bounds: &PacketBounds) -> Option<usize> {
+    let len = unsafe { ptr::read_volatile(&bounds.payload_len) };
+    if len < MIN_CAPTURE_LEN {
+        return None;
+    }
+    if len > COPY_CAP {
+        if let Some(c) = TRUNCATED_CAPTURES.get_ptr_mut(0) {
+            unsafe { ptr::write(c, ptr::read(c).saturating_add(1)) };
+        }
+        return Some(COPY_CAP);
+    }
+    Some(len)
+}
+
 #[cfg(target_arch = "bpf")]
 #[xdp]
 /// iicpc_xdp_ingress performs the module-specific operation described by its name.
@@ -161,17 +220,13 @@ fn try_xdp_ingress(ctx: &XdpContext) {
     let Some(bounds) = xdp_payload_bounds(data, data_end) else {
         return;
     };
-    if bounds.payload_len == 0 {
-        return;
-    }
-
+    let cap = match capture_len(&bounds) {
+        Some(cap) => cap,
+        None => return,
+    };
     let Some(rec) = SCRATCH.get_ptr_mut(0) else {
         return;
     };
-    let cap = unsafe { ptr::read_volatile(&clamp_cap(bounds.payload_len)) };
-    if cap == 0 || cap > CAPTURE_CAP {
-        return;
-    }
     let dst = unsafe { ptr::addr_of_mut!((*rec).payload) as *mut c_void };
     let ret = unsafe { bpf_xdp_load_bytes(ctx.ctx, bounds.payload_offset as u32, dst, cap as u32) };
     if ret != 0 {
@@ -188,17 +243,13 @@ fn try_tc_egress(ctx: TcContext) {
     let Some(bounds) = tc_payload_bounds(&ctx) else {
         return;
     };
-    if bounds.payload_len == 0 {
-        return;
-    }
-
+    let cap = match capture_len(&bounds) {
+        Some(cap) => cap,
+        None => return,
+    };
     let Some(rec) = SCRATCH.get_ptr_mut(0) else {
         return;
     };
-    let cap = unsafe { ptr::read_volatile(&clamp_cap(bounds.payload_len)) };
-    if cap == 0 || cap > CAPTURE_CAP {
-        return;
-    }
     let dst = unsafe { ptr::addr_of_mut!((*rec).payload) as *mut c_void };
     let ret = unsafe {
         bpf_skb_load_bytes(
@@ -212,21 +263,6 @@ fn try_tc_egress(ctx: TcContext) {
         return;
     }
     emit_capture(rec, &bounds, cap, DIR_RESPONSE);
-}
-
-#[cfg(target_arch = "bpf")]
-#[inline(always)]
-/// clamp_cap performs the module-specific operation described by its name.
-/// It keeps validation, side effects, and returned values within this module's contract.
-fn clamp_cap(payload_len: usize) -> usize {
-    if payload_len > CAPTURE_CAP {
-        if let Some(c) = TRUNCATED_CAPTURES.get_ptr_mut(0) {
-            unsafe { ptr::write(c, ptr::read(c).saturating_add(1)) };
-        }
-        CAPTURE_CAP
-    } else {
-        payload_len
-    }
 }
 
 #[cfg(target_arch = "bpf")]

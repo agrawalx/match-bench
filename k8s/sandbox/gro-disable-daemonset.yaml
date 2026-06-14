@@ -1,0 +1,55 @@
+# Disables GRO/GSO/TSO/LRO on the sandbox nodes' host interfaces (root netns).
+#
+# Why: the eBPF capture runs in the contestant pod's netns and disables offloads
+# there, but its XDP-ingress hook attaches in GENERIC mode (native/driver attach
+# fails on the veth), so it runs AFTER GRO. For CROSS-NODE traffic (load gen on a
+# botworker node -> contestant on a sandbox node) the incoming request segments are
+# GRO-coalesced on the sandbox node's ENS/ENI before the capture sees them, producing
+# super-frames that exceed CAPTURE_CAP (1536B) -> truncated -> request reassembly
+# reset -> requests never matched -> ~98% of latency samples lost. Disabling GRO on
+# the receiving node's interfaces makes the capture see individual MTU frames.
+# (The sender side is handled separately: the bot-fleet worker pod sets eth0 MTU 1500
+#  + offloads off via an initContainer, so wire frames are <=1500.)
+#
+# Re-applies on a loop because the VPC CNI attaches new ENIs / pod veths over time.
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: gro-disable
+  namespace: sandbox
+  labels:
+    app: gro-disable
+spec:
+  selector:
+    matchLabels:
+      app: gro-disable
+  template:
+    metadata:
+      labels:
+        app: gro-disable
+    spec:
+      hostNetwork: true
+      nodeSelector:
+        pool: sandbox
+      tolerations:
+        - { key: sandbox, operator: Exists, effect: NoSchedule }
+      terminationGracePeriodSeconds: 2
+      containers:
+        - name: gro-disable
+          image: nicolaka/netshoot:latest
+          securityContext:
+            privileged: true
+          command:
+            - sh
+            - -c
+            - |
+              echo "gro-disable: keeping GRO/GSO/TSO/LRO off on host interfaces"
+              while true; do
+                for i in $(ls /sys/class/net | grep -vE '^(lo|docker0)$'); do
+                  ethtool -K "$i" gro off gso off tso off lro off 2>/dev/null || true
+                done
+                sleep 20
+              done
+          resources:
+            requests: { cpu: 10m, memory: 32Mi }
+            limits: { cpu: 100m, memory: 64Mi }

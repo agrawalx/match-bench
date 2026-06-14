@@ -27,6 +27,15 @@ spec:
         prometheus.io/port: "9308"
     spec:
       automountServiceAccountToken: false
+      # One broker per node: the brokers must not co-locate or a node loss takes
+      # out multiple brokers and they contend for the same page cache / NIC.
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels:
+                  app: kafka
+              topologyKey: kubernetes.io/hostname
       containers:
         - name: kafka
           image: apache/kafka:3.7.1
@@ -57,6 +66,15 @@ spec:
               value: "CONTROLLER"
             - name: KAFKA_INTER_BROKER_LISTENER_NAME
               value: "PLAINTEXT"
+            # Topic data on the persistent PVC (mounted at /opt/kafka/data), NOT the
+            # image default /tmp/kafka-logs (an emptyDir) — otherwise every broker
+            # restart WIPES all topics. This was a real incident: a resource bump
+            # restarted the broker and lost every topic.
+            # A SUBDIRECTORY of the PVC, not the mount root: the root holds ext4's
+            # `lost+found`, which Kafka's log loader tries to parse as a topic-partition
+            # dir and crashes on (parseTopicPartitionName). The subdir is clean.
+            - name: KAFKA_LOG_DIRS
+              value: "/opt/kafka/data/logs"
             - name: KAFKA_AUTO_CREATE_TOPICS_ENABLE
               value: "false"
             - name: KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR
@@ -94,12 +112,16 @@ spec:
               drop:
                 - ALL
           resources:
+            # Kafka throughput is page-cache + CPU bound. 8Gi limit gives real page
+            # cache (the 2Gi default forced every produce to disk and was a key cause
+            # of the telemetry-producer backlog); cpu req kept at 1 so the general
+            # pool's total requests fit 2x m6i.xlarge, limit 4 for burst headroom.
             requests:
-              cpu: 500m
-              memory: 1Gi
-            limits:
-              cpu: "2"
+              cpu: "1"
               memory: 2Gi
+            limits:
+              cpu: "4"
+              memory: 8Gi
         - name: kafka-exporter
           image: danielqsj/kafka-exporter:v1.8.0
           args:

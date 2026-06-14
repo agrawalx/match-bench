@@ -1,0 +1,13 @@
+# Dependency-free on purpose: the build-worker runs `cargo build --release --bin fix_acker`
+# in a sandbox; with zero deps it builds fully offline (no crates.io fetch) and fast.
+[package]
+name = "fix-acker"
+version = "0.1.3"
+edition = "2021"
+
+[[bin]]
+name = "fix_acker"
+path = "src/main.rs"
+
+[profile.release]
+opt-level = 3

@@ -1,0 +1,28 @@
+# PROFILING variant of services/bot-fleet/Dockerfile. Identical EXCEPT:
+#   - userspace binary built with debuginfo + frame pointers (perf needs symbols;
+#     the normal --release build has neither, so its flamegraph is unusable),
+#   - linux-perf + procps in the runtime so `perf record`/`pgrep` run in-pod,
+#   - runs as root (the profiling run patches the worker pod to privileged so perf
+#     can perf_event_open; the normal image runs as 65532 + drops all caps).
+# NOT for production — build/push as bot-fleet:prof, point the worker at it for ONE
+# profiling run, then revert.
+FROM rust:1.96-bookworm AS builder
+WORKDIR /app
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends cmake build-essential librdkafka-dev pkg-config \
+    && rm -rf /var/lib/apt/lists/*
+COPY Cargo.toml Cargo.lock* ./
+COPY libs/rust libs/rust
+COPY schemas/rust schemas/rust
+COPY services/bot-fleet services/bot-fleet
+COPY services/ebpf-latency services/ebpf-latency
+COPY services/telemetry-ingester services/telemetry-ingester
+RUN RUSTFLAGS="-C debuginfo=2 -C force-frame-pointers=yes" \
+    cargo build --release -p iicpc-bot-fleet
+
+FROM debian:bookworm-slim
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates librdkafka1 linux-perf procps \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=builder /app/target/release/iicpc-bot-fleet /usr/local/bin/iicpc-bot-fleet
+ENTRYPOINT ["/usr/local/bin/iicpc-bot-fleet"]

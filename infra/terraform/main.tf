@@ -233,6 +233,42 @@ module "eks" {
         }
       }
     }
+
+    # Dedicated Kafka broker pool for the 2M/s BENCH suite. Tainted + labelled so the
+    # 3-broker StatefulSet (podAntiAffinity, one per node) lands here, I/O-isolated
+    # from the data/measurement plane. Defaults to 0 nodes so the e2e cluster doesn't
+    # pay for it; the bench tfvars sets kafka_desired_size=3. Broker LOG data lives on
+    # a gp3 PVC (throughput bumped via StorageClass), not this node root volume.
+    kafka = {
+      ami_type       = "AL2023_x86_64_STANDARD"
+      instance_types = [var.kafka_instance_type]
+      min_size       = var.kafka_min_size
+      max_size       = var.kafka_max_size
+      desired_size   = var.kafka_desired_size
+
+      labels = {
+        pool = "kafka"
+      }
+
+      taints = {
+        kafka = {
+          key    = "kafka"
+          value  = "true"
+          effect = "NO_SCHEDULE"
+        }
+      }
+
+      block_device_mappings = {
+        xvda = {
+          device_name = "/dev/xvda"
+          ebs = {
+            volume_size           = var.kafka_disk_size
+            volume_type           = "gp3"
+            delete_on_termination = true
+          }
+        }
+      }
+    }
   }
 
   tags = var.tags

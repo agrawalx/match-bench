@@ -1,0 +1,23 @@
+# High-throughput gp3 StorageClass for the Kafka broker during the throughput
+# benchmark. Default gp3 is 125 MB/s — right at the order-firehose write rate
+# (~108 MB/s at 360k orders/s), so the broker's disk, not the load gens, would
+# be the bottleneck. gp3 lets throughput/IOPS be provisioned independently of
+# size; 500 MB/s gives comfortable headroom for a single broker.
+#
+# Apply, then point Kafka's volumeClaimTemplate at it:
+#   kubectl apply -f deploy-bench/kafka-gp3-throughput.yaml
+#   # edit k8s/data/kafka/statefulset.yaml volumeClaimTemplates:
+#   #   spec.storageClassName: gp3-bench
+#   # (volumeClaimTemplates are immutable — recreate the StatefulSet:
+#   #   kubectl -n data delete statefulset kafka --cascade=orphan && re-apply)
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: gp3-bench
+provisioner: ebs.csi.aws.com
+volumeBindingMode: WaitForFirstConsumer
+allowVolumeExpansion: true
+parameters:
+  type: gp3
+  throughput: "500"   # MB/s (default gp3 = 125)
+  iops: "6000"        # default gp3 = 3000

@@ -7,7 +7,7 @@
 use std::{
     collections::HashMap,
     net::SocketAddr,
-    sync::{Arc, Mutex},
+    sync::{Arc, LazyLock, Mutex},
     time::Duration,
 };
 
@@ -714,13 +714,49 @@ async fn fix_write_loop(
     global_seed: u64,
     task_start_ns: u64,
     task_end_ns: u64,
-    write_timeout: Duration,
+    // Intentionally unused: a per-write timeout is wrong for a load generator (see the write
+    // site) — it turns sink backpressure into permanent task death and collapses aggregate load.
+    _write_timeout: Duration,
     cancel: CancelToken,
 ) -> Result<u64> {
     time::sleep_until(instant_from_unix_nanos(task_start_ns)).await;
 
+    // BOT_WRITE_BATCH coalesces up to N already-DUE orders into a single write_all,
+    // so one write() syscall + one reactor round-trip amortises across many orders —
+    // the dominant per-order cost found by profiling (CPU-bound, ~42us/order, mostly
+    // the per-order write().await). Default 64; 1 reproduces legacy per-order sends.
+    // Pacing is unchanged: only orders past their schedule are batched (catch-up), so
+    // an under-the-ceiling task still paces normally and just writes batches of one.
+    static MAX_WRITE_BATCH: LazyLock<usize> = LazyLock::new(|| {
+        std::env::var("BOT_WRITE_BATCH")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .filter(|&n| n >= 1)
+            .unwrap_or(64)
+    });
+    let batch_max = *MAX_WRITE_BATCH;
+
+    // Closed-loop in-flight cap (per task). A slow contestant — or a stalled telemetry path —
+    // makes the per-task pending map (sent-but-unacked orders) grow without bound and OOMs the
+    // worker. Cap in-flight orders: at the cap the send loop backpressures instead of firing
+    // more, pacing this connection to the contestant's real ack rate. A healthy contestant
+    // keeps in-flight at ~rate×RTT (orders of magnitude below the cap → never engages); only an
+    // over-driven slow contestant is throttled, to its honest sustainable rate. Default 10k/task
+    // (~2.4 MiB) → bounded worker memory that fits a small node, and well above
+    // per_task_rate × RESPONSE_TIMEOUT for any realistic rate, so it never false-throttles
+    // (e.g. an 835k/500-task drain sits at ~8.4k in-flight, under 10k).
+    static MAX_INFLIGHT: LazyLock<usize> = LazyLock::new(|| {
+        std::env::var("BOT_MAX_INFLIGHT_PER_TASK")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .filter(|&n| n >= 1)
+            .unwrap_or(10_000)
+    });
+    let max_inflight = *MAX_INFLIGHT;
+
     let interval_ns = 1_000_000_000_u64 / u64::from(task.target_rps);
     let mut next_send_ns = task_start_ns;
+    let barrier_epoch_ns = task_start_ns.saturating_sub(task.start_offset_ns);
     let mut generator = TaskGenerator::new(
         session_id.clone(),
         u64::from(task.task_id),
@@ -730,13 +766,30 @@ async fn fix_write_loop(
     );
     let mut sent: u64 = 0;
 
+    // Reused across iterations to avoid per-batch allocation.
+    let mut frames: Vec<OrderFrame> = Vec::with_capacity(batch_max);
+    let mut targets: Vec<u64> = Vec::with_capacity(batch_max);
+    let mut batch_buf: Vec<u8> = Vec::with_capacity(batch_max * 256);
+
     loop {
         if should_stop_sending(&cancel, task_end_ns) {
             break;
         }
 
-        let target_send_ts_ns = next_send_ns;
+        // In-flight backpressure: if too many orders are awaiting acks (contestant can't keep
+        // up, or telemetry is stalled), wait for pending to drain — via acks or watchdog
+        // eviction — before issuing more, instead of growing memory unbounded.
+        while pending.lock().expect("pending map poisoned").len() >= max_inflight {
+            if should_stop_sending(&cancel, task_end_ns) {
+                return Ok(sent);
+            }
+            tokio::select! {
+                _ = time::sleep(Duration::from_millis(1)) => {}
+                _ = cancel.cancelled() => return Ok(sent),
+            }
+        }
 
+        // Pace: park only when genuinely ahead of the next due order.
         if next_send_ns > unix_nanos() {
             tokio::select! {
                 _ = time::sleep_until(instant_from_unix_nanos(next_send_ns)) => {}
@@ -744,81 +797,100 @@ async fn fix_write_loop(
             }
         }
 
-        let action = generator.next();
-        let seq = action.seq();
-        let mut frame = render_frame(
-            &fix_version,
-            &session_id,
-            &target_host,
-            u64::from(task.task_id),
-            &action,
-        );
-        frame.patch_timestamp(unix_nanos());
+        // Collect every order that is now due (up to batch_max) into one buffer.
+        frames.clear();
+        targets.clear();
+        batch_buf.clear();
+        let now_ns = unix_nanos();
+        while frames.len() < batch_max && next_send_ns <= now_ns {
+            let action = generator.next();
+            let mut frame = render_frame(
+                &fix_version,
+                &session_id,
+                &target_host,
+                u64::from(task.task_id),
+                &action,
+            );
+            frame.patch_timestamp(unix_nanos());
+            batch_buf.extend_from_slice(&frame.fix);
+            targets.push(next_send_ns);
+            frames.push(frame);
+            next_send_ns = next_send_ns.saturating_add(interval_ns);
+        }
+        if frames.is_empty() {
+            continue;
+        }
+        let count = frames.len();
 
+        // Insert the whole batch under a single lock.
         {
             let mut map = pending.lock().expect("pending map poisoned");
-            map.insert(
-                frame.order_id.clone(),
-                PendingOrder {
-                    order_id: frame.order_id.clone(),
-                    orig_order_id: frame.orig_order_id.clone(),
-                    target_send_ts_ns,
-                    send_ts_ns: 0, // patched on successful write
-                    barrier_epoch_ns: task_start_ns.saturating_sub(task.start_offset_ns),
-                    price: frame.price,
-                    qty: frame.qty,
-                    side: frame.side,
-                    payload_type: frame.payload_type,
-                    ord_type: frame.ord_type,
-                },
-            );
+            for (frame, &target) in frames.iter().zip(targets.iter()) {
+                map.insert(
+                    frame.order_id.clone(),
+                    PendingOrder {
+                        order_id: frame.order_id.clone(),
+                        orig_order_id: frame.orig_order_id.clone(),
+                        target_send_ts_ns: target,
+                        send_ts_ns: 0, // patched on successful write
+                        barrier_epoch_ns,
+                        price: frame.price,
+                        qty: frame.qty,
+                        side: frame.side,
+                        payload_type: frame.payload_type,
+                        ord_type: frame.ord_type,
+                    },
+                );
+            }
         }
 
         let write_start_ns = unix_nanos();
-        match time::timeout(write_timeout, write_half.write_all(&frame.fix)).await {
-            Ok(Ok(())) => {
+        // Block on the write rather than imposing a per-write timeout. When the contestant
+        // can't drain fast enough its TCP receive window fills and write_all stalls; TCP flow
+        // control then paces THIS task down to the contestant's real service rate, so aggregate
+        // load plateaus at the sink's capacity instead of overshooting. A short timeout here did
+        // the opposite: write_all isn't cancel-safe, so a timeout left a partial frame and forced
+        // the task to exit — under sustained backpressure every loaded task exited at once and the
+        // offered load collapsed to zero (the symptom we saw on ramp; a drain sink never fills the
+        // window so it never tripped). Cancellation still tears the loop down promptly at session
+        // end, and a genuinely dead peer surfaces as a write error below.
+        let write_res = tokio::select! {
+            res = write_half.write_all(&batch_buf) => res,
+            _ = cancel.cancelled() => break,
+        };
+        match write_res {
+            Ok(()) => {
                 let send_ts_ns = unix_nanos();
-                metrics::order_sent();
-                metrics::observe_send(
-                    send_ts_ns.saturating_sub(write_start_ns),
-                    send_ts_ns.saturating_sub(target_send_ts_ns),
-                );
-                if let Some(p) = pending
-                    .lock()
-                    .expect("pending map poisoned")
-                    .get_mut(&frame.order_id)
+                metrics::orders_sent_by(count);
+                metrics::observe_write(send_ts_ns.saturating_sub(write_start_ns), count);
                 {
-                    p.send_ts_ns = send_ts_ns;
+                    let mut map = pending.lock().expect("pending map poisoned");
+                    for frame in frames.iter() {
+                        if let Some(p) = map.get_mut(&frame.order_id) {
+                            p.send_ts_ns = send_ts_ns;
+                        }
+                    }
                 }
-                sent += 1;
+                for &target in targets.iter() {
+                    metrics::observe_slip(send_ts_ns.saturating_sub(target));
+                }
+                sent += count as u64;
             }
-            Ok(Err(err)) => {
-                pending
-                    .lock()
-                    .expect("pending map poisoned")
-                    .remove(&frame.order_id);
+            Err(err) => {
+                {
+                    let mut map = pending.lock().expect("pending map poisoned");
+                    for frame in frames.iter() {
+                        map.remove(&frame.order_id);
+                    }
+                }
                 metrics::order_write_error();
                 warn!(
                     task_id = task.task_id,
-                    seq, error = %err, "FIX write failed; task writer exiting"
-                );
-                return Ok(sent);
-            }
-            Err(_) => {
-                pending
-                    .lock()
-                    .expect("pending map poisoned")
-                    .remove(&frame.order_id);
-                metrics::order_write_error();
-                warn!(
-                    task_id = task.task_id,
-                    seq, "FIX write timeout; task writer exiting"
+                    error = %err, "FIX batch write failed; task writer exiting"
                 );
                 return Ok(sent);
             }
         }
-
-        next_send_ns = next_send_ns.saturating_add(interval_ns);
     }
 
     Ok(sent)
@@ -1193,10 +1265,8 @@ async fn rw_write_loop(
             Ok(Ok(())) => {
                 let send_ts_ns = unix_nanos();
                 metrics::order_sent();
-                metrics::observe_send(
-                    send_ts_ns.saturating_sub(write_start_ns),
-                    send_ts_ns.saturating_sub(target_send_ts_ns),
-                );
+                metrics::observe_write(send_ts_ns.saturating_sub(write_start_ns), 1);
+                metrics::observe_slip(send_ts_ns.saturating_sub(target_send_ts_ns));
                 if let Some(p) = pending
                     .lock()
                     .expect("pending map poisoned")
@@ -1472,11 +1542,14 @@ pub(crate) fn order_shape(profile: BotProfile, seq: u32, rng: &mut SmallRng) -> 
     match profile {
         BotProfile::Hft => {
             let side = if seq % 2 == 0 { Side::Sell } else { Side::Buy };
-            let spread = rng.gen_range(1..25);
-            let price = match side {
-                Side::Buy => 10_000 - spread,
-                Side::Sell => 10_000 + spread,
-            };
+            // Price straddles the 10_000 mid (both sides draw from the same band),
+            // so a buy can land above a resting sell — and a sell below a resting
+            // bid — and they cross and trade. This churns the reference order book
+            // (filled orders leave it), keeping the validator's book bounded, and
+            // produces realistic fills instead of a permanently two-sided book that
+            // never matches. Orders far from the mid still rest; near it they cross.
+            let offset = rng.gen_range(0i64..25) - 12; // -12..=+12 around the mid
+            let price = (10_000_i64 + offset) as u64;
             (price, rng.gen_range(10..50), side)
         }
         BotProfile::Retail => {

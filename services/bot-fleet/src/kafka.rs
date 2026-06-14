@@ -107,7 +107,12 @@ pub fn control_producer(brokers: &str) -> Result<KafkaProducer> {
     let inner: FutureProducer = ClientConfig::new()
         .set("bootstrap.servers", brokers)
         .set("acks", "all")
-        .set("enable.idempotence", "true")
+        // No idempotence: it requires the broker's transaction coordinator
+        // (__transaction_state), which a fresh single-broker / RF=1 cluster may not
+        // have ready ("Coordinator load in progress" stalls the producer indefinitely).
+        // Control + telemetry are at-least-once (ingester/validator dedup by order_id),
+        // so exactly-once is unnecessary; acks=all still gives leader durability.
+        .set("enable.idempotence", "false")
         .set("linger.ms", "0")
         .set("retries", "2147483647")
         .set("retry.backoff.ms", "100")
@@ -130,8 +135,15 @@ pub fn telemetry_producer(brokers: &str) -> Result<KafkaProducer> {
     let inner: FutureProducer = ClientConfig::new()
         .set("bootstrap.servers", brokers)
         .set("acks", "1")
-        .set("linger.ms", "5")
+        // Drain the producer faster per broker round-trip: a longer linger accumulates many
+        // app-batches into one large produce request (fewer requests = less broker per-request
+        // CPU + fewer fsyncs), lz4 shrinks the wire (zstd would be better but libzstd isn't
+        // compiled into the vendored librdkafka), and the larger batch ceilings let those big
+        // requests form.
+        .set("linger.ms", "20")
         .set("compression.type", "lz4")
+        .set("batch.num.messages", "100000")
+        .set("batch.size", "4194304") // 4 MiB produce-batch ceiling
         .set("queue.buffering.max.messages", "1000000")
         .set("queue.buffering.max.kbytes", "1048576") // 1 GiB in-flight ceiling
         .set("retries", "2147483647")

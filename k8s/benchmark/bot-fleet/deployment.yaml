@@ -26,6 +26,34 @@ spec:
     spec:
       automountServiceAccountToken: false
       terminationGracePeriodSeconds: 30
+      # Pin load generators to their dedicated, tainted botworker pool so they
+      # don't crowd the measurement plane (Kafka/data) on the general nodes.
+      nodeSelector:
+        pool: botworker
+      tolerations:
+        - key: botworker
+          operator: Exists
+          effect: NoSchedule
+      # EKS nodes default to jumbo MTU (9001) with offloads on. The eBPF latency
+      # capture (CAPTURE_CAP=1536B) then truncates the load gen's frames, corrupting
+      # FIX framing so requests never match responses (~98% of latency samples lost).
+      # Clamp the load gen's eth0 to 1500 + disable segmentation offload so it emits
+      # <=1500B wire frames. (Receiver side: the sandbox nodes run the gro-disable
+      # DaemonSet so cross-node GRO doesn't re-coalesce them before capture.)
+      initContainers:
+        - name: net-tune
+          image: nicolaka/netshoot:latest
+          command:
+            - sh
+            - -c
+            - |
+              ip link set dev eth0 mtu 1500
+              ethtool -K eth0 gso off tso off gro off lro off
+              echo "net-tune: $(ip -o link show eth0 | grep -o 'mtu [0-9]*'), offloads off"
+          securityContext:
+            privileged: true
+            runAsUser: 0
+            runAsNonRoot: false
       containers:
         - name: bot-fleet-worker
           image: ghcr.io/agrawalx/bot-fleet:dev
@@ -49,6 +77,17 @@ spec:
               value: "1000"
             - name: MAX_POLL_INTERVAL_MS
               value: "1800000"
+            # Closed-loop in-flight cap per task: bounds the pending map so a slow
+            # contestant can't grow it unbounded (see worker.rs). The watchdog
+            # (RESPONSE_TIMEOUT 5s) already caps REAL pending at rate x 5s — hft's
+            # 1000/s x 5 = 5000 — so 10k never false-throttles. HARD worst case (all
+            # tasks stalled at the cap): tasks/worker (<= MAX_TASKS_PER_WORKER=1000)
+            # x 10000 x ~350 B ~= 3.5 GiB pending + 1 GiB kafka queue + ~0.5 GiB
+            # runtime ~= 5 GiB — hence the 6Gi mem limit below (one worker per
+            # c6i.xlarge / 8 GiB node). OOM is otherwise impossible: the kafka queue
+            # BLOCKS at 1 GiB rather than growing.
+            - name: BOT_MAX_INFLIGHT_PER_TASK
+              value: "10000"
           securityContext:
             readOnlyRootFilesystem: true
             allowPrivilegeEscalation: false
@@ -58,11 +97,11 @@ spec:
                 - ALL
           resources:
             requests:
-              cpu: 500m
-              memory: 512Mi
+              cpu: "1"
+              memory: 1Gi
             limits:
-              cpu: "4"
-              memory: 2Gi
+              cpu: "3"
+              memory: 6Gi
       securityContext:
         runAsNonRoot: true
         runAsUser: 65532

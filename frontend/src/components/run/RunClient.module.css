@@ -239,6 +239,14 @@
   gap: var(--space-4);
 }
 
+/* One HDR percentile chart per scenario (constant / spike / ramp), stacked. */
+.scenarioCharts {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: var(--space-5, 1.5rem);
+  margin-bottom: var(--space-4);
+}
+
 .mono {
   color: var(--color-text-tertiary);
   font-family: var(--font-mono);

@@ -52,6 +52,20 @@ func Order(orders []*model.Order) []*model.Order {
 	return out
 }
 
+// Less reports whether a sorts before b under the SAME total order Order() applies
+// (EffectiveT3, then flow, then TCP seq). The streaming source's reorder heap uses
+// this so it releases orders in exactly the order the batch path replays them.
+// EffectiveT3 must already be populated on both orders.
+func Less(a, b *model.Order) bool {
+	if a.EffectiveT3 != b.EffectiveT3 {
+		return a.EffectiveT3 < b.EffectiveT3
+	}
+	if a.Flow != b.Flow {
+		return a.Flow.Less(b.Flow)
+	}
+	return seqLess(a.TCPSeq, b.TCPSeq)
+}
+
 // CrossFlowTie performs the package-specific operation described by its name.
 // It keeps validation, side effects, and returned values within this package's contract.
 func CrossFlowTie(a, b *model.Order) bool {

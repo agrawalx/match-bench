@@ -136,7 +136,7 @@ func main() {
 	r.Get("/ready", handler.Readiness(pgStore.Ping, log))
 	r.Handle("/metrics", metrics.Handler())
 
-	authMW := handler.InsecureTrustSubClaim(log)
+	var authMW func(http.Handler) http.Handler
 	if envBool("AUTH_REQUIRED", true) {
 		googleClientID := mustEnv("GOOGLE_CLIENT_ID")
 		verifier, err := authn.NewVerifier(googleClientID)
@@ -146,7 +146,13 @@ func main() {
 		}
 		authMW = handler.RequireContestant(verifier, log)
 	} else {
-		log.Warn("AUTH_REQUIRED=false — bearer tokens are NOT verified; dev/test only")
+		// AUTH_REQUIRED=false → authentication disabled entirely: no bearer token is
+		// required. The caller's contestant identity is taken from an (unverified)
+		// token sub claim if present, otherwise DEFAULT_CONTESTANT_ID. Dev/e2e only.
+		defaultContestant := getenvOr("DEFAULT_CONTESTANT_ID", "e2e-contestant")
+		log.Warn("AUTH_REQUIRED=false — authentication DISABLED; using default contestant when no token",
+			"default_contestant_id", defaultContestant)
+		authMW = handler.OptionalContestant(defaultContestant, log)
 	}
 
 	r.Group(func(r chi.Router) {
@@ -244,6 +250,14 @@ func envBool(key string, def bool) bool {
 	default:
 		return def
 	}
+}
+
+// getenvOr returns the env var value for key, or def when it is unset/empty.
+func getenvOr(key, def string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return def
 }
 
 // mustEnv performs the package-specific operation described by its name.

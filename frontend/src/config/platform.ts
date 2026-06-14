@@ -36,6 +36,24 @@ export const platformConfig = {
 } as const;
 
 /**
+ * authDisabled reports whether authentication is turned off. Auth has been REMOVED
+ * from this benchmark frontend: it is hardcoded off (NOT dependent on a build arg, so
+ * it can't silently fall back to the OAuth path if the arg is omitted at build time).
+ * The visitor is always the default contestant; the backend runs AUTH_REQUIRED=false.
+ */
+export function authDisabled(): boolean {
+  return true;
+}
+
+/**
+ * defaultContestantId is the identity used for every request (auth is off). It must
+ * match the submission-api DEFAULT_CONTESTANT_ID so submission ownership lines up.
+ */
+export function defaultContestantId(): string {
+  return process.env.NEXT_PUBLIC_DEFAULT_CONTESTANT_ID ?? "echo-contestant";
+}
+
+/**
  * googleClientId performs the module-specific operation described by its name.
  * It keeps inputs, side effects, and returned values within this module's contract.
  */

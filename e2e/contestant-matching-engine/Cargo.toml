@@ -1,0 +1,17 @@
+# tokio for async I/O: hundreds of bot connections are handled by lightweight tasks
+# on a small worker pool (NOT one OS thread per connection), and a single matcher
+# task owns the book (no lock contention). Builds in the sandbox via 443/crates.io.
+[package]
+name = "matching-engine"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "matching_engine"
+path = "src/main.rs"
+
+[dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "sync"] }
+
+[profile.release]
+opt-level = 3

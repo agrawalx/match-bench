@@ -1,0 +1,13 @@
+# IICPC contestant manifest (validated by submission-api/internal/validator/zip.go).
+# contestant-matching-engine: a CORRECT price-time-priority limit order book that
+# matches incoming FIX orders and reports fills — a faithful port of the platform's
+# reference engine (correctness-validator/internal/book), so its fills match ground
+# truth and the run reaches QUALIFIED (correctness ratio >= 0.95). Handles
+# NewOrderSingle (limit + market), Cancel (35=F), Replace (35=G).
+protocol: FIX          # FIX | REST | WS
+language: rust         # cpp | rust | go
+port: 9898             # must be a port the eBPF capture filters (9898 or 8080)
+team_name: contestant-matching-engine
+build:
+  type: cargo          # cmake (cpp) | cargo (rust) | go
+  target: matching_engine   # must match the [[bin]] name in Cargo.toml

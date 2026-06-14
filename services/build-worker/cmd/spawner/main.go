@@ -84,6 +84,15 @@ func main() {
 
 	updater := &statusUpdater{pub: pub, pg: pgStore}
 
+	// Harbor basic-auth creds are only needed for the Harbor registry path; the ECR path
+	// authenticates via IRSA (GetAuthorizationToken), so they're optional there.
+	registryProvider := os.Getenv("REGISTRY_PROVIDER")
+	harborUser, harborPassword := "", ""
+	if registryProvider != "ecr" {
+		harborUser = mustEnv("HARBOR_USER")
+		harborPassword = mustEnv("HARBOR_PASSWORD")
+	}
+
 	jobCfg := k8sspawner.JobConfig{
 		Namespace:     envOr("K8S_NAMESPACE", "build"),
 		BuildNodePool: os.Getenv("BUILD_NODE_POOL"), // empty = no nodeSelector/toleration (dev)
@@ -101,10 +110,10 @@ func main() {
 		HarborStagingEndpoint:    mustEnv("HARBOR_STAGING_ENDPOINT"),
 		HarborProductionEndpoint: mustEnv("HARBOR_PRODUCTION_ENDPOINT"),
 		HarborProject:            envOr("HARBOR_PROJECT", "iicpc"),
-		HarborUser:               mustEnv("HARBOR_USER"),
-		HarborPassword:           mustEnv("HARBOR_PASSWORD"),
+		HarborUser:               harborUser,
+		HarborPassword:           harborPassword,
 
-		RegistryProvider: os.Getenv("REGISTRY_PROVIDER"),
+		RegistryProvider: registryProvider,
 		RegistryInsecure: os.Getenv("REGISTRY_INSECURE") == "true",
 	}
 

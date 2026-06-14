@@ -1,0 +1,50 @@
+# PROFILING variant of services/ebpf-latency/Dockerfile. Identical to it EXCEPT:
+#   - userspace binary built with debuginfo + frame pointers (perf needs symbols;
+#     the normal release build has neither, so its flamegraph is unusable),
+#   - linux-perf + procps baked into the runtime so `perf record`/`pgrep` run
+#     in-pod (the capture Job is privileged + hostPID + CAP_SYS_ADMIN).
+# NOT for production — build/push as ebpf-latency:prof, point CAPTURE_IMAGE at it
+# for one profiling run, then revert CAPTURE_IMAGE.
+
+# Stage 1 — kernel BPF object (unchanged from the main Dockerfile).
+FROM rust:bookworm AS bpf-builder
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends llvm clang libclang-dev pkg-config \
+    && rm -rf /var/lib/apt/lists/*
+RUN rustup toolchain install nightly --component rust-src \
+    && cargo install bpf-linker --locked
+WORKDIR /app
+COPY Cargo.toml Cargo.lock* ./
+COPY libs/rust libs/rust
+COPY schemas/rust schemas/rust
+COPY services/bot-fleet services/bot-fleet
+COPY services/ebpf-latency services/ebpf-latency
+COPY services/telemetry-ingester services/telemetry-ingester
+RUN cargo +nightly build --release -p iicpc-ebpf-latency --lib \
+    --target bpfel-unknown-none --features ebpf -Z build-std=core
+
+# Stage 2 — userspace binary WITH debuginfo + frame pointers for perf.
+FROM rust:bookworm AS builder
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends cmake build-essential librdkafka-dev pkg-config \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /app
+COPY Cargo.toml Cargo.lock* ./
+COPY libs/rust libs/rust
+COPY schemas/rust schemas/rust
+COPY services/bot-fleet services/bot-fleet
+COPY services/ebpf-latency services/ebpf-latency
+COPY services/telemetry-ingester services/telemetry-ingester
+RUN RUSTFLAGS="-C debuginfo=2 -C force-frame-pointers=yes" \
+    cargo build --release -p iicpc-ebpf-latency
+
+# Stage 3 — runtime + profiling tools.
+FROM debian:bookworm-slim
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates librdkafka1 ethtool linux-perf procps \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=builder /app/target/release/iicpc-ebpf-latency /usr/local/bin/iicpc-ebpf-latency
+COPY --from=bpf-builder /app/target/bpfel-unknown-none/release/libiicpc_ebpf_latency.so \
+     /opt/iicpc/ebpf/libiicpc_ebpf_latency.so
+ENV EBPF_OBJECT_PATH=/opt/iicpc/ebpf/libiicpc_ebpf_latency.so
+ENTRYPOINT ["/usr/local/bin/iicpc-ebpf-latency"]

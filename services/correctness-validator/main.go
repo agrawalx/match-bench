@@ -21,7 +21,6 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
-	"github.com/iicpc/correctness-validator/internal/pipeline"
 	"github.com/iicpc/correctness-validator/internal/publisher"
 	"github.com/iicpc/correctness-validator/internal/source"
 	"github.com/iicpc/correctness-validator/internal/store"
@@ -59,6 +58,7 @@ func main() {
 	validationTimeout := time.Duration(envInt("VALIDATION_TIMEOUT_MS", 60000)) * time.Millisecond
 	concurrency := envInt("VALIDATOR_CONCURRENCY", 4)
 	validate.AggressiveFillToleranceNs = uint64(envInt("AGGRESSIVE_FILL_TOLERANCE_US", 0)) * 1000
+	reorderWindow := envInt("REORDER_WINDOW", 0) // 0 -> source.DefaultReorderWindow
 	brokers := parseBrokers(kafkaBrokers)
 	if err := checkTimeoutConfig(validationTimeout, settleDelay); err != nil {
 		log.Error("invalid validation timeout config", "validation_timeout_ms", validationTimeout.Milliseconds(), "settle_ms", settleDelay.Milliseconds(), "error", err)
@@ -84,6 +84,7 @@ func main() {
 		pub:               pub,
 		settleDelay:       settleDelay,
 		validationTimeout: validationTimeout,
+		reorderWindow:     reorderWindow,
 	}
 
 	for i := 0; i < concurrency; i++ {
@@ -131,6 +132,7 @@ type validator struct {
 	pub               *publisher.Publisher
 	settleDelay       time.Duration
 	validationTimeout time.Duration
+	reorderWindow     int
 	inflight          atomic.Int64
 }
 
@@ -200,18 +202,23 @@ func (v *validator) validateSession(ctx context.Context, sessionID string) error
 	}
 
 	drainStart := time.Now()
-	sents, ackeds, err := source.DrainSession(ctx, v.brokers, sessionID)
+	sv := validate.NewStreamValidator()
+	counts, contestant, err := source.StreamSession(ctx, v.brokers, sessionID, v.reorderWindow,
+		sv.Apply,
+		func(id string, qty uint64, price int64) {
+			sv.AddPhantom(validate.ReportedFill{OrderID: id, Qty: qty, Price: price})
+		},
+	)
 	if err != nil {
 		metrics.Counter("validator_validation_errors_total", "Correctness-validator validation errors by stage.", metrics.Labels("stage", "drain"), 1)
 		metrics.Counter("validator_sessions_validated_total", "Correctness-validator sessions processed by result.", metrics.Labels("result", "error"), 1)
-		return fmt.Errorf("drain session: %w", err)
+		return fmt.Errorf("stream session: %w", err)
 	}
+	report := sv.Finish()
 	metrics.Histogram("validator_drain_duration_seconds", "Correctness-validator per-session Kafka drain duration in seconds.", nil, metrics.SinceSeconds(drainStart))
-	metrics.Counter("validator_events_drained_total", "Correctness-validator events drained from Kafka by topic.", metrics.Labels("topic", "orders_sent"), float64(len(sents)))
-	metrics.Counter("validator_events_drained_total", "Correctness-validator events drained from Kafka by topic.", metrics.Labels("topic", "orders_acked"), float64(len(ackeds)))
-	metrics.Histogram("validator_session_events_buffered", "Events (orders.sent + orders.acked) buffered in memory per validated session.", nil, float64(len(sents)+len(ackeds)))
+	metrics.Counter("validator_events_drained_total", "Correctness-validator events drained from Kafka by topic.", metrics.Labels("topic", "orders_sent"), float64(counts.SentEvents))
+	metrics.Counter("validator_events_drained_total", "Correctness-validator events drained from Kafka by topic.", metrics.Labels("topic", "orders_acked"), float64(counts.AckedEvents))
 
-	report, counts, contestant := pipeline.Run(sents, ackeds)
 	recordViolations(report)
 	rec := store.Record{
 		SessionID:    sessionID,
@@ -258,7 +265,7 @@ func (v *validator) validateSession(ctx context.Context, sessionID string) error
 		"valid_fills", report.ValidFills,
 		"score", report.CorrectnessScore(),
 		"violations", report.ViolationCount(),
-		"sent", len(sents), "acked", len(ackeds), "matched", counts.MatchedOrders)
+		"sent", counts.SentEvents, "acked", counts.AckedEvents, "matched", counts.MatchedOrders)
 	return nil
 }
 

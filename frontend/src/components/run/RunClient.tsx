@@ -91,7 +91,7 @@ export function RunClient({
     [historyQuery.data?.run_groups],
   );
 
-  const { data, histogram, throughput, hdrSeries, isLoading, error } =
+  const { data, histogram, throughput, hdrByScenario, isLoading, error } =
     useRunDetail(detailMode ? (initialRunGroupId ?? null) : null);
   const runGroupQuery = useQuery({
     queryKey: ["run-group-status", initialRunGroupId],
@@ -164,8 +164,16 @@ export function RunClient({
         {data && (
           <>
             <RunHeader run={data} />
-            {hdrSeries && hdrSeries.length > 0 && (
-              <HdrPercentileChart series={hdrSeries} />
+            {hdrByScenario && hdrByScenario.length > 0 && (
+              <div className={styles.scenarioCharts}>
+                {hdrByScenario.map((s) => (
+                  <HdrPercentileChart
+                    key={s.sessionId}
+                    series={s.series}
+                    title={`Latency by Percentile — ${s.scenario}`}
+                  />
+                ))}
+              </div>
             )}
             <div className={styles.charts}>
               <LatencyHistogram histogram={histogram} run={data} />

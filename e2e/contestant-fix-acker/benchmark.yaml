@@ -1,0 +1,9 @@
+# IICPC contestant manifest (validated by submission-api/internal/validator/zip.go).
+# Required at the zip ROOT alongside the build file (Cargo.toml) and a src/ dir.
+protocol: FIX          # FIX | REST | WS  — this contestant speaks FIX 4.2 over TCP
+language: rust         # cpp | rust | go
+port: 9898             # 1024..65535 — must be a port the eBPF capture filters (9898 or 8080)
+team_name: e2e-fix-acker
+build:
+  type: cargo          # cmake (cpp) | cargo (rust) | go
+  target: fix_acker    # must match a [[bin]] name in Cargo.toml; built binary becomes the entrypoint

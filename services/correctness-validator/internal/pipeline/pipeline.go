@@ -18,6 +18,29 @@ func isFill(execType string, qty uint64) bool {
 	return qty > 0 && (execType == "1" || execType == "2" || execType == "F")
 }
 
+// AssembleOrder joins one sent event with its acks into a model.Order, identically
+// to Assemble (so the batch and streaming paths build orders the same way). Returns
+// nil if the order was never delivered (no acks). EffectiveT3 is left zero; the caller
+// sets it (replay.Order in batch, the promotion pass in the streaming source).
+func AssembleOrder(s topics.OrderSentEvent, acks []topics.OrderAckedEvent) *model.Order {
+	if len(acks) == 0 {
+		return nil
+	}
+	first := acks[0]
+	return &model.Order{
+		OrderID:     s.OrderID,
+		Flow:        model.Flow{SrcIP: first.SrcIP, SrcPort: first.SrcPort},
+		TCPSeq:      first.TCPSeq,
+		T3Ns:        first.T3XDPIngressNS,
+		Side:        model.SideFrom(s.Side),
+		Price:       int64(s.Price) * int64(topics.TelemetryPriceScale),
+		Qty:         s.Qty,
+		Kind:        model.KindFrom(s.PayloadType, s.OrdType),
+		OrigOrderID: preferOrig(s.OrigOrderID, acks),
+		Responses:   responses(acks),
+	}
+}
+
 // Assemble performs the package-specific operation described by its name.
 // It keeps validation, side effects, and returned values within this package's contract.
 func Assemble(sents []topics.OrderSentEvent, ackeds []topics.OrderAckedEvent) ([]*model.Order, []validate.ReportedFill) {
@@ -32,22 +55,9 @@ func Assemble(sents []topics.OrderSentEvent, ackeds []topics.OrderAckedEvent) ([
 
 	var orders []*model.Order
 	for id, s := range sentByID {
-		acks := ackedByID[id]
-		if len(acks) == 0 {
+		o := AssembleOrder(s, ackedByID[id])
+		if o == nil {
 			continue // never delivered
-		}
-		first := acks[0]
-		o := &model.Order{
-			OrderID:     id,
-			Flow:        model.Flow{SrcIP: first.SrcIP, SrcPort: first.SrcPort},
-			TCPSeq:      first.TCPSeq,
-			T3Ns:        first.T3XDPIngressNS,
-			Side:        model.SideFrom(s.Side),
-			Price:       int64(s.Price) * int64(topics.TelemetryPriceScale),
-			Qty:         s.Qty,
-			Kind:        model.KindFrom(s.PayloadType, s.OrdType),
-			OrigOrderID: preferOrig(s.OrigOrderID, acks),
-			Responses:   responses(acks),
 		}
 		orders = append(orders, o)
 	}

@@ -15,6 +15,8 @@ import {
   useState,
 } from "react";
 import {
+  authDisabled,
+  defaultContestantId,
   googleClientId,
   googleRedirectUri,
   platformConfig,
@@ -85,10 +87,58 @@ const KEYS = {
 const AuthContext = createContext<AuthContextValue | null>(null);
 
 /**
- * AuthProvider performs the module-specific operation described by its name.
- * It keeps inputs, side effects, and returned values within this module's contract.
+ * AuthProvider picks the real OAuth provider, or a no-auth provider when
+ * NEXT_PUBLIC_AUTH_DISABLED=true. The branch is on a build-time constant, so the
+ * same provider component runs on every render (no conditional-hook violation).
  */
 export function AuthProvider({ children }: { children: React.ReactNode }) {
+  if (authDisabled()) {
+    return <DisabledAuthProvider>{children}</DisabledAuthProvider>;
+  }
+  return <RealAuthProvider>{children}</RealAuthProvider>;
+}
+
+/**
+ * DisabledAuthProvider supplies a fixed, always-authenticated context with a
+ * synthetic unsigned bearer token (sub = default contestant). The backend runs with
+ * AUTH_REQUIRED=false, so the token is trusted-not-verified (or ignored entirely).
+ */
+function DisabledAuthProvider({ children }: { children: React.ReactNode }) {
+  const value = useMemo<AuthContextValue>(() => {
+    const id = defaultContestantId();
+    const user: UserProfile = {
+      sub: id,
+      email: `${id}@local`,
+      emailVerified: true,
+      displayName: id,
+      avatarUrl: null,
+      contestantId: id,
+    };
+    // base64url("{}") . base64url({"sub":id}) . sig — an unsigned JWT the
+    // AUTH_REQUIRED=false backend trusts for its `sub` claim.
+    const b64u = (s: string) =>
+      btoa(s).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+    const token = `e30.${b64u(JSON.stringify({ sub: id }))}.sig`;
+    return {
+      status: "authenticated",
+      user,
+      platformToken: token,
+      platformTokenExpiresAt: Number.MAX_SAFE_INTEGER,
+      error: null,
+      signIn: async () => undefined,
+      signOut: async () => undefined,
+      handleCallback: async () => undefined,
+      getToken: () => token,
+    };
+  }, []);
+  return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
+}
+
+/**
+ * RealAuthProvider performs the module-specific operation described by its name.
+ * It keeps inputs, side effects, and returned values within this module's contract.
+ */
+function RealAuthProvider({ children }: { children: React.ReactNode }) {
   const [state, setState] = useState<AuthState>({
     status: "unauthenticated",
     user: null,

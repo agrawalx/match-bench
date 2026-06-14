@@ -1,0 +1,14 @@
+# IICPC contestant manifest (validated by submission-api/internal/validator/zip.go).
+# contestant-echo: a tokio FIX 4.2 echo/acker — replies 35=8 (ExecutionReport) to
+# every NewOrderSingle. Higher throughput than the std thread-per-conn fix-acker.
+# NOTE: this is a THROUGHPUT contestant — it acks without a real order book, so it
+# will be DISQUALIFIED on correctness (the validator diffs fills vs a price-time
+# reference book). Use it to measure the platform's delivered/latency ceiling, not
+# to reach "qualified". A qualifying contestant needs a real matching engine.
+protocol: FIX          # FIX | REST | WS
+language: rust         # cpp | rust | go
+port: 9898             # must be a port the eBPF capture filters (9898 or 8080)
+team_name: contestant-echo
+build:
+  type: cargo          # cmake (cpp) | cargo (rust) | go
+  target: fix_echo     # must match the [[bin]] name in Cargo.toml

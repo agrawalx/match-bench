@@ -34,7 +34,13 @@ function ninesToLabel(v: number): string {
  * HdrPercentileChart performs the module-specific operation described by its name.
  * It keeps inputs, side effects, and returned values within this module's contract.
  */
-export function HdrPercentileChart({ series }: { series: HdrSeries[] }) {
+export function HdrPercentileChart({
+  series,
+  title,
+}: {
+  series: HdrSeries[];
+  title?: string;
+}) {
   if (!series.length) return null;
   const n = series[0].points.length;
   const data = Array.from({ length: n }, (_, i) => {
@@ -46,7 +52,7 @@ export function HdrPercentileChart({ series }: { series: HdrSeries[] }) {
   });
   return (
     <div>
-      <h3>Latency by Percentile Distribution</h3>
+      <h3>{title ?? "Latency by Percentile Distribution"}</h3>
       <p style={{ opacity: 0.7, fontSize: 13, marginTop: 0 }}>
         service_time = algo processing at the veth (scored). response_time = the
         bot&apos;s full round trip. The gap between them is the non-algo

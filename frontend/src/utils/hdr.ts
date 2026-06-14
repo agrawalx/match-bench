@@ -39,62 +39,88 @@ const METRICS: {
 ];
 
 /**
- * mergeLastPerWave performs the module-specific operation described by its name.
- * It keeps inputs, side effects, and returned values within this module's contract.
+ * HdrScenario groups the per-metric HDR percentile series for a SINGLE scenario
+ * session (constant / spike / ramp), so each scenario renders its own chart.
  */
-function mergeLastPerWave(
-  detail: RunDetail,
+export interface HdrScenario {
+  scenario: string; // scenario name: constant | spike | ramp
+  sessionId: string;
+  series: HdrSeries[]; // one per metric (service_time, round trip)
+}
+
+/**
+ * histForSession merges the last HDR snapshot of each wave within ONE session
+ * (waves are cumulative within a wave but distinct across waves, so we take the
+ * latest per wave and add them together). Returns null if the session has no
+ * encoded histogram for `field`.
+ */
+function histForSession(
+  session: RunDetail["sessions"][number],
   field: "hdr_encoded" | "rt_hdr_encoded" | "slip_hdr_encoded",
 ): hdr.Histogram | null {
+  const lastByWave = new Map<number, string>();
+  const lastTime = new Map<number, number>();
+  for (const p of session.timeline ?? []) {
+    const b64 = p[field];
+    if (!b64) continue;
+    const t = p.time_unix_ns ?? 0;
+    if (!lastTime.has(p.wave_index) || t >= (lastTime.get(p.wave_index) as number)) {
+      lastTime.set(p.wave_index, t);
+      lastByWave.set(p.wave_index, b64);
+    }
+  }
   let merged: hdr.Histogram | null = null;
-  for (const session of detail.sessions) {
-    const lastByWave = new Map<number, string>();
-    const lastTime = new Map<number, number>();
-    for (const p of session.timeline ?? []) {
-      const b64 = p[field];
-      if (!b64) continue;
-      const t = p.time_unix_ns ?? 0;
-      if (
-        !lastTime.has(p.wave_index) ||
-        t >= (lastTime.get(p.wave_index) as number)
-      ) {
-        lastTime.set(p.wave_index, t);
-        lastByWave.set(p.wave_index, b64);
-      }
-    }
-    for (const b64 of lastByWave.values()) {
-      try {
-        const h = hdr.decodeFromCompressedBase64(b64.replace(/\s/g, ""));
-        if (!merged) merged = h;
-        else merged.add(h);
-      } catch {}
-    }
+  for (const b64 of lastByWave.values()) {
+    try {
+      const h = hdr.decodeFromCompressedBase64(b64.replace(/\s/g, ""));
+      if (!merged) merged = h;
+      else merged.add(h);
+    } catch {}
   }
   return merged;
 }
 
 /**
- * deriveHdrSeries performs the module-specific operation described by its name.
- * It keeps inputs, side effects, and returned values within this module's contract.
+ * seriesFromHistogram turns one decoded HDR histogram into a percentile curve.
  */
-export function deriveHdrSeries(detail: RunDetail | undefined): HdrSeries[] {
+function seriesFromHistogram(label: string, h: hdr.Histogram): HdrSeries {
+  const points = PCTS.map((pct) => ({
+    percentile: pct,
+    nines: pct < 100 ? 100 / (100 - pct) : 1e7,
+    value_us: h.getValueAtPercentile(pct) / 1000,
+  }));
+  return {
+    scenario: label,
+    total: h.totalCount,
+    p50_us: h.getValueAtPercentile(50) / 1000,
+    p99_us: h.getValueAtPercentile(99) / 1000,
+    points,
+  };
+}
+
+/**
+ * deriveHdrByScenario returns ONE entry per scenario session (constant / spike /
+ * ramp), each carrying its own per-metric percentile series. The /run page renders
+ * a separate HdrPercentileChart for each entry instead of merging all scenarios
+ * into a single chart.
+ */
+export function deriveHdrByScenario(detail: RunDetail | undefined): HdrScenario[] {
   if (!detail?.sessions) return [];
-  const out: HdrSeries[] = [];
-  for (const metric of METRICS) {
-    const merged = mergeLastPerWave(detail, metric.key);
-    if (!merged || merged.totalCount === 0) continue;
-    const points = PCTS.map((pct) => ({
-      percentile: pct,
-      nines: pct < 100 ? 100 / (100 - pct) : 1e7,
-      value_us: merged.getValueAtPercentile(pct) / 1000,
-    }));
-    out.push({
-      scenario: metric.label,
-      total: merged.totalCount,
-      p50_us: merged.getValueAtPercentile(50) / 1000,
-      p99_us: merged.getValueAtPercentile(99) / 1000,
-      points,
-    });
+  const out: HdrScenario[] = [];
+  for (const session of detail.sessions) {
+    const series: HdrSeries[] = [];
+    for (const metric of METRICS) {
+      const h = histForSession(session, metric.key);
+      if (!h || h.totalCount === 0) continue;
+      series.push(seriesFromHistogram(metric.label, h));
+    }
+    if (series.length > 0) {
+      out.push({
+        scenario: session.scenario || session.session_id,
+        sessionId: session.session_id,
+        series,
+      });
+    }
   }
   return out;
 }

@@ -30,7 +30,7 @@ export function ThroughputChart({
   throughput?: ThroughputWindow[];
   run: RunDetail;
 }) {
-  const data =
+  const points =
     throughput ??
     run.sessions.flatMap(
       (session) =>
@@ -41,6 +41,26 @@ export function ThroughputChart({
           scenario: session.scenario,
         })) ?? [],
     );
+
+  // Each snapshot writes one row per active (session, wave) window, so at a wave
+  // boundary two or more rows share a timestamp. Plotted raw, the area line
+  // whipsaws between the busy wave and the near-zero wave that is just opening or
+  // draining. Collapse to one point per timestamp: tps is additive (true
+  // instantaneous throughput is the sum across waves); error_rate is a ratio, so
+  // surface the worst wave rather than summing.
+  const byTime = new Map<string, (typeof points)[number]>();
+  for (const p of points) {
+    const existing = byTime.get(p.timestamp);
+    if (existing) {
+      existing.tps += p.tps;
+      existing.errors = Math.max(existing.errors, p.errors);
+    } else {
+      byTime.set(p.timestamp, { ...p });
+    }
+  }
+  const data = Array.from(byTime.values()).sort((a, b) =>
+    a.timestamp < b.timestamp ? -1 : a.timestamp > b.timestamp ? 1 : 0,
+  );
   const hasSamples = data.length > 0;
 
   return (

@@ -37,7 +37,7 @@ markdown_extensions:
           class: mermaid
           format: !!python/name:pymdownx.superfences.fence_code_format
 nav:
-  - Home: index.md
+  - Overview: index.md
   - "The thesis & system overview": the-thesis-system-overview.md
   - "Map of the system": map-of-the-system.md
   - "Kafka Topology, Partitioning & Horizontal Scaling": kafka-topology-partitioning-horizontal-scaling.md

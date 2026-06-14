@@ -20,10 +20,10 @@ for k,start in enumerate(idx):
     title=re.sub(r'^##\s+','',lines[start]).strip()
     sections.append((title, lines[start:end]))
 
-# index.md = pre + first section (How to read)
-index_block = pre + sections[0][1]
+# index.md = hand-authored quick overview (source: docs/architecture/overview.md);
+# the in-doc "How to read" section is skipped — the sidebar + overview replace it.
+overview_md = open('docs/architecture/overview.md').read()
 pages=[]   # (title, filename, block)
-pages.append((sections[0][0], 'index.md', index_block))
 for title,block in sections[1:]:
     pages.append((title, slug(title)+'.md', block))
 
@@ -56,20 +56,21 @@ def rewrite(block, selffn):
 
 for title,fn,block in pages:
     open(os.path.join(WIKI,fn),'w').write(rewrite(block, fn).strip()+'\n')
+open(os.path.join(WIKI,'index.md'),'w').write(rewrite(overview_md.split('\n'),'index.md').strip()+'\n')
 
 # build nav
 SERVICES={'Submission API (Go)','Build Pipeline & Sandbox Orchestrator (Go)','Bot-Fleet Controller (Go)',
  'Bot-Fleet Load Generator (Rust)','eBPF Latency Capture (Rust)','Telemetry Ingester & Rollup (Rust)',
  'Correctness Validator (Go)','Score Computer & Leaderboard API (Go)','Platform Foundations: Auth, Shared Libraries & Schemas'}
-nav=["  - Home: index.md"]
+nav=["  - Overview: index.md"]
 svc=[]; appx=[]; top=[]
-for title,fn,block in pages[1:]:
+for title,fn,block in pages:
     if title in SERVICES: svc.append((title,fn))
     elif title.startswith('Appendix'): appx.append((title,fn))
     else: top.append((title,fn))
 # emit in document order, inserting Services group where the first service appears, appendix at end
 emitted_svc=emitted_appx=False
-order=[(t,f) for t,f,_ in pages[1:]]
+order=[(t,f) for t,f,_ in pages]
 for t,f in order:
     if t in SERVICES:
         if not emitted_svc:

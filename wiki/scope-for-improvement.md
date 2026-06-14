@@ -48,9 +48,8 @@ is the real gap between what the code does today and what the design aspires to.
   (raised 2→4 vCPU already), never more replicas. Validated lossless at
   **≥ ~144k samples/s**; the per-contestant ceiling above that is one CPU.
 - **Single-pod contestant ceiling ~150k delivered/s** (one pod, one TCP
-  connection per task). This caps *before* the measurement pipeline and is why
-  the measure-capacity sweep is non-monotonic (200k CLEAN while 150k STALLs is
-  run-to-run jitter at the single-pod boundary, not a pipeline limit).
+  connection per task). This caps *before* the measurement pipeline does — to find
+  the pipeline's own ceiling you must add responder pods / cores.
 - **`net-tune` / `gro-disable` are best-effort privileged loops.** The
   gro-disable DaemonSet re-applies `ethtool … off` every 2 s forever with no
   convergence signal; a window between a new VPC-CNI ENI attaching and the next

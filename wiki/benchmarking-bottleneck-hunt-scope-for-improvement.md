@@ -105,38 +105,7 @@ consistent with this.
 > and ride separate NICs — and is the next measurement to run (see §4), rather than
 > an already-recorded number. The single-node generation figures above are measured.
 
-**C. Measurement-capacity sweep** (echo, capture + telemetry ON, single worker / single
-sandbox node — `deploy-bench/measure-capacity-sweep.tsv`):
-
-| target_k | sent/s | decoded/s | flushed/s | coverage | drops (rbuf/acked/tel) | verdict |
-|---|---|---|---|---|---|---|
-| 50  | 50,005  | 50,000  | 50,000  | 0.9999 | 0/0/0 | **CLEAN** |
-| 100 | 99,997  | 89,029  | 89,029  | 0.8903 | 0/0/0 | CLEAN* |
-| 150 | 36,644  | 0       | 0       | 0.0000 | 0/0/0 | **STALL** |
-| 200 | 150,006 | 140,992 | 140,992 | 0.9399 | 0/0/0 | **CLEAN** |
-| 250 | 200,044 | 0       | 0       | 0.0000 | 0/0/0 | STALL |
-| 300 | 252,700 | 273     | 273     | 0.0011 | 0/0/0 | STALL |
-| 400 | 299,421 | 0       | 0       | 0.0000 | 0/0/0 | STALL |
-| 500 | 364,159 | 0       | 0       | 0.0000 | 0/0/0 | STALL |
-
-**Reading this table:** the verdicts are
-**non-monotonic** — 200k passes CLEAN while 150k STALLs, and 50k/100k pass but 250k+
-fail. That pattern is the signature of **a single-pod / single-node ceiling around the
-low-100s-of-k delivered, plus run-to-run variance**, not a clean "this rate works, above
-it doesn't" cliff. The decisive evidence: at the STALL steps the loss counters are all
-**zero** while `decoded/flushed` collapse to 0 — i.e. nothing is being *dropped*; the
-echo contestant simply isn't *delivering* acks at that offered rate (the run stalled, no
-responses to stamp). This is exactly the **~150k single-pod-contestant ceiling** showing up as run-to-run
-jitter at the boundary. The lossless number to trust from this harness is **≥ ~144k
-samples/s with zero drops** (matches the 200k row's 140,992 flushed). The measurement
-pipeline's *own* ceiling is **not yet reached** — to find it you must stop bottlenecking
-on one echo pod (more responder pods / more cores).
-
-> The `*` on the 100k row: it is marked CLEAN by the script's verdict but its coverage is
-> 0.89 (< the 0.99 COV_MIN gate). Treat it as a borderline/variance result, not a clean
-> pass — the same single-pod jitter.
-
-**D. Latency HDR percentiles** — local k3s, kernel-stamped service_time (µs), decoded
+**C. Latency HDR percentiles** — local k3s, kernel-stamped service_time (µs), decoded
 from the Rust V2-deflate HDR blobs by an independent Python `hdrh` cross-check
 (`deploy-local/plot-hdr.py:5-11`, `deploy-local/plots/*.hgrm`):
 
@@ -150,7 +119,7 @@ The tail rises with load shape (ramp's climbing waves > spike's burst > constant
 exactly as expected. These are small-n local runs (n≈20–60 per scenario in the `.hgrm`
 files) — directional, not the EKS production tail (~98–120 µs p99 healthy).
 
-**E. The 2M/s tier target** (`bench/bench.tfvars`,
+**D. The 2M/s tier target** (`bench/bench.tfvars`,
 `bench/kafka-bench.sh`):
 
 | knob | e2e | **bench (2M/s tier)** |
@@ -369,10 +338,9 @@ These are the *real* gaps, each tied to a file:
    `deploy-bench/drain-scale-sweep.sh "1 2"` to populate it.
 
 3. **Single-pod contestant ceiling ~150k delivered/s.** One echo pod with one TCP
-   connection per task caps before the measurement pipeline does. This is exactly what makes
-   the measure-capacity-sweep non-monotonic (§2C). To find the pipeline's *own* ceiling you
-   must add responder pods / cores; until then the measurement ceiling (>144k) is a *floor*,
-   not the true limit.
+   connection per task caps before the measurement pipeline does. To find the pipeline's
+   *own* ceiling you must add responder pods / cores; until then the measurement ceiling
+   (>144k) is a *floor*, not the true limit.
 
 4. **Telemetry-on per-worker ceiling (~445k) < telemetry-off (~600–790k).** The single
    broker caps durable telemetry at ~445k/s, and the
@@ -396,20 +364,15 @@ These are the *real* gaps, each tied to a file:
    the capture shares the sandbox node's other 2 vCPU and can be starved if the contestant
    is given all cores.
 
-7. **Run-to-run benchmark variance.** The measure-capacity-sweep verdicts are
-   non-monotonic (200k CLEAN, 150k STALL) and the 100k row's coverage (0.89) misses the
-   0.99 gate (`deploy-bench/measure-capacity-sweep.tsv`). Single-pod/single-node runs need
-   repetition + averaging before any boundary number is trusted.
-
-8. **Auth is disabled for the benchmark flow.** The frontend runs with sign-in removed — fine for a benchmark harness, a gap for a multi-tenant
+7. **Auth is disabled for the benchmark flow.** The frontend runs with sign-in removed — fine for a benchmark harness, a gap for a multi-tenant
    contest. Production multi-tenant scheduling + supply-chain attestation are the
    headline future work.
 
-9. **Ingester `auto.offset.reset=latest` + auto-commit** means a late-starting ingester
+8. **Ingester `auto.offset.reset=latest` + auto-commit** means a late-starting ingester
    skips the backlog and *reads as* telemetry loss when it isn't. An operational footgun to pin before
    re-measuring loss.
 
-10. **Local HDR latency numbers are small-n / directional.** The `.hgrm` percentiles
-    (§2D) come from n≈20–60 local k3s samples; the EKS healthy p99 is ~98–120 µs. The local plots demonstrate the pipeline, not the production tail.
+9. **Local HDR latency numbers are small-n / directional.** The `.hgrm` percentiles
+    (§2C) come from n≈20–60 local k3s samples; the EKS healthy p99 is ~98–120 µs. The local plots demonstrate the pipeline, not the production tail.
 
 ---

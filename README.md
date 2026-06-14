@@ -20,7 +20,7 @@
 - [Repository Layout](#repository-layout)
 - [Getting Started](#getting-started)
 - [Testing](#testing)
-- [Deployment](#deployment)
+- [Deployment (AWS EKS)](#deployment-aws-eks)
 - [Architecture Document](#architecture-document)
 - [Demo Video](#demo-video)
 - [Design Notes](#design-notes)
@@ -31,19 +31,18 @@ match-bench is a multi-service benchmark platform for evaluating untrusted tradi
 
 ## Benchmark Snapshot
 
-Initial local benchmarking shows the load-generation path is not the bottleneck for realistic contest-scale runs.
+The figures below are **measured on EKS** (or the local k3s HDR harness where noted), not projected. Methodology, the raw data files, and the bottleneck hunt behind each number are in the [architecture doc's benchmarking section](docs/architecture/ARCHITECTURE.md#benchmarking-bottleneck-hunt--scope-for-improvement).
 
-| Environment / assumption | Observed or projected throughput |
+| Measurement | Result |
 |---|---:|
-| Laptop, single core test | ~68,000 orders/sec |
-| CPU usage during local single-core test | ~0.74% of one core |
-| EKS paid worker node assumption | 4 cores |
-| Projected throughput per worker on 4-core node | ~360,000 orders/sec |
-| Projected throughput per worker per minute | ~21 million orders/min |
-| Projected 2-3 node capacity | ~1 million orders/sec |
-| Concurrent run planning note | Designed to support multiple simultaneous runs; current planning target mentioned in benchmarking notes is 10 at a time |
+| Order generation, telemetry **off** (drain), per botworker node | **~600–790k orders/sec** (peak ~748k on one `c6i.xlarge`) |
+| Order generation, telemetry **on** (single worker → 1 broker) | **~445k orders/sec**, lossless |
+| Measurement pipeline (eBPF capture → Kafka → ingester) | lossless **≥ ~144k samples/sec** (own ceiling not yet reached) |
+| Single echo-contestant pod, cross-node | ~150k delivered/sec (caps before the pipeline) |
+| Kernel-stamped service-time p99 (healthy) | **~98 µs** |
+| Platform self-benchmark tier (target) | **~2M orders/sec** — 3 botworker nodes, 2-broker Kafka, 96 partitions, 8 ingesters |
 
-These numbers useful because they show the platform has room to scale before the load generator becomes the limiting component. Production numbers should be revalidated on the exact EKS node type, kernel, networking mode, Kafka settings, and workload mix used for the event.
+The load generator is not the bottleneck at contest scale: a single node sustains hundreds of thousands of orders/sec, and the data plane scales out across Kafka partitions (24 in prod, 96 in the bench tier). The 2M/s tier is a documented, *partially-validated* target — the drain path (generation + telemetry + ingester) is ready to validate; eBPF-capture and echo-contestant capacity at 2M/s are still unverified. Revalidate on the exact node type, kernel, networking mode, and Kafka settings used for the event.
 
 ## Key Features
 
@@ -73,14 +72,9 @@ The important detail is where measurement happens. match-bench does not ask the 
 
 ## Architecture
 
-Architecture diagrams are kept as Mermaid files under [`mermaids/`](./mermaids/) so they can be rendered in GitHub, documentation sites, or architecture review decks without duplicating diagrams in the README.
+The full, **code-derived** architecture lives in **[docs/architecture/ARCHITECTURE.md](docs/architecture/ARCHITECTURE.md)** — a standalone deep reference with a section per microservice, the Kafka topology and partitioning model, the horizontal-scaling design, the benchmarking numbers, the bottleneck hunt, and the consolidated open items. It was written by reading the source directly, with every non-obvious claim cited to a `path:line`.
 
-Available diagrams:
-
-- [`mermaids/end_to_end_pipeline.mermaid`](./mermaids/end_to_end_pipeline.mermaid): sequence-level view of one benchmark run, from user trigger to final score.
-- [`mermaids/k8s_namespaces.mermaid`](./mermaids/k8s_namespaces.mermaid): deployment-level view of the Kubernetes namespaces and the services in each tier.
-
-The README intentionally does not inline the full architecture diagram. The Mermaid files are the source of truth for architecture visuals, while [design.md](./design.md) is the source of truth for detailed engineering rationale.
+It contains fresh, code-derived diagrams: a system-context map, the run-lifecycle sequence, the Kafka topic graph, and the node-pool isolation model. [`design.md`](./design.md) remains the detailed engineering-rationale companion.
 
 ## Tech Stack
 
@@ -116,11 +110,20 @@ design.md                  Detailed engineering design
 
 ## Getting Started
 
-Use the local run guide for setup commands:
+There are two local paths, both current:
 
-- [Local development guide](./docs/local-run.md)
+**1. Dependency stack + services from source (fast dev loop).** Bring up Postgres, TimescaleDB, Redis, Kafka, and MinIO (optionally the platform APIs and observability too) with Docker Compose, then run individual services from source. Full steps and the local endpoint table are in **[docs/local-run.md](./docs/local-run.md)**.
 
-The local setup uses Docker Compose for dependencies such as PostgreSQL, TimescaleDB, Redis, Kafka, MinIO, Prometheus, Grafana, and Loki. Individual services can then be run from source.
+```bash
+cp .env.example .env
+docker compose -f docker-compose.yml -f docker-compose.kafka.yml up -d   # core deps + Kafka topic init
+```
+
+**2. Full platform on local k3s (no-cost end-to-end demo).** [`deploy-local/up.sh`](./deploy-local/up.sh) deploys the *entire* stack — data tier, all services, eBPF capture, telemetry, validator, and frontend — onto a single local k3s node (1-broker Kafka, all replicas 1, gVisor off, tiny scenarios). This mirrors the EKS end-to-end run without the cloud cost and is the demo path.
+
+```bash
+deploy-local/up.sh        # builds images into the in-cluster registry, then applies the platform
+```
 
 ## Testing
 
@@ -130,19 +133,31 @@ Test commands are maintained separately:
 
 The test guide covers Go tests, Rust tests, frontend checks, integration tests, and Kubernetes smoke checks.
 
-## Deployment
+## Deployment (AWS EKS)
 
-AWS deployment instructions are in:
+The **recommended end-to-end path is the [`e2e/`](./e2e/) suite** — clone → Terraform → deploy → run a real benchmark with every service on (load generator, eBPF capture, telemetry, validator, scoring, leaderboard). It is the most current and complete guide:
 
-- [AWS deployment guide](./docs/aws-deployment.md)
-- [Infrastructure README](./infra/README.md)
-- [Secret bootstrap guide](./bootstrap/README.md)
+- **[e2e/README.md](./e2e/README.md)** — topology, contestants, scenarios, the required capture-fidelity setup, validated ceilings, and the full run order.
+- **[e2e/cluster.md](./e2e/cluster.md)** — Terraform apply/destroy, kubeconfig, and re-scaling (you run Terraform).
 
-The AWS path uses EKS, ECR, Terraform, Kubernetes manifests, IRSA, KEDA, and the AWS Load Balancer Controller.
+```bash
+cd infra/terraform && AWS_PROFILE=iicpc terraform apply -var-file="$(git rev-parse --show-toplevel)/e2e/e2e.tfvars"
+AWS_PROFILE=iicpc aws eks update-kubeconfig --name iicpc-prod --region us-east-1
+e2e/01-images.sh && e2e/02-bootstrap.sh && e2e/04-scenarios.sh   # then run via the UI, or e2e/run.sh <scenario>
+```
+
+For deeper or alternative needs:
+
+- **[DEPLOYMENT_EKS.md](./DEPLOYMENT_EKS.md)** — the detailed, manual EKS reference (node groups, network policies, IRSA, KEDA, ALB controller, secrets, dependency-correct deploy order, gVisor).
+- **Scaling tiers:** [`bench/`](./bench/) drives the ~2M orders/s platform self-benchmark (multi-broker Kafka, 96 partitions, 8 ingesters); [`deploy-bench/`](./deploy-bench/) runs the load-generator capacity sweep (drain sink, 1→2 nodes).
+- **Supporting:** [infra/README.md](./infra/README.md), the [secret bootstrap guide](./bootstrap/README.md), and the higher-level [docs/aws-deployment.md](./docs/aws-deployment.md).
+
+> **Free-plan caveat:** new AWS Free-plan accounts cap nodes at 2 vCPU, which cannot run the platform (the data tier alone needs ~5 vCPU and the exclusive-core sandbox needs ≥4 vCPU). Use a paid account for EKS, or the local k3s path above for a no-cost demo. See the [architecture doc's deployment section](docs/architecture/ARCHITECTURE.md#deployment-isolation--observability) for details.
 
 ## Architecture Document
 
-- [DeepWiki](https://deepwiki.com/akronim26/match-bench)
+- **[Platform Architecture](docs/architecture/ARCHITECTURE.md)** — canonical, code-derived, standalone
+- [DeepWiki](https://deepwiki.com/akronim26/match-bench) — community-generated; mostly correct but ~2–3 days behind on the latest benchmarking and bug-fix work
 - [Google Doc](https://docs.google.com/document/d/13tPoT2Bfk82HeOVpX94-9zFqoKTqFExBVFwyRXRliBk/edit?usp=sharing)
 
 ## Demo Video

@@ -285,9 +285,15 @@ Key metric families: `iicpc_http_*` (APIs), `iicpc_bot_*` (load gen), `iicpc_ebp
 (capture), `iicpc_telemetry_*` (ingester), `iicpc_validator_*`, `iicpc_scorer_*`,
 `iicpc_leaderboard_api_*`.
 
+![IICPC Measurement Pipeline Grafana dashboard during a live run](assets/grafana-dashboard.jpeg)
+
+*The Measurement Pipeline dashboard during a run — bot-fleet orders-sent vs write errors, telemetry flush/drops, eBPF flushes/drops/reordering, and ingester consume-by-topic; capture drops stay at ~0.*
+
 ---
 
 ### 6. Frontend — Next.js, SSE, build timeline, auth removed
+
+![Frontend run-detail page — scored service-time vs response-time percentiles, HDR histogram, throughput timeline, and per-scenario (constant/spike/ramp) verdicts](assets/result_image.png)
 
 The frontend (`frontend/`) is a **Next.js 14** app (React 18, TanStack Query, Recharts,
 framer-motion, `hdr-histogram-js`) served by nginx — the deployment

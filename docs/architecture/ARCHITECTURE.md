@@ -1524,6 +1524,10 @@ A "wave" is a `wave_ns` slice (default **20 s**, `DEFAULT_WAVE_NS`) of a session
 
 Each snapshot serializes **three HDR blobs** with `V2DeflateSerializer` (`aggregate.rs:296-298, 343-347`): `hdr_encoded`=service_time, `rt_hdr_encoded`=response_time, `slip_hdr_encoded`=schedule_slip. This is the **coordinated-omission decomposition**: to see CO offline you need algo-time, full round-trip, and back-pressure as separate curves. Because each blob is cumulative-per-wave, the downstream merge contract is **last-blob-per-wave then HDR-add across waves** — never sum all rows, which would double-count the cumulative prefix (the same discipline is mirrored in the JS frontend `hdr.ts` and the Python plotter).
 
+![Latency by percentile — scored service_time (t7−t3) vs full round-trip response_time (r9−t0)](assets/run2.jpeg)
+
+*The decomposition rendered for a real run: the flat blue curve is the scored algo service time; the rising yellow tail is the full round trip. The gap between them is non-algo overhead — coordinated omission + network + kernel queueing.*
+
 ### Tail-censoring fix: `service p99 ≤ response p99`
 
 A subtle correctness bug the code fixes: when the load generator abandons an order at its 5 s `RESPONSE_TIMEOUT`, `observe_sent` excludes it from `response_time` (`aggregate.rs:209` requires `!e.timed_out`). But the pod can still egress a late response, so eBPF emits an acked with a huge `pod_service_time`. Recording *that* into `service_time` while `response_time` omits it would make the two histograms cover different populations — and `service p99` could then exceed `response p99`, which is impossible per order. The fix: a `timed_out_orders` map marks abandoned order-ids on the sent side (`aggregate.rs:198-205`) and `observe_acked` early-returns for any marked order (`aggregate.rs:226-229`), keeping both histograms over the same "answered-in-time" population. The marker map is bounded by `TIMED_OUT_IDLE_NS = 15 s` (`aggregate.rs:27`) — deliberately short: under overload the map grows as `timeout_rate × window`, so a long window (e.g. the 60 s HDR ceiling) would OOM the ingester before the 5 s join buffer does. Tests `timed_out_order_excluded_from_service_time`, `ack_before_completed_sent_still_records_service`, and `timed_out_markers_are_evicted` (`aggregate.rs:561-616`) pin this behavior, including the assertion `s.p99_ns <= s.rt_p99_ns`.
@@ -2886,9 +2890,15 @@ Key metric families: `iicpc_http_*` (APIs), `iicpc_bot_*` (load gen), `iicpc_ebp
 (capture), `iicpc_telemetry_*` (ingester), `iicpc_validator_*`, `iicpc_scorer_*`,
 `iicpc_leaderboard_api_*`.
 
+![IICPC Measurement Pipeline Grafana dashboard during a live run](assets/grafana-dashboard.jpeg)
+
+*The Measurement Pipeline dashboard during a run — bot-fleet orders-sent vs write errors, telemetry flush/drops, eBPF flushes/drops/reordering, and ingester consume-by-topic; capture drops stay at ~0.*
+
 ---
 
 ### 6. Frontend — Next.js, SSE, build timeline, auth removed
+
+![Frontend run-detail page — scored service-time vs response-time percentiles, HDR histogram, throughput timeline, and per-scenario (constant/spike/ramp) verdicts](assets/result_image.png)
 
 The frontend (`frontend/`) is a **Next.js 14** app (React 18, TanStack Query, Recharts,
 framer-motion, `hdr-histogram-js`) served by nginx — the deployment

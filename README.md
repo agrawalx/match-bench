@@ -15,6 +15,7 @@
 - [Benchmark Snapshot](#benchmark-snapshot)
 - [Key Features](#key-features)
 - [How It Works](#how-it-works)
+- [Screenshots](#screenshots)
 - [Architecture](#architecture)
 - [Tech Stack](#tech-stack)
 - [Repository Layout](#repository-layout)
@@ -69,6 +70,16 @@ For each submission, match-bench follows this flow:
 8. The score computer produces the final leaderboard score.
 
 The important detail is where measurement happens. match-bench does not ask the submitted algorithm how fast it was. It observes network traffic from outside the algorithm and computes latency from those observations.
+
+## Screenshots
+
+A completed run in the contestant UI — scored kernel-stamped service time vs the full round trip, the HDR latency histogram, the live throughput timeline, and per-scenario (constant / spike / ramp) verdicts:
+
+![Run detail page](docs/architecture/assets/result_image.png)
+
+The latency-by-percentile decomposition: the flat lower curve is the scored algo service time (`t7 − t3`); the rising tail is the full round trip (`r9 − t0`). The gap between them is non-algo overhead — coordinated omission + network + kernel queueing:
+
+![Latency by percentile distribution](docs/architecture/assets/run2.jpeg)
 
 ## Architecture
 

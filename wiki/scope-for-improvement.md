@@ -74,10 +74,8 @@ is the real gap between what the code does today and what the design aspires to.
   serialization audit's **T1 "shard the aggregator across M tasks"** lever is
   identified but **not implemented** — `record` still drains through one Tokio
   task per worker. The 2-broker split + aggregator sharding are the named fixes.
-- **1→2-node linear scaling is argued from architecture, not measured.**
-  `deploy-bench/scale-sweep-off.tsv` has only zero rows; "2 nodes ≈ 1.9×" rests on
-  "independent workers, separate NICs," which is sound but unswept. Run
-  `deploy-bench/drain-scale-sweep.sh "1 2"` to populate it.
+- **Node scaling is validated only to 2 nodes.** The 1→2-node drain sweep measured
+  ~2.02× (near-linear); scaling beyond 2 nodes, and the 3-node ~2M/s tier, is not yet swept.
 - **Worker fan-out is hard-capped at 24** (`validateWorkerCapacity`,
   `bot-fleet-controller/internal/controller/producer.go:88`) because
   `workload.assignments` and `orders.*` are 24 partitions. Scaling past 24

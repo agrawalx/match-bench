@@ -2301,7 +2301,7 @@ flowchart LR
 
 | layer | ceiling | notes |
 |---|---|---|
-| generation, telemetry OFF (drain) | **~600–790k/s per botworker node** | scales ~linearly with nodes |
+| generation, telemetry OFF (drain) | **~600–790k/s per botworker node** | scales ~linearly — measured 2.02× at 2 nodes (§2B) |
 | telemetry ON (single worker → 1 broker) | **~445k/s** | lossless `record` backpressure |
 | measurement pipeline (capture→Kafka→ingester) | **lossless ≥ ~144k samples/s**, ceiling not yet reached | with the capture-fidelity fix |
 | single echo contestant pod (cross-node) | **~150k delivered/s** | one pod + one TCP conn/task; caps before the pipeline |
@@ -2319,11 +2319,12 @@ buckets are warm-up/drain.) `deploy-bench/drain-raw-tps.png` plots this run. A s
 60 s run measured **47,401,664 orders = ~790k/s** at 3.94/4 cores (93% user, 7% kernel),
 consistent with this.
 
-> **Note — node-scaling sweep.** The 1→2-node sweep data file
-> (`deploy-bench/scale-sweep-off.tsv`) is not yet populated, so near-linear
-> multi-node scaling is **expected from the architecture** — workers share no state
-> and ride separate NICs — and is the next measurement to run (see §4), rather than
-> an already-recorded number. The single-node generation figures above are measured.
+**Node scaling (measured).** Adding a second botworker node scales generation
+near-linearly (drain sink, telemetry off): peak **745k/s → 1503k/s = 2.02×**, total orders
+**42.5M → 84.8M = 2.00×**. Workers share no state and ride separate NICs, so the platform
+adds throughput simply by adding nodes.
+
+![1→2 botworker-node drain scaling — 745k/s to 1503k/s (2.02×)](assets/drain-scale-1v2.png)
 
 **C. Latency HDR percentiles** — local k3s, kernel-stamped service_time (µs), decoded
 from the Rust V2-deflate HDR blobs by an independent Python `hdrh` cross-check
@@ -2394,8 +2395,10 @@ floor; "behind" deadlines skip the timer wheel entirely.*
 
 #### (a′) Two follow-on send-path fixes the timer fix exposed
 
-Removing the timer cap surfaced the *real* CPU hogs, both confirmed in code and the
-flamegraph (`docs/bot-worker-flamegraph.svg`):
+Removing the timer cap surfaced the *real* CPU hogs, both confirmed in code and in the
+bot-worker CPU flame graph below:
+
+![Bot-worker CPU flame graph (telemetry off, high single-task rate)](assets/bot-worker-flamegraph.svg)
 
 - **`push_resting` O(n) memmove (87% of CPU).** The resting-order ledger was a `Vec`
   doing `Vec::remove(0)` on every order once full. Fixed to a `VecDeque` with O(1)
@@ -2552,10 +2555,9 @@ These are the *real* gaps, each tied to a file:
    acks/s) and (b) **echo contestant capacity at 2M/s**. Only the drain variant (send +
    telemetry + ingester) is ready to validate first.
 
-2. **The 1→2 node linear-scaling claim is not yet measured.**
-   `deploy-bench/scale-sweep-off.tsv` has only zero rows; "scales ~linearly / 2 nodes ≈
-   1.9×" is argued from architecture (independent workers, separate NICs), not data. Run
-   `deploy-bench/drain-scale-sweep.sh "1 2"` to populate it.
+2. **Node scaling is validated only to 2 nodes.** The 1→2-node drain sweep measured
+   **2.02×** (745k/s → 1503k/s, near-linear); scaling beyond 2 nodes — and the 3-node
+   ~2M/s tier — has not been swept.
 
 3. **Single-pod contestant ceiling ~150k delivered/s.** One echo pod with one TCP
    connection per task caps before the measurement pipeline does. To find the pipeline's
@@ -3109,10 +3111,8 @@ is the real gap between what the code does today and what the design aspires to.
   serialization audit's **T1 "shard the aggregator across M tasks"** lever is
   identified but **not implemented** — `record` still drains through one Tokio
   task per worker. The 2-broker split + aggregator sharding are the named fixes.
-- **1→2-node linear scaling is argued from architecture, not measured.**
-  `deploy-bench/scale-sweep-off.tsv` has only zero rows; "2 nodes ≈ 1.9×" rests on
-  "independent workers, separate NICs," which is sound but unswept. Run
-  `deploy-bench/drain-scale-sweep.sh "1 2"` to populate it.
+- **Node scaling is validated only to 2 nodes.** The 1→2-node drain sweep measured
+  ~2.02× (near-linear); scaling beyond 2 nodes, and the 3-node ~2M/s tier, is not yet swept.
 - **Worker fan-out is hard-capped at 24** (`validateWorkerCapacity`,
   `bot-fleet-controller/internal/controller/producer.go:88`) because
   `workload.assignments` and `orders.*` are 24 partitions. Scaling past 24

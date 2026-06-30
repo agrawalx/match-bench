@@ -56,7 +56,7 @@ spec:
             runAsNonRoot: false
       containers:
         - name: bot-fleet-worker
-          image: ghcr.io/agrawalx/bot-fleet:dev
+          image: ghcr.io/agrawalx/bot-fleet:demo
           ports:
             - name: metrics
               containerPort: 9090

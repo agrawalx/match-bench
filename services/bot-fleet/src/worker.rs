@@ -47,6 +47,25 @@ const RESPONSE_TIMEOUT_NS: u64 = 5_000_000_000;
 
 const BARRIER_WAIT: Duration = Duration::from_secs(120);
 
+// Closed-loop in-flight cap (per task), shared by EVERY protocol write loop (FIX,
+// REST, WS) so backpressure behaviour is identical across them. A slow contestant —
+// or a stalled telemetry path — makes the per-task pending map (sent-but-unacked
+// orders) grow without bound and OOMs the worker. Cap in-flight orders: at the cap
+// the send loop backpressures instead of firing more, pacing the connection to the
+// contestant's real ack rate. A healthy contestant keeps in-flight at ~rate×RTT
+// (orders of magnitude below the cap → never engages); only an over-driven slow
+// contestant is throttled, to its honest sustainable rate. Default 10k/task
+// (~2.4 MiB) → bounded worker memory that fits a small node, and well above
+// per_task_rate × RESPONSE_TIMEOUT for any realistic rate, so it never
+// false-throttles (e.g. an 835k/500-task drain sits at ~8.4k in-flight, under 10k).
+static MAX_INFLIGHT: LazyLock<usize> = LazyLock::new(|| {
+    std::env::var("BOT_MAX_INFLIGHT_PER_TASK")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|&n| n >= 1)
+        .unwrap_or(10_000)
+});
+
 #[derive(Clone)]
 /// CancelToken stores the state passed across this module boundary.
 /// Keep field changes compatible with callers and serialized contracts.
@@ -114,8 +133,8 @@ pub async fn run(mut config: Config) -> Result<()> {
     )
     .await?;
 
-    let control_producer = kafka::control_producer(&config.kafka_brokers)?;
-    let telemetry_producer = kafka::telemetry_producer(&config.kafka_brokers)?;
+    let control_producer = kafka::control_producer(&config.kafka_brokers)?; // the one which sends ready signals back to bot fleet controller
+    let telemetry_producer = kafka::telemetry_producer(&config.kafka_brokers)?; // the one which is responsible for sending orders.acked to kafka 
     if let Some(n) = kafka::topic_partition_count(&telemetry_producer, &config.orders_sent_topic) {
         if n != config.orders_partitions {
             tracing::info!(
@@ -270,6 +289,37 @@ async fn run_workload(
         config.orders_partitions,
     );
 
+    // 1s send-health snapshot. Logs to the pod's own stdout (survives a dead
+    // port-forward and is finer than the 15s Prometheus scrape), giving a
+    // second-by-second timeline to align against the eBPF capture's decoded/
+    // ringbuf_dropped log. The cliff diagnosis: orders_sent rate -> 0 with
+    // write_block spiking and inflight pinned high == contestant stopped
+    // draining; orders_sent rate steady while eBPF decoded craters == capture.
+    let snapshot_session = spec.session_id.clone();
+    let snapshot = tokio::spawn(async move {
+        let mut ticker = time::interval(Duration::from_secs(1));
+        ticker.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
+        let mut last_sent = metrics::orders_sent_value();
+        let start = unix_nanos();
+        loop {
+            ticker.tick().await;
+            let now_sent = metrics::orders_sent_value();
+            let rate = now_sent.saturating_sub(last_sent);
+            last_sent = now_sent;
+            let max_block_ms = metrics::take_max_write_block_ns() as f64 / 1e6;
+            info!(
+                session_id = %snapshot_session,
+                t_s = (unix_nanos().saturating_sub(start)) / 1_000_000_000,
+                orders_sent_total = now_sent,
+                send_rate_per_s = rate,
+                inflight = metrics::inflight_value(),
+                max_write_block_ms = max_block_ms,
+                write_errors = metrics::write_errors_value(),
+                "bot send snapshot"
+            );
+        }
+    });
+
     let result = fire_workload(
         config,
         &spec,
@@ -279,6 +329,7 @@ async fn run_workload(
         cancel,
     )
     .await;
+    snapshot.abort();
     telemetry.close().await?;
     result
 }
@@ -729,22 +780,7 @@ async fn fix_write_loop(
     });
     let batch_max = *MAX_WRITE_BATCH;
 
-    // Closed-loop in-flight cap (per task). A slow contestant — or a stalled telemetry path —
-    // makes the per-task pending map (sent-but-unacked orders) grow without bound and OOMs the
-    // worker. Cap in-flight orders: at the cap the send loop backpressures instead of firing
-    // more, pacing this connection to the contestant's real ack rate. A healthy contestant
-    // keeps in-flight at ~rate×RTT (orders of magnitude below the cap → never engages); only an
-    // over-driven slow contestant is throttled, to its honest sustainable rate. Default 10k/task
-    // (~2.4 MiB) → bounded worker memory that fits a small node, and well above
-    // per_task_rate × RESPONSE_TIMEOUT for any realistic rate, so it never false-throttles
-    // (e.g. an 835k/500-task drain sits at ~8.4k in-flight, under 10k).
-    static MAX_INFLIGHT: LazyLock<usize> = LazyLock::new(|| {
-        std::env::var("BOT_MAX_INFLIGHT_PER_TASK")
-            .ok()
-            .and_then(|v| v.parse::<usize>().ok())
-            .filter(|&n| n >= 1)
-            .unwrap_or(10_000)
-    });
+    // Per-task closed-loop in-flight cap (module-level MAX_INFLIGHT, shared with the REST/WS path).
     let max_inflight = *MAX_INFLIGHT;
 
     let interval_ns = 1_000_000_000_u64 / u64::from(task.target_rps);
@@ -836,6 +872,7 @@ async fn fix_write_loop(
                 );
             }
         }
+        metrics::inflight_add(count);
 
         let write_start_ns = unix_nanos();
         // Block on the write rather than imposing a per-write timeout. When the contestant
@@ -876,6 +913,7 @@ async fn fix_write_loop(
                         map.remove(&frame.order_id);
                     }
                 }
+                metrics::inflight_sub(count);
                 metrics::order_write_error();
                 warn!(
                     task_id = task.task_id,
@@ -942,6 +980,7 @@ async fn fix_read_loop(
                 map.remove(clord_id)
             };
             let Some(p) = pending_order else { continue };
+            metrics::inflight_sub(1);
 
             let recv_done_ts_ns = unix_nanos();
             telemetry
@@ -1017,6 +1056,7 @@ async fn watchdog_loop(
             evicted
         };
 
+        metrics::inflight_sub(to_evict.len());
         for p in to_evict {
             telemetry
                 .record(OrderSentEvent {
@@ -1186,7 +1226,10 @@ async fn rw_write_loop(
     global_seed: u64,
     task_start_ns: u64,
     task_end_ns: u64,
-    write_timeout: Duration,
+    // Intentionally unused: a per-write timeout is wrong for a load generator (see the write
+    // site) — it turns sink backpressure into permanent task death and collapses aggregate load.
+    // Matches the FIX path; backpressure comes from the in-flight cap + blocking write instead.
+    _write_timeout: Duration,
     cancel: CancelToken,
 ) -> Result<u64> {
     time::sleep_until(instant_from_unix_nanos(task_start_ns)).await;
@@ -1201,11 +1244,26 @@ async fn rw_write_loop(
         global_seed ^ u64::from(task.task_id),
     );
     let mut sent: u64 = 0;
+    let max_inflight = *MAX_INFLIGHT;
 
     loop {
         if should_stop_sending(&cancel, task_end_ns) {
             break;
         }
+
+        // In-flight backpressure (same as the FIX path): if too many orders are awaiting acks
+        // (contestant can't keep up, or telemetry is stalled), wait for pending to drain — via
+        // acks or watchdog eviction — before issuing more, instead of growing memory unbounded.
+        while pending.lock().expect("pending map poisoned").len() >= max_inflight {
+            if should_stop_sending(&cancel, task_end_ns) {
+                return Ok(sent);
+            }
+            tokio::select! {
+                _ = time::sleep(Duration::from_millis(1)) => {}
+                _ = cancel.cancelled() => return Ok(sent),
+            }
+        }
+
         let target_send_ts_ns = next_send_ns;
         if next_send_ns > unix_nanos() {
             tokio::select! {
@@ -1244,8 +1302,20 @@ async fn rw_write_loop(
         }
 
         let write_start_ns = unix_nanos();
-        match time::timeout(write_timeout, writer.write_order(&frame)).await {
-            Ok(Ok(())) => {
+        // Block on the write rather than imposing a per-write timeout (same as the FIX path).
+        // When the contestant can't drain fast enough its TCP receive window fills and the write
+        // stalls; TCP flow control then paces THIS task down to the contestant's real service
+        // rate, so aggregate load plateaus at the sink's capacity instead of overshooting. A short
+        // per-write timeout did the opposite: it forced the writer to exit, so under sustained
+        // backpressure every loaded task exited at once and the offered load collapsed to zero
+        // (the ramp-collapse symptom). Cancellation still tears the loop down promptly at session
+        // end, and a genuinely dead peer surfaces as a write error below.
+        let write_res = tokio::select! {
+            res = writer.write_order(&frame) => res,
+            _ = cancel.cancelled() => break,
+        };
+        match write_res {
+            Ok(()) => {
                 let send_ts_ns = unix_nanos();
                 metrics::order_sent();
                 metrics::observe_write(send_ts_ns.saturating_sub(write_start_ns), 1);
@@ -1259,25 +1329,13 @@ async fn rw_write_loop(
                 }
                 sent += 1;
             }
-            Ok(Err(err)) => {
+            Err(err) => {
                 pending
                     .lock()
                     .expect("pending map poisoned")
                     .remove(&frame.order_id);
                 metrics::order_write_error();
                 warn!(task_id = task.task_id, seq, error = %err, "REST/WS write failed; writer exiting");
-                return Ok(sent);
-            }
-            Err(_) => {
-                pending
-                    .lock()
-                    .expect("pending map poisoned")
-                    .remove(&frame.order_id);
-                metrics::order_write_error();
-                warn!(
-                    task_id = task.task_id,
-                    seq, "REST/WS write timeout; writer exiting"
-                );
                 return Ok(sent);
             }
         }

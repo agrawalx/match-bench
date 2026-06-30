@@ -51,10 +51,8 @@ export function SessionCards({ sessions }: { sessions: SessionDetail[] }) {
               )}
             />
             <Item
-              label="Error rate"
-              value={formatPercent(
-                max(session.timeline.map((point) => point.error_rate * 100)),
-              )}
+              label="Correctness"
+              value={formatCorrectness(session.correctness_score)}
             />
             <Item
               label="Samples"
@@ -68,11 +66,13 @@ export function SessionCards({ sessions }: { sessions: SessionDetail[] }) {
 }
 
 /**
- * formatPercent performs the module-specific operation described by its name.
- * It keeps inputs, side effects, and returned values within this module's contract.
+ * formatCorrectness renders a per-scenario correctness score (0..1) as a
+ * percentage, or "pending" before the validator has scored the session.
  */
-function formatPercent(value: number): string {
-  return Number.isFinite(value) ? `${value.toFixed(2)}%` : "-";
+function formatCorrectness(value?: number): string {
+  return typeof value === "number" && Number.isFinite(value)
+    ? `${(value * 100).toFixed(2)}%`
+    : "pending";
 }
 
 /**

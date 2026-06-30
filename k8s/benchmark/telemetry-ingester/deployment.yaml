@@ -30,7 +30,7 @@ spec:
       automountServiceAccountToken: false
       containers:
         - name: telemetry-ingester
-          image: ghcr.io/agrawalx/telemetry-ingester:dev
+          image: ghcr.io/agrawalx/telemetry-ingester:demo
           ports:
             - name: metrics
               containerPort: 9090
@@ -102,7 +102,7 @@ spec:
       automountServiceAccountToken: false
       containers:
         - name: telemetry-rollup
-          image: ghcr.io/agrawalx/telemetry-ingester:dev
+          image: ghcr.io/agrawalx/telemetry-ingester:demo
           command: ["/usr/local/bin/telemetry-rollup"]
           ports:
             - name: metrics

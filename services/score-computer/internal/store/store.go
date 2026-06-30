@@ -261,7 +261,7 @@ SELECT p.run_group_id
  WHERE p.run_group_id=$1 AND sc.run_group_id IS NULL
  GROUP BY p.run_group_id
 HAVING COUNT(DISTINCT p.session_id) = (SELECT COUNT(DISTINCT session_id) FROM runs WHERE run_group_id=$1)
-   AND COUNT(DISTINCT p.session_id) >= 3
+   AND COUNT(DISTINCT p.session_id) >= 1
    AND BOOL_AND(p.terminal_status IN ('completed','failed'))
    AND BOOL_AND(p.total_fills IS NOT NULL)`, runGroupID)
 	if err != nil {
@@ -290,7 +290,7 @@ SELECT p.run_group_id
  WHERE sc.run_group_id IS NULL
  GROUP BY p.run_group_id
 HAVING COUNT(DISTINCT p.session_id) = (SELECT COUNT(DISTINCT session_id) FROM runs WHERE run_group_id=p.run_group_id)
-   AND COUNT(DISTINCT p.session_id) >= 3
+   AND COUNT(DISTINCT p.session_id) >= 1
    AND BOOL_AND(p.terminal_status IN ('completed','failed'))
    AND BOOL_AND(p.total_fills IS NOT NULL)`)
 	if err != nil {

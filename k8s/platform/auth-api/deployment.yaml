@@ -25,7 +25,7 @@ spec:
       automountServiceAccountToken: false
       containers:
         - name: auth-api
-          image: ghcr.io/agrawalx/auth-api:dev
+          image: ghcr.io/agrawalx/auth-api:demo
           ports:
             - name: http
               containerPort: 8080

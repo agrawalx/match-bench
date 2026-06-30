@@ -27,7 +27,7 @@ spec:
       serviceAccountName: sandbox-orchestrator
       containers:
         - name: sandbox-orchestrator
-          image: ghcr.io/agrawalx/sandbox-orchestrator:dev
+          image: ghcr.io/agrawalx/sandbox-orchestrator:demo
           ports:
             - name: http
               containerPort: 8080
@@ -56,7 +56,7 @@ spec:
             - name: CAPTURE_ENABLED
               value: "true"
             - name: CAPTURE_IMAGE
-              value: ghcr.io/agrawalx/ebpf-latency:dev
+              value: ghcr.io/agrawalx/ebpf-latency:demo
             - name: KAFKA_BROKERS
               value: kafka.data.svc.cluster.local:9092
             - name: ALGO_IMAGE_PULL_SECRET

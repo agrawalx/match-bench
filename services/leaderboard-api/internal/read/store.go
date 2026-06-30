@@ -200,10 +200,15 @@ type RunDetail struct {
 // SessionDetail groups the state and dependencies used by this package.
 // Keep this type aligned with the runtime contract around it.
 type SessionDetail struct {
-	SessionID string        `json:"session_id"`
-	Scenario  string        `json:"scenario"`
-	Status    string        `json:"status"`
-	Timeline  []MetricPoint `json:"timeline"`
+	SessionID string `json:"session_id"`
+	Scenario  string `json:"scenario"`
+	Status    string `json:"status"`
+	// Per-scenario correctness from score_progress (nil until the validator has
+	// scored this session). CorrectnessScore = ValidFills/TotalFills.
+	CorrectnessScore *float64      `json:"correctness_score,omitempty"`
+	ValidFills       *int64        `json:"valid_fills,omitempty"`
+	TotalFills       *int64        `json:"total_fills,omitempty"`
+	Timeline         []MetricPoint `json:"timeline"`
 }
 
 // MetricPoint groups the state and dependencies used by this package.
@@ -247,8 +252,9 @@ func (s *Store) RunDetail(ctx context.Context, runGroupID string) (RunDetail, er
 		d.Score = &scoreRow
 	}
 	rows, err := s.meta.Query(ctx, `
-SELECT r.session_id, sc.name, r.status
+SELECT r.session_id, sc.name, r.status, p.correctness_score, p.valid_fills, p.total_fills
   FROM runs r JOIN scenarios sc ON sc.scenario_id=r.scenario_id
+  LEFT JOIN score_progress p ON p.session_id=r.session_id
  WHERE r.run_group_id=$1
  ORDER BY sc.sort_order, sc.name`, runGroupID)
 	if err != nil {
@@ -257,7 +263,7 @@ SELECT r.session_id, sc.name, r.status
 	defer rows.Close()
 	for rows.Next() {
 		var sd SessionDetail
-		if err := rows.Scan(&sd.SessionID, &sd.Scenario, &sd.Status); err != nil {
+		if err := rows.Scan(&sd.SessionID, &sd.Scenario, &sd.Status, &sd.CorrectnessScore, &sd.ValidFills, &sd.TotalFills); err != nil {
 			return d, err
 		}
 		sd.Timeline, err = s.Chart(ctx, sd.SessionID)

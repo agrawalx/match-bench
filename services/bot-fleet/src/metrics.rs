@@ -8,16 +8,26 @@ use std::{
     env,
     io::{Read, Write},
     net::{TcpListener, TcpStream},
-    sync::LazyLock,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        LazyLock,
+    },
     thread,
     time::Duration,
 };
 
 use prometheus_client::{
     encoding::text::encode,
-    metrics::{counter::Counter, family::Family, histogram::Histogram},
+    metrics::{counter::Counter, family::Family, gauge::Gauge, histogram::Histogram},
     registry::Registry,
 };
+
+// Rolling max write_all block (ns) observed since the last snapshot read. The 1s
+// snapshot logger reads-and-resets this, so each line reports the worst write
+// backpressure seen in that second — the cleanest "contestant stopped draining"
+// tell that survives even if Prometheus scraping (15s) is too coarse or the
+// port-forward dies. Separate from the write_seconds histogram, which is cumulative.
+static MAX_WRITE_BLOCK_NS: AtomicU64 = AtomicU64::new(0);
 
 type ResultFamily = Family<[(&'static str, &'static str); 1], Counter>;
 
@@ -31,6 +41,12 @@ struct Metrics {
     connect_failures: Counter,
     orders_sent: Counter,
     order_write_errors: Counter,
+    // inflight: orders sent-but-unacked across all FIX tasks (sum of every task's
+    // pending map). The direct contestant-drain readout: if the contestant stops
+    // acking, this climbs to BOT_MAX_INFLIGHT_PER_TASK * tasks and the writers
+    // throttle. Distinguishes "contestant not draining" (inflight pinned high)
+    // from "eBPF not decoding" (inflight normal, sends continue).
+    inflight: Gauge,
     telemetry_dropped: Counter,
     telemetry_batches: Counter,
     telemetry_events_flushed: Counter,
@@ -74,6 +90,7 @@ static METRICS: LazyLock<Metrics> = LazyLock::new(|| {
     let connect_failures = Counter::default();
     let orders_sent = Counter::default();
     let order_write_errors = Counter::default();
+    let inflight = Gauge::default();
     let telemetry_dropped = Counter::default();
     let telemetry_batches = Counter::default();
     let telemetry_events_flushed = Counter::default();
@@ -110,6 +127,11 @@ static METRICS: LazyLock<Metrics> = LazyLock::new(|| {
         "iicpc_bot_order_write_errors",
         "Bot order websocket write errors.",
         order_write_errors.clone(),
+    );
+    registry.register(
+        "iicpc_bot_inflight",
+        "Orders sent-but-unacked across all FIX tasks (contestant-drain backpressure).",
+        inflight.clone(),
     );
     registry.register(
         "iicpc_bot_telemetry_events_dropped",
@@ -150,6 +172,7 @@ static METRICS: LazyLock<Metrics> = LazyLock::new(|| {
         connect_failures,
         orders_sent,
         order_write_errors,
+        inflight,
         telemetry_dropped,
         telemetry_batches,
         telemetry_events_flushed,
@@ -256,11 +279,44 @@ pub fn telemetry_flushed(events: usize) {
 pub fn observe_write(write_ns: u64, batch_size: usize) {
     METRICS.write_seconds.observe(write_ns as f64 / 1e9);
     METRICS.write_batch_size.observe(batch_size as f64);
+    MAX_WRITE_BLOCK_NS.fetch_max(write_ns, Ordering::Relaxed);
 }
 
 /// observe_slip records one order's lateness vs its paced schedule (ns).
 pub fn observe_slip(slip_ns: u64) {
     METRICS.schedule_slip_seconds.observe(slip_ns as f64 / 1e9);
+}
+
+/// inflight_add increments the global sent-but-unacked gauge by `n` (one write batch).
+pub fn inflight_add(n: usize) {
+    METRICS.inflight.inc_by(n as i64);
+}
+
+/// inflight_sub decrements the global sent-but-unacked gauge by `n` (acks or evictions).
+pub fn inflight_sub(n: usize) {
+    METRICS.inflight.dec_by(n as i64);
+}
+
+/// Snapshot accessors for the 1s debug logger (worker.rs). Reading these is cheap
+/// and lock-free; the logger derives per-second rates from successive samples.
+pub fn orders_sent_value() -> u64 {
+    METRICS.orders_sent.get()
+}
+
+/// inflight_value returns the current sent-but-unacked depth across all tasks.
+pub fn inflight_value() -> i64 {
+    METRICS.inflight.get()
+}
+
+/// write_errors_value returns the cumulative count of failed order writes.
+pub fn write_errors_value() -> u64 {
+    METRICS.order_write_errors.get()
+}
+
+/// take_max_write_block_ns returns the worst write_all block seen since the last
+/// call and resets the tracker to zero (read-and-reset for per-second reporting).
+pub fn take_max_write_block_ns() -> u64 {
+    MAX_WRITE_BLOCK_NS.swap(0, Ordering::Relaxed)
 }
 
 /// render performs the module-specific operation described by its name.
@@ -300,4 +356,31 @@ fn handle_client(mut stream: TcpStream) {
         body
     );
     let _ = stream.write_all(response.as_bytes());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn inflight_gauge_round_trips() {
+        let start = inflight_value();
+        inflight_add(64);
+        inflight_add(64);
+        assert_eq!(inflight_value(), start + 128);
+        inflight_sub(128);
+        assert_eq!(inflight_value(), start);
+    }
+
+    #[test]
+    fn max_write_block_reads_and_resets() {
+        // swap out any residue first so this test owns the tracker.
+        take_max_write_block_ns();
+        observe_write(5_000_000, 1);
+        observe_write(20_000_000, 1);
+        observe_write(3_000_000, 1);
+        // take returns the worst seen, then resets to zero.
+        assert_eq!(take_max_write_block_ns(), 20_000_000);
+        assert_eq!(take_max_write_block_ns(), 0);
+    }
 }

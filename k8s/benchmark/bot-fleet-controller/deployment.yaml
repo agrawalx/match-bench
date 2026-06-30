@@ -29,7 +29,7 @@ spec:
       automountServiceAccountToken: false
       containers:
         - name: bot-fleet-controller
-          image: ghcr.io/agrawalx/bot-fleet-controller:dev
+          image: ghcr.io/agrawalx/bot-fleet-controller:demo
           ports:
             - name: http
               containerPort: 8080

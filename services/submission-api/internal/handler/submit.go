@@ -122,18 +122,29 @@ func Submit(ms *store.MinioStore, pg *store.PostgresStore, pub publisher.Publish
 				writeError(w, http.StatusInternalServerError, "lookup failed")
 				return
 			}
+			// Duplicate by sha256: the identical artifact was already uploaded and
+			// (usually) already built. Instead of rejecting (was: 409), accept
+			// idempotently and return the existing submission so the caller can
+			// re-run it — the build phase is skipped because the existing image is
+			// reused. This makes re-running the same contestant cheap (no rebuild).
 			if existing != nil {
-				existing, err = claimOrResolveOwner(r.Context(), pg, existing, contestantID)
-				if err != nil {
-					log.ErrorContext(r.Context(), "claim duplicate submission contestant failed", "submission_id", existingID, "error", err)
-					writeError(w, http.StatusInternalServerError, "failed to bind duplicate submission")
-					return
+				if bound, berr := claimOrResolveOwner(r.Context(), pg, existing, contestantID); berr == nil && bound != nil {
+					existing = bound
 				}
-				if existing.ContestantID != contestantID {
-					metrics.Counter("submission_duplicate_total", "Duplicate submissions detected by sha256.", nil, 1)
-					writeError(w, http.StatusConflict, "duplicate submission")
-					return
-				}
+				metrics.Counter("submission_duplicate_total", "Duplicate submissions detected by sha256.", nil, 1)
+				log.InfoContext(r.Context(), "duplicate submission accepted; reusing existing build (skip build)",
+					"submission_id", existing.SubmissionID, "status", existing.Status)
+				writeJSON(w, http.StatusOK, submitResponse{
+					SubmissionID: existing.SubmissionID,
+					Status:       existing.Status,
+					SHA256:       existing.SHA256,
+					Language:     existing.Language,
+					Protocol:     existing.Protocol,
+					Port:         existing.Port,
+					TeamName:     existing.TeamName,
+					CreatedAt:    existing.CreatedAt,
+				})
+				return
 			}
 			metrics.Counter("submission_duplicate_total", "Duplicate submissions detected by sha256.", nil, 1)
 			writeErrorWithID(w, http.StatusConflict, "duplicate submission", existingID)

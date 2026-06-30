@@ -24,6 +24,10 @@ export interface SessionDetail {
   session_id: string;
   scenario: string;
   status: string;
+  // Per-scenario correctness from score_progress (undefined until scored).
+  correctness_score?: number;
+  valid_fills?: number;
+  total_fills?: number;
   timeline: MetricPoint[];
 }
 

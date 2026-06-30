@@ -33,7 +33,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: score-computer
-          image: score-computer:local
+          image: ghcr.io/agrawalx/score-computer:demo
           imagePullPolicy: IfNotPresent
           ports:
             - name: http

@@ -27,7 +27,7 @@ spec:
       serviceAccountName: build-spawner
       containers:
         - name: spawner
-          image: ghcr.io/agrawalx/spawner:dev
+          image: ghcr.io/agrawalx/spawner:demo
           ports:
             - name: metrics
               containerPort: 9090
@@ -39,7 +39,7 @@ spec:
             - name: ENVIRONMENT
               value: prod
             - name: SPAWNER_IMAGE
-              value: ghcr.io/agrawalx/spawner:dev
+              value: ghcr.io/agrawalx/spawner:demo
             - name: K8S_NAMESPACE
               value: build
             - name: DATABASE_URL

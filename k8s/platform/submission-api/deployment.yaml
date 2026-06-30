@@ -27,7 +27,7 @@ spec:
       automountServiceAccountToken: false
       containers:
         - name: submission-api
-          image: ghcr.io/agrawalx/submission-api:dev
+          image: ghcr.io/agrawalx/submission-api:demo
           ports:
             - containerPort: 8080
           env:

@@ -13,7 +13,7 @@ export interface RunDetail {
   run_group_id: string;
   score?: LeaderboardEntry;
   sessions: SessionDetail[];
-  violations: ViolationEntry[];
+  violation_counts: ViolationCount[];
 }
 
 /**
@@ -49,30 +49,18 @@ export interface MetricPoint {
   hdr_encoded?: string; // service_time t7-t3 (scored)
   rt_hdr_encoded?: string; // response_time r9-t0 (client round trip)
   slip_hdr_encoded?: string; // schedule_slip t1-t0 (back-pressure)
+  match_hdr_encoded?: string; // matching latency t7-t3 for taker fills only (FIX 851=2)
 }
 
 /**
- * ViolationEntry describes structured data exchanged by this module.
+ * ViolationCount is the aggregate number of correctness violations of one type
+ * within one session (server-side GROUP BY, not a raw-row sample).
  * Keep this shape aligned with API and component expectations.
  */
-export interface ViolationEntry {
+export interface ViolationCount {
   session_id: string;
-  contestant_id: string;
   violation_type: string;
-  order_id: string;
-  detail: string;
-  detected_at_ns: number;
-}
-
-/**
- * LatencyHistogram describes structured data exchanged by this module.
- * Keep this shape aligned with API and component expectations.
- */
-export interface LatencyHistogram {
-  buckets: { upper_bound_us: number; count: number }[];
-  p50_us: number;
-  p99_us: number;
-  max_us: number;
+  count: number;
 }
 
 /**
@@ -93,6 +81,8 @@ export interface ThroughputWindow {
 export interface RunGroupStatus {
   run_group_id: string;
   submission_id: string;
+  contestant_id?: string;
+  team_name?: string;
   status: "requested" | "running" | "completed" | "failed" | string;
   created_at: string;
   runs: RunGroupChild[];

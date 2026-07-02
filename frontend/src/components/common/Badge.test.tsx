@@ -22,7 +22,9 @@ describe("Badge", () => {
     ];
     variants.forEach((variant) => {
       render(<Badge variant={variant} />);
-      expect(screen.getByText(variant.toUpperCase())).toBeInTheDocument();
+      // Badge renders the raw variant text; capitalization is CSS-only, so the
+      // DOM text content stays lowercase.
+      expect(screen.getByText(variant)).toBeInTheDocument();
     });
   });
 });

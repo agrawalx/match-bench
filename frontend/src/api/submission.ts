@@ -19,7 +19,6 @@ import type {
  */
 export function uploadSubmission(
   file: File,
-  token: string,
   onProgress: (pct: number) => void,
 ): Promise<{ submission_id: string; reused?: boolean }> {
   return new Promise((resolve, reject) => {
@@ -28,7 +27,6 @@ export function uploadSubmission(
 
     const xhr = new XMLHttpRequest();
     xhr.open("POST", platformConfig.endpoints.submission.create);
-    xhr.setRequestHeader("Authorization", `Bearer ${token}`);
     xhr.upload.onprogress = (event) => {
       if (event.lengthComputable)
         onProgress(Math.round((event.loaded / event.total) * 100));
@@ -67,11 +65,9 @@ export function uploadSubmission(
  */
 export async function getSubmissionStatus(
   submissionId: string,
-  token: string,
 ): Promise<SubmissionStatus> {
   const status = await apiFetch<BackendSubmissionStatus>(
     platformConfig.endpoints.submission.detail(submissionId),
-    { token },
   );
   return { ...status, status: normalizeSubmissionStatus(status.status) };
 }
@@ -80,13 +76,10 @@ export async function getSubmissionStatus(
  * createRun performs the module-specific operation described by its name.
  * It keeps inputs, side effects, and returned values within this module's contract.
  */
-export function createRun(
-  submissionId: string,
-  token: string,
-): Promise<RunGroupStatus> {
+export function createRun(submissionId: string): Promise<RunGroupStatus> {
   return apiFetch<RunGroupStatus>(
     platformConfig.endpoints.submission.benchmark(submissionId),
-    { method: "POST", token },
+    { method: "POST" },
   );
 }
 
@@ -96,31 +89,31 @@ export function createRun(
  */
 export function getRunGroupStatus(
   runGroupId: string,
-  token: string,
 ): Promise<RunGroupStatus> {
   return apiFetch<RunGroupStatus>(
     platformConfig.endpoints.submission.runGroup(runGroupId),
-    { token },
   );
 }
 
 /**
- * getRunGroups performs the module-specific operation described by its name.
+ * getRunGroups lists benchmark run-groups. Auth is off, so this is a public
+ * cross-contestant listing; `search` filters by contestant id / team name.
  * It keeps inputs, side effects, and returned values within this module's contract.
  */
-export function getRunGroups(
-  params: { contestantId?: string; submissionIds?: string[]; limit?: number },
-  token: string,
-): Promise<RunGroupHistoryResponse> {
+export function getRunGroups(params: {
+  search?: string;
+  submissionIds?: string[];
+  limit?: number;
+}): Promise<RunGroupHistoryResponse> {
   const query = new URLSearchParams();
   for (const submissionId of params.submissionIds ?? []) {
     query.append("submission_id", submissionId);
   }
+  if (params.search?.trim()) query.set("contestant", params.search.trim());
   if (params.limit) query.set("limit", String(params.limit));
   const suffix = query.toString();
   return apiFetch<RunGroupHistoryResponse>(
     `${platformConfig.endpoints.submission.runGroups}${suffix ? `?${suffix}` : ""}`,
-    { token },
   );
 }
 

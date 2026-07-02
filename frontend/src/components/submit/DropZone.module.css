@@ -1,6 +1,5 @@
 .wrap {
   display: flex;
-  min-height: 100%;
   flex-direction: column;
 }
 
@@ -11,54 +10,56 @@
   align-items: center;
   justify-content: center;
   width: 100%;
-  min-height: 360px;
-  flex: 1;
-  gap: var(--space-2);
-  color: var(--color-text-tertiary);
-  background: var(--color-surface-1);
-  border: 1px dashed #2a2a2a;
-  border-radius: var(--radius-md);
+  gap: 10px;
+  padding: 38px 24px;
+  color: var(--text-2);
+  background: var(--s1);
+  border: 1.5px dashed var(--border);
+  border-radius: var(--radius-2xl);
   cursor: pointer;
+  text-align: center;
   transition:
-    background var(--duration-base) var(--ease-std),
-    border-color var(--duration-base) var(--ease-std),
-    color var(--duration-base) var(--ease-std);
+    background var(--dur) var(--ease-std),
+    border-color var(--dur) var(--ease-std);
 }
 
-.zone:hover {
-  color: var(--color-text-secondary);
-  border-color: #3b3b3b;
-}
-
+.zone:hover,
 .active {
-  border-color: var(--color-accent);
-  background: rgba(0, 229, 255, 0.03);
+  border-color: var(--accent);
+  background: var(--accent-subtle);
 }
 
 .icon {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 56px;
-  height: 56px;
-  color: var(--color-accent);
-  background: var(--color-accent-subtle);
-  border: 1px solid var(--color-accent-dim);
-  border-radius: var(--radius-md);
+  width: 46px;
+  height: 46px;
+  color: var(--accent);
+  background: var(--accent-subtle);
+  border-radius: var(--radius-xl);
+}
+
+.zone span {
+  font-family: var(--font-sans);
+  font-weight: 600;
+  font-size: 15px;
+  color: var(--text-1);
 }
 
 .zone small {
-  color: var(--color-text-muted);
-  font-family: var(--font-mono);
-  font-size: 12px;
+  color: var(--text-3);
+  font-family: var(--font-sans);
+  font-size: 12.5px;
+  font-weight: 400;
 }
 
 .file {
   max-width: min(520px, 84vw);
   overflow: hidden;
-  color: var(--color-text-primary);
-  font-family: var(--font-mono);
-  font-size: 14px;
+  color: var(--text-1) !important;
+  font-family: var(--font-mono) !important;
+  font-size: 13px !important;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -70,7 +71,12 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  color: var(--color-text-secondary);
+  color: var(--text-3);
+  cursor: pointer;
+}
+
+.clear:hover {
+  color: var(--text-1);
 }
 
 .input {
@@ -79,7 +85,7 @@
 
 .error {
   margin: 8px 0 0;
-  color: var(--color-error);
-  font-family: var(--font-mono);
+  color: var(--error);
+  font-family: var(--font-sans);
   font-size: 12px;
 }

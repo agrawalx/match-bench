@@ -34,10 +34,8 @@ export function Badge({ variant }: { variant: BadgeVariant | string }) {
       role="status"
       aria-label={`Status: ${variant}`}
     >
-      {(safeVariant === "running" || safeVariant === "building") && (
-        <span className={styles.dot}>●</span>
-      )}
-      {variant.toUpperCase()}
+      <span className={styles.dot} aria-hidden="true" />
+      {variant}
     </span>
   );
 }

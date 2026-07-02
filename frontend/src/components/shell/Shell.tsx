@@ -5,28 +5,23 @@
  */
 "use client";
 
-import { PacketFlowCanvas } from "@/components/canvas/PacketFlowCanvas";
+import { SideNav } from "./SideNav";
 import { TopBar } from "./TopBar";
 import styles from "./Shell.module.css";
 
 /**
- * Shell performs the module-specific operation described by its name.
- * It keeps inputs, side effects, and returned values within this module's contract.
+ * Shell lays out the persistent app chrome: a fixed sidebar for primary
+ * navigation and a top bar over the scrolling content column. No ambient
+ * animation — the chrome stays out of the way of the measurement data.
  */
 export function Shell({ children }: { children: React.ReactNode }) {
   return (
-    <>
-      <PacketFlowCanvas aria-hidden="true" />
-      <span className="sr-only">
-        Ambient animation showing data flowing through the IICPC benchmark
-        pipeline
-      </span>
-      <div className={styles.layout}>
+    <div className={styles.layout}>
+      <SideNav />
+      <div className={styles.main}>
         <TopBar />
-        <div className={styles.body}>
-          <main className={styles.content}>{children}</main>
-        </div>
+        <main className={styles.content}>{children}</main>
       </div>
-    </>
+    </div>
   );
 }

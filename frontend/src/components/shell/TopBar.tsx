@@ -5,85 +5,38 @@
  */
 "use client";
 
-import Image from "next/image";
-import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { Gauge, Send, Trophy } from "lucide-react";
-import { GoogleButton } from "@/auth/GoogleButton";
-import { useAuth } from "@/auth/useAuth";
-import { UserMenu } from "./UserMenu";
 import styles from "./TopBar.module.css";
 
-/**
- * TopBar performs the module-specific operation described by its name.
- * It keeps inputs, side effects, and returned values within this module's contract.
- */
-export function TopBar() {
-  const { status, user } = useAuth();
-  const pathname = usePathname();
-  const authenticated = status === "authenticated" && user;
+const TITLES: Record<string, string> = {
+  "/": "Overview",
+  "/leaderboard": "Leaderboard",
+  "/run": "All runs",
+  "/submit": "Submit engine",
+};
 
-  return (
-    <header className={styles.bar}>
-      <div className={styles.left}>
-        <span className={styles.logo}>IICPC</span>
-        <span className={styles.separator}>|</span>
-        <span className={styles.session}>
-          <span className={styles.liveDot} />
-          SESSION&nbsp;GLOBAL
-        </span>
-      </div>
-      <nav className={styles.tabs} aria-label="Primary">
-        {[
-          { href: "/leaderboard", label: "Leaderboard", icon: Trophy },
-          { href: "/submit", label: "Submit", icon: Send },
-          { href: "/run", label: "My Run", icon: Gauge },
-        ].map((item) => (
-          <Link
-            key={item.href}
-            className={`${styles.tab} ${pathname === item.href ? styles.activeTab : ""}`}
-            href={item.href}
-          >
-            <item.icon size={14} strokeWidth={1.8} aria-hidden="true" />
-            {item.label}
-          </Link>
-        ))}
-      </nav>
-      <div className={styles.right}>
-        {authenticated ? (
-          <UserMenu>
-            {user.avatarUrl ? (
-              <Image
-                className={styles.avatarImage}
-                src={user.avatarUrl}
-                alt=""
-                width={28}
-                height={28}
-              />
-            ) : (
-              <span className={styles.avatar}>
-                {initials(user.displayName)}
-              </span>
-            )}
-            <span className={styles.name}>{user.displayName}</span>
-          </UserMenu>
-        ) : (
-          <GoogleButton />
-        )}
-      </div>
-    </header>
-  );
+/**
+ * pageTitle maps the current route to a top-bar heading, falling back to the
+ * first path segment for nested routes.
+ */
+function pageTitle(pathname: string): string {
+  if (TITLES[pathname]) return TITLES[pathname];
+  const seg = pathname.split("/").filter(Boolean)[0];
+  if (seg && TITLES[`/${seg}`]) return TITLES[`/${seg}`];
+  return "match-bench";
 }
 
 /**
- * initials performs the module-specific operation described by its name.
- * It keeps inputs, side effects, and returned values within this module's contract.
+ * TopBar shows the current page title. Auth is disabled, so there is no account
+ * control. It keeps inputs, side effects, and returned values within this
+ * module's contract.
  */
-function initials(name: string): string {
-  return name
-    .split(/\s+/)
-    .filter(Boolean)
-    .slice(0, 2)
-    .map((part) => part[0]?.toUpperCase())
-    .join("");
+export function TopBar() {
+  const pathname = usePathname();
+  return (
+    <header className={styles.bar}>
+      <span className={styles.title}>{pageTitle(pathname)}</span>
+      <span className={styles.brandTag}>match-bench</span>
+    </header>
+  );
 }

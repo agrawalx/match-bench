@@ -1,57 +1,55 @@
 .badge {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
-  padding: 2px 6px;
-  border-radius: var(--radius-sm);
-  font-family: var(--font-mono);
-  font-size: 10px;
-  font-weight: 500;
-  letter-spacing: 0.08em;
+  gap: 6px;
+  padding: 4px 11px;
+  border-radius: var(--radius-pill);
+  font-family: var(--font-sans);
+  font-weight: 600;
+  font-size: 11.5px;
   white-space: nowrap;
+  text-transform: capitalize;
 }
 
 .dot {
-  animation: pulse 1.4s ease-in-out infinite;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
 }
 
 .scored,
 .ready,
 .completed {
-  background: rgba(0, 200, 83, 0.1);
-  border: 1px solid rgba(0, 200, 83, 0.3);
-  color: var(--color-success);
+  background: color-mix(in srgb, var(--success) 12%, var(--s1));
+  border: 1px solid color-mix(in srgb, var(--success) 35%, var(--border));
+  color: var(--success);
 }
 
 .running,
 .requested {
-  background: rgba(0, 229, 255, 0.1);
-  border: 1px solid rgba(0, 229, 255, 0.3);
-  color: var(--color-accent);
+  background: var(--accent-subtle);
+  border: 1px solid color-mix(in srgb, var(--accent) 40%, transparent);
+  color: var(--accent);
 }
 
 .building,
 .scanning,
 .promoting {
-  background: rgba(255, 214, 0, 0.1);
-  border: 1px solid rgba(255, 214, 0, 0.3);
-  color: var(--color-warning);
+  background: color-mix(in srgb, var(--warning) 12%, var(--s1));
+  border: 1px solid color-mix(in srgb, var(--warning) 35%, var(--border));
+  color: var(--warning);
 }
 
 .queued {
-  background: rgba(100, 100, 100, 0.1);
-  border: 1px solid rgba(100, 100, 100, 0.3);
-  color: #666666;
+  background: var(--s2);
+  border: 1px solid var(--border);
+  color: var(--text-3);
 }
 
-.failed {
-  background: rgba(255, 77, 77, 0.1);
-  border: 1px solid rgba(255, 77, 77, 0.3);
-  color: var(--color-error);
-}
-
+.failed,
 .disqualified {
-  background: rgba(255, 77, 77, 0.08);
-  border: 1px solid rgba(255, 77, 77, 0.2);
-  color: #cc3333;
+  background: color-mix(in srgb, var(--error) 12%, var(--s1));
+  border: 1px solid color-mix(in srgb, var(--error) 35%, var(--border));
+  color: var(--error);
 }

@@ -1,11 +1,14 @@
 .row {
-  height: 52px;
-  border-bottom: 1px solid var(--color-surface-1);
-  animation: fade-in 120ms var(--ease-std) both;
+  height: 46px;
+  border-bottom: 1px solid var(--border-2);
+}
+
+.row:last-child {
+  border-bottom: 0;
 }
 
 .row:hover {
-  background: #0f0f0f;
+  background: var(--s2);
 }
 
 .clickable {
@@ -13,17 +16,18 @@
 }
 
 .clickable:focus-visible {
-  outline: 1px solid var(--color-accent);
+  outline: 1px solid var(--accent);
   outline-offset: -1px;
 }
 
 .own {
-  background: rgba(0, 229, 255, 0.03);
-  box-shadow: inset 2px 0 0 var(--color-accent);
+  background: var(--accent-subtle);
+  box-shadow: inset 2px 0 0 var(--accent);
 }
 
 .flash {
-  box-shadow: inset 0 0 0 1px var(--color-accent);
+  transition: background var(--dur) var(--ease-std);
+  background: var(--accent-subtle);
 }
 
 .rank,
@@ -33,79 +37,75 @@
 }
 
 .rank {
-  text-align: center;
-  font-size: 14px;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text-2);
 }
 
-.first {
-  color: var(--color-accent);
-}
-
+.first,
 .podium {
-  color: var(--color-text-primary);
+  color: var(--accent);
 }
 
 .top {
-  color: var(--color-text-secondary);
+  color: var(--text-2);
 }
 
 .rest {
-  color: #444444;
+  color: var(--text-3);
 }
 
 .name {
-  color: var(--color-text-primary);
-  font-size: 13px;
+  color: var(--text-1);
+  font-family: var(--font-mono);
+  font-weight: 600;
+  font-size: 12.5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .id {
-  margin-top: 3px;
-  color: #444444;
+  margin-top: 2px;
+  color: var(--text-3);
   font-family: var(--font-mono);
-  font-size: 11px;
+  font-size: 10.5px;
 }
 
 .number {
-  color: var(--color-text-secondary);
-  text-align: right;
-  font-size: 13px;
+  color: var(--text-2);
+  font-size: 11.5px;
 }
 
 .scoreHot {
-  color: var(--color-accent);
-  font-size: 15px;
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.delta {
+  color: var(--text-3);
 }
 
 .track {
   height: 4px;
-  background: var(--color-surface-3);
+  background: var(--s3);
   border-radius: var(--radius-sm);
 }
 
 .fill {
   height: 100%;
-  background: var(--color-accent);
+  background: var(--success);
   border-radius: var(--radius-sm);
 }
 
 .correctLabel {
   margin-top: 4px;
-  color: #666666;
+  color: var(--text-3);
   font-family: var(--font-mono);
-  font-size: 11px;
+  font-size: 10.5px;
+  text-align: right;
 }
 
-.spark,
 .status {
-  text-align: center;
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .row {
-    animation: none;
-  }
-
-  .flash {
-    box-shadow: none;
-  }
+  text-align: right;
 }

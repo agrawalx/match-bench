@@ -3,13 +3,13 @@
  * It is part of the IICPC frontend and keeps UI, API, or test behavior
  * scoped to this module so callers can rely on stable boundaries.
  */
-import { redirect } from "next/navigation";
+import { HomeClient } from "@/components/home/HomeClient";
 
 /**
- * HomePage redirects the root route into the primary leaderboard experience.
- * It keeps the app entry point stable while letting the leaderboard own the
- * first interactive screen.
+ * HomePage renders the overview landing: top teams and recent runs.
+ * It keeps the app entry point stable while surfacing the most useful
+ * at-a-glance state from data the platform already serves.
  */
 export default function HomePage() {
-  redirect("/leaderboard");
+  return <HomeClient />;
 }

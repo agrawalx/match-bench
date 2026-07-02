@@ -1,0 +1,80 @@
+.card {
+  background: var(--s1);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xl);
+  padding: 14px 15px 11px;
+  min-width: 0;
+}
+
+.head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+
+.heading {
+  min-width: 0;
+}
+
+.title {
+  margin: 0;
+  font-family: var(--font-sans);
+  font-weight: 600;
+  font-size: 13px;
+  color: var(--text-1);
+}
+
+.caption {
+  margin: 2px 0 0;
+  font-family: var(--font-sans);
+  font-weight: 400;
+  font-size: 11px;
+  color: var(--text-3);
+}
+
+.right {
+  flex: none;
+}
+
+.body {
+  height: 132px;
+}
+
+.legend {
+  display: flex;
+  gap: 11px;
+}
+
+.legendItem {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-family: var(--font-mono);
+  font-weight: 500;
+  font-size: 10.5px;
+  color: var(--text-2);
+}
+
+.swatch {
+  width: 11px;
+  height: 3px;
+  border-radius: 2px;
+}
+
+.empty {
+  height: 132px;
+  border: 1px dashed var(--border);
+  border-radius: var(--radius-lg);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  background: var(--s2);
+  color: var(--text-3);
+  font-family: var(--font-sans);
+  font-weight: 450;
+  font-size: 12px;
+}

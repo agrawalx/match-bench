@@ -12,17 +12,19 @@ import type { LeaderboardResponse } from "@/types/leaderboard";
  * getLeaderboard performs the module-specific operation described by its name.
  * It keeps inputs, side effects, and returned values within this module's contract.
  */
-export function getLeaderboard(
-  params: { runGroupId?: string; limit?: number; cursor?: string },
-  token?: string,
-): Promise<LeaderboardResponse> {
+export function getLeaderboard(params: {
+  runGroupId?: string;
+  scenario?: string;
+  limit?: number;
+  cursor?: string;
+}): Promise<LeaderboardResponse> {
   const query = new URLSearchParams();
   if (params.runGroupId) query.set("run_group_id", params.runGroupId);
+  if (params.scenario) query.set("scenario", params.scenario);
   if (params.limit) query.set("limit", String(params.limit));
   if (params.cursor) query.set("cursor", params.cursor);
   return apiFetch<LeaderboardResponse>(
     `${platformConfig.endpoints.leaderboard.rows}?${query.toString()}`,
-    { token },
   );
 }
 
@@ -30,12 +32,8 @@ export function getLeaderboard(
  * getRunDetail performs the module-specific operation described by its name.
  * It keeps inputs, side effects, and returned values within this module's contract.
  */
-export function getRunDetail(
-  runGroupId: string,
-  token: string,
-): Promise<RunDetail> {
+export function getRunDetail(runGroupId: string): Promise<RunDetail> {
   return apiFetch<RunDetail>(
     platformConfig.endpoints.leaderboard.run(runGroupId),
-    { token },
   );
 }

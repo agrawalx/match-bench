@@ -40,11 +40,7 @@ describe("uploadSubmission", () => {
   });
 
   it("rejects an oversized upload (413) with a friendly message", async () => {
-    const promise = uploadSubmission(
-      new File(["x"], "algo.tar.gz"),
-      "token",
-      () => {},
-    );
+    const promise = uploadSubmission(new File(["x"], "algo.tar.gz"), () => {});
     const xhr = FakeXHR.instances[0];
     xhr.status = 413;
     xhr.responseText =
@@ -54,11 +50,7 @@ describe("uploadSubmission", () => {
   });
 
   it("resolves a successful upload", async () => {
-    const promise = uploadSubmission(
-      new File(["x"], "algo.tar.gz"),
-      "token",
-      () => {},
-    );
+    const promise = uploadSubmission(new File(["x"], "algo.tar.gz"), () => {});
     const xhr = FakeXHR.instances[0];
     xhr.status = 201;
     xhr.responseText = JSON.stringify({ submission_id: "sub-1" });

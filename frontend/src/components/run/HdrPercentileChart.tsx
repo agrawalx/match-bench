@@ -7,7 +7,6 @@
 
 import {
   CartesianGrid,
-  Legend,
   Line,
   LineChart,
   ResponsiveContainer,
@@ -15,33 +14,44 @@ import {
   XAxis,
   YAxis,
 } from "recharts";
+import { ChartCard } from "@/components/common/ChartCard";
 import type { HdrSeries } from "@/utils/hdr";
+import { formatLatencyUs } from "@/utils/format";
+import { chart, series as palette } from "@/utils/chartTheme";
 
-const COLORS = ["#3b82f6", "#f59e0b", "#10b981", "#ef4444"];
+// Each LINE is a metric (service_time / response_time / match), not a percentile,
+// so colors come from the palette in a fixed order rather than the p50/p90/p99 map.
+const LINE_COLORS = [palette.p99, palette.p90, palette.p50, palette.err];
 const TICKS = [1, 10, 100, 1000, 10000];
 
 /**
- * ninesToLabel performs the module-specific operation described by its name.
- * It keeps inputs, side effects, and returned values within this module's contract.
+ * ninesToLabel converts a log "nines" x value back to a percentile label.
  */
 function ninesToLabel(v: number): string {
-  if (v <= 1) return "0%";
+  if (v <= 1) return "p0";
   const p = 100 - 100 / v;
-  return v >= 1000 ? `${p.toFixed(2)}%` : `${p.toFixed(0)}%`;
+  return v >= 1000 ? `p${p.toFixed(2)}` : `p${p.toFixed(0)}`;
 }
 
 /**
- * HdrPercentileChart performs the module-specific operation described by its name.
- * It keeps inputs, side effects, and returned values within this module's contract.
+ * HdrPercentileChart plots latency-by-percentile curves (x = percentile on a log
+ * "nines" scale, y = µs). It keeps inputs, side effects, and returned values
+ * within this module's contract.
  */
 export function HdrPercentileChart({
   series,
   title,
+  caption,
+  height = 118,
 }: {
   series: HdrSeries[];
-  title?: string;
+  title: string;
+  caption?: string;
+  height?: number;
 }) {
-  if (!series.length) return null;
+  if (!series.length) {
+    return <ChartCard title={title} caption={caption} height={height} empty />;
+  }
   const n = series[0].points.length;
   const data = Array.from({ length: n }, (_, i) => {
     const row: Record<string, number> = { nines: series[0].points[i].nines };
@@ -50,20 +60,12 @@ export function HdrPercentileChart({
     });
     return row;
   });
+
   return (
-    <div>
-      <h3>{title ?? "Latency by Percentile Distribution"}</h3>
-      <p style={{ opacity: 0.7, fontSize: 13, marginTop: 0 }}>
-        service_time = algo processing at the veth (scored). response_time = the
-        bot&apos;s full round trip. The gap between them is the non-algo
-        overhead — coordinated omission + network + kernel queueing.
-      </p>
-      <ResponsiveContainer width="100%" height={380}>
-        <LineChart
-          data={data}
-          margin={{ top: 8, right: 28, bottom: 28, left: 16 }}
-        >
-          <CartesianGrid strokeDasharray="3 3" opacity={0.3} />
+    <ChartCard title={title} caption={caption} height={height}>
+      <ResponsiveContainer width="100%" height="100%">
+        <LineChart data={data} margin={{ top: 4, right: 6, bottom: 0, left: 0 }}>
+          <CartesianGrid stroke={chart.grid} vertical={false} />
           <XAxis
             dataKey="nines"
             type="number"
@@ -71,44 +73,34 @@ export function HdrPercentileChart({
             domain={[1, "dataMax"]}
             ticks={TICKS}
             tickFormatter={ninesToLabel}
-            height={44}
-            label={{ value: "Percentile", position: "insideBottom", offset: 2 }}
+            tick={chart.axisTick}
+            stroke={chart.axis}
           />
           <YAxis
-            width={68}
-            tickFormatter={(v: number) => `${v}`}
-            label={{
-              value: "latency (µs)",
-              angle: -90,
-              position: "insideLeft",
-              style: { textAnchor: "middle" },
-            }}
+            tickFormatter={formatLatencyUs}
+            tick={chart.axisTick}
+            stroke={chart.axis}
+            width={72}
           />
           <Tooltip
-            formatter={(v: number, name: string) => [`${v} µs`, name]}
-            labelFormatter={(v: number) => `p${ninesToLabel(Number(v))}`}
-          />
-          {}
-          <Legend
-            verticalAlign="top"
-            align="center"
-            height={30}
-            wrapperStyle={{ paddingBottom: 10 }}
+            formatter={(v: number, name: string) => [formatLatencyUs(v), name]}
+            labelFormatter={(v: number) => ninesToLabel(Number(v))}
+            contentStyle={chart.tooltip}
           />
           {series.map((s, i) => (
             <Line
               key={s.scenario}
               dataKey={s.scenario}
-              name={`${s.scenario}  ·  p99 ${s.p99_us.toFixed(0)}µs  ·  n=${s.total}`}
-              stroke={COLORS[i % COLORS.length]}
-              strokeWidth={2}
-              dot
+              name={s.scenario}
+              stroke={LINE_COLORS[i % LINE_COLORS.length]}
+              strokeWidth={1.6}
+              dot={false}
               type="monotone"
               isAnimationActive={false}
             />
           ))}
         </LineChart>
       </ResponsiveContainer>
-    </div>
+    </ChartCard>
   );
 }

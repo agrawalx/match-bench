@@ -56,7 +56,7 @@ export interface HdrScenario {
  */
 function histForSession(
   session: RunDetail["sessions"][number],
-  field: "hdr_encoded" | "rt_hdr_encoded" | "slip_hdr_encoded",
+  field: "hdr_encoded" | "rt_hdr_encoded" | "slip_hdr_encoded" | "match_hdr_encoded",
 ): hdr.Histogram | null {
   const lastByWave = new Map<number, string>();
   const lastTime = new Map<number, number>();
@@ -121,6 +121,27 @@ export function deriveHdrByScenario(detail: RunDetail | undefined): HdrScenario[
         series,
       });
     }
+  }
+  return out;
+}
+
+/**
+ * deriveMatchByScenario builds the STANDALONE matching-latency percentile series
+ * per scenario from match_hdr_encoded (t7−t3 for taker fills only, FIX 851=2). It
+ * is intentionally separate from deriveHdrByScenario so matching latency renders in
+ * its own chart rather than as another line on the service/response-time plot.
+ */
+export function deriveMatchByScenario(detail: RunDetail | undefined): HdrScenario[] {
+  if (!detail?.sessions) return [];
+  const out: HdrScenario[] = [];
+  for (const session of detail.sessions) {
+    const h = histForSession(session, "match_hdr_encoded");
+    if (!h || h.totalCount === 0) continue;
+    out.push({
+      scenario: session.scenario || session.session_id,
+      sessionId: session.session_id,
+      series: [seriesFromHistogram("matching latency t7−t3 (taker fills)", h)],
+    });
   }
   return out;
 }

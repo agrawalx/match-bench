@@ -9,7 +9,6 @@ import { useCallback, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { getLeaderboard } from "@/api/leaderboard";
 import { ApiError } from "@/api/client";
-import { useAuth } from "@/auth/useAuth";
 import { platformConfig } from "@/config/platform";
 import type {
   LeaderboardEntry,
@@ -55,20 +54,15 @@ export function applyLeaderboardUpdate(
  * useLeaderboard performs the module-specific operation described by its name.
  * It keeps inputs, side effects, and returned values within this module's contract.
  */
-export function useLeaderboard(sessionId?: string) {
-  const { getToken } = useAuth();
-  const token = getToken();
+export function useLeaderboard(scenario?: string) {
   const queryClient = useQueryClient();
   const [sseStatus, setSseStatus] = useState<SSEStatus>("closed");
   const [flashedRows, setFlashedRows] = useState<Set<string>>(new Set());
 
   const query = useQuery<LeaderboardResponse, ApiError>({
-    queryKey: ["leaderboard", sessionId],
+    queryKey: ["leaderboard", scenario ?? "all"],
     queryFn: () =>
-      getLeaderboard(
-        { runGroupId: sessionId, limit: platformConfig.leaderboardLimit },
-        token ?? undefined,
-      ),
+      getLeaderboard({ scenario, limit: platformConfig.leaderboardLimit }),
   });
 
   const flash = useCallback((contestantId: string) => {
@@ -82,14 +76,15 @@ export function useLeaderboard(sessionId?: string) {
     }, 400);
   }, []);
 
+  const key = scenario ?? "all";
   const onMessage = useCallback(
     (event: SSEEvent) => {
       if (event.type === "snapshot") {
-        queryClient.setQueryData(["leaderboard", sessionId], event.data);
+        queryClient.setQueryData(["leaderboard", key], event.data);
       }
       if (event.type === "update") {
         queryClient.setQueryData<LeaderboardResponse>(
-          ["leaderboard", sessionId],
+          ["leaderboard", key],
           (current) => {
             if (!current) return current;
             return applyLeaderboardUpdate(current, event.data);
@@ -98,7 +93,7 @@ export function useLeaderboard(sessionId?: string) {
         flash(event.data.contestant_id);
       }
     },
-    [flash, queryClient, sessionId],
+    [flash, queryClient, key],
   );
 
   useSSE(platformConfig.endpoints.leaderboard.events, {

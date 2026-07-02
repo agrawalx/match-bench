@@ -8,17 +8,14 @@
 import { useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { useRouter } from "next/navigation";
-import { motion } from "framer-motion";
-import { AlertTriangle, LogIn, Play, Send, ShieldCheck } from "lucide-react";
+import { AlertTriangle, Play, Send, ShieldCheck } from "lucide-react";
 import toast from "react-hot-toast";
-import { GoogleButton } from "@/auth/GoogleButton";
-import { useAuth } from "@/auth/useAuth";
 import {
   createRun,
   getSubmissionStatus,
   uploadSubmission,
 } from "@/api/submission";
-import { platformConfig } from "@/config/platform";
+import { defaultContestantId, platformConfig } from "@/config/platform";
 import type { SubmissionStatus } from "@/types/submission";
 import {
   rememberRunGroupId,
@@ -34,7 +31,6 @@ import styles from "./SubmitClient.module.css";
  * It keeps inputs, side effects, and returned values within this module's contract.
  */
 export function SubmitClient() {
-  const { status, user, getToken, signIn } = useAuth();
   const router = useRouter();
   const [file, setFile] = useState<File | null>(null);
   const [progress, setProgress] = useState(0);
@@ -44,15 +40,14 @@ export function SubmitClient() {
   const [fileError, setFileError] = useState<string | null>(null);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
   const [isDuplicate, setIsDuplicate] = useState(false);
-  const token = getToken();
-  const ownerId = user?.contestantId || user?.sub || "";
+  const ownerId = defaultContestantId();
   const duplicateError =
     fileError?.toLowerCase().includes("duplicate") ?? false;
 
   const statusQuery = useQuery<SubmissionStatus>({
     queryKey: ["submission", submissionId],
-    enabled: Boolean(submissionId && token),
-    queryFn: () => getSubmissionStatus(submissionId ?? "", token ?? ""),
+    enabled: Boolean(submissionId),
+    queryFn: () => getSubmissionStatus(submissionId ?? ""),
     refetchInterval: (query) => {
       const phase = query.state.data?.status;
       return phase === "queued" ||
@@ -66,7 +61,7 @@ export function SubmitClient() {
 
   const upload = useMutation({
     mutationFn: async () => {
-      if (!file || !token) throw new Error("missing_file");
+      if (!file) throw new Error("missing_file");
       if (!file.name.endsWith(".zip"))
         throw new Error("Only .zip bundles are accepted");
       if (file.size > platformConfig.uploadMaxBytes) {
@@ -74,7 +69,7 @@ export function SubmitClient() {
           `File exceeds ${Math.round(platformConfig.uploadMaxBytes / 1024 / 1024)} MB limit`,
         );
       }
-      return uploadSubmission(file, token, setProgress);
+      return uploadSubmission(file, setProgress);
     },
     onSuccess: (result) => {
       const now = new Date().toISOString();
@@ -134,8 +129,8 @@ export function SubmitClient() {
 
   const run = useMutation({
     mutationFn: async () => {
-      if (!submissionId || !token) throw new Error("missing_submission");
-      return createRun(submissionId, token);
+      if (!submissionId) throw new Error("missing_submission");
+      return createRun(submissionId);
     },
     onSuccess: (result) => {
       rememberSubmissionId(result.submission_id, ownerId);
@@ -151,20 +146,14 @@ export function SubmitClient() {
     },
   });
 
-  const authenticated = status === "authenticated";
   const timelineStatus = statusQuery.data ?? optimisticStatus;
   const terminalReady = timelineStatus?.status === "ready";
 
   return (
-    <motion.section
-      className={styles.page}
-      initial={{ opacity: 0, y: 8 }}
-      animate={{ opacity: 1, y: 0 }}
-      transition={{ duration: 0.22, ease: "easeOut" }}
-    >
+    <section className={styles.page}>
       <div className={styles.heading}>
         <div>
-          <h1>SUBMIT</h1>
+          <h1>Submit engine</h1>
           <p>
             Upload a zip bundle for build, scan, promotion, and benchmark
             execution.
@@ -179,20 +168,7 @@ export function SubmitClient() {
         </div>
       </div>
       <div className={styles.workspace}>
-        <motion.div className={styles.primary} layout>
-          {!authenticated && (
-            <div className={styles.authNotice}>
-              <LogIn size={18} strokeWidth={1.8} aria-hidden="true" />
-              <div>
-                <strong>Sign in required for submission</strong>
-                <span>
-                  You can prepare a bundle here, but upload starts after Google
-                  sign-in.
-                </span>
-              </div>
-              <GoogleButton />
-            </div>
-          )}
+        <div className={styles.primary}>
           <UploadProgress progress={progress} />
           {(isDuplicate || duplicateError) && (
             <div className={styles.duplicateWarning}>
@@ -246,27 +222,11 @@ export function SubmitClient() {
           <div className={styles.actions}>
             <button
               type="button"
-              disabled={!file || upload.isPending || status === "redirecting"}
-              onClick={() => {
-                if (!authenticated) {
-                  void signIn();
-                  return;
-                }
-                upload.mutate();
-              }}
+              disabled={!file || upload.isPending}
+              onClick={() => upload.mutate()}
             >
-              {authenticated ? (
-                <Send size={16} strokeWidth={1.8} />
-              ) : (
-                <LogIn size={16} strokeWidth={1.8} />
-              )}
-              <span>
-                {upload.isPending
-                  ? "Uploading"
-                  : authenticated
-                    ? "Submit Bundle"
-                    : "Sign in to Submit"}
-              </span>
+              <Send size={16} strokeWidth={1.8} />
+              <span>{upload.isPending ? "Uploading" : "Submit Bundle"}</span>
             </button>
             {terminalReady && (
               <button
@@ -298,12 +258,8 @@ export function SubmitClient() {
               </span>
             </div>
           )}
-        </motion.div>
-        <motion.aside
-          className={styles.statusPanel}
-          aria-label="Submission status"
-          layout
-        >
+        </div>
+        <aside className={styles.statusPanel} aria-label="Submission status">
           <BuildTimeline status={timelineStatus ?? null} />
           {!timelineStatus && (
             <div className={styles.placeholder}>
@@ -315,8 +271,8 @@ export function SubmitClient() {
               </span>
             </div>
           )}
-        </motion.aside>
+        </aside>
       </div>
-    </motion.section>
+    </section>
   );
 }

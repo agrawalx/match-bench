@@ -9,7 +9,6 @@ import "@fontsource/geist-mono/400.css";
 import "@fontsource/geist-mono/500.css";
 import "./globals.css";
 import type { Metadata } from "next";
-import { AuthProvider } from "@/auth/AuthProvider";
 import { QueryProvider } from "@/providers/QueryProvider";
 import { Shell } from "@/components/shell/Shell";
 
@@ -21,8 +20,8 @@ export const metadata: Metadata = {
 
 /**
  * RootLayout wires global providers and the application shell around pages.
- * It keeps authentication, query state, and navigation available to every
- * route rendered by the frontend app.
+ * Auth is disabled platform-wide, so only query state and navigation are
+ * provided to every route rendered by the frontend app.
  */
 export default function RootLayout({
   children,
@@ -33,9 +32,7 @@ export default function RootLayout({
     <html lang="en">
       <body>
         <QueryProvider>
-          <AuthProvider>
-            <Shell>{children}</Shell>
-          </AuthProvider>
+          <Shell>{children}</Shell>
         </QueryProvider>
       </body>
     </html>

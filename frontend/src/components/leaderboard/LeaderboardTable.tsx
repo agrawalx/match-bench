@@ -13,7 +13,6 @@ import styles from "./LeaderboardTable.module.css";
  * Props describes structured data exchanged by this module.
  * Keep this shape aligned with API and component expectations.
  */
-
 interface Props {
   rows: LeaderboardEntry[];
   loading: boolean;
@@ -27,10 +26,8 @@ const headers = [
   ["rank", "#"],
   ["team_name", "TEAM"],
   ["peak_sustained_tps", "PEAK TPS"],
-  ["p99_ns_at_peak_tps", "P99 AT PEAK"],
-  ["spike_recovery_ns", "RECOVERY"],
   ["total_correctness", "CORRECT"],
-  ["rank_delta", "DELTA"],
+  ["rank_delta", "Δ"],
   ["status", "STATUS"],
 ] as const;
 
@@ -52,11 +49,9 @@ export function LeaderboardTable({
         <colgroup>
           <col className={styles.rankCol} />
           <col />
-          <col className={styles.scoreCol} />
-          <col className={styles.latencyCol} />
-          <col className={styles.latencyCol} />
-          <col className={styles.correctCol} />
           <col className={styles.tpsCol} />
+          <col className={styles.correctCol} />
+          <col className={styles.deltaCol} />
           <col className={styles.statusCol} />
         </colgroup>
         <thead>
@@ -80,7 +75,13 @@ export function LeaderboardTable({
         </thead>
         <tbody>
           {loading ? (
-            <SkeletonRows />
+            <SkeletonRows columns={6} />
+          ) : rows.length === 0 ? (
+            <tr>
+              <td colSpan={6} className={styles.emptyCell}>
+                No ranked results for this scenario yet.
+              </td>
+            </tr>
           ) : (
             rows.map((entry) => (
               <LeaderboardRow

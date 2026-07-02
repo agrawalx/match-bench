@@ -1,56 +1,62 @@
 .grid {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: var(--space-4);
-  margin-top: var(--space-4);
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
 }
 
 .card {
-  padding: var(--space-4);
-  background: var(--color-surface-2);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-md);
+  padding: 13px 14px;
+  background: var(--s1);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
 }
 
-.card header {
+.head {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  margin-bottom: var(--space-4);
+  gap: 8px;
+  margin-bottom: 11px;
 }
 
-.card h3 {
+.head h3 {
   margin: 0;
-  color: var(--color-accent);
   font-family: var(--font-mono);
-  font-size: 11px;
-  letter-spacing: 0.1em;
-  text-transform: uppercase;
+  font-weight: 600;
+  font-size: 12.5px;
+  color: var(--text-1);
 }
 
-.card dl {
+.rows {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 8px 16px;
+  gap: 6px;
   margin: 0;
 }
 
-.card dt {
-  color: #444444;
-  font-family: var(--font-mono);
-  font-size: 10px;
+.item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
 }
 
-.card dd {
-  margin: 4px 0 0;
-  color: var(--color-text-primary);
+.item dt {
+  font-family: var(--font-sans);
+  font-weight: 450;
+  font-size: 11px;
+  color: var(--text-3);
+}
+
+.item dd {
+  margin: 0;
   font-family: var(--font-mono);
-  font-size: 14px;
+  font-weight: 500;
+  font-size: 11.5px;
+  color: var(--text-2);
   font-variant-numeric: tabular-nums;
 }
 
 @media (max-width: 1000px) {
   .grid {
-    grid-template-columns: 1fr;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }

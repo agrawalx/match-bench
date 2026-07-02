@@ -5,19 +5,21 @@
  */
 import { Badge } from "@/components/common/Badge";
 import type { SessionDetail } from "@/types/run";
-import { formatLatencyNs, formatNumber } from "@/utils/format";
+import { formatNumber } from "@/utils/format";
 import styles from "./SessionCards.module.css";
 
 /**
- * SessionCards performs the module-specific operation described by its name.
- * It keeps inputs, side effects, and returned values within this module's contract.
+ * SessionCards summarizes each scenario session — throughput, correctness and
+ * fills — without per-percentile latency (that lives in the timelines and HDR
+ * charts). It keeps inputs, side effects, and returned values within this
+ * module's contract.
  */
 export function SessionCards({ sessions }: { sessions: SessionDetail[] }) {
   return (
     <div className={styles.grid}>
       {sessions.map((session) => (
         <article key={session.session_id} className={styles.card}>
-          <header>
+          <header className={styles.head}>
             <h3>{session.scenario}</h3>
             <Badge
               variant={
@@ -25,7 +27,7 @@ export function SessionCards({ sessions }: { sessions: SessionDetail[] }) {
               }
             />
           </header>
-          <dl>
+          <dl className={styles.rows}>
             <Item
               label="Peak TPS"
               value={formatNumber(
@@ -33,27 +35,10 @@ export function SessionCards({ sessions }: { sessions: SessionDetail[] }) {
               )}
             />
             <Item
-              label="P50 latency"
-              value={formatLatencyNs(
-                max(session.timeline.map((point) => point.p50_ns)),
-              )}
-            />
-            <Item
-              label="P99 latency"
-              value={formatLatencyNs(
-                max(session.timeline.map((point) => point.p99_ns)),
-              )}
-            />
-            <Item
-              label="RT P99"
-              value={formatLatencyNs(
-                max(session.timeline.map((point) => point.rt_p99_ns)),
-              )}
-            />
-            <Item
               label="Correctness"
               value={formatCorrectness(session.correctness_score)}
             />
+            <Item label="Fills" value={formatFills(session)} />
             <Item
               label="Samples"
               value={formatNumber(session.timeline.length)}
@@ -76,6 +61,20 @@ function formatCorrectness(value?: number): string {
 }
 
 /**
+ * formatFills renders valid/total fills, or a dash when the validator has not
+ * reported fill counts yet.
+ */
+function formatFills(session: SessionDetail): string {
+  if (
+    typeof session.valid_fills === "number" &&
+    typeof session.total_fills === "number"
+  ) {
+    return `${formatNumber(session.valid_fills)} / ${formatNumber(session.total_fills)}`;
+  }
+  return "—";
+}
+
+/**
  * max performs the module-specific operation described by its name.
  * It keeps inputs, side effects, and returned values within this module's contract.
  */
@@ -90,7 +89,7 @@ function max(values: number[]): number {
  */
 function Item({ label, value }: { label: string; value: string }) {
   return (
-    <div>
+    <div className={styles.item}>
       <dt>{label}</dt>
       <dd>{value}</dd>
     </div>

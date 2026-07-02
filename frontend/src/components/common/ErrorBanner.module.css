@@ -1,9 +1,18 @@
 .banner {
-  padding: 10px 12px;
-  background: rgba(255, 77, 77, 0.08);
-  border: 1px solid rgba(255, 77, 77, 0.24);
-  border-radius: var(--radius-md);
-  color: var(--color-error);
-  font-family: var(--font-mono);
-  font-size: 12px;
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  padding: 12px 14px;
+  background: color-mix(in srgb, var(--error) 10%, var(--s1));
+  border: 1px solid color-mix(in srgb, var(--error) 35%, var(--border));
+  border-radius: var(--radius-lg);
+  color: var(--text-1);
+  font-family: var(--font-sans);
+  font-weight: 500;
+  font-size: 12.5px;
+}
+
+.icon {
+  flex: none;
+  color: var(--error);
 }

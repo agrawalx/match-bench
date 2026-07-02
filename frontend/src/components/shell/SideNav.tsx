@@ -7,60 +7,60 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { useState } from "react";
-import { useAuth } from "@/auth/useAuth";
+import { Activity, LayoutGrid, Trophy, Upload } from "lucide-react";
 import styles from "./SideNav.module.css";
 
 const links = [
-  { href: "/leaderboard", icon: "#", label: "Leaderboard" },
-  { href: "/submit", icon: "^", label: "Submit" },
-  { href: "/run", icon: "[]", label: "My Run" },
+  { href: "/", icon: LayoutGrid, label: "Overview" },
+  { href: "/leaderboard", icon: Trophy, label: "Leaderboard" },
+  { href: "/run", icon: Activity, label: "All runs" },
+  { href: "/submit", icon: Upload, label: "Submit" },
 ] as const;
 
 /**
- * SideNav performs the module-specific operation described by its name.
- * It keeps inputs, side effects, and returned values within this module's contract.
+ * isActive marks a nav link active for its own route and, for non-root links,
+ * any nested path beneath it (e.g. /run?run_group_id=… keeps "My Runs" lit).
+ */
+function isActive(pathname: string, href: string): boolean {
+  if (href === "/") return pathname === "/";
+  return pathname === href || pathname.startsWith(`${href}/`);
+}
+
+/**
+ * SideNav is the persistent left navigation: brand mark, primary links, and a
+ * season footer. It keeps inputs, side effects, and returned values within this
+ * module's contract.
  */
 export function SideNav() {
   const pathname = usePathname();
-  const { status } = useAuth();
-  const [tip, setTip] = useState(false);
-  const authenticated = status === "authenticated";
 
   return (
     <aside className={styles.nav}>
-      {links.map((link) => {
-        const locked = link.href === "/submit" && !authenticated;
-        const active = pathname === link.href;
-        if (locked) {
+      <div className={styles.brand}>
+        <span className={styles.mark}>M</span>
+        <span className={styles.wordmark}>match-bench</span>
+      </div>
+      <nav className={styles.links} aria-label="Primary">
+        {links.map((link) => {
+          const active = isActive(pathname, link.href);
+          const Icon = link.icon;
           return (
-            <button
+            <Link
               key={link.href}
               className={`${styles.item} ${active ? styles.active : ""}`}
-              type="button"
-              onClick={() => {
-                setTip(true);
-                setTimeout(() => setTip(false), 2000);
-              }}
+              href={link.href}
+              aria-current={active ? "page" : undefined}
             >
-              <span className={styles.icon}>{link.icon}</span>
-              <span className={styles.label}>{link.label}</span>
-              <span className={styles.lock}>LOCK</span>
-              {tip && <span className={styles.tip}>Sign in to submit</span>}
-            </button>
+              <Icon size={16} strokeWidth={1.8} className={styles.icon} />
+              {link.label}
+            </Link>
           );
-        }
-        return (
-          <Link
-            key={link.href}
-            className={`${styles.item} ${active ? styles.active : ""}`}
-            href={link.href}
-          >
-            <span className={styles.icon}>{link.icon}</span>
-            <span className={styles.label}>{link.label}</span>
-          </Link>
-        );
-      })}
+        })}
+      </nav>
+      <div className={styles.season}>
+        <div className={styles.seasonLabel}>SEASON</div>
+        <div className={styles.seasonValue}>2026 · Finals</div>
+      </div>
     </aside>
   );
 }

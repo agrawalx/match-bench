@@ -1,58 +1,66 @@
 .controls {
   display: flex;
   align-items: center;
-  gap: var(--space-3);
-  padding: var(--space-4) 0;
+  gap: 9px;
 }
 
 .select,
 .button {
-  min-height: 36px;
-  padding: 6px 10px;
-  color: var(--color-text-primary);
-  background: var(--color-surface-2);
-  border: 1px solid var(--color-border);
+  min-height: 34px;
+  padding: 7px 11px;
+  color: var(--text-1);
+  background: var(--s1);
+  border: 1px solid var(--border);
   border-radius: var(--radius-md);
-  font-family: var(--font-mono);
-  font-size: 13px;
+  font-family: var(--font-sans);
+  font-size: 12px;
+}
+
+.select {
+  cursor: pointer;
 }
 
 .button {
   display: inline-flex;
   align-items: center;
-  justify-content: center;
-  gap: var(--space-2);
+  gap: 6px;
   cursor: pointer;
+  color: var(--text-2);
+}
+
+.button:hover {
+  color: var(--text-1);
 }
 
 .live {
   display: inline-flex;
   align-items: center;
-  gap: var(--space-2);
-  margin-left: auto;
-  padding: 6px 10px;
-  background: var(--color-surface-1);
-  border: 1px solid var(--color-border-subtle);
+  gap: 7px;
+  padding: 7px 11px;
+  background: var(--s1);
+  border: 1px solid var(--border);
   border-radius: var(--radius-md);
   font-family: var(--font-mono);
-  font-size: 12px;
+  font-size: 11.5px;
+}
+
+.liveDot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: currentColor;
 }
 
 .on {
-  color: var(--color-accent);
+  color: var(--success);
 }
 
 .off {
-  color: var(--color-text-tertiary);
+  color: var(--text-3);
 }
 
 @media (max-width: 720px) {
   .controls {
-    align-items: stretch;
-    flex-direction: column;
-  }
-
-  .live {
-    margin-left: 0;
+    flex-wrap: wrap;
   }
 }

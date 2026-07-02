@@ -1,41 +1,59 @@
 .page {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.topRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.split {
   display: grid;
-  gap: var(--space-3);
+  grid-template-columns: minmax(0, 1fr) 280px;
+  gap: 16px;
+  align-items: start;
 }
 
-.heading h1 {
-  margin: 0;
-  font-family: var(--font-mono);
-  font-size: 20px;
-  letter-spacing: 0.1em;
-}
-
-.heading p {
-  margin: 6px 0 0;
-  color: var(--color-text-tertiary);
-  font-size: 13px;
+.tableCol {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
 }
 
 .pagination {
   display: flex;
   align-items: center;
   justify-content: flex-end;
-  gap: var(--space-3);
-  color: var(--color-text-tertiary);
+  gap: 12px;
+  color: var(--text-3);
   font-family: var(--font-mono);
   font-size: 12px;
 }
 
 .pagination button {
-  padding: 6px 10px;
-  color: var(--color-text-primary);
-  background: var(--color-surface-1);
-  border: 1px solid var(--color-border);
+  padding: 6px 12px;
+  color: var(--text-1);
+  background: var(--s1);
+  border: 1px solid var(--border);
   border-radius: var(--radius-md);
   cursor: pointer;
+  font-family: var(--font-sans);
+  font-size: 12px;
 }
 
 .pagination button:disabled {
   cursor: not-allowed;
   opacity: 0.45;
+}
+
+@media (max-width: 900px) {
+  .split {
+    grid-template-columns: 1fr;
+  }
 }

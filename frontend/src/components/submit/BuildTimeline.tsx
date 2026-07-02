@@ -5,32 +5,33 @@
  */
 import { Badge } from "@/components/common/Badge";
 import type { SubmissionStatus } from "@/types/submission";
-import { AnimatePresence, motion } from "framer-motion";
-import { AlertTriangle, CheckCircle2, XCircle } from "lucide-react";
+import { AlertTriangle, Check } from "lucide-react";
 import styles from "./BuildTimeline.module.css";
 
 const steps = ["queued", "building", "scanning", "promoting", "ready"] as const;
-const labels: Record<(typeof steps)[number] | "failed", string> = {
+const labels: Record<(typeof steps)[number], string> = {
   queued: "Queued",
-  building: "Building image",
-  scanning: "Scanning image",
-  promoting: "Promoting artifact",
+  building: "Building",
+  scanning: "Scanning",
+  promoting: "Promoting",
   ready: "Ready",
-  failed: "Failed",
 };
 
 /**
- * BuildTimeline performs the module-specific operation described by its name.
- * It keeps inputs, side effects, and returned values within this module's contract.
+ * BuildTimeline renders the build pipeline as a horizontal stepper: completed
+ * steps checked, the current step marked, later steps pending. No motion — state
+ * changes are conveyed by the marker styling. It keeps inputs, side effects, and
+ * returned values within this module's contract.
  */
 export function BuildTimeline({ status }: { status: SubmissionStatus | null }) {
   if (!status) return null;
+  const failed = status.status === "failed";
   const activeIndex = Math.max(
-    steps.indexOf(status.status === "failed" ? "ready" : status.status),
+    steps.indexOf(
+      (failed ? "ready" : status.status) as (typeof steps)[number],
+    ),
     0,
   );
-  const progress = status.status === "failed" ? activeIndex : activeIndex + 1;
-  const isTerminal = status.status === "ready" || status.status === "failed";
   const logs = status.build_logs?.split("\n").slice(-20).join("\n");
   const timestamp = status.updated_at ?? status.created_at;
   const queuedForMs = Date.now() - Date.parse(timestamp);
@@ -39,55 +40,43 @@ export function BuildTimeline({ status }: { status: SubmissionStatus | null }) {
   return (
     <section className={styles.timeline}>
       <div className={styles.header}>
-        <span>{status.submission_id}</span>
+        <span className={styles.id}>{status.submission_id}</span>
         <Badge variant={status.status} />
       </div>
-      <AnimatePresence mode="wait">
-        <motion.div
-          key={status.status}
-          className={styles.current}
-          initial={{ opacity: 0, y: 8 }}
-          animate={{ opacity: 1, y: 0 }}
-          exit={{ opacity: 0, y: -8 }}
-          transition={{ duration: 0.2, ease: "easeOut" }}
-        >
-          <span
-            className={`${styles.marker} ${status.status === "ready" ? styles.done : ""} ${status.status === "failed" ? styles.failed : styles.active}`}
-          >
-            {status.status === "ready" && (
-              <CheckCircle2 size={24} strokeWidth={1.8} />
-            )}
-            {status.status === "failed" && (
-              <XCircle size={24} strokeWidth={1.8} />
-            )}
-            {!isTerminal && (
-              <span className={styles.spinnerRing} aria-hidden="true" />
-            )}
-          </span>
-          <div className={styles.currentText}>
-            <strong>{labels[status.status]}</strong>
-            <span>
-              Step {progress} of {steps.length}
-            </span>
-          </div>
-          <time>{timestamp}</time>
-        </motion.div>
-      </AnimatePresence>
-      <div className={styles.track} aria-hidden="true">
-        <span style={{ width: `${(progress / steps.length) * 100}%` }} />
+
+      <div className={styles.stepper}>
+        <div className={styles.rail} aria-hidden="true" />
+        {steps.map((step, i) => {
+          const done = i < activeIndex || status.status === "ready";
+          const active = i === activeIndex && !done;
+          const isFailedHere = failed && i === activeIndex;
+          return (
+            <div key={step} className={styles.step}>
+              <span
+                className={`${styles.marker} ${done ? styles.done : ""} ${active ? styles.active : ""} ${isFailedHere ? styles.failed : ""}`}
+              >
+                {done ? (
+                  <Check size={14} strokeWidth={2.6} />
+                ) : (
+                  <span className={styles.dot} />
+                )}
+              </span>
+              <span className={styles.stepLabel}>{labels[step]}</span>
+            </div>
+          );
+        })}
       </div>
+
       {showQueuedHint && (
         <div className={styles.hint} role="status">
-          <AlertTriangle size={16} strokeWidth={2} aria-hidden="true" />
+          <AlertTriangle size={15} strokeWidth={2} aria-hidden="true" />
           <span>
-            Still queued. Check that the local build-worker is running and
-            connected to the same Kafka/Postgres stack.
+            Still queued. Check that the build-worker is running and connected to
+            the same Kafka/Postgres stack.
           </span>
         </div>
       )}
-      {status.status === "failed" && logs && (
-        <pre className={styles.logs}>{logs}</pre>
-      )}
+      {failed && logs && <pre className={styles.logs}>{logs}</pre>}
     </section>
   );
 }

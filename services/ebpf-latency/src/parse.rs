@@ -39,6 +39,8 @@ pub struct ParsedMessage {
     pub exec_type: String,
     pub fill_qty: u64,
     pub fill_price: u64,
+    /// FIX LastLiquidityInd (tag 851) / JSON "liquidity": 0 unknown, 1 maker, 2 taker.
+    pub liquidity: u8,
 }
 
 impl Default for Classified {
@@ -112,6 +114,7 @@ fn parse_fix(direction: Direction, msg: &[u8]) -> ParsedMessage {
     let mut ordstatus39 = String::new();
     let mut fill_qty = 0u64;
     let mut fill_price = 0u64;
+    let mut liquidity = 0u8;
 
     for field in msg.split(|&b| b == SOH) {
         let Some(eq) = field.iter().position(|&b| b == b'=') else {
@@ -126,6 +129,7 @@ fn parse_fix(direction: Direction, msg: &[u8]) -> ParsedMessage {
             b"39" => ordstatus39 = string(val),
             b"32" => fill_qty = parse_uint(val).unwrap_or(0),
             b"31" => fill_price = parse_decimal_scaled(val),
+            b"851" => liquidity = parse_uint(val).unwrap_or(0) as u8,
             _ => {}
         }
     }
@@ -151,6 +155,7 @@ fn parse_fix(direction: Direction, msg: &[u8]) -> ParsedMessage {
         exec_type,
         fill_qty,
         fill_price,
+        liquidity,
     }
 }
 
@@ -311,6 +316,7 @@ fn parse_json(direction: Direction, body: &[u8]) -> ParsedMessage {
     let exec_type = json_string(body, "exec_type").unwrap_or_default();
     let fill_qty = json_uint(body, "fill_qty").unwrap_or(0);
     let fill_price = json_decimal_scaled(body, "fill_price").unwrap_or(0);
+    let liquidity = json_uint(body, "liquidity").unwrap_or(0) as u8;
 
     let class = if clordid.is_empty() {
         Classified::Ignore
@@ -327,6 +333,7 @@ fn parse_json(direction: Direction, body: &[u8]) -> ParsedMessage {
         exec_type,
         fill_qty,
         fill_price,
+        liquidity,
     }
 }
 

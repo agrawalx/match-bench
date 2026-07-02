@@ -51,6 +51,7 @@ func (h *Handler) Leaderboard(w http.ResponseWriter, r *http.Request) {
 		ContestantID: r.URL.Query().Get("contestant_id"),
 		TeamID:       r.URL.Query().Get("team_id"),
 		TeamName:     r.URL.Query().Get("team_name"),
+		Scenario:     r.URL.Query().Get("scenario"),
 	})
 	writeJSON(w, resp, err)
 }

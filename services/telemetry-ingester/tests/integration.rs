@@ -67,6 +67,7 @@ fn acked(
         orig_order_id: String::new(),
         reordering_detected: false,
         retransmission_count: 0,
+        liquidity_ind: 0,
     }
 }
 

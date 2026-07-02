@@ -1,0 +1,11 @@
+# k3s registry config — lets the node's containerd pull contestant images from
+# the in-cluster registry over plain HTTP. Install to /etc/rancher/k3s/registries.yaml
+# then restart k3s. NODE_IP must match the registry hostPort address used in up.sh.
+mirrors:
+  "192.168.1.11:5000":
+    endpoint:
+      - "http://192.168.1.11:5000"
+configs:
+  "192.168.1.11:5000":
+    tls:
+      insecure_skip_verify: true

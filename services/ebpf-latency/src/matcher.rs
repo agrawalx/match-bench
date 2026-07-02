@@ -39,6 +39,8 @@ pub struct MatchedEvent {
     pub orig_order_id: String,
     pub reordering_detected: bool,
     pub retransmission_count: u32,
+    /// FIX LastLiquidityInd (851): 0 unknown, 1 maker, 2 taker. Pass-through from parse.
+    pub liquidity_ind: u8,
 }
 
 #[derive(Debug, Default)]
@@ -108,6 +110,7 @@ impl Matcher {
         fill_price: u64,
         orig_order_id: &str,
         reordered: bool,
+        liquidity_ind: u8,
     ) -> Option<MatchedEvent> {
         let Some(inflight) = self.inflight.get_mut(clordid) else {
             self.unmatched_responses = self.unmatched_responses.saturating_add(1);
@@ -130,6 +133,7 @@ impl Matcher {
             orig_order_id: orig_order_id.to_string(),
             reordering_detected: inflight.reordering_detected,
             retransmission_count: inflight.retransmission_count,
+            liquidity_ind,
         })
     }
 
@@ -167,9 +171,9 @@ mod tests {
         let mut m = Matcher::new();
         m.on_request("o1", 100, 0x0a00_0001, 50000, 1, false);
 
-        let ack = m.on_response("o1", 200, "0", 0, 0, "", false).unwrap();
+        let ack = m.on_response("o1", 200, "0", 0, 0, "", false, 0).unwrap();
         let fill = m
-            .on_response("o1", 350, "2", 12, 42_500_000_000, "", false)
+            .on_response("o1", 350, "2", 12, 42_500_000_000, "", false, 2)
             .unwrap();
 
         assert_eq!(ack.t3_ns, 100);
@@ -184,6 +188,21 @@ mod tests {
     }
 
     #[test]
+    /// liquidity_ind_passes_through verifies the FIX 851 liquidity indicator is
+    /// carried verbatim onto the MatchedEvent (taker=2, maker=1, ack=0).
+    fn liquidity_ind_passes_through() {
+        let mut m = Matcher::new();
+        m.on_request("t", 100, 1, 5, 10, false);
+        m.on_request("k", 100, 1, 5, 11, false);
+        let ack = m.on_response("t", 150, "0", 0, 0, "", false, 0).unwrap();
+        let taker = m.on_response("t", 200, "2", 5, 0, "", false, 2).unwrap();
+        let maker = m.on_response("k", 900, "2", 5, 0, "", false, 1).unwrap();
+        assert_eq!(ack.liquidity_ind, 0);
+        assert_eq!(taker.liquidity_ind, 2);
+        assert_eq!(maker.liquidity_ind, 1);
+    }
+
+    #[test]
     /// per_clordid_isolation_across_pipelined_orders performs the module-specific operation described by its name.
     /// It keeps validation, side effects, and returned values within this module's contract.
     fn per_clordid_isolation_across_pipelined_orders() {
@@ -191,8 +210,8 @@ mod tests {
         m.on_request("A", 100, 1, 5, 10, false);
         m.on_request("B", 130, 1, 5, 20, false);
 
-        let rb = m.on_response("B", 300, "2", 1, 0, "", false).unwrap();
-        let ra = m.on_response("A", 320, "2", 1, 0, "", false).unwrap();
+        let rb = m.on_response("B", 300, "2", 1, 0, "", false, 2).unwrap();
+        let ra = m.on_response("A", 320, "2", 1, 0, "", false, 2).unwrap();
 
         assert_eq!(rb.t3_ns, 130);
         assert_eq!(ra.t3_ns, 100);
@@ -205,7 +224,7 @@ mod tests {
     /// It keeps validation, side effects, and returned values within this module's contract.
     fn response_without_request_is_unmatched() {
         let mut m = Matcher::new();
-        assert!(m.on_response("ghost", 200, "0", 0, 0, "", false).is_none());
+        assert!(m.on_response("ghost", 200, "0", 0, 0, "", false, 0).is_none());
         assert_eq!(m.unmatched_responses, 1);
     }
 
@@ -216,7 +235,7 @@ mod tests {
         let mut m = Matcher::new();
         m.on_request("o1", 100, 1, 5, 10, false);
         m.on_request("o1", 175, 1, 5, 10, false);
-        let e = m.on_response("o1", 200, "0", 0, 0, "", false).unwrap();
+        let e = m.on_response("o1", 200, "0", 0, 0, "", false, 0).unwrap();
         assert_eq!(e.t3_ns, 100);
         assert_eq!(e.retransmission_count, 1);
     }
@@ -231,10 +250,10 @@ mod tests {
         let evicted = m.evict_idle(10_000_000_000, DEFAULT_IDLE_NS);
         assert_eq!(evicted, 1);
         assert!(m
-            .on_response("old", 10_000_000_100, "0", 0, 0, "", false)
+            .on_response("old", 10_000_000_100, "0", 0, 0, "", false, 0)
             .is_none());
         assert!(m
-            .on_response("new", 10_000_000_100, "0", 0, 0, "", false)
+            .on_response("new", 10_000_000_100, "0", 0, 0, "", false, 0)
             .is_some());
     }
 }

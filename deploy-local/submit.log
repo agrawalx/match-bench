@@ -1,0 +1,43 @@
+>> submitting /tmp/iicpc-sub.zip
+{"submission_id":"019eafa8-ff1a-7129-913d-4f261ddf612b","status":"uploaded","sha256":"9d1db6df35d650f68d0a2f9fbd37308cff4c4eacfb3714f2e44eb9e1865e2259","language":"go","protocol":"REST","port":8080,"team_name":"devtest","created_at":"2026-06-10T03:52:28.69807638Z"}
+>> submission_id=019eafa8-ff1a-7129-913d-4f261ddf612b  — waiting for build to reach 'ready' (Kaniko build + scan)...
+   [1] status=uploaded
+   [2] status=uploaded
+   [3] status=uploaded
+   [4] status=uploaded
+   [5] status=uploaded
+   [6] status=uploaded
+   [7] status=uploaded
+   [8] status=uploaded
+   [9] status=uploaded
+   [10] status=uploaded
+   [11] status=uploaded
+   [12] status=uploaded
+   [13] status=uploaded
+   [14] status=uploaded
+   [15] status=building
+   [16] status=building
+   [17] status=building
+   [18] status=building
+   [19] status=building
+   [20] status=building
+   [21] status=building
+   [22] status=building
+   [23] status=building
+   [24] status=building
+   [25] status=building
+   [26] status=building
+   [27] status=building
+   [28] status=building
+   [29] status=building
+   [30] status=building
+   [31] status=building
+   [32] status=ready
+>> triggering benchmark (3 sessions: constant/spike/ramp, low RPS)
+{"run_group_id":"019eafab-63fd-7714-966b-180bffc5ef56","submission_id":"019eafa8-ff1a-7129-913d-4f261ddf612b","status":"requested","created_at":"2026-06-10T03:55:05.597464771Z","runs":[{"session_id":"019eafab-63fd-771f-b4aa-557e473cd5f6","scenario_id":"019eaf95-9e7e-7d53-9409-9d59d22d6b7b","scenario_name":"constant","status":"deploying","message":"allocating sandbox slot","created_at":"2026-06-10T03:55:05.597464Z","updated_at":"2026-06-10T03:55:07.646637Z"},{"session_id":"019eafab-63fd-7722-8f9d-afe4bfd0d6a8","scenario_id":"019eaf95-9e7e-7d56-b81c-166397484bfe","scenario_name":"spike","status":"requested","created_at":"2026-06-10T03:55:05.597464Z","updated_at":"2026-06-10T03:55:05.597464Z"},{"session_id":"019eafab-63fd-7723-a400-06a4a40aea98","scenario_id":"019eaf95-9e7e-7d57-b8a8-72fa89929147","scenario_name":"ramp","status":"requested","created_at":"2026-06-10T03:55:05.597464Z","updated_at":"2026-06-10T03:55:05.597464Z"}]}
+
+>> run_group_id=019eafab-63fd-7714-966b-180bffc5ef56
+   Watch it run:
+     kubectl get pods -A -w           # algo-* + capture-* appear in sandbox ns
+     Grafana  http://localhost:3000   # throughput (Prometheus) + latency (TimescaleDB)
+     Frontend http://localhost:8080   # leaderboard / run detail

@@ -329,6 +329,7 @@ fn flush(producer: &KafkaProducer, config: &Config, events: &mut Vec<MatchedEven
                 orig_order_id: &e.orig_order_id,
                 reordering_detected: e.reordering_detected,
                 retransmission_count: e.retransmission_count,
+                liquidity_ind: e.liquidity_ind,
             })
             .collect::<Vec<_>>();
         let batch = OrderAckedBatchRef {
@@ -621,6 +622,7 @@ mod tests {
             orig_order_id: String::new(),
             reordering_detected: false,
             retransmission_count: 0,
+            liquidity_ind: 0,
         }
     }
 
@@ -759,6 +761,7 @@ mod tests {
             orig_order_id: format!("order-{suffix}"),
             reordering_detected: true,
             retransmission_count: 1,
+            liquidity_ind: 2,
         }];
 
         flush(&producer, &config, &mut events);

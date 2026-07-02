@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -92,6 +93,14 @@ func main() {
 	if err != nil {
 		log.Error("build scenarios failed", "error", err)
 		os.Exit(1)
+	}
+	// SEED_SCENARIOS optionally restricts which built scenarios are seeded (CSV of
+	// names, e.g. "constant"). Empty = seed all. Note SeedScenarios only inserts/
+	// upserts, so pre-existing rows for excluded scenarios must be deleted once via
+	// SQL — they are simply never re-created here after that.
+	if only := envOr("SEED_SCENARIOS", ""); strings.TrimSpace(only) != "" {
+		scenarioRows = filterScenarios(scenarioRows, only)
+		log.Info("scenario seed filtered", "keep", only, "count", len(scenarioRows))
 	}
 	storeRows := make([]store.ScenarioRow, len(scenarioRows))
 	for i, sr := range scenarioRows {
@@ -237,6 +246,25 @@ func envOr(key, def string) string {
 		return v
 	}
 	return def
+}
+
+// filterScenarios keeps only the scenarios whose name is in the CSV allowlist.
+// It preserves input order and silently drops unknown names, so a bad entry
+// yields fewer rows rather than a startup failure.
+func filterScenarios(rows []scenarios.ScenarioRow, csv string) []scenarios.ScenarioRow {
+	keep := make(map[string]bool)
+	for _, n := range strings.Split(csv, ",") {
+		if n = strings.TrimSpace(n); n != "" {
+			keep[n] = true
+		}
+	}
+	out := rows[:0:0]
+	for _, r := range rows {
+		if keep[r.Name] {
+			out = append(out, r)
+		}
+	}
+	return out
 }
 
 // envBool performs the package-specific operation described by its name.

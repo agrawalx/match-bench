@@ -1,0 +1,27 @@
+>> submitting /tmp/iicpc-sub.zip
+{"submission_id":"019eafaf-08b7-70f2-a928-f8ab06bc5e80","status":"uploaded","sha256":"0bc769832e81e4c88a912b946e6bc572f2fce10c2dd7f111c1db8eefd0fe1382","language":"go","protocol":"REST","port":8080,"team_name":"devtest","created_at":"2026-06-10T03:59:04.375062508Z"}
+>> submission_id=019eafaf-08b7-70f2-a928-f8ab06bc5e80  — waiting for build to reach 'ready' (Kaniko build + scan)...
+   [1] status=uploaded
+   [2] status=building
+   [3] status=building
+   [4] status=building
+   [5] status=building
+   [6] status=building
+   [7] status=building
+   [8] status=building
+   [9] status=building
+   [10] status=building
+   [11] status=building
+   [12] status=building
+   [13] status=building
+   [14] status=building
+   [15] status=building
+   [16] status=ready
+>> triggering benchmark (3 sessions: constant/spike/ramp, low RPS)
+{"run_group_id":"019eafb0-3339-7028-8bdd-70fe3ed8877c","submission_id":"019eafaf-08b7-70f2-a928-f8ab06bc5e80","status":"requested","created_at":"2026-06-10T04:00:20.793010919Z","runs":[{"session_id":"019eafb0-3339-702e-b20f-2c59d3ea89eb","scenario_id":"019eaf95-9e7e-7d53-9409-9d59d22d6b7b","scenario_name":"constant","status":"requested","created_at":"2026-06-10T04:00:20.79301Z","updated_at":"2026-06-10T04:00:20.79301Z"},{"session_id":"019eafb0-3339-7030-a647-ea6c3fa06545","scenario_id":"019eaf95-9e7e-7d56-b81c-166397484bfe","scenario_name":"spike","status":"requested","created_at":"2026-06-10T04:00:20.79301Z","updated_at":"2026-06-10T04:00:20.79301Z"},{"session_id":"019eafb0-3339-7031-8645-7a78529fb794","scenario_id":"019eaf95-9e7e-7d57-b8a8-72fa89929147","scenario_name":"ramp","status":"requested","created_at":"2026-06-10T04:00:20.79301Z","updated_at":"2026-06-10T04:00:20.79301Z"}]}
+
+>> run_group_id=019eafb0-3339-7028-8bdd-70fe3ed8877c
+   Watch it run:
+     kubectl get pods -A -w           # algo-* + capture-* appear in sandbox ns
+     Grafana  http://localhost:3000   # throughput (Prometheus) + latency (TimescaleDB)
+     Frontend http://localhost:8080   # leaderboard / run detail

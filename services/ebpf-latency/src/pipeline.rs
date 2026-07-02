@@ -102,6 +102,7 @@ impl Pipeline {
                         p.fill_price,
                         &p.orig_clordid,
                         reordered,
+                        p.liquidity,
                     ) {
                         out.push(ev);
                     }

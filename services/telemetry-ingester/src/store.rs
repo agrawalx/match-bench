@@ -28,7 +28,8 @@ CREATE TABLE IF NOT EXISTS metrics (
     error_rate    DOUBLE PRECISION,
     hdr_encoded   BYTEA,
     rt_hdr_encoded   BYTEA,
-    slip_hdr_encoded BYTEA
+    slip_hdr_encoded BYTEA,
+    match_hdr_encoded BYTEA
 );";
 
 const METRICS_PARTIAL_TABLE: &str = "\
@@ -51,7 +52,8 @@ CREATE TABLE IF NOT EXISTS metrics_partial (
     errors        BIGINT,
     hdr_encoded   BYTEA,
     rt_hdr_encoded   BYTEA,
-    slip_hdr_encoded BYTEA
+    slip_hdr_encoded BYTEA,
+    match_hdr_encoded BYTEA
 );";
 
 const ADD_RT_COLUMNS: &str = "\
@@ -59,7 +61,9 @@ ALTER TABLE metrics ADD COLUMN IF NOT EXISTS rt_p50_ns BIGINT;
 ALTER TABLE metrics ADD COLUMN IF NOT EXISTS rt_p90_ns BIGINT;
 ALTER TABLE metrics ADD COLUMN IF NOT EXISTS rt_p99_ns BIGINT;
 ALTER TABLE metrics ADD COLUMN IF NOT EXISTS rt_hdr_encoded BYTEA;
-ALTER TABLE metrics ADD COLUMN IF NOT EXISTS slip_hdr_encoded BYTEA;";
+ALTER TABLE metrics ADD COLUMN IF NOT EXISTS slip_hdr_encoded BYTEA;
+ALTER TABLE metrics ADD COLUMN IF NOT EXISTS match_hdr_encoded BYTEA;
+ALTER TABLE metrics_partial ADD COLUMN IF NOT EXISTS match_hdr_encoded BYTEA;";
 
 const TIMESCALE_SETUP: &[&str] = &[
     "CREATE EXTENSION IF NOT EXISTS timescaledb;",
@@ -72,6 +76,14 @@ const TIMESCALE_SETUP: &[&str] = &[
     "SELECT add_continuous_aggregate_policy('metrics_10s', \
         start_offset => INTERVAL '1 hour', end_offset => INTERVAL '10 seconds', \
         schedule_interval => INTERVAL '10 seconds');",
+    // metrics_partial is transient rollup staging: the rollup merges it into
+    // `metrics` and never reads old rows again, so drop chunks after 6h to stop
+    // unbounded growth at high TPS. 6h is far larger than any run + rollup lag.
+    // NOTE: `metrics` itself is intentionally NOT compressed — telemetry-rollup
+    // re-creates its unique index (for the UPSERT ON CONFLICT) on every boot, and
+    // TimescaleDB forbids CREATE INDEX on a compressed hypertable, which would
+    // crashloop the rollup. Growth of `metrics` is bounded per-run instead.
+    "SELECT add_retention_policy('metrics_partial', INTERVAL '6 hours', if_not_exists => TRUE);",
 ];
 
 /// INSERT_SQL writes per-shard partial rows for later rollup into metrics.
@@ -79,8 +91,8 @@ const TIMESCALE_SETUP: &[&str] = &[
 /// histograms across independent ingester shards.
 const INSERT_SQL: &str = "\
 INSERT INTO metrics_partial
-    (time, session_id, contestant_id, wave_index, p50_ns, p90_ns, p99_ns, p999_ns, rt_p50_ns, rt_p90_ns, rt_p99_ns, tps_1s, error_rate, hdr_encoded, rt_hdr_encoded, slip_hdr_encoded, offered, errors, shard)
-VALUES (to_timestamp($1::double precision / 1e9), $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)";
+    (time, session_id, contestant_id, wave_index, p50_ns, p90_ns, p99_ns, p999_ns, rt_p50_ns, rt_p90_ns, rt_p99_ns, tps_1s, error_rate, hdr_encoded, rt_hdr_encoded, slip_hdr_encoded, offered, errors, shard, match_hdr_encoded)
+VALUES (to_timestamp($1::double precision / 1e9), $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)";
 
 /// Store stores the state passed across this module boundary.
 /// Keep field changes compatible with callers and serialized contracts.
@@ -177,6 +189,7 @@ impl Store {
                         &(s.offered as i64),
                         &(s.errors as i64),
                         &self.shard,
+                        &s.match_hdr_encoded,
                     ],
                 )
                 .await

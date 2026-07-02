@@ -1,0 +1,2813 @@
+=== build ghcr.io/agrawalx/submission-api:dev ===
+#0 building with "default" instance using docker driver
+
+#1 [internal] load build definition from Dockerfile
+#1 transferring dockerfile: 1.26kB done
+#1 DONE 0.0s
+
+#2 [internal] load metadata for docker.io/library/golang:1.25
+#2 ...
+
+#3 [auth] library/debian:pull token for registry-1.docker.io
+#3 DONE 0.0s
+
+#4 [internal] load metadata for docker.io/library/debian:12-slim
+#4 ...
+
+#2 [internal] load metadata for docker.io/library/golang:1.25
+#2 DONE 1.4s
+
+#4 [internal] load metadata for docker.io/library/debian:12-slim
+#4 DONE 2.5s
+
+#5 [internal] load .dockerignore
+#5 transferring context: 2B done
+#5 DONE 0.0s
+
+#6 [stage-1 1/3] FROM docker.io/library/debian:12-slim@sha256:0104b334637a5f19aa9c983a91b54c89887c0984081f2068983107a6f6c21eeb
+#6 DONE 0.0s
+
+#7 [builder 1/7] FROM docker.io/library/golang:1.25@sha256:fb6b5fe6aca5fb55b7238c2fadaac64bd955ceeb6f305cb0ac3fd28b377e4415
+#7 resolve docker.io/library/golang:1.25@sha256:fb6b5fe6aca5fb55b7238c2fadaac64bd955ceeb6f305cb0ac3fd28b377e4415 0.0s done
+#7 DONE 0.0s
+
+#8 [internal] load build context
+#8 transferring context: 21.38MB 0.1s done
+#8 DONE 0.1s
+
+#9 [builder 2/7] WORKDIR /workspace
+#9 CACHED
+
+#10 [builder 3/7] COPY schemas/go ./schemas/go
+#10 DONE 0.1s
+
+#11 [builder 4/7] COPY libs/go ./libs/go
+#11 DONE 0.1s
+
+#12 [builder 5/7] COPY services/submission-api ./services/submission-api
+#12 DONE 0.1s
+
+#13 [builder 6/7] WORKDIR /workspace/services/submission-api
+#13 DONE 0.1s
+
+#14 [builder 7/7] RUN CGO_ENABLED=0 GOOS=linux go build -o /bin/submission-api .
+#14 0.250 go: downloading github.com/go-chi/chi/v5 v5.3.0
+#14 0.250 go: downloading github.com/segmentio/kafka-go v0.4.51
+#14 0.250 go: downloading github.com/google/uuid v1.6.0
+#14 0.251 go: downloading github.com/jackc/pgx/v5 v5.9.2
+#14 0.256 go: downloading github.com/minio/minio-go/v7 v7.1.0
+#14 0.257 go: downloading github.com/prometheus/client_golang v1.20.5
+#14 0.273 go: downloading github.com/golang-jwt/jwt/v5 v5.3.0
+#14 0.322 go: downloading github.com/BurntSushi/toml v1.4.0
+#14 0.322 go: downloading gopkg.in/yaml.v3 v3.0.1
+#14 1.218 go: downloading github.com/prometheus/common v0.55.0
+#14 1.218 go: downloading github.com/beorn7/perks v1.0.1
+#14 1.218 go: downloading github.com/cespare/xxhash/v2 v2.3.0
+#14 1.218 go: downloading github.com/klauspost/compress v1.18.6
+#14 1.218 go: downloading github.com/prometheus/client_model v0.6.1
+#14 1.219 go: downloading github.com/prometheus/procfs v0.15.1
+#14 1.278 go: downloading google.golang.org/protobuf v1.34.2
+#14 1.286 go: downloading github.com/jackc/puddle/v2 v2.2.2
+#14 1.340 go: downloading github.com/jackc/pgpassfile v1.0.0
+#14 1.443 go: downloading github.com/jackc/pgservicefile v0.0.0-20240606120523-5a60cdf6a761
+#14 1.443 go: downloading golang.org/x/text v0.37.0
+#14 1.443 go: downloading github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822
+#14 1.444 go: downloading golang.org/x/sys v0.44.0
+#14 1.447 go: downloading github.com/dustin/go-humanize v1.0.1
+#14 1.463 go: downloading github.com/klauspost/crc32 v1.3.0
+#14 1.504 go: downloading github.com/minio/crc64nvme v1.1.1
+#14 1.648 go: downloading github.com/minio/md5-simd v1.1.2
+#14 1.648 go: downloading github.com/zeebo/xxh3 v1.1.0
+#14 1.648 go: downloading go.yaml.in/yaml/v3 v3.0.4
+#14 1.648 go: downloading golang.org/x/net v0.54.0
+#14 1.690 go: downloading github.com/go-ini/ini v1.67.0
+#14 1.690 go: downloading golang.org/x/sync v0.20.0
+#14 1.690 go: downloading github.com/rs/xid v1.6.0
+#14 1.691 go: downloading github.com/tinylib/msgp v1.6.1
+#14 1.691 go: downloading golang.org/x/crypto v0.51.0
+#14 1.932 go: downloading github.com/klauspost/cpuid/v2 v2.2.11
+#14 2.023 go: downloading github.com/pierrec/lz4/v4 v4.1.15
+#14 2.312 go: downloading github.com/philhofer/fwd v1.2.0
+#14 DONE 15.5s
+
+#15 [stage-1 2/3] RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates &&     rm -rf /var/lib/apt/lists/*
+#15 CACHED
+
+#16 [stage-1 3/3] COPY --from=builder /bin/submission-api /usr/local/bin/submission-api
+#16 DONE 0.2s
+
+#17 exporting to image
+#17 exporting layers 0.1s done
+#17 writing image sha256:4a38571c570ec2122f21b9bc77af69895ba6473b3a068180ced6a8bdd6b7bc4e done
+#17 naming to ghcr.io/agrawalx/submission-api:dev done
+#17 DONE 0.1s
+=== build ghcr.io/agrawalx/spawner:dev ===
+#0 building with "default" instance using docker driver
+
+#1 [internal] load build definition from Dockerfile
+#1 transferring dockerfile: 1.51kB done
+#1 DONE 0.0s
+
+#2 [internal] load metadata for docker.io/library/golang:1.25
+#2 ...
+
+#3 [internal] load metadata for docker.io/library/debian:12-slim
+#3 DONE 0.4s
+
+#2 [internal] load metadata for docker.io/library/golang:1.25
+#2 DONE 0.4s
+
+#4 [internal] load .dockerignore
+#4 transferring context: 2B done
+#4 DONE 0.0s
+
+#5 [stage-1 1/4] FROM docker.io/library/debian:12-slim@sha256:0104b334637a5f19aa9c983a91b54c89887c0984081f2068983107a6f6c21eeb
+#5 DONE 0.0s
+
+#6 [stage-1 2/4] RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates &&     rm -rf /var/lib/apt/lists/*
+#6 CACHED
+
+#7 [builder 1/8] FROM docker.io/library/golang:1.25@sha256:fb6b5fe6aca5fb55b7238c2fadaac64bd955ceeb6f305cb0ac3fd28b377e4415
+#7 resolve docker.io/library/golang:1.25@sha256:fb6b5fe6aca5fb55b7238c2fadaac64bd955ceeb6f305cb0ac3fd28b377e4415 0.0s done
+#7 DONE 0.0s
+
+#8 [internal] load build context
+#8 transferring context: 150.24kB 0.0s done
+#8 DONE 0.1s
+
+#9 [builder 2/8] WORKDIR /workspace
+#9 CACHED
+
+#10 [builder 3/8] COPY schemas/go ./schemas/go
+#10 CACHED
+
+#11 [builder 4/8] COPY libs/go ./libs/go
+#11 CACHED
+
+#12 [builder 5/8] COPY services/build-worker ./services/build-worker
+#12 DONE 0.1s
+
+#13 [builder 6/8] WORKDIR /workspace/services/build-worker
+#13 DONE 0.1s
+
+#14 [builder 7/8] RUN CGO_ENABLED=0 GOOS=linux go build -o /bin/spawner ./cmd/spawner
+#14 0.269 go: downloading github.com/segmentio/kafka-go v0.4.51
+#14 0.269 go: downloading github.com/prometheus/client_golang v1.20.5
+#14 0.274 go: downloading github.com/aws/aws-sdk-go-v2/config v1.32.24
+#14 0.274 go: downloading github.com/aws/aws-sdk-go-v2/service/ecr v1.58.4
+#14 0.274 go: downloading github.com/google/go-containerregistry v0.21.6
+#14 0.275 go: downloading k8s.io/api v0.31.0
+#14 0.275 go: downloading k8s.io/apimachinery v0.31.0
+#14 0.282 go: downloading k8s.io/client-go v0.31.0
+#14 0.298 go: downloading github.com/jackc/pgx/v5 v5.9.2
+#14 0.319 go: downloading github.com/minio/minio-go/v7 v7.1.0
+#14 0.797 go: downloading github.com/aws/aws-sdk-go-v2 v1.42.0
+#14 1.235 go: downloading github.com/cespare/xxhash/v2 v2.3.0
+#14 1.236 go: downloading github.com/dustin/go-humanize v1.0.1
+#14 1.236 go: downloading github.com/google/uuid v1.6.0
+#14 1.237 go: downloading github.com/klauspost/compress v1.18.6
+#14 1.241 go: downloading github.com/klauspost/crc32 v1.3.0
+#14 1.306 go: downloading github.com/minio/crc64nvme v1.1.1
+#14 1.533 go: downloading github.com/minio/md5-simd v1.1.2
+#14 1.533 go: downloading go.yaml.in/yaml/v3 v3.0.4
+#14 1.533 go: downloading github.com/zeebo/xxh3 v1.1.0
+#14 1.533 go: downloading golang.org/x/net v0.48.0
+#14 1.640 go: downloading github.com/go-ini/ini v1.67.0
+#14 1.669 go: downloading github.com/beorn7/perks v1.0.1
+#14 1.670 go: downloading github.com/prometheus/client_model v0.6.1
+#14 1.670 go: downloading github.com/prometheus/common v0.55.0
+#14 1.690 go: downloading github.com/prometheus/procfs v0.15.1
+#14 1.718 go: downloading google.golang.org/protobuf v1.34.2
+#14 1.869 go: downloading github.com/jackc/puddle/v2 v2.2.2
+#14 1.870 go: downloading github.com/aws/aws-sdk-go-v2/credentials v1.19.23
+#14 1.981 go: downloading github.com/aws/aws-sdk-go-v2/feature/ec2/imds v1.18.29
+#14 1.982 go: downloading github.com/aws/aws-sdk-go-v2/service/signin v1.1.5
+#14 1.995 go: downloading github.com/aws/aws-sdk-go-v2/service/sso v1.31.3
+#14 1.995 go: downloading github.com/aws/aws-sdk-go-v2/service/ssooidc v1.36.6
+#14 1.996 go: downloading github.com/aws/smithy-go v1.27.1
+#14 1.996 go: downloading github.com/aws/aws-sdk-go-v2/service/sts v1.43.3
+#14 2.027 go: downloading github.com/klauspost/cpuid/v2 v2.2.11
+#14 2.050 go: downloading golang.org/x/crypto v0.46.0
+#14 2.050 go: downloading github.com/rs/xid v1.6.0
+#14 2.051 go: downloading github.com/tinylib/msgp v1.6.1
+#14 2.087 go: downloading golang.org/x/sys v0.44.0
+#14 2.157 go: downloading github.com/aws/aws-sdk-go-v2/internal/configsources v1.4.29
+#14 2.305 go: downloading github.com/gogo/protobuf v1.3.2
+#14 2.305 go: downloading github.com/google/gofuzz v1.2.0
+#14 2.305 go: downloading k8s.io/utils v0.0.0-20240711033017-18e509b52bc8
+#14 2.305 go: downloading github.com/docker/cli v29.4.3+incompatible
+#14 2.306 go: downloading golang.org/x/sync v0.20.0
+#14 2.307 go: downloading github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822
+#14 2.334 go: downloading github.com/jackc/pgpassfile v1.0.0
+#14 2.355 go: downloading github.com/jackc/pgservicefile v0.0.0-20240606120523-5a60cdf6a761
+#14 2.367 go: downloading golang.org/x/text v0.32.0
+#14 2.453 go: downloading k8s.io/klog/v2 v2.130.1
+#14 2.453 go: downloading github.com/imdario/mergo v0.3.6
+#14 2.535 go: downloading github.com/spf13/pflag v1.0.10
+#14 2.535 go: downloading golang.org/x/term v0.38.0
+#14 2.599 go: downloading github.com/aws/aws-sdk-go-v2/internal/endpoints/v2 v2.7.29
+#14 2.667 go: downloading github.com/aws/aws-sdk-go-v2/internal/v4a v1.4.30
+#14 2.784 go: downloading github.com/aws/aws-sdk-go-v2/service/internal/accept-encoding v1.13.12
+#14 2.784 go: downloading github.com/aws/aws-sdk-go-v2/service/internal/presigned-url v1.13.29
+#14 2.850 go: downloading github.com/philhofer/fwd v1.2.0
+#14 2.857 go: downloading sigs.k8s.io/structured-merge-diff/v4 v4.4.1
+#14 2.857 go: downloading gopkg.in/inf.v0 v0.9.1
+#14 2.858 go: downloading sigs.k8s.io/json v0.0.0-20221116044647-bc3834ca7abd
+#14 2.868 go: downloading github.com/opencontainers/go-digest v1.0.0
+#14 2.868 go: downloading github.com/pierrec/lz4/v4 v4.1.15
+#14 2.990 go: downloading github.com/golang/protobuf v1.5.4
+#14 3.008 go: downloading github.com/google/gnostic-models v0.6.8
+#14 3.009 go: downloading golang.org/x/time v0.11.0
+#14 3.027 go: downloading golang.org/x/oauth2 v0.36.0
+#14 3.096 go: downloading github.com/go-logr/logr v1.4.3
+#14 3.099 go: downloading github.com/fxamacker/cbor/v2 v2.7.0
+#14 3.100 go: downloading github.com/opencontainers/image-spec v1.1.1
+#14 3.125 go: downloading k8s.io/kube-openapi v0.0.0-20240228011516-70dd3763d340
+#14 3.213 go: downloading github.com/json-iterator/go v1.1.12
+#14 3.217 go: downloading gopkg.in/yaml.v2 v2.4.0
+#14 3.217 go: downloading github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc
+#14 3.217 go: downloading sigs.k8s.io/yaml v1.4.0
+#14 3.219 go: downloading github.com/sirupsen/logrus v1.9.4
+#14 3.345 go: downloading gopkg.in/yaml.v3 v3.0.1
+#14 3.357 go: downloading github.com/google/go-cmp v0.7.0
+#14 3.357 go: downloading github.com/docker/docker-credential-helpers v0.9.3
+#14 3.359 go: downloading github.com/x448/float16 v0.8.4
+#14 3.389 go: downloading github.com/modern-go/concurrent v0.0.0-20180306012644-bacd9c7ef1dd
+#14 3.478 go: downloading github.com/modern-go/reflect2 v1.0.2
+#14 3.899 go: downloading github.com/emicklei/go-restful/v3 v3.11.0
+#14 3.900 go: downloading github.com/go-openapi/swag v0.22.4
+#14 3.900 go: downloading github.com/go-openapi/jsonreference v0.20.2
+#14 4.012 go: downloading github.com/go-openapi/jsonpointer v0.19.6
+#14 4.013 go: downloading github.com/mailru/easyjson v0.7.7
+#14 4.127 go: downloading github.com/josharian/intern v1.0.0
+#14 DONE 27.9s
+
+#15 [builder 8/8] RUN CGO_ENABLED=0 GOOS=linux go build -o /bin/fetcher ./cmd/fetcher
+#15 DONE 0.8s
+
+#16 [stage-1 3/4] COPY --from=builder /bin/spawner /usr/local/bin/spawner
+#16 DONE 0.1s
+
+#17 [stage-1 4/4] COPY --from=builder /bin/fetcher /usr/local/bin/fetcher
+#17 DONE 0.1s
+
+#18 exporting to image
+#18 exporting layers 0.1s done
+#18 writing image sha256:040616d2d4a9fb1dab0c12cfc23063c0a6be7db10bbda88b36e5ac41dc8d6395 done
+#18 naming to ghcr.io/agrawalx/spawner:dev done
+#18 DONE 0.2s
+=== build ghcr.io/agrawalx/sandbox-orchestrator:dev ===
+#0 building with "default" instance using docker driver
+
+#1 [internal] load build definition from Dockerfile
+#1 transferring dockerfile: 1.18kB done
+#1 DONE 0.0s
+
+#2 [internal] load metadata for docker.io/library/debian:12-slim
+#2 ...
+
+#3 [internal] load metadata for docker.io/library/golang:1.25
+#3 DONE 0.4s
+
+#2 [internal] load metadata for docker.io/library/debian:12-slim
+#2 DONE 0.4s
+
+#4 [internal] load .dockerignore
+#4 transferring context: 2B done
+#4 DONE 0.0s
+
+#5 [stage-1 1/3] FROM docker.io/library/debian:12-slim@sha256:0104b334637a5f19aa9c983a91b54c89887c0984081f2068983107a6f6c21eeb
+#5 DONE 0.0s
+
+#6 [stage-1 2/3] RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates &&     rm -rf /var/lib/apt/lists/*
+#6 CACHED
+
+#7 [builder 1/7] FROM docker.io/library/golang:1.25@sha256:fb6b5fe6aca5fb55b7238c2fadaac64bd955ceeb6f305cb0ac3fd28b377e4415
+#7 resolve docker.io/library/golang:1.25@sha256:fb6b5fe6aca5fb55b7238c2fadaac64bd955ceeb6f305cb0ac3fd28b377e4415 0.0s done
+#7 DONE 0.0s
+
+#8 [internal] load build context
+#8 transferring context: 91.56kB done
+#8 DONE 0.0s
+
+#9 [builder 2/7] WORKDIR /workspace
+#9 CACHED
+
+#10 [builder 3/7] COPY schemas/go ./schemas/go
+#10 CACHED
+
+#11 [builder 4/7] COPY libs/go ./libs/go
+#11 CACHED
+
+#12 [builder 5/7] COPY services/sandbox-orchestrator ./services/sandbox-orchestrator
+#12 DONE 0.0s
+
+#13 [builder 6/7] WORKDIR /workspace/services/sandbox-orchestrator
+#13 DONE 0.0s
+
+#14 [builder 7/7] RUN CGO_ENABLED=0 GOOS=linux go build -o /bin/sandbox-orchestrator .
+#14 0.217 go: downloading github.com/prometheus/client_golang v1.20.5
+#14 0.217 go: downloading github.com/go-chi/chi/v5 v5.1.0
+#14 0.218 go: downloading k8s.io/api v0.31.0
+#14 0.222 go: downloading k8s.io/apimachinery v0.31.0
+#14 0.231 go: downloading k8s.io/client-go v0.31.0
+#14 1.236 go: downloading github.com/cespare/xxhash/v2 v2.3.0
+#14 1.236 go: downloading github.com/prometheus/client_model v0.6.1
+#14 1.236 go: downloading github.com/beorn7/perks v1.0.1
+#14 1.237 go: downloading github.com/prometheus/common v0.55.0
+#14 1.297 go: downloading github.com/prometheus/procfs v0.15.1
+#14 1.297 go: downloading google.golang.org/protobuf v1.34.2
+#14 1.297 go: downloading github.com/klauspost/compress v1.18.6
+#14 1.301 go: downloading github.com/gogo/protobuf v1.3.2
+#14 1.302 go: downloading gopkg.in/inf.v0 v0.9.1
+#14 1.399 go: downloading github.com/google/gofuzz v1.2.0
+#14 1.399 go: downloading k8s.io/utils v0.0.0-20240711033017-18e509b52bc8
+#14 1.452 go: downloading k8s.io/klog/v2 v2.130.1
+#14 1.467 go: downloading sigs.k8s.io/structured-merge-diff/v4 v4.4.1
+#14 1.649 go: downloading sigs.k8s.io/json v0.0.0-20221116044647-bc3834ca7abd
+#14 1.649 go: downloading github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822
+#14 1.660 go: downloading github.com/fxamacker/cbor/v2 v2.7.0
+#14 1.680 go: downloading golang.org/x/sys v0.44.0
+#14 1.681 go: downloading golang.org/x/net v0.26.0
+#14 1.681 go: downloading github.com/go-logr/logr v1.4.2
+#14 1.685 go: downloading github.com/json-iterator/go v1.1.12
+#14 1.754 go: downloading gopkg.in/yaml.v2 v2.4.0
+#14 1.755 go: downloading github.com/imdario/mergo v0.3.6
+#14 1.755 go: downloading github.com/spf13/pflag v1.0.5
+#14 1.755 go: downloading golang.org/x/term v0.21.0
+#14 1.756 go: downloading github.com/google/gnostic-models v0.6.8
+#14 1.756 go: downloading github.com/golang/protobuf v1.5.4
+#14 1.798 go: downloading golang.org/x/time v0.3.0
+#14 1.828 go: downloading golang.org/x/oauth2 v0.21.0
+#14 1.833 go: downloading k8s.io/kube-openapi v0.0.0-20240228011516-70dd3763d340
+#14 1.892 go: downloading github.com/x448/float16 v0.8.4
+#14 1.897 go: downloading sigs.k8s.io/yaml v1.4.0
+#14 1.926 go: downloading github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc
+#14 1.974 go: downloading github.com/google/go-cmp v0.7.0
+#14 1.975 go: downloading github.com/modern-go/concurrent v0.0.0-20180306012644-bacd9c7ef1dd
+#14 1.975 go: downloading github.com/modern-go/reflect2 v1.0.2
+#14 2.131 go: downloading gopkg.in/yaml.v3 v3.0.1
+#14 2.225 go: downloading github.com/emicklei/go-restful/v3 v3.11.0
+#14 2.225 go: downloading github.com/google/uuid v1.6.0
+#14 2.225 go: downloading github.com/go-openapi/swag v0.22.4
+#14 2.225 go: downloading github.com/go-openapi/jsonreference v0.20.2
+#14 2.345 go: downloading github.com/go-openapi/jsonpointer v0.19.6
+#14 2.349 go: downloading github.com/mailru/easyjson v0.7.7
+#14 2.377 go: downloading golang.org/x/text v0.16.0
+#14 2.565 go: downloading github.com/josharian/intern v1.0.0
+#14 DONE 39.0s
+
+#15 [stage-1 3/3] COPY --from=builder /bin/sandbox-orchestrator /usr/local/bin/sandbox-orchestrator
+#15 DONE 0.1s
+
+#16 exporting to image
+#16 exporting layers 0.1s done
+#16 writing image sha256:41280c9645e77974d4aa34d9a1cc7859284c08c7e3b6097cbf5f3103aa82ca09 done
+#16 naming to ghcr.io/agrawalx/sandbox-orchestrator:dev done
+#16 DONE 0.1s
+=== build ghcr.io/agrawalx/bot-fleet-controller:dev ===
+#0 building with "default" instance using docker driver
+
+#1 [internal] load build definition from Dockerfile
+#1 transferring dockerfile: 1.18kB done
+#1 DONE 0.0s
+
+#2 [internal] load metadata for docker.io/library/golang:1.25
+#2 ...
+
+#3 [internal] load metadata for docker.io/library/debian:12-slim
+#3 DONE 1.0s
+
+#2 [internal] load metadata for docker.io/library/golang:1.25
+#2 DONE 1.1s
+
+#4 [internal] load .dockerignore
+#4 transferring context: 2B done
+#4 DONE 0.0s
+
+#5 [stage-1 1/3] FROM docker.io/library/debian:12-slim@sha256:0104b334637a5f19aa9c983a91b54c89887c0984081f2068983107a6f6c21eeb
+#5 DONE 0.0s
+
+#6 [builder 1/7] FROM docker.io/library/golang:1.25@sha256:fb6b5fe6aca5fb55b7238c2fadaac64bd955ceeb6f305cb0ac3fd28b377e4415
+#6 resolve docker.io/library/golang:1.25@sha256:fb6b5fe6aca5fb55b7238c2fadaac64bd955ceeb6f305cb0ac3fd28b377e4415 0.0s done
+#6 DONE 0.0s
+
+#7 [internal] load build context
+#7 transferring context: 108.77kB done
+#7 DONE 0.0s
+
+#8 [builder 2/7] WORKDIR /workspace
+#8 CACHED
+
+#9 [builder 3/7] COPY schemas/go ./schemas/go
+#9 CACHED
+
+#10 [builder 4/7] COPY libs/go ./libs/go
+#10 CACHED
+
+#11 [builder 5/7] COPY services/bot-fleet-controller ./services/bot-fleet-controller
+#11 DONE 0.0s
+
+#12 [builder 6/7] WORKDIR /workspace/services/bot-fleet-controller
+#12 DONE 0.1s
+
+#13 [builder 7/7] RUN CGO_ENABLED=0 GOOS=linux go build -o /bin/bot-fleet-controller .
+#13 0.183 go: downloading github.com/go-chi/chi/v5 v5.3.0
+#13 0.183 go: downloading github.com/jackc/pgx/v5 v5.9.2
+#13 0.183 go: downloading github.com/segmentio/kafka-go v0.4.51
+#13 0.184 go: downloading github.com/prometheus/client_golang v1.20.5
+#13 1.011 go: downloading github.com/beorn7/perks v1.0.1
+#13 1.011 go: downloading github.com/prometheus/client_model v0.6.1
+#13 1.011 go: downloading github.com/prometheus/common v0.55.0
+#13 1.011 go: downloading github.com/cespare/xxhash/v2 v2.3.0
+#13 1.011 go: downloading google.golang.org/protobuf v1.34.2
+#13 1.011 go: downloading github.com/klauspost/compress v1.18.6
+#13 1.011 go: downloading github.com/prometheus/procfs v0.15.1
+#13 1.100 go: downloading github.com/jackc/puddle/v2 v2.2.2
+#13 1.100 go: downloading github.com/jackc/pgpassfile v1.0.0
+#13 1.101 go: downloading github.com/jackc/pgservicefile v0.0.0-20240606120523-5a60cdf6a761
+#13 1.102 go: downloading golang.org/x/text v0.37.0
+#13 1.291 go: downloading github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822
+#13 1.364 go: downloading golang.org/x/sys v0.44.0
+#13 1.382 go: downloading golang.org/x/sync v0.20.0
+#13 1.694 go: downloading github.com/pierrec/lz4/v4 v4.1.15
+#13 DONE 14.1s
+
+#14 [stage-1 2/3] RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates &&     rm -rf /var/lib/apt/lists/*
+#14 CACHED
+
+#15 [stage-1 3/3] COPY --from=builder /bin/bot-fleet-controller /usr/local/bin/bot-fleet-controller
+#15 DONE 0.1s
+
+#16 exporting to image
+#16 exporting layers 0.1s done
+#16 writing image sha256:9e4b746f57c9bb34901b5ae1ddcfbfe59b7e6ed4797a77a7234c308264de1875 done
+#16 naming to ghcr.io/agrawalx/bot-fleet-controller:dev done
+#16 DONE 0.1s
+=== build ghcr.io/agrawalx/correctness-validator:dev ===
+#0 building with "default" instance using docker driver
+
+#1 [internal] load build definition from Dockerfile
+#1 transferring dockerfile: 1.11kB done
+#1 DONE 0.0s
+
+#2 [internal] load metadata for docker.io/library/debian:12-slim
+#2 ...
+
+#3 [internal] load metadata for docker.io/library/golang:1.25
+#3 DONE 0.4s
+
+#2 [internal] load metadata for docker.io/library/debian:12-slim
+#2 DONE 0.4s
+
+#4 [internal] load .dockerignore
+#4 transferring context: 2B done
+#4 DONE 0.0s
+
+#5 [stage-1 1/3] FROM docker.io/library/debian:12-slim@sha256:0104b334637a5f19aa9c983a91b54c89887c0984081f2068983107a6f6c21eeb
+#5 DONE 0.0s
+
+#6 [stage-1 2/3] RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates &&     rm -rf /var/lib/apt/lists/*
+#6 CACHED
+
+#7 [builder 1/7] FROM docker.io/library/golang:1.25@sha256:fb6b5fe6aca5fb55b7238c2fadaac64bd955ceeb6f305cb0ac3fd28b377e4415
+#7 resolve docker.io/library/golang:1.25@sha256:fb6b5fe6aca5fb55b7238c2fadaac64bd955ceeb6f305cb0ac3fd28b377e4415 0.0s done
+#7 DONE 0.0s
+
+#8 [internal] load build context
+#8 transferring context: 153.22kB done
+#8 DONE 0.0s
+
+#9 [builder 2/7] WORKDIR /workspace
+#9 CACHED
+
+#10 [builder 3/7] COPY schemas/go ./schemas/go
+#10 CACHED
+
+#11 [builder 4/7] COPY libs/go ./libs/go
+#11 CACHED
+
+#12 [builder 5/7] COPY services/correctness-validator ./services/correctness-validator
+#12 DONE 0.1s
+
+#13 [builder 6/7] WORKDIR /workspace/services/correctness-validator
+#13 DONE 0.0s
+
+#14 [builder 7/7] RUN CGO_ENABLED=0 GOOS=linux go build -o /bin/correctness-validator .
+#14 0.183 go: downloading github.com/go-chi/chi/v5 v5.3.0
+#14 0.183 go: downloading github.com/segmentio/kafka-go v0.4.51
+#14 0.183 go: downloading github.com/prometheus/client_golang v1.20.5
+#14 0.183 go: downloading github.com/vmihailenco/msgpack/v5 v5.4.1
+#14 0.183 go: downloading github.com/jackc/pgx/v5 v5.9.2
+#14 0.193 go: downloading github.com/google/btree v1.1.3
+#14 0.825 go: downloading github.com/vmihailenco/tagparser/v2 v2.0.0
+#14 0.872 go: downloading github.com/prometheus/common v0.55.0
+#14 0.872 go: downloading google.golang.org/protobuf v1.34.2
+#14 0.872 go: downloading github.com/prometheus/client_model v0.6.1
+#14 0.872 go: downloading github.com/cespare/xxhash/v2 v2.3.0
+#14 0.872 go: downloading github.com/klauspost/compress v1.18.6
+#14 0.872 go: downloading github.com/beorn7/perks v1.0.1
+#14 0.872 go: downloading github.com/prometheus/procfs v0.15.1
+#14 0.914 go: downloading github.com/pierrec/lz4/v4 v4.1.15
+#14 0.933 go: downloading github.com/jackc/puddle/v2 v2.2.2
+#14 0.933 go: downloading github.com/jackc/pgpassfile v1.0.0
+#14 0.934 go: downloading github.com/jackc/pgservicefile v0.0.0-20240606120523-5a60cdf6a761
+#14 1.077 go: downloading golang.org/x/text v0.37.0
+#14 1.079 go: downloading github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822
+#14 1.129 go: downloading golang.org/x/sys v0.44.0
+#14 1.141 go: downloading golang.org/x/sync v0.20.0
+#14 DONE 13.9s
+
+#15 [stage-1 3/3] COPY --from=builder /bin/correctness-validator /usr/local/bin/correctness-validator
+#15 DONE 0.1s
+
+#16 exporting to image
+#16 exporting layers 0.1s done
+#16 writing image sha256:4a723957219c97c21d87d9fbf04b2c3e22bf6efd8874d76777721a68171ed563 done
+#16 naming to ghcr.io/agrawalx/correctness-validator:dev done
+#16 DONE 0.1s
+=== build ghcr.io/agrawalx/auth-api:dev ===
+#0 building with "default" instance using docker driver
+
+#1 [internal] load build definition from Dockerfile
+#1 transferring dockerfile: 386B done
+#1 DONE 0.0s
+
+#2 [internal] load metadata for docker.io/library/golang:1.25-alpine
+#2 DONE 0.4s
+
+#3 [internal] load metadata for gcr.io/distroless/static-debian12:nonroot
+#3 DONE 0.8s
+
+#4 [internal] load .dockerignore
+#4 transferring context: 2B done
+#4 DONE 0.0s
+
+#5 [stage-1 1/2] FROM gcr.io/distroless/static-debian12:nonroot@sha256:d093aa3e30dbadd3efe1310db061a14da60299baff8450a17fe0ccc514a16639
+#5 DONE 0.0s
+
+#6 [build 1/6] FROM docker.io/library/golang:1.25-alpine@sha256:c05ba4b73604069d376c4f41346b05374335b5ca0c46fb6dfede5a59f5196931
+#6 DONE 0.0s
+
+#7 [internal] load build context
+#7 transferring context: 9.38MB 0.0s done
+#7 DONE 0.0s
+
+#8 [build 6/6] RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/auth-api .
+#8 CACHED
+
+#9 [build 5/6] COPY services/auth-api/ ./
+#9 CACHED
+
+#10 [build 2/6] WORKDIR /src
+#10 CACHED
+
+#11 [build 3/6] COPY services/auth-api/go.mod ./
+#11 CACHED
+
+#12 [build 4/6] RUN go mod download
+#12 CACHED
+
+#13 [stage-1 2/2] COPY --from=build /out/auth-api /auth-api
+#13 CACHED
+
+#14 exporting to image
+#14 exporting layers done
+#14 writing image sha256:1dbf42c068fa767695a7d61c9e6ad9f357f5bb31780b60513525b1d7068b7497 done
+#14 naming to ghcr.io/agrawalx/auth-api:dev done
+#14 DONE 0.0s
+=== build score-computer:local ===
+#0 building with "default" instance using docker driver
+
+#1 [internal] load build definition from Dockerfile
+#1 transferring dockerfile: 763B done
+#1 DONE 0.0s
+
+#2 [internal] load metadata for docker.io/library/golang:1.25-bookworm
+#2 DONE 0.4s
+
+#3 [internal] load metadata for gcr.io/distroless/static-debian12:nonroot
+#3 DONE 0.6s
+
+#4 [internal] load .dockerignore
+#4 transferring context: 2B done
+#4 DONE 0.0s
+
+#5 [build 1/8] FROM docker.io/library/golang:1.25-bookworm@sha256:a1ae6b6c564f3e0072d70081036827a2705dbcf6b38aaa6d97f5de97fe9abdb4
+#5 DONE 0.0s
+
+#6 [stage-1 1/2] FROM gcr.io/distroless/static-debian12:nonroot@sha256:d093aa3e30dbadd3efe1310db061a14da60299baff8450a17fe0ccc514a16639
+#6 CACHED
+
+#7 [internal] load build context
+#7 transferring context: 160.27kB done
+#7 DONE 0.0s
+
+#8 [build 2/8] WORKDIR /src
+#8 CACHED
+
+#9 [build 3/8] COPY go.work go.work.sum ./
+#9 DONE 0.1s
+
+#10 [build 4/8] COPY libs/go ./libs/go
+#10 DONE 0.1s
+
+#11 [build 5/8] COPY schemas/go ./schemas/go
+#11 DONE 0.1s
+
+#12 [build 6/8] COPY services/score-computer ./services/score-computer
+#12 DONE 0.1s
+
+#13 [build 7/8] WORKDIR /src/services/score-computer
+#13 DONE 0.1s
+
+#14 [build 8/8] RUN GOWORK=off CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/score-computer .
+#14 0.245 go: downloading github.com/go-chi/chi/v5 v5.3.0
+#14 0.245 go: downloading github.com/segmentio/kafka-go v0.4.51
+#14 0.249 go: downloading github.com/jackc/pgx/v5 v5.9.2
+#14 0.249 go: downloading github.com/redis/go-redis/v9 v9.20.0
+#14 0.250 go: downloading github.com/prometheus/client_golang v1.20.5
+#14 0.915 go: downloading google.golang.org/protobuf v1.34.2
+#14 0.915 go: downloading github.com/prometheus/common v0.55.0
+#14 0.915 go: downloading github.com/cespare/xxhash/v2 v2.3.0
+#14 0.915 go: downloading github.com/prometheus/client_model v0.6.1
+#14 0.915 go: downloading github.com/beorn7/perks v1.0.1
+#14 0.915 go: downloading github.com/prometheus/procfs v0.15.1
+#14 0.917 go: downloading github.com/klauspost/compress v1.18.6
+#14 1.067 go: downloading github.com/jackc/puddle/v2 v2.2.2
+#14 1.067 go: downloading github.com/jackc/pgpassfile v1.0.0
+#14 1.068 go: downloading github.com/jackc/pgservicefile v0.0.0-20240606120523-5a60cdf6a761
+#14 1.069 go: downloading golang.org/x/text v0.29.0
+#14 1.073 go: downloading github.com/pierrec/lz4/v4 v4.1.15
+#14 1.127 go: downloading golang.org/x/sys v0.44.0
+#14 1.127 go: downloading github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822
+#14 1.202 go: downloading go.uber.org/atomic v1.11.0
+#14 1.202 go: downloading golang.org/x/sync v0.17.0
+#14 DONE 24.3s
+
+#15 [stage-1 2/2] COPY --from=build /out/score-computer /score-computer
+#15 DONE 0.1s
+
+#16 exporting to image
+#16 exporting layers 0.1s done
+#16 writing image sha256:0c0eca0c96aee23e5415900578c89ef4db4a824e9ed0cf5f6650a07998b39c9a done
+#16 naming to docker.io/library/score-computer:local done
+#16 DONE 0.1s
+=== build leaderboard-api:local ===
+#0 building with "default" instance using docker driver
+
+#1 [internal] load build definition from Dockerfile
+#1 transferring dockerfile: 770B done
+#1 DONE 0.0s
+
+#2 [internal] load metadata for docker.io/library/golang:1.25-bookworm
+#2 DONE 0.4s
+
+#3 [internal] load metadata for gcr.io/distroless/static-debian12:nonroot
+#3 DONE 0.5s
+
+#4 [internal] load .dockerignore
+#4 transferring context: 2B done
+#4 DONE 0.0s
+
+#5 [build 1/8] FROM docker.io/library/golang:1.25-bookworm@sha256:a1ae6b6c564f3e0072d70081036827a2705dbcf6b38aaa6d97f5de97fe9abdb4
+#5 DONE 0.0s
+
+#6 [stage-1 1/2] FROM gcr.io/distroless/static-debian12:nonroot@sha256:d093aa3e30dbadd3efe1310db061a14da60299baff8450a17fe0ccc514a16639
+#6 DONE 0.0s
+
+#7 [internal] load build context
+#7 transferring context: 56.18kB done
+#7 DONE 0.0s
+
+#8 [build 3/8] COPY go.work go.work.sum ./
+#8 CACHED
+
+#9 [build 4/8] COPY libs/go ./libs/go
+#9 CACHED
+
+#10 [build 2/8] WORKDIR /src
+#10 CACHED
+
+#11 [build 5/8] COPY schemas/go ./schemas/go
+#11 CACHED
+
+#12 [build 6/8] COPY services/leaderboard-api ./services/leaderboard-api
+#12 DONE 0.0s
+
+#13 [build 7/8] WORKDIR /src/services/leaderboard-api
+#13 DONE 0.0s
+
+#14 [build 8/8] RUN GOWORK=off CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/leaderboard-api .
+#14 0.180 go: downloading github.com/go-chi/chi/v5 v5.3.0
+#14 0.180 go: downloading github.com/segmentio/kafka-go v0.4.51
+#14 0.180 go: downloading github.com/redis/go-redis/v9 v9.20.0
+#14 0.180 go: downloading github.com/jackc/pgx/v5 v5.9.2
+#14 0.180 go: downloading github.com/prometheus/client_golang v1.20.5
+#14 0.840 go: downloading github.com/beorn7/perks v1.0.1
+#14 0.840 go: downloading google.golang.org/protobuf v1.34.2
+#14 0.840 go: downloading github.com/cespare/xxhash/v2 v2.3.0
+#14 0.840 go: downloading github.com/prometheus/client_model v0.6.1
+#14 0.840 go: downloading github.com/klauspost/compress v1.18.6
+#14 0.840 go: downloading github.com/prometheus/procfs v0.15.1
+#14 0.840 go: downloading github.com/prometheus/common v0.55.0
+#14 0.997 go: downloading github.com/jackc/pgpassfile v1.0.0
+#14 0.997 go: downloading github.com/jackc/pgservicefile v0.0.0-20240606120523-5a60cdf6a761
+#14 0.997 go: downloading golang.org/x/text v0.29.0
+#14 0.998 go: downloading github.com/jackc/puddle/v2 v2.2.2
+#14 1.013 go: downloading golang.org/x/sys v0.44.0
+#14 1.013 go: downloading github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822
+#14 1.013 go: downloading go.uber.org/atomic v1.11.0
+#14 1.015 go: downloading github.com/pierrec/lz4/v4 v4.1.15
+#14 1.277 go: downloading golang.org/x/sync v0.17.0
+#14 DONE 16.5s
+
+#6 [stage-1 1/2] FROM gcr.io/distroless/static-debian12:nonroot@sha256:d093aa3e30dbadd3efe1310db061a14da60299baff8450a17fe0ccc514a16639
+#6 CACHED
+
+#15 [stage-1 2/2] COPY --from=build /out/leaderboard-api /leaderboard-api
+#15 DONE 0.1s
+
+#16 exporting to image
+#16 exporting layers 0.1s done
+#16 writing image sha256:ccaba55e239738c9baf54f9ce07208974505af7164cfdb4f014ecf76b7f53862 done
+#16 naming to docker.io/library/leaderboard-api:local done
+#16 DONE 0.1s
+=== build ghcr.io/agrawalx/bot-fleet:dev ===
+#0 building with "default" instance using docker driver
+
+#1 [internal] load build definition from Dockerfile
+#1 transferring dockerfile: 2.13kB done
+#1 DONE 0.0s
+
+#2 [internal] load metadata for docker.io/library/rust:1.96-bookworm
+#2 ...
+
+#3 [auth] library/rust:pull token for registry-1.docker.io
+#3 DONE 0.0s
+
+#4 [internal] load metadata for docker.io/library/debian:bookworm-slim
+#4 DONE 1.0s
+
+#2 [internal] load metadata for docker.io/library/rust:1.96-bookworm
+#2 DONE 1.7s
+
+#5 [internal] load .dockerignore
+#5 transferring context: 2B done
+#5 DONE 0.0s
+
+#6 [stage-1 1/3] FROM docker.io/library/debian:bookworm-slim@sha256:0104b334637a5f19aa9c983a91b54c89887c0984081f2068983107a6f6c21eeb
+#6 DONE 0.0s
+
+#7 [builder  1/10] FROM docker.io/library/rust:1.96-bookworm@sha256:13c186980fa33cc12759b429662a1322939dbe697484b7c33b47dd2698d28460
+#7 DONE 0.0s
+
+#8 [internal] load build context
+#8 transferring context: 541.49kB 0.7s done
+#8 DONE 0.7s
+
+#9 [builder  2/10] WORKDIR /app
+#9 CACHED
+
+#10 [builder  3/10] RUN apt-get update     && apt-get install -y --no-install-recommends cmake build-essential librdkafka-dev pkg-config     && rm -rf /var/lib/apt/lists/*
+#10 CACHED
+
+#11 [builder  4/10] COPY Cargo.toml Cargo.lock* ./
+#11 CACHED
+
+#12 [builder  5/10] COPY libs/rust libs/rust
+#12 CACHED
+
+#13 [builder  6/10] COPY schemas/rust schemas/rust
+#13 DONE 0.1s
+
+#14 [builder  7/10] COPY services/bot-fleet services/bot-fleet
+#14 DONE 0.1s
+
+#15 [builder  8/10] COPY services/ebpf-latency services/ebpf-latency
+#15 DONE 0.1s
+
+#16 [builder  9/10] COPY services/telemetry-ingester services/telemetry-ingester
+#16 DONE 0.1s
+
+#17 [builder 10/10] RUN cargo build --release -p iicpc-bot-fleet
+#17 0.476     Updating crates.io index
+#17 9.613  Downloading crates ...
+#17 9.755   Downloaded atomic-waker v1.1.2
+#17 9.785   Downloaded anyhow v1.0.102
+#17 9.793   Downloaded block-buffer v0.10.4
+#17 9.820   Downloaded crypto-common v0.1.7
+#17 9.821   Downloaded cpufeatures v0.2.17
+#17 9.824   Downloaded cfg_aliases v0.2.1
+#17 9.835   Downloaded futures-core v0.3.32
+#17 9.839   Downloaded data-encoding v2.11.0
+#17 9.840   Downloaded cmake v0.1.58
+#17 9.841   Downloaded byteorder v1.5.0
+#17 9.843   Downloaded cfg-if v1.0.4
+#17 9.844   Downloaded autocfg v1.5.1
+#17 9.846   Downloaded futures-macro v0.3.32
+#17 9.854   Downloaded futures-executor v0.3.32
+#17 9.857   Downloaded futures-sink v0.3.32
+#17 9.867   Downloaded futures-io v0.3.32
+#17 9.871   Downloaded stable_deref_trait v1.2.1
+#17 9.872   Downloaded idna_adapter v1.2.2
+#17 9.874   Downloaded tokio-macros v2.7.0
+#17 9.875   Downloaded http-body v1.0.1
+#17 9.876   Downloaded itoa v1.0.18
+#17 9.878   Downloaded toml_datetime v0.6.11
+#17 9.883   Downloaded zerofrom-derive v0.1.7
+#17 9.884   Downloaded generic-array v0.14.7
+#17 9.885   Downloaded proc-macro-crate v1.3.1
+#17 9.887   Downloaded errno v0.3.14
+#17 9.888   Downloaded yoke-derive v0.8.2
+#17 9.897   Downloaded utf8_iter v1.0.4
+#17 9.898   Downloaded sync_wrapper v1.0.2
+#17 9.899   Downloaded num_enum_derive v0.5.11
+#17 9.900   Downloaded want v0.3.1
+#17 9.901   Downloaded form_urlencoded v1.2.2
+#17 9.902   Downloaded untrusted v0.9.0
+#17 9.904   Downloaded rand_chacha v0.3.1
+#17 9.906   Downloaded rustc-hash v2.1.2
+#17 9.908   Downloaded equivalent v1.0.2
+#17 9.917   Downloaded potential_utf v0.1.5
+#17 9.920   Downloaded zerofrom v0.1.8
+#17 9.921   Downloaded try-lock v0.2.5
+#17 9.922   Downloaded bitflags v2.11.1
+#17 9.926   Downloaded tower-layer v0.3.3
+#17 9.927   Downloaded tinyvec_macros v0.1.1
+#17 9.928   Downloaded futures-task v0.3.32
+#17 9.929   Downloaded serde_urlencoded v0.7.1
+#17 9.937   Downloaded matchers v0.2.0
+#17 9.938   Downloaded lru-slab v0.1.2
+#17 9.944   Downloaded tower-service v0.3.3
+#17 9.945   Downloaded hyper-rustls v0.27.9
+#17 9.946   Downloaded tracing-serde v0.2.0
+#17 9.947   Downloaded pin-project-lite v0.2.17
+#17 9.954   Downloaded sha1 v0.10.6
+#17 9.956   Downloaded subtle v2.6.1
+#17 9.957   Downloaded scopeguard v1.2.0
+#17 9.958   Downloaded percent-encoding v2.3.2
+#17 9.959   Downloaded lock_api v0.4.14
+#17 9.960   Downloaded http-body-util v0.1.3
+#17 9.962   Downloaded digest v0.10.7
+#17 9.964   Downloaded pkg-config v0.3.33
+#17 9.965   Downloaded num_enum v0.5.11
+#17 9.971   Downloaded ipnet v2.12.0
+#17 9.972   Downloaded find-msvc-tools v0.1.9
+#17 9.974   Downloaded dtoa v1.0.11
+#17 9.976   Downloaded version_check v0.9.5
+#17 9.981   Downloaded rand_chacha v0.9.0
+#17 9.983   Downloaded ppv-lite86 v0.2.21
+#17 9.986   Downloaded serde v1.0.228
+#17 9.989   Downloaded thiserror-impl v1.0.69
+#17 9.991   Downloaded nu-ansi-term v0.50.3
+#17 9.993   Downloaded shlex v1.3.0
+#17 9.994   Downloaded rand_core v0.6.4
+#17 9.995   Downloaded quote v1.0.45
+#17 9.998   Downloaded tinystr v0.8.3
+#17 10.000   Downloaded utf-8 v0.7.6
+#17 10.00   Downloaded thiserror-impl v2.0.18
+#17 10.00   Downloaded quinn-udp v0.5.14
+#17 10.00   Downloaded once_cell v1.21.4
+#17 10.01   Downloaded zerovec-derive v0.11.3
+#17 10.01   Downloaded writeable v0.6.3
+#17 10.01   Downloaded rmp v0.8.15
+#17 10.02   Downloaded tracing-log v0.2.0
+#17 10.02   Downloaded rmp-serde v1.3.1
+#17 10.02   Downloaded parking_lot v0.12.5
+#17 10.02   Downloaded litemap v0.8.2
+#17 10.02   Downloaded bytes v1.11.1
+#17 10.03   Downloaded zeroize v1.8.2
+#17 10.03   Downloaded thread_local v1.1.9
+#17 10.03   Downloaded proc-macro2 v1.0.106
+#17 10.03   Downloaded icu_provider v2.2.0
+#17 10.04   Downloaded getrandom v0.3.4
+#17 10.04   Downloaded icu_properties v2.2.0
+#17 10.05   Downloaded futures v0.3.32
+#17 10.05   Downloaded thiserror v1.0.69
+#17 10.06   Downloaded num-traits v0.2.19
+#17 10.06   Downloaded smallvec v1.15.1
+#17 10.06   Downloaded ryu v1.0.23
+#17 10.06   Downloaded tracing-attributes v0.1.31
+#17 10.07   Downloaded icu_normalizer_data v2.2.0
+#17 10.07   Downloaded tokio-tungstenite v0.23.1
+#17 10.07   Downloaded synstructure v0.13.2
+#17 10.07   Downloaded thiserror v2.0.18
+#17 10.08   Downloaded icu_normalizer v2.2.0
+#17 10.08   Downloaded tokio-rustls v0.26.4
+#17 10.08   Downloaded icu_locale_core v2.2.0
+#17 10.09   Downloaded cc v1.2.62
+#17 10.09   Downloaded rustls-pki-types v1.14.1
+#17 10.10   Downloaded log v0.4.29
+#17 10.10   Downloaded quinn v0.11.9
+#17 10.10   Downloaded httparse v1.10.1
+#17 10.10   Downloaded rustls-webpki v0.103.13
+#17 10.11   Downloaded rand v0.8.6
+#17 10.11   Downloaded futures-channel v0.3.32
+#17 10.11   Downloaded aho-corasick v1.1.4
+#17 10.12   Downloaded zmij v1.0.21
+#17 10.12   Downloaded getrandom v0.2.17
+#17 10.12   Downloaded yoke v0.8.2
+#17 10.12   Downloaded rand v0.9.4
+#17 10.13   Downloaded icu_collections v2.2.0
+#17 10.13   Downloaded memchr v2.8.0
+#17 10.14   Downloaded unicode-ident v1.0.24
+#17 10.14   Downloaded tracing-core v0.1.36
+#17 10.14   Downloaded tinyvec v1.11.0
+#17 10.15   Downloaded sharded-slab v0.1.7
+#17 10.15   Downloaded serde_derive v1.0.228
+#17 10.15   Downloaded mio v1.2.0
+#17 10.16   Downloaded idna v1.1.0
+#17 10.16   Downloaded indexmap v2.14.0
+#17 10.16   Downloaded socket2 v0.6.3
+#17 10.17   Downloaded hyper v1.10.1
+#17 10.17   Downloaded reqwest v0.12.28
+#17 10.18   Downloaded hashbrown v0.17.1
+#17 10.18   Downloaded icu_properties_data v2.2.0
+#17 10.19   Downloaded futures-util v0.3.32
+#17 10.21   Downloaded serde_core v1.0.228
+#17 10.21   Downloaded http v1.4.0
+#17 10.21   Downloaded quinn-proto v0.11.14
+#17 10.22   Downloaded hyper-util v0.1.20
+#17 10.22   Downloaded base64 v0.22.1
+#17 10.23   Downloaded signal-hook-registry v1.4.8
+#17 10.23   Downloaded tungstenite v0.23.0
+#17 10.23   Downloaded rand_core v0.9.5
+#17 10.23   Downloaded parking_lot_core v0.9.12
+#17 10.24   Downloaded displaydoc v0.2.6
+#17 10.24   Downloaded slab v0.4.12
+#17 10.24   Downloaded lazy_static v1.5.0
+#17 10.24   Downloaded url v2.5.8
+#17 10.25   Downloaded regex-syntax v0.8.10
+#17 10.26   Downloaded rustls v0.23.40
+#17 10.29   Downloaded toml_edit v0.19.15
+#17 10.31   Downloaded zerotrie v0.2.4
+#17 10.32   Downloaded regex-automata v0.4.14
+#17 10.35   Downloaded libc v0.2.186
+#17 10.39   Downloaded tower v0.5.3
+#17 10.40   Downloaded typenum v1.20.0
+#17 10.40   Downloaded ring v0.17.14
+#17 10.44   Downloaded zerovec v0.11.6
+#17 10.46   Downloaded serde_json v1.0.150
+#17 10.46   Downloaded winnow v0.5.40
+#17 10.47   Downloaded tower-http v0.6.11
+#17 10.49   Downloaded tracing-subscriber v0.3.23
+#17 10.50   Downloaded webpki-roots v1.0.7
+#17 10.50   Downloaded syn v1.0.109
+#17 10.52   Downloaded zerocopy v0.8.48
+#17 10.55   Downloaded syn v2.0.117
+#17 10.57   Downloaded tracing v0.1.44
+#17 10.60   Downloaded tokio v1.52.3
+#17 10.64   Downloaded prometheus-client-derive-encode v0.4.2
+#17 10.66   Downloaded rdkafka v0.36.0
+#17 10.77   Downloaded prometheus-client v0.22.3
+#17 10.85   Downloaded rdkafka-sys v4.7.0+2.3.0
+#17 10.97    Compiling proc-macro2 v1.0.106
+#17 10.97    Compiling quote v1.0.45
+#17 10.97    Compiling unicode-ident v1.0.24
+#17 10.97    Compiling libc v0.2.186
+#17 10.97    Compiling cfg-if v1.0.4
+#17 10.97    Compiling pin-project-lite v0.2.17
+#17 10.97    Compiling stable_deref_trait v1.2.1
+#17 10.97    Compiling shlex v1.3.0
+#17 10.97    Compiling find-msvc-tools v0.1.9
+#17 10.97    Compiling itoa v1.0.18
+#17 10.97    Compiling futures-core v0.3.32
+#17 10.97    Compiling bytes v1.11.1
+#17 10.98    Compiling smallvec v1.15.1
+#17 10.99    Compiling memchr v2.8.0
+#17 11.01    Compiling futures-sink v0.3.32
+#17 11.01    Compiling serde_core v1.0.228
+#17 11.11    Compiling once_cell v1.21.4
+#17 11.11    Compiling slab v0.4.12
+#17 11.11    Compiling futures-task v0.3.32
+#17 11.11    Compiling futures-io v0.3.32
+#17 11.17    Compiling cc v1.2.62
+#17 11.18    Compiling futures-channel v0.3.32
+#17 11.20    Compiling litemap v0.8.2
+#17 11.22    Compiling serde v1.0.228
+#17 11.24    Compiling writeable v0.6.3
+#17 11.25    Compiling httparse v1.10.1
+#17 11.27    Compiling version_check v0.9.5
+#17 11.28    Compiling utf8_iter v1.0.4
+#17 11.31    Compiling icu_properties_data v2.2.0
+#17 11.31    Compiling icu_normalizer_data v2.2.0
+#17 11.35    Compiling tracing-core v0.1.36
+#17 11.41    Compiling zerocopy v0.8.48
+#17 11.42    Compiling percent-encoding v2.3.2
+#17 11.43    Compiling zeroize v1.8.2
+#17 11.44    Compiling typenum v1.20.0
+#17 11.44    Compiling untrusted v0.9.0
+#17 11.50    Compiling generic-array v0.14.7
+#17 11.52    Compiling zmij v1.0.21
+#17 11.54    Compiling equivalent v1.0.2
+#17 11.58    Compiling http v1.4.0
+#17 11.58    Compiling rustls-pki-types v1.14.1
+#17 11.59    Compiling log v0.4.29
+#17 11.64    Compiling hashbrown v0.17.1
+#17 11.66    Compiling serde_json v1.0.150
+#17 11.71    Compiling syn v1.0.109
+#17 11.78    Compiling tower-service v0.3.3
+#17 11.83    Compiling try-lock v0.2.5
+#17 11.85    Compiling rustls v0.23.40
+#17 11.90    Compiling winnow v0.5.40
+#17 11.93    Compiling toml_datetime v0.6.11
+#17 11.97    Compiling want v0.3.1
+#17 12.11    Compiling form_urlencoded v1.2.2
+#17 12.15    Compiling atomic-waker v1.1.2
+#17 12.25    Compiling syn v2.0.117
+#17 12.25    Compiling indexmap v2.14.0
+#17 12.26    Compiling subtle v2.6.1
+#17 12.30    Compiling autocfg v1.5.1
+#17 12.37    Compiling cmake v0.1.58
+#17 12.37    Compiling sync_wrapper v1.0.2
+#17 12.45    Compiling getrandom v0.2.17
+#17 12.46    Compiling errno v0.3.14
+#17 12.47    Compiling socket2 v0.6.3
+#17 12.51    Compiling mio v1.2.0
+#17 12.56    Compiling signal-hook-registry v1.4.8
+#17 12.61    Compiling rand_core v0.6.4
+#17 12.65    Compiling ring v0.17.14
+#17 12.68    Compiling http-body v1.0.1
+#17 12.69    Compiling num-traits v0.2.19
+#17 12.78    Compiling thiserror v1.0.69
+#17 12.79    Compiling base64 v0.22.1
+#17 12.80    Compiling regex-syntax v0.8.10
+#17 12.85    Compiling pkg-config v0.3.33
+#17 12.89    Compiling block-buffer v0.10.4
+#17 12.99    Compiling crypto-common v0.1.7
+#17 13.02    Compiling tower-layer v0.3.3
+#17 13.03    Compiling parking_lot_core v0.9.12
+#17 13.05    Compiling ipnet v2.12.0
+#17 13.10    Compiling digest v0.10.7
+#17 13.27    Compiling webpki-roots v1.0.7
+#17 13.28    Compiling scopeguard v1.2.0
+#17 13.29    Compiling cpufeatures v0.2.17
+#17 13.30    Compiling ryu v1.0.23
+#17 13.31    Compiling lazy_static v1.5.0
+#17 13.33    Compiling bitflags v2.11.1
+#17 13.34    Compiling lock_api v0.4.14
+#17 13.36    Compiling sha1 v0.10.6
+#17 13.37    Compiling sharded-slab v0.1.7
+#17 13.38    Compiling rdkafka-sys v4.7.0+2.3.0
+#17 13.61    Compiling http-body-util v0.1.3
+#17 13.74    Compiling toml_edit v0.19.15
+#17 13.78    Compiling tracing-log v0.2.0
+#17 13.81    Compiling thread_local v1.1.9
+#17 13.89    Compiling anyhow v1.0.102
+#17 14.03    Compiling utf-8 v0.7.6
+#17 14.04    Compiling nu-ansi-term v0.50.3
+#17 14.05    Compiling byteorder v1.5.0
+#17 14.09    Compiling thiserror v2.0.18
+#17 14.12    Compiling data-encoding v2.11.0
+#17 14.14    Compiling prometheus-client v0.22.3
+#17 14.27    Compiling regex-automata v0.4.14
+#17 14.31    Compiling rmp v0.8.15
+#17 14.31    Compiling parking_lot v0.12.5
+#17 14.41    Compiling dtoa v1.0.11
+#17 15.42    Compiling proc-macro-crate v1.3.1
+#17 15.79    Compiling num_enum_derive v0.5.11
+#17 15.84    Compiling ppv-lite86 v0.2.21
+#17 15.97    Compiling synstructure v0.13.2
+#17 16.11    Compiling rand_chacha v0.3.1
+#17 16.21    Compiling num_enum v0.5.11
+#17 16.30    Compiling rand v0.8.6
+#17 16.31    Compiling zerofrom-derive v0.1.7
+#17 16.31    Compiling yoke-derive v0.8.2
+#17 16.31    Compiling zerovec-derive v0.11.3
+#17 16.31    Compiling displaydoc v0.2.6
+#17 16.31    Compiling futures-macro v0.3.32
+#17 16.31    Compiling tokio-macros v2.7.0
+#17 16.32    Compiling serde_derive v1.0.228
+#17 16.32    Compiling tracing-attributes v0.1.31
+#17 16.32    Compiling thiserror-impl v1.0.69
+#17 16.33    Compiling prometheus-client-derive-encode v0.4.2
+#17 16.68    Compiling thiserror-impl v2.0.18
+#17 16.83    Compiling matchers v0.2.0
+#17 16.94    Compiling tokio v1.52.3
+#17 17.08    Compiling futures-util v0.3.32
+#17 17.42    Compiling zerofrom v0.1.8
+#17 17.50    Compiling tracing v0.1.44
+#17 17.52    Compiling yoke v0.8.2
+#17 17.53    Compiling tungstenite v0.23.0
+#17 17.72    Compiling zerovec v0.11.6
+#17 17.82    Compiling zerotrie v0.2.4
+#17 18.48    Compiling tinystr v0.8.3
+#17 18.68    Compiling icu_locale_core v2.2.0
+#17 19.09    Compiling potential_utf v0.1.5
+#17 19.21    Compiling icu_collections v2.2.0
+#17 19.80    Compiling icu_provider v2.2.0
+#17 20.27    Compiling icu_normalizer v2.2.0
+#17 20.41    Compiling icu_properties v2.2.0
+#17 20.43    Compiling tracing-serde v0.2.0
+#17 20.51    Compiling serde_urlencoded v0.7.1
+#17 20.56    Compiling tracing-subscriber v0.3.23
+#17 20.76    Compiling futures-executor v0.3.32
+#17 20.79    Compiling iicpc-schemas-rust v0.1.0 (/app/schemas/rust)
+#17 21.11    Compiling futures v0.3.32
+#17 21.12    Compiling rmp-serde v1.3.1
+#17 21.62    Compiling idna_adapter v1.2.2
+#17 21.71    Compiling idna v1.1.0
+#17 22.13    Compiling hyper v1.10.1
+#17 22.52    Compiling url v2.5.8
+#17 23.12    Compiling tower v0.5.3
+#17 23.19    Compiling tokio-tungstenite v0.23.1
+#17 23.22    Compiling hyper-util v0.1.20
+#17 23.57    Compiling rustls-webpki v0.103.13
+#17 23.68    Compiling tower-http v0.6.11
+#17 27.48    Compiling tokio-rustls v0.26.4
+#17 27.67    Compiling hyper-rustls v0.27.9
+#17 27.90    Compiling reqwest v0.12.28
+#17 29.73    Compiling iicpc-logger-rust v0.1.0 (/app/libs/rust/logger)
+#17 30.16    Compiling rdkafka v0.36.0
+#17 31.60    Compiling iicpc-bot-fleet v0.1.0 (/app/services/bot-fleet)
+#17 36.02     Finished `release` profile [optimized] target(s) in 35.77s
+#17 DONE 36.5s
+
+#18 [stage-1 2/3] RUN apt-get update     && apt-get install -y --no-install-recommends ca-certificates librdkafka1     && rm -rf /var/lib/apt/lists/*
+#18 CACHED
+
+#19 [stage-1 3/3] COPY --from=builder /app/target/release/iicpc-bot-fleet /usr/local/bin/iicpc-bot-fleet
+#19 DONE 0.1s
+
+#20 exporting to image
+#20 exporting layers 0.0s done
+#20 writing image sha256:f61af8a71ef53b082125d19a8f0f18bcb0c40c30a7fe36a4e71e28ed25aab138 done
+#20 naming to ghcr.io/agrawalx/bot-fleet:dev done
+#20 DONE 0.1s
+=== build ghcr.io/agrawalx/telemetry-ingester:dev ===
+#0 building with "default" instance using docker driver
+
+#1 [internal] load build definition from Dockerfile
+#1 transferring dockerfile: 1.51kB done
+#1 DONE 0.0s
+
+#2 [internal] load metadata for docker.io/library/debian:bookworm-slim
+#2 ...
+
+#3 [internal] load metadata for docker.io/library/rust:1.96-bookworm
+#3 DONE 1.0s
+
+#2 [internal] load metadata for docker.io/library/debian:bookworm-slim
+#2 DONE 1.0s
+
+#4 [internal] load .dockerignore
+#4 transferring context: 2B done
+#4 DONE 0.0s
+
+#5 [builder  1/10] FROM docker.io/library/rust:1.96-bookworm@sha256:13c186980fa33cc12759b429662a1322939dbe697484b7c33b47dd2698d28460
+#5 DONE 0.0s
+
+#6 [stage-1 1/3] FROM docker.io/library/debian:bookworm-slim@sha256:0104b334637a5f19aa9c983a91b54c89887c0984081f2068983107a6f6c21eeb
+#6 DONE 0.0s
+
+#7 [stage-1 2/3] RUN apt-get update     && apt-get install -y --no-install-recommends ca-certificates librdkafka1     && rm -rf /var/lib/apt/lists/*
+#7 CACHED
+
+#8 [internal] load build context
+#8 transferring context: 3.75kB 0.6s done
+#8 DONE 0.6s
+
+#9 [builder  4/10] COPY Cargo.toml Cargo.lock* ./
+#9 CACHED
+
+#10 [builder  5/10] COPY libs/rust libs/rust
+#10 CACHED
+
+#11 [builder  7/10] COPY services/bot-fleet services/bot-fleet
+#11 CACHED
+
+#12 [builder  2/10] WORKDIR /app
+#12 CACHED
+
+#13 [builder  3/10] RUN apt-get update     && apt-get install -y --no-install-recommends cmake build-essential librdkafka-dev pkg-config     && rm -rf /var/lib/apt/lists/*
+#13 CACHED
+
+#14 [builder  6/10] COPY schemas/rust schemas/rust
+#14 CACHED
+
+#15 [builder  8/10] COPY services/ebpf-latency services/ebpf-latency
+#15 CACHED
+
+#16 [builder  9/10] COPY services/telemetry-ingester services/telemetry-ingester
+#16 CACHED
+
+#17 [builder 10/10] RUN cargo build --release -p iicpc-telemetry-ingester
+#17 0.197     Updating crates.io index
+#17 2.607  Downloading crates ...
+#17 2.715   Downloaded arc-swap v1.9.1
+#17 2.719   Downloaded async-trait v0.1.89
+#17 2.723   Downloaded adler2 v2.0.1
+#17 2.730   Downloaded potential_utf v0.1.5
+#17 2.735   Downloaded atomic-waker v1.1.2
+#17 2.737   Downloaded cfg_aliases v0.2.1
+#17 2.738   Downloaded cfg-if v1.0.4
+#17 2.741   Downloaded ppv-lite86 v0.2.21
+#17 2.742   Downloaded pkg-config v0.3.33
+#17 2.746   Downloaded prometheus-client-derive-encode v0.4.2
+#17 2.747   Downloaded cpufeatures v0.3.0
+#17 2.748   Downloaded equivalent v1.0.2
+#17 2.749   Downloaded errno v0.3.14
+#17 2.751   Downloaded block-buffer v0.12.0
+#17 2.758   Downloaded deadpool-runtime v0.1.4
+#17 2.760   Downloaded itoa v1.0.18
+#17 2.761   Downloaded crypto-common v0.2.2
+#17 2.762   Downloaded postgres-protocol v0.6.11
+#17 2.770   Downloaded form_urlencoded v1.2.2
+#17 2.775   Downloaded rand_chacha v0.3.1
+#17 2.777   Downloaded percent-encoding v2.3.2
+#17 2.778   Downloaded num_enum_derive v0.5.11
+#17 2.780   Downloaded proc-macro-crate v1.3.1
+#17 2.781   Downloaded futures-io v0.3.32
+#17 2.782   Downloaded futures-core v0.3.32
+#17 2.791   Downloaded lru-slab v0.1.2
+#17 2.793   Downloaded futures-sink v0.3.32
+#17 2.797   Downloaded http-body v1.0.1
+#17 2.799   Downloaded num_cpus v1.17.0
+#17 2.802   Downloaded phf_shared v0.13.1
+#17 2.803   Downloaded cmake v0.1.58
+#17 2.805   Downloaded matchers v0.2.0
+#17 2.806   Downloaded lazy_static v1.5.0
+#17 2.808   Downloaded idna_adapter v1.2.2
+#17 2.809   Downloaded fallible-iterator v0.2.0
+#17 2.810   Downloaded autocfg v1.5.1
+#17 2.813   Downloaded http-body-util v0.1.3
+#17 2.815   Downloaded serde_urlencoded v0.7.1
+#17 2.817   Downloaded scopeguard v1.2.0
+#17 2.819   Downloaded rand_chacha v0.9.0
+#17 2.820   Downloaded postgres-types v0.2.13
+#17 2.823   Downloaded rand_core v0.9.5
+#17 2.824   Downloaded nu-ansi-term v0.50.3
+#17 2.826   Downloaded hyper-rustls v0.27.9
+#17 2.828   Downloaded find-msvc-tools v0.1.9
+#17 2.830   Downloaded num_enum v0.5.11
+#17 2.836   Downloaded subtle v2.6.1
+#17 2.837   Downloaded anyhow v1.0.102
+#17 2.841   Downloaded either v1.16.0
+#17 2.843   Downloaded displaydoc v0.2.6
+#17 2.846   Downloaded ctutils v0.4.2
+#17 2.848   Downloaded ipnet v2.12.0
+#17 2.850   Downloaded zeroize v1.8.2
+#17 2.851   Downloaded crc32fast v1.5.0
+#17 2.853   Downloaded getrandom v0.2.17
+#17 2.856   Downloaded httparse v1.10.1
+#17 2.858   Downloaded lock_api v0.4.14
+#17 2.860   Downloaded byteorder v1.5.0
+#17 2.862   Downloaded litemap v0.8.2
+#17 2.864   Downloaded futures-channel v0.3.32
+#17 2.866   Downloaded tower-service v0.3.3
+#17 2.867   Downloaded zmij v1.0.21
+#17 2.868   Downloaded hmac v0.13.0
+#17 2.871   Downloaded parking_lot v0.12.5
+#17 2.873   Downloaded tower-layer v0.3.3
+#17 2.874   Downloaded parking_lot_core v0.9.12
+#17 2.876   Downloaded sync_wrapper v1.0.2
+#17 2.877   Downloaded siphasher v1.0.3
+#17 2.879   Downloaded deadpool v0.12.3
+#17 2.883   Downloaded once_cell v1.21.4
+#17 2.885   Downloaded tinyvec_macros v0.1.1
+#17 2.886   Downloaded num-traits v0.2.19
+#17 2.889   Downloaded crossbeam-utils v0.8.21
+#17 2.892   Downloaded getrandom v0.4.2
+#17 2.895   Downloaded log v0.4.29
+#17 2.898   Downloaded icu_provider v2.2.0
+#17 2.900   Downloaded bitflags v2.11.1
+#17 2.905   Downloaded try-lock v0.2.5
+#17 2.905   Downloaded icu_locale_core v2.2.0
+#17 2.912   Downloaded miniz_oxide v0.8.9
+#17 2.915   Downloaded untrusted v0.9.0
+#17 2.916   Downloaded icu_properties v2.2.0
+#17 2.919   Downloaded icu_collections v2.2.0
+#17 2.925   Downloaded flate2 v1.1.9
+#17 2.930   Downloaded zerotrie v0.2.4
+#17 2.934   Downloaded cc v1.2.62
+#17 2.937   Downloaded rustc-hash v2.1.2
+#17 2.938   Downloaded base64 v0.22.1
+#17 2.942   Downloaded indexmap v2.14.0
+#17 2.947   Downloaded zerofrom-derive v0.1.7
+#17 2.948   Downloaded nom v7.1.3
+#17 2.953   Downloaded toml_datetime v0.6.11
+#17 2.954   Downloaded itertools v0.13.0
+#17 2.961   Downloaded zerovec v0.11.6
+#17 2.966   Downloaded icu_properties_data v2.2.0
+#17 2.977   Downloaded hyper v1.10.1
+#17 2.984   Downloaded utf8_iter v1.0.4
+#17 2.985   Downloaded futures-util v0.3.32
+#17 2.998   Downloaded rand_core v0.10.1
+#17 2.999   Downloaded rand_core v0.6.4
+#17 3.001   Downloaded hdrhistogram v7.5.4
+#17 3.007   Downloaded aho-corasick v1.1.4
+#17 3.012   Downloaded synstructure v0.13.2
+#17 3.013   Downloaded tinystr v0.8.3
+#17 3.015   Downloaded libc v0.2.186
+#17 3.051   Downloaded tracing-log v0.2.0
+#17 3.052   Downloaded thread_local v1.1.9
+#17 3.053   Downloaded thiserror v2.0.18
+#17 3.060   Downloaded slab v0.4.12
+#17 3.061   Downloaded zerofrom v0.1.8
+#17 3.062   Downloaded simd-adler32 v0.3.9
+#17 3.064   Downloaded shlex v1.3.0
+#17 3.065   Downloaded quinn-udp v0.5.14
+#17 3.067   Downloaded quote v1.0.45
+#17 3.070   Downloaded rustversion v1.0.22
+#17 3.073   Downloaded stringprep v0.1.5
+#17 3.074   Downloaded zerovec-derive v0.11.3
+#17 3.075   Downloaded signal-hook-registry v1.4.8
+#17 3.076   Downloaded tokio-rustls v0.26.4
+#17 3.078   Downloaded thiserror-impl v2.0.18
+#17 3.080   Downloaded rustls-pki-types v1.14.1
+#17 3.082   Downloaded writeable v0.6.3
+#17 3.084   Downloaded yoke-derive v0.8.2
+#17 3.085   Downloaded want v0.3.1
+#17 3.086   Downloaded tracing-serde v0.2.0
+#17 3.087   Downloaded idna v1.1.0
+#17 3.090   Downloaded hashbrown v0.17.1
+#17 3.095   Downloaded tracing-attributes v0.1.31
+#17 3.098   Downloaded yoke v0.8.2
+#17 3.099   Downloaded rmp v0.8.15
+#17 3.103   Downloaded unicode-properties v0.1.4
+#17 3.105   Downloaded prometheus-client v0.22.3
+#17 3.109   Downloaded rmp-serde v1.3.1
+#17 3.110   Downloaded proc-macro2 v1.0.106
+#17 3.113   Downloaded smallvec v1.15.1
+#17 3.115   Downloaded serde_derive v1.0.228
+#17 3.118   Downloaded unicode-ident v1.0.24
+#17 3.121   Downloaded unicode-bidi v0.3.18
+#17 3.123   Downloaded tinyvec v1.11.0
+#17 3.126   Downloaded socket2 v0.6.3
+#17 3.127   Downloaded tracing-core v0.1.36
+#17 3.130   Downloaded sha2 v0.11.0
+#17 3.134   Downloaded sharded-slab v0.1.7
+#17 3.137   Downloaded rand v0.8.6
+#17 3.140   Downloaded serde_core v1.0.228
+#17 3.143   Downloaded ryu v1.0.23
+#17 3.146   Downloaded combine v4.6.7
+#17 3.152   Downloaded rustls-webpki v0.103.13
+#17 3.155   Downloaded toml_edit v0.19.15
+#17 3.174   Downloaded url v2.5.8
+#17 3.177   Downloaded rand v0.10.1
+#17 3.180   Downloaded rand v0.9.4
+#17 3.183   Downloaded tokio-postgres v0.7.17
+#17 3.188   Downloaded tower v0.5.3
+#17 3.199   Downloaded typenum v1.20.0
+#17 3.202   Downloaded unicode-normalization v0.1.25
+#17 3.205   Downloaded tokio-util v0.7.18
+#17 3.213   Downloaded serde_json v1.0.150
+#17 3.219   Downloaded winnow v0.5.40
+#17 3.228   Downloaded tower-http v0.6.11
+#17 3.236   Downloaded reqwest v0.12.28
+#17 3.241   Downloaded rdkafka v0.36.0
+#17 3.246   Downloaded serde v1.0.228
+#17 3.249   Downloaded quinn v0.11.9
+#17 3.252   Downloaded webpki-roots v1.0.7
+#17 3.255   Downloaded tracing-subscriber v0.3.23
+#17 3.263   Downloaded num-bigint v0.4.6
+#17 3.267   Downloaded mio v1.2.0
+#17 3.273   Downloaded hyper-util v0.1.20
+#17 3.279   Downloaded http v1.4.0
+#17 3.282   Downloaded syn v1.0.109
+#17 3.291   Downloaded crossbeam-channel v0.5.15
+#17 3.295   Downloaded redis v0.27.6
+#17 3.301   Downloaded quinn-proto v0.11.14
+#17 3.307   Downloaded zerocopy v0.8.48
+#17 3.329   Downloaded syn v2.0.117
+#17 3.338   Downloaded tokio-macros v2.7.0
+#17 3.339   Downloaded regex-syntax v0.8.10
+#17 3.345   Downloaded rustls v0.23.40
+#17 3.355   Downloaded minimal-lexical v0.2.1
+#17 3.359   Downloaded memchr v2.8.0
+#17 3.364   Downloaded base64 v0.21.7
+#17 3.367   Downloaded tracing v0.1.44
+#17 3.382   Downloaded getrandom v0.3.4
+#17 3.386   Downloaded icu_normalizer_data v2.2.0
+#17 3.388   Downloaded icu_normalizer v2.2.0
+#17 3.391   Downloaded const-oid v0.10.2
+#17 3.393   Downloaded bytes v1.11.1
+#17 3.397   Downloaded regex-automata v0.4.14
+#17 3.410   Downloaded stable_deref_trait v1.2.1
+#17 3.410   Downloaded chacha20 v0.10.0
+#17 3.413   Downloaded phf v0.13.1
+#17 3.414   Downloaded num-integer v0.1.46
+#17 3.416   Downloaded deadpool-postgres v0.14.1
+#17 3.417   Downloaded pin-project-lite v0.2.17
+#17 3.422   Downloaded futures-task v0.3.32
+#17 3.423   Downloaded dtoa v1.0.11
+#17 3.425   Downloaded digest v0.11.3
+#17 3.427   Downloaded tokio v1.52.3
+#17 3.479   Downloaded ring v0.17.14
+#17 3.577   Downloaded cmov v0.5.4
+#17 3.583   Downloaded rdkafka-sys v4.7.0+2.3.0
+#17 3.645   Downloaded whoami v2.1.2
+#17 3.714   Downloaded md-5 v0.11.0
+#17 3.755   Downloaded hybrid-array v0.4.12
+#17 3.838    Compiling proc-macro2 v1.0.106
+#17 3.838    Compiling quote v1.0.45
+#17 3.838    Compiling unicode-ident v1.0.24
+#17 3.838    Compiling libc v0.2.186
+#17 3.838    Compiling cfg-if v1.0.4
+#17 3.838    Compiling bytes v1.11.1
+#17 3.838    Compiling pin-project-lite v0.2.17
+#17 3.845    Compiling memchr v2.8.0
+#17 3.851    Compiling smallvec v1.15.1
+#17 3.854    Compiling futures-core v0.3.32
+#17 3.859    Compiling stable_deref_trait v1.2.1
+#17 3.869    Compiling shlex v1.3.0
+#17 3.873    Compiling find-msvc-tools v0.1.9
+#17 3.873    Compiling itoa v1.0.18
+#17 3.874    Compiling futures-sink v0.3.32
+#17 3.874    Compiling serde_core v1.0.228
+#17 3.885    Compiling once_cell v1.21.4
+#17 3.900    Compiling percent-encoding v2.3.2
+#17 3.906    Compiling futures-task v0.3.32
+#17 3.919    Compiling slab v0.4.12
+#17 4.052    Compiling futures-io v0.3.32
+#17 4.059    Compiling writeable v0.6.3
+#17 4.078    Compiling cc v1.2.62
+#17 4.095    Compiling typenum v1.20.0
+#17 4.095    Compiling litemap v0.8.2
+#17 4.122    Compiling icu_properties_data v2.2.0
+#17 4.137    Compiling serde v1.0.228
+#17 4.158    Compiling icu_normalizer_data v2.2.0
+#17 4.184    Compiling utf8_iter v1.0.4
+#17 4.185    Compiling tracing-core v0.1.36
+#17 4.215    Compiling autocfg v1.5.1
+#17 4.226    Compiling cmov v0.5.4
+#17 4.289    Compiling futures-channel v0.3.32
+#17 4.297    Compiling zeroize v1.8.2
+#17 4.307    Compiling base64 v0.22.1
+#17 4.317    Compiling futures-util v0.3.32
+#17 4.423    Compiling http v1.4.0
+#17 4.437    Compiling const-oid v0.10.2
+#17 4.457    Compiling ctutils v0.4.2
+#17 4.468    Compiling rustls-pki-types v1.14.1
+#17 4.557    Compiling tinyvec_macros v0.1.1
+#17 4.605    Compiling getrandom v0.4.2
+#17 4.668    Compiling num-traits v0.2.19
+#17 4.668    Compiling zmij v1.0.21
+#17 4.746    Compiling cpufeatures v0.3.0
+#17 4.753    Compiling rand_core v0.10.1
+#17 4.783    Compiling syn v2.0.117
+#17 4.811    Compiling httparse v1.10.1
+#17 4.844    Compiling log v0.4.29
+#17 4.851    Compiling untrusted v0.9.0
+#17 4.859    Compiling equivalent v1.0.2
+#17 4.871    Compiling hashbrown v0.17.1
+#17 4.942    Compiling tinyvec v1.11.0
+#17 4.961    Compiling form_urlencoded v1.2.2
+#17 5.088    Compiling serde_json v1.0.150
+#17 5.104    Compiling parking_lot_core v0.9.12
+#17 5.146    Compiling hybrid-array v0.4.12
+#17 5.172    Compiling errno v0.3.14
+#17 5.197    Compiling socket2 v0.6.3
+#17 5.212    Compiling mio v1.2.0
+#17 5.220    Compiling getrandom v0.2.17
+#17 5.302    Compiling signal-hook-registry v1.4.8
+#17 5.317    Compiling rustls v0.23.40
+#17 5.359    Compiling http-body v1.0.1
+#17 5.430    Compiling zerocopy v0.8.48
+#17 5.438    Compiling syn v1.0.109
+#17 5.499    Compiling winnow v0.5.40
+#17 5.528    Compiling tower-service v0.3.3
+#17 5.537    Compiling indexmap v2.14.0
+#17 5.549    Compiling try-lock v0.2.5
+#17 5.577    Compiling toml_datetime v0.6.11
+#17 5.591    Compiling ring v0.17.14
+#17 5.632    Compiling want v0.3.1
+#17 5.646    Compiling block-buffer v0.12.0
+#17 5.675    Compiling crypto-common v0.2.2
+#17 5.760    Compiling unicode-normalization v0.1.25
+#17 5.812    Compiling chacha20 v0.10.0
+#17 5.953    Compiling subtle v2.6.1
+#17 6.021    Compiling unicode-properties v0.1.4
+#17 6.046    Compiling unicode-bidi v0.3.18
+#17 6.062    Compiling scopeguard v1.2.0
+#17 6.103    Compiling byteorder v1.5.0
+#17 6.135    Compiling lazy_static v1.5.0
+#17 6.150    Compiling atomic-waker v1.1.2
+#17 6.220    Compiling lock_api v0.4.14
+#17 6.227    Compiling rand v0.10.1
+#17 6.315    Compiling cmake v0.1.58
+#17 6.339    Compiling sync_wrapper v1.0.2
+#17 6.352    Compiling siphasher v1.0.3
+#17 6.418    Compiling crc32fast v1.5.0
+#17 6.480    Compiling rustversion v1.0.22
+#17 6.559    Compiling stringprep v0.1.5
+#17 6.588    Compiling digest v0.11.3
+#17 6.613    Compiling ipnet v2.12.0
+#17 6.698    Compiling pkg-config v0.3.33
+#17 6.713    Compiling regex-syntax v0.8.10
+#17 6.724    Compiling hmac v0.13.0
+#17 6.758    Compiling md-5 v0.11.0
+#17 6.904    Compiling sha2 v0.11.0
+#17 7.007    Compiling tower-layer v0.3.3
+#17 7.157    Compiling crossbeam-utils v0.8.21
+#17 7.186    Compiling ryu v1.0.23
+#17 7.260    Compiling fallible-iterator v0.2.0
+#17 7.306    Compiling rdkafka-sys v4.7.0+2.3.0
+#17 7.383    Compiling toml_edit v0.19.15
+#17 7.510    Compiling phf_shared v0.13.1
+#17 7.518    Compiling parking_lot v0.12.5
+#17 7.563    Compiling rand_core v0.6.4
+#17 7.573    Compiling webpki-roots v1.0.7
+#17 7.636    Compiling adler2 v2.0.1
+#17 7.682    Compiling simd-adler32 v0.3.9
+#17 7.750    Compiling bitflags v2.11.1
+#17 7.818    Compiling phf v0.13.1
+#17 7.969    Compiling postgres-protocol v0.6.11
+#17 8.056    Compiling miniz_oxide v0.8.9
+#17 8.574    Compiling regex-automata v0.4.14
+#17 8.586    Compiling postgres-types v0.2.13
+#17 8.641    Compiling sharded-slab v0.1.7
+#17 8.664    Compiling num-integer v0.1.46
+#17 8.809    Compiling synstructure v0.13.2
+#17 8.990    Compiling http-body-util v0.1.3
+#17 9.164    Compiling proc-macro-crate v1.3.1
+#17 9.164    Compiling whoami v2.1.2
+#17 9.257    Compiling num_cpus v1.17.0
+#17 9.364    Compiling tracing-log v0.2.0
+#17 9.389    Compiling thread_local v1.1.9
+#17 9.530    Compiling either v1.16.0
+#17 9.549    Compiling prometheus-client v0.22.3
+#17 9.588    Compiling minimal-lexical v0.2.1
+#17 9.673    Compiling nu-ansi-term v0.50.3
+#17 9.680    Compiling anyhow v1.0.102
+#17 9.731    Compiling num-bigint v0.4.6
+#17 9.771    Compiling itertools v0.13.0
+#17 9.851    Compiling flate2 v1.1.9
+#17 9.968    Compiling nom v7.1.3
+#17 9.992    Compiling crossbeam-channel v0.5.15
+#17 10.05    Compiling arc-swap v1.9.1
+#17 10.17    Compiling rmp v0.8.15
+#17 10.24    Compiling dtoa v1.0.11
+#17 10.28    Compiling base64 v0.21.7
+#17 10.31    Compiling num_enum_derive v0.5.11
+#17 10.37    Compiling zerofrom-derive v0.1.7
+#17 10.40    Compiling yoke-derive v0.8.2
+#17 10.52    Compiling tokio-macros v2.7.0
+#17 10.58    Compiling zerovec-derive v0.11.3
+#17 10.68    Compiling displaydoc v0.2.6
+#17 10.82    Compiling serde_derive v1.0.228
+#17 10.84    Compiling tracing-attributes v0.1.31
+#17 11.07    Compiling ppv-lite86 v0.2.21
+#17 11.12    Compiling async-trait v0.1.89
+#17 11.15    Compiling tokio v1.52.3
+#17 11.35    Compiling num_enum v0.5.11
+#17 11.36    Compiling matchers v0.2.0
+#17 11.41    Compiling prometheus-client-derive-encode v0.4.2
+#17 11.50    Compiling rand_chacha v0.3.1
+#17 11.57    Compiling zerofrom v0.1.8
+#17 11.67    Compiling yoke v0.8.2
+#17 11.74    Compiling rand v0.8.6
+#17 11.85    Compiling zerovec v0.11.6
+#17 11.92    Compiling zerotrie v0.2.4
+#17 12.06    Compiling tracing v0.1.44
+#17 12.16    Compiling hdrhistogram v7.5.4
+#17 12.58    Compiling tinystr v0.8.3
+#17 12.61    Compiling potential_utf v0.1.5
+#17 12.74    Compiling icu_collections v2.2.0
+#17 12.75    Compiling icu_locale_core v2.2.0
+#17 13.93    Compiling icu_provider v2.2.0
+#17 14.19    Compiling serde_urlencoded v0.7.1
+#17 14.27    Compiling icu_normalizer v2.2.0
+#17 14.53    Compiling icu_properties v2.2.0
+#17 14.57    Compiling tracing-serde v0.2.0
+#17 14.71    Compiling tracing-subscriber v0.3.23
+#17 14.72    Compiling iicpc-schemas-rust v0.1.0 (/app/schemas/rust)
+#17 15.01    Compiling rmp-serde v1.3.1
+#17 15.86    Compiling idna_adapter v1.2.2
+#17 15.96    Compiling idna v1.1.0
+#17 16.01    Compiling rustls-webpki v0.103.13
+#17 16.61    Compiling tokio-util v0.7.18
+#17 17.44    Compiling hyper v1.10.1
+#17 17.48    Compiling url v2.5.8
+#17 17.58    Compiling tower v0.5.3
+#17 17.92    Compiling deadpool-runtime v0.1.4
+#17 17.98    Compiling tokio-postgres v0.7.17
+#17 18.04    Compiling deadpool v0.12.3
+#17 18.05    Compiling combine v4.6.7
+#17 18.25    Compiling tower-http v0.6.11
+#17 18.66    Compiling hyper-util v0.1.20
+#17 20.22    Compiling deadpool-postgres v0.14.1
+#17 20.97    Compiling tokio-rustls v0.26.4
+#17 21.26    Compiling hyper-rustls v0.27.9
+#17 21.61    Compiling reqwest v0.12.28
+#17 22.81    Compiling redis v0.27.6
+#17 23.47    Compiling iicpc-logger-rust v0.1.0 (/app/libs/rust/logger)
+#17 26.49    Compiling rdkafka v0.36.0
+#17 27.62    Compiling iicpc-telemetry-ingester v0.1.0 (/app/services/telemetry-ingester)
+#17 32.17     Finished `release` profile [optimized] target(s) in 32.01s
+#17 DONE 32.4s
+
+#18 [stage-1 3/3] COPY --from=builder /app/target/release/iicpc-telemetry-ingester /usr/local/bin/iicpc-telemetry-ingester
+#18 DONE 0.1s
+
+#19 exporting to image
+#19 exporting layers
+#19 exporting layers 0.2s done
+#19 writing image sha256:e7a7fcb4ae40854a6e6fd9c318e0d906402101bb47b21856a350e799e4786575 done
+#19 naming to ghcr.io/agrawalx/telemetry-ingester:dev done
+#19 DONE 0.2s
+=== build iicpc/ebpf-latency:dev ===
+#0 building with "default" instance using docker driver
+
+#1 [internal] load build definition from Dockerfile
+#1 transferring dockerfile: 3.02kB done
+#1 DONE 0.0s
+
+#2 [internal] load metadata for docker.io/library/rust:bookworm
+#2 ...
+
+#3 [internal] load metadata for docker.io/library/debian:bookworm-slim
+#3 DONE 0.9s
+
+#2 [internal] load metadata for docker.io/library/rust:bookworm
+#2 DONE 0.9s
+
+#4 [internal] load .dockerignore
+#4 transferring context: 2B done
+#4 DONE 0.0s
+
+#5 [bpf-builder  1/11] FROM docker.io/library/rust:bookworm@sha256:13c186980fa33cc12759b429662a1322939dbe697484b7c33b47dd2698d28460
+#5 CACHED
+
+#6 [stage-2 1/4] FROM docker.io/library/debian:bookworm-slim@sha256:0104b334637a5f19aa9c983a91b54c89887c0984081f2068983107a6f6c21eeb
+#6 CACHED
+
+#7 [internal] load build context
+#7 transferring context: 3.75kB 0.5s done
+#7 DONE 0.8s
+
+#8 [stage-2 2/4] RUN apt-get update     && apt-get install -y --no-install-recommends ca-certificates librdkafka1 ethtool     && rm -rf /var/lib/apt/lists/*
+#8 0.346 Get:1 http://deb.debian.org/debian bookworm InRelease [151 kB]
+#8 0.379 Get:2 http://deb.debian.org/debian bookworm-updates InRelease [55.4 kB]
+#8 0.391 Get:3 http://deb.debian.org/debian-security bookworm-security InRelease [48.0 kB]
+#8 0.441 Get:4 http://deb.debian.org/debian bookworm/main amd64 Packages [8790 kB]
+#8 ...
+
+#9 [builder  2/10] RUN apt-get update     && apt-get install -y --no-install-recommends cmake build-essential librdkafka-dev pkg-config     && rm -rf /var/lib/apt/lists/*
+#9 CACHED
+
+#10 [builder  3/10] WORKDIR /app
+#10 CACHED
+
+#11 [builder  4/10] COPY Cargo.toml Cargo.lock* ./
+#11 CACHED
+
+#12 [builder  5/10] COPY libs/rust libs/rust
+#12 CACHED
+
+#13 [builder  6/10] COPY schemas/rust schemas/rust
+#13 DONE 0.1s
+
+#14 [builder  7/10] COPY services/bot-fleet services/bot-fleet
+#14 DONE 0.1s
+
+#15 [builder  8/10] COPY services/ebpf-latency services/ebpf-latency
+#15 DONE 0.1s
+
+#8 [stage-2 2/4] RUN apt-get update     && apt-get install -y --no-install-recommends ca-certificates librdkafka1 ethtool     && rm -rf /var/lib/apt/lists/*
+#8 1.003 Get:5 http://deb.debian.org/debian bookworm-updates/main amd64 Packages [6924 B]
+#8 ...
+
+#16 [builder  9/10] COPY services/telemetry-ingester services/telemetry-ingester
+#16 DONE 0.1s
+
+#8 [stage-2 2/4] RUN apt-get update     && apt-get install -y --no-install-recommends ca-certificates librdkafka1 ethtool     && rm -rf /var/lib/apt/lists/*
+#8 1.003 Get:6 http://deb.debian.org/debian-security bookworm-security/main amd64 Packages [309 kB]
+#8 1.571 Fetched 9361 kB in 1s (7403 kB/s)
+#8 1.571 Reading package lists...
+#8 2.019 Reading package lists...
+#8 2.390 Building dependency tree...
+#8 2.495 Reading state information...
+#8 2.585 The following additional packages will be installed:
+#8 2.585   libmnl0 libsasl2-2 libsasl2-modules-db libssl3 openssl
+#8 2.586 Recommended packages:
+#8 2.586   libsasl2-modules
+#8 2.628 The following NEW packages will be installed:
+#8 2.629   ca-certificates ethtool libmnl0 librdkafka1 libsasl2-2 libsasl2-modules-db
+#8 2.629   libssl3 openssl
+#8 2.682 0 upgraded, 8 newly installed, 0 to remove and 2 not upgraded.
+#8 2.682 Need to get 4563 kB of archives.
+#8 2.682 After this operation, 12.0 MB of additional disk space will be used.
+#8 2.682 Get:1 http://deb.debian.org/debian-security bookworm-security/main amd64 libssl3 amd64 3.0.20-1~deb12u2 [2036 kB]
+#8 3.092 Get:2 http://deb.debian.org/debian-security bookworm-security/main amd64 openssl amd64 3.0.20-1~deb12u2 [1439 kB]
+#8 3.195 Get:3 http://deb.debian.org/debian bookworm/main amd64 ca-certificates all 20230311+deb12u1 [155 kB]
+#8 3.202 Get:4 http://deb.debian.org/debian bookworm/main amd64 libmnl0 amd64 1.0.4-3 [12.5 kB]
+#8 3.215 Get:5 http://deb.debian.org/debian bookworm/main amd64 ethtool amd64 1:6.1-1 [197 kB]
+#8 3.237 Get:6 http://deb.debian.org/debian bookworm/main amd64 libsasl2-modules-db amd64 2.1.28+dfsg-10 [20.3 kB]
+#8 3.237 Get:7 http://deb.debian.org/debian bookworm/main amd64 libsasl2-2 amd64 2.1.28+dfsg-10 [59.7 kB]
+#8 3.471 Get:8 http://deb.debian.org/debian bookworm/main amd64 librdkafka1 amd64 2.0.2-1 [644 kB]
+#8 4.158 debconf: delaying package configuration, since apt-utils is not installed
+#8 4.212 Fetched 4563 kB in 1s (3479 kB/s)
+#8 4.271 Selecting previously unselected package libssl3:amd64.
+#8 4.271 (Reading database ... (Reading database ... 5%(Reading database ... 10%(Reading database ... 15%(Reading database ... 20%(Reading database ... 25%(Reading database ... 30%(Reading database ... 35%(Reading database ... 40%(Reading database ... 45%(Reading database ... 50%(Reading database ... 55%(Reading database ... 60%(Reading database ... 65%(Reading database ... 70%(Reading database ... 75%(Reading database ... 80%(Reading database ... 85%(Reading database ... 90%(Reading database ... 95%(Reading database ... 100%(Reading database ... 6096 files and directories currently installed.)
+#8 4.293 Preparing to unpack .../0-libssl3_3.0.20-1~deb12u2_amd64.deb ...
+#8 4.312 Unpacking libssl3:amd64 (3.0.20-1~deb12u2) ...
+#8 4.509 Selecting previously unselected package openssl.
+#8 4.509 Preparing to unpack .../1-openssl_3.0.20-1~deb12u2_amd64.deb ...
+#8 4.518 Unpacking openssl (3.0.20-1~deb12u2) ...
+#8 4.677 Selecting previously unselected package ca-certificates.
+#8 4.680 Preparing to unpack .../2-ca-certificates_20230311+deb12u1_all.deb ...
+#8 4.689 Unpacking ca-certificates (20230311+deb12u1) ...
+#8 4.808 Selecting previously unselected package libmnl0:amd64.
+#8 4.810 Preparing to unpack .../3-libmnl0_1.0.4-3_amd64.deb ...
+#8 4.818 Unpacking libmnl0:amd64 (1.0.4-3) ...
+#8 4.890 Selecting previously unselected package ethtool.
+#8 4.891 Preparing to unpack .../4-ethtool_1%3a6.1-1_amd64.deb ...
+#8 4.899 Unpacking ethtool (1:6.1-1) ...
+#8 4.985 Selecting previously unselected package libsasl2-modules-db:amd64.
+#8 4.987 Preparing to unpack .../5-libsasl2-modules-db_2.1.28+dfsg-10_amd64.deb ...
+#8 4.997 Unpacking libsasl2-modules-db:amd64 (2.1.28+dfsg-10) ...
+#8 5.078 Selecting previously unselected package libsasl2-2:amd64.
+#8 5.078 Preparing to unpack .../6-libsasl2-2_2.1.28+dfsg-10_amd64.deb ...
+#8 5.087 Unpacking libsasl2-2:amd64 (2.1.28+dfsg-10) ...
+#8 5.167 Selecting previously unselected package librdkafka1:amd64.
+#8 5.170 Preparing to unpack .../7-librdkafka1_2.0.2-1_amd64.deb ...
+#8 5.179 Unpacking librdkafka1:amd64 (2.0.2-1) ...
+#8 5.281 Setting up libssl3:amd64 (3.0.20-1~deb12u2) ...
+#8 5.308 Setting up libsasl2-modules-db:amd64 (2.1.28+dfsg-10) ...
+#8 5.334 Setting up libmnl0:amd64 (1.0.4-3) ...
+#8 5.363 Setting up libsasl2-2:amd64 (2.1.28+dfsg-10) ...
+#8 5.387 Setting up librdkafka1:amd64 (2.0.2-1) ...
+#8 5.415 Setting up openssl (3.0.20-1~deb12u2) ...
+#8 5.454 Setting up ethtool (1:6.1-1) ...
+#8 5.499 Setting up ca-certificates (20230311+deb12u1) ...
+#8 5.617 debconf: unable to initialize frontend: Dialog
+#8 5.617 debconf: (TERM is not set, so the dialog frontend is not usable.)
+#8 5.617 debconf: falling back to frontend: Readline
+#8 5.618 debconf: unable to initialize frontend: Readline
+#8 5.618 debconf: (Can't locate Term/ReadLine.pm in @INC (you may need to install the Term::ReadLine module) (@INC contains: /etc/perl /usr/local/lib/x86_64-linux-gnu/perl/5.36.0 /usr/local/share/perl/5.36.0 /usr/lib/x86_64-linux-gnu/perl5/5.36 /usr/share/perl5 /usr/lib/x86_64-linux-gnu/perl-base /usr/lib/x86_64-linux-gnu/perl/5.36 /usr/share/perl/5.36 /usr/local/lib/site_perl) at /usr/share/perl5/Debconf/FrontEnd/Readline.pm line 7.)
+#8 5.618 debconf: falling back to frontend: Teletype
+#8 6.364 Updating certificates in /etc/ssl/certs...
+#8 7.258 142 added, 0 removed; done.
+#8 7.308 Processing triggers for libc-bin (2.36-9+deb12u14) ...
+#8 7.374 Processing triggers for ca-certificates (20230311+deb12u1) ...
+#8 7.387 Updating certificates in /etc/ssl/certs...
+#8 ...
+
+#17 [builder 10/10] RUN cargo build --release -p iicpc-ebpf-latency
+#17 0.262     Updating crates.io index
+#17 1.426  Downloading crates ...
+#17 1.602   Downloaded allocator-api2 v0.2.21
+#17 1.609   Downloaded atomic-waker v1.1.2
+#17 1.620   Downloaded block-buffer v0.10.4
+#17 1.622   Downloaded cfg_aliases v0.2.1
+#17 1.624   Downloaded cfg-if v1.0.4
+#17 1.625   Downloaded anyhow v1.0.102
+#17 1.642   Downloaded bitflags v2.11.1
+#17 1.655   Downloaded cpufeatures v0.2.17
+#17 1.658   Downloaded futures-sink v0.3.32
+#17 1.660   Downloaded futures-io v0.3.32
+#17 1.666   Downloaded futures-core v0.3.32
+#17 1.669   Downloaded generic-array v0.14.7
+#17 1.671   Downloaded form_urlencoded v1.2.2
+#17 1.673   Downloaded crypto-common v0.1.7
+#17 1.681   Downloaded idna_adapter v1.2.2
+#17 1.682   Downloaded http-body v1.0.1
+#17 1.683   Downloaded errno v0.3.14
+#17 1.685   Downloaded futures-macro v0.3.32
+#17 1.695   Downloaded byteorder v1.5.0
+#17 1.698   Downloaded bytes v1.11.1
+#17 1.703   Downloaded matchers v0.2.0
+#17 1.704   Downloaded equivalent v1.0.2
+#17 1.710   Downloaded potential_utf v0.1.5
+#17 1.713   Downloaded rand_chacha v0.3.1
+#17 1.717   Downloaded proc-macro-crate v1.3.1
+#17 1.724   Downloaded serde_urlencoded v0.7.1
+#17 1.726   Downloaded num_enum_derive v0.5.11
+#17 1.728   Downloaded itoa v1.0.18
+#17 1.730   Downloaded toml_datetime v0.6.11
+#17 1.731   Downloaded lazy_static v1.5.0
+#17 1.733   Downloaded percent-encoding v2.3.2
+#17 1.734   Downloaded find-msvc-tools v0.1.9
+#17 1.736   Downloaded tinyvec_macros v0.1.1
+#17 1.737   Downloaded futures-executor v0.3.32
+#17 1.738   Downloaded prometheus-client-derive-encode v0.4.2
+#17 1.739   Downloaded http-body-util v0.1.3
+#17 1.741   Downloaded subtle v2.6.1
+#17 1.742   Downloaded hyper-rustls v0.27.9
+#17 1.744   Downloaded tower-layer v0.3.3
+#17 1.745   Downloaded sha1 v0.10.6
+#17 1.754   Downloaded tokio-macros v2.7.0
+#17 1.756   Downloaded futures-task v0.3.32
+#17 1.757   Downloaded scopeguard v1.2.0
+#17 1.758   Downloaded sync_wrapper v1.0.2
+#17 1.759   Downloaded rand_core v0.9.5
+#17 1.762   Downloaded base64 v0.22.1
+#17 1.766   Downloaded foldhash v0.1.5
+#17 1.767   Downloaded try-lock v0.2.5
+#17 1.768   Downloaded rand_core v0.6.4
+#17 1.770   Downloaded data-encoding v2.11.0
+#17 1.772   Downloaded ppv-lite86 v0.2.21
+#17 1.773   Downloaded digest v0.10.7
+#17 1.776   Downloaded rand_chacha v0.9.0
+#17 1.777   Downloaded displaydoc v0.2.6
+#17 1.780   Downloaded lru-slab v0.1.2
+#17 1.781   Downloaded ipnet v2.12.0
+#17 1.782   Downloaded nu-ansi-term v0.50.3
+#17 1.785   Downloaded utf-8 v0.7.6
+#17 1.787   Downloaded lock_api v0.4.14
+#17 1.788   Downloaded pin-project-lite v0.2.17
+#17 1.794   Downloaded autocfg v1.5.1
+#17 1.796   Downloaded num_enum v0.5.11
+#17 1.802   Downloaded tracing-serde v0.2.0
+#17 1.803   Downloaded crc32fast v1.5.0
+#17 1.805   Downloaded yoke-derive v0.8.2
+#17 1.806   Downloaded want v0.3.1
+#17 1.808   Downloaded utf8_iter v1.0.4
+#17 1.809   Downloaded version_check v0.9.5
+#17 1.811   Downloaded cmake v0.1.58
+#17 1.813   Downloaded rustc-hash v2.1.2
+#17 1.814   Downloaded httparse v1.10.1
+#17 1.817   Downloaded futures-channel v0.3.32
+#17 1.824   Downloaded quinn-udp v0.5.14
+#17 1.826   Downloaded once_cell v1.21.4
+#17 1.828   Downloaded zerofrom-derive v0.1.7
+#17 1.829   Downloaded parking_lot v0.12.5
+#17 1.832   Downloaded quote v1.0.45
+#17 1.835   Downloaded litemap v0.8.2
+#17 1.838   Downloaded pkg-config v0.3.33
+#17 1.840   Downloaded parking_lot_core v0.9.12
+#17 1.842   Downloaded zerofrom v0.1.8
+#17 1.843   Downloaded futures v0.3.32
+#17 1.849   Downloaded thiserror-impl v2.0.18
+#17 1.850   Downloaded tinystr v0.8.3
+#17 1.852   Downloaded thiserror v2.0.18
+#17 1.859   Downloaded zeroize v1.8.2
+#17 1.860   Downloaded thiserror v1.0.69
+#17 1.866   Downloaded thiserror-impl v1.0.69
+#17 1.867   Downloaded num-traits v0.2.19
+#17 1.870   Downloaded tower-service v0.3.3
+#17 1.871   Downloaded getrandom v0.3.4
+#17 1.874   Downloaded cc v1.2.62
+#17 1.877   Downloaded thread_local v1.1.9
+#17 1.879   Downloaded proc-macro2 v1.0.106
+#17 1.881   Downloaded log v0.4.29
+#17 1.884   Downloaded synstructure v0.13.2
+#17 1.885   Downloaded prometheus-client v0.22.3
+#17 1.888   Downloaded tracing-log v0.2.0
+#17 1.889   Downloaded shlex v1.3.0
+#17 1.891   Downloaded icu_provider v2.2.0
+#17 1.893   Downloaded getrandom v0.2.17
+#17 1.896   Downloaded icu_properties v2.2.0
+#17 1.898   Downloaded untrusted v0.9.0
+#17 1.900   Downloaded dtoa v1.0.11
+#17 1.902   Downloaded icu_locale_core v2.2.0
+#17 1.909   Downloaded stable_deref_trait v1.2.1
+#17 1.910   Downloaded slab v0.4.12
+#17 1.911   Downloaded icu_normalizer_data v2.2.0
+#17 1.915   Downloaded zmij v1.0.21
+#17 1.918   Downloaded icu_normalizer v2.2.0
+#17 1.922   Downloaded icu_collections v2.2.0
+#17 1.932   Downloaded writeable v0.6.3
+#17 1.943   Downloaded hyper-util v0.1.20
+#17 1.949   Downloaded smallvec v1.15.1
+#17 1.951   Downloaded http v1.4.0
+#17 1.956   Downloaded aho-corasick v1.1.4
+#17 1.961   Downloaded indexmap v2.14.0
+#17 1.965   Downloaded tracing-attributes v0.1.31
+#17 1.967   Downloaded zerovec-derive v0.11.3
+#17 1.969   Downloaded mio v1.2.0
+#17 1.975   Downloaded yoke v0.8.2
+#17 1.977   Downloaded tokio-tungstenite v0.23.1
+#17 1.979   Downloaded tokio-rustls v0.26.4
+#17 1.981   Downloaded signal-hook-registry v1.4.8
+#17 1.982   Downloaded hashbrown v0.15.5
+#17 1.986   Downloaded idna v1.1.0
+#17 1.989   Downloaded unicode-ident v1.0.24
+#17 1.991   Downloaded socket2 v0.6.3
+#17 1.993   Downloaded icu_properties_data v2.2.0
+#17 2.003   Downloaded futures-util v0.3.32
+#17 2.016   Downloaded tinyvec v1.11.0
+#17 2.019   Downloaded quinn-proto v0.11.14
+#17 2.025   Downloaded tracing-core v0.1.36
+#17 2.027   Downloaded sharded-slab v0.1.7
+#17 2.030   Downloaded object v0.36.7
+#17 2.039   Downloaded serde_core v1.0.228
+#17 2.042   Downloaded tungstenite v0.23.0
+#17 2.045   Downloaded ryu v1.0.23
+#17 2.048   Downloaded hashbrown v0.17.1
+#17 2.053   Downloaded hyper v1.10.1
+#17 2.059   Downloaded zerotrie v0.2.4
+#17 2.064   Downloaded serde v1.0.228
+#17 2.067   Downloaded toml_edit v0.19.15
+#17 2.086   Downloaded url v2.5.8
+#17 2.088   Downloaded typenum v1.20.0
+#17 2.091   Downloaded tower v0.5.3
+#17 2.101   Downloaded reqwest v0.12.28
+#17 2.105   Downloaded rustls-webpki v0.103.13
+#17 2.109   Downloaded serde_derive v1.0.228
+#17 2.112   Downloaded libc v0.2.186
+#17 2.148   Downloaded zerovec v0.11.6
+#17 2.154   Downloaded tower-http v0.6.11
+#17 2.163   Downloaded serde_json v1.0.150
+#17 2.170   Downloaded regex-syntax v0.8.10
+#17 2.176   Downloaded winnow v0.5.40
+#17 2.184   Downloaded rdkafka v0.36.0
+#17 2.189   Downloaded webpki-roots v1.0.7
+#17 2.191   Downloaded rustls-pki-types v1.14.1
+#17 2.194   Downloaded rmp-serde v1.3.1
+#17 2.196   Downloaded rmp v0.8.15
+#17 2.199   Downloaded tracing-subscriber v0.3.23
+#17 2.207   Downloaded syn v1.0.109
+#17 2.215   Downloaded rand v0.9.4
+#17 2.219   Downloaded rand v0.8.6
+#17 2.222   Downloaded quinn v0.11.9
+#17 2.225   Downloaded memchr v2.8.0
+#17 2.230   Downloaded zerocopy v0.8.48
+#17 2.251   Downloaded syn v2.0.117
+#17 2.261   Downloaded rustls v0.23.40
+#17 2.277   Downloaded tracing v0.1.44
+#17 2.292   Downloaded regex-automata v0.4.14
+#17 2.328   Downloaded tokio v1.52.3
+#17 2.459   Downloaded ring v0.17.14
+#17 2.498   Downloaded core-error v0.0.0
+#17 2.499   Downloaded assert_matches v1.5.0
+#17 2.500   Downloaded aya v0.13.1
+#17 2.506   Downloaded aya-obj v0.2.1
+#17 2.605   Downloaded rdkafka-sys v4.7.0+2.3.0
+#17 2.739    Compiling proc-macro2 v1.0.106
+#17 2.739    Compiling quote v1.0.45
+#17 2.739    Compiling unicode-ident v1.0.24
+#17 2.739    Compiling libc v0.2.186
+#17 2.739    Compiling cfg-if v1.0.4
+#17 2.739    Compiling pin-project-lite v0.2.17
+#17 2.745    Compiling bytes v1.11.1
+#17 2.750    Compiling shlex v1.3.0
+#17 2.755    Compiling itoa v1.0.18
+#17 2.760    Compiling memchr v2.8.0
+#17 2.760    Compiling find-msvc-tools v0.1.9
+#17 2.763    Compiling stable_deref_trait v1.2.1
+#17 2.767    Compiling futures-core v0.3.32
+#17 2.782    Compiling version_check v0.9.5
+#17 2.782    Compiling smallvec v1.15.1
+#17 2.795    Compiling futures-sink v0.3.32
+#17 2.795    Compiling once_cell v1.21.4
+#17 2.795    Compiling serde_core v1.0.228
+#17 2.800    Compiling futures-io v0.3.32
+#17 2.833    Compiling slab v0.4.12
+#17 2.871    Compiling futures-channel v0.3.32
+#17 2.887    Compiling cc v1.2.62
+#17 2.893    Compiling futures-task v0.3.32
+#17 2.938    Compiling writeable v0.6.3
+#17 2.944    Compiling serde v1.0.228
+#17 2.950    Compiling litemap v0.8.2
+#17 2.951    Compiling utf8_iter v1.0.4
+#17 3.025    Compiling icu_normalizer_data v2.2.0
+#17 3.039    Compiling log v0.4.29
+#17 3.040    Compiling httparse v1.10.1
+#17 3.053    Compiling icu_properties_data v2.2.0
+#17 3.060    Compiling generic-array v0.14.7
+#17 3.081    Compiling tracing-core v0.1.36
+#17 3.093    Compiling zerocopy v0.8.48
+#17 3.132    Compiling zeroize v1.8.2
+#17 3.168    Compiling percent-encoding v2.3.2
+#17 3.184    Compiling hashbrown v0.17.1
+#17 3.237    Compiling equivalent v1.0.2
+#17 3.252    Compiling rustls-pki-types v1.14.1
+#17 3.286    Compiling typenum v1.20.0
+#17 3.291    Compiling zmij v1.0.21
+#17 3.306    Compiling untrusted v0.9.0
+#17 3.361    Compiling tower-service v0.3.3
+#17 3.395    Compiling rustls v0.23.40
+#17 3.414    Compiling thiserror v1.0.69
+#17 3.421    Compiling try-lock v0.2.5
+#17 3.473    Compiling http v1.4.0
+#17 3.523    Compiling serde_json v1.0.150
+#17 3.634    Compiling toml_datetime v0.6.11
+#17 3.714    Compiling syn v2.0.117
+#17 3.780    Compiling syn v1.0.109
+#17 3.785    Compiling winnow v0.5.40
+#17 3.837    Compiling indexmap v2.14.0
+#17 3.907    Compiling want v0.3.1
+#17 3.920    Compiling form_urlencoded v1.2.2
+#17 4.052    Compiling getrandom v0.2.17
+#17 4.103    Compiling errno v0.3.14
+#17 4.110    Compiling socket2 v0.6.3
+#17 4.110    Compiling mio v1.2.0
+#17 4.170    Compiling autocfg v1.5.1
+#17 4.197    Compiling subtle v2.6.1
+#17 4.225    Compiling signal-hook-registry v1.4.8
+#17 4.306    Compiling rand_core v0.6.4
+#17 4.315    Compiling atomic-waker v1.1.2
+#17 4.352    Compiling ring v0.17.14
+#17 4.389    Compiling cmake v0.1.58
+#17 4.433    Compiling sync_wrapper v1.0.2
+#17 4.518    Compiling http-body v1.0.1
+#17 4.554    Compiling num-traits v0.2.19
+#17 4.575    Compiling bitflags v2.11.1
+#17 4.587    Compiling tower-layer v0.3.3
+#17 4.639    Compiling parking_lot_core v0.9.12
+#17 4.680    Compiling ipnet v2.12.0
+#17 4.689    Compiling regex-syntax v0.8.10
+#17 4.766    Compiling block-buffer v0.10.4
+#17 4.787    Compiling crypto-common v0.1.7
+#17 4.804    Compiling base64 v0.22.1
+#17 4.810    Compiling pkg-config v0.3.33
+#17 4.887    Compiling crc32fast v1.5.0
+#17 4.913    Compiling digest v0.10.7
+#17 4.967    Compiling webpki-roots v1.0.7
+#17 5.061    Compiling core-error v0.0.0
+#17 5.100    Compiling allocator-api2 v0.2.21
+#17 5.120    Compiling lazy_static v1.5.0
+#17 5.193    Compiling cpufeatures v0.2.17
+#17 5.220    Compiling foldhash v0.1.5
+#17 5.237    Compiling object v0.36.7
+#17 5.277    Compiling ryu v1.0.23
+#17 5.358    Compiling scopeguard v1.2.0
+#17 5.387    Compiling sha1 v0.10.6
+#17 5.423    Compiling lock_api v0.4.14
+#17 5.452    Compiling rdkafka-sys v4.7.0+2.3.0
+#17 5.475    Compiling sharded-slab v0.1.7
+#17 5.586    Compiling hashbrown v0.15.5
+#17 5.782    Compiling toml_edit v0.19.15
+#17 5.906    Compiling http-body-util v0.1.3
+#17 5.981    Compiling tracing-log v0.2.0
+#17 6.141    Compiling thread_local v1.1.9
+#17 6.188    Compiling regex-automata v0.4.14
+#17 6.246    Compiling nu-ansi-term v0.50.3
+#17 6.260    Compiling prometheus-client v0.22.3
+#17 6.355    Compiling byteorder v1.5.0
+#17 6.403    Compiling anyhow v1.0.102
+#17 6.471    Compiling data-encoding v2.11.0
+#17 6.511    Compiling utf-8 v0.7.6
+#17 6.649    Compiling thiserror v2.0.18
+#17 6.676    Compiling rmp v0.8.15
+#17 6.875    Compiling parking_lot v0.12.5
+#17 6.920    Compiling dtoa v1.0.11
+#17 6.986    Compiling assert_matches v1.5.0
+#17 ...
+
+#8 [stage-2 2/4] RUN apt-get update     && apt-get install -y --no-install-recommends ca-certificates librdkafka1 ethtool     && rm -rf /var/lib/apt/lists/*
+#8 8.181 0 added, 0 removed; done.
+#8 8.181 Running hooks in /etc/ca-certificates/update.d...
+#8 8.183 done.
+#8 DONE 8.3s
+
+#18 [bpf-builder  2/11] RUN apt-get update     && apt-get install -y --no-install-recommends llvm clang libclang-dev pkg-config     && rm -rf /var/lib/apt/lists/*
+#18 0.818 Get:1 http://deb.debian.org/debian bookworm InRelease [151 kB]
+#18 0.878 Get:2 http://deb.debian.org/debian bookworm-updates InRelease [55.4 kB]
+#18 0.904 Get:3 http://deb.debian.org/debian-security bookworm-security InRelease [48.0 kB]
+#18 0.970 Get:4 http://deb.debian.org/debian bookworm/main amd64 Packages [8790 kB]
+#18 1.588 Get:5 http://deb.debian.org/debian bookworm-updates/main amd64 Packages [6924 B]
+#18 1.589 Get:6 http://deb.debian.org/debian-security bookworm-security/main amd64 Packages [309 kB]
+#18 2.147 Fetched 9361 kB in 2s (4972 kB/s)
+#18 2.147 Reading package lists...
+#18 2.513 Reading package lists...
+#18 2.860 Building dependency tree...
+#18 2.958 Reading state information...
+#18 3.171 pkg-config is already the newest version (1.8.1-1).
+#18 3.171 pkg-config set to manually installed.
+#18 3.171 The following additional packages will be installed:
+#18 3.171   clang-14 libclang-14-dev libclang-common-14-dev libclang-cpp14 libclang1-14
+#18 3.171   libcurl3-nss libgc1 libllvm14 libnspr4 libnss3 libobjc-12-dev libobjc4
+#18 3.171   libpfm4 libz3-4 llvm-14 llvm-14-linker-tools llvm-14-runtime llvm-runtime
+#18 3.172   nss-plugin-pem
+#18 3.172 Suggested packages:
+#18 3.172   clang-14-doc wasi-libc llvm-14-doc
+#18 3.172 Recommended packages:
+#18 3.172   llvm-14-dev libclang-rt-14-dev binfmt-support | systemd
+#18 3.309 The following NEW packages will be installed:
+#18 3.309   clang clang-14 libclang-14-dev libclang-common-14-dev libclang-cpp14
+#18 3.310   libclang-dev libclang1-14 libcurl3-nss libgc1 libllvm14 libnspr4 libnss3
+#18 3.310   libobjc-12-dev libobjc4 libpfm4 libz3-4 llvm llvm-14 llvm-14-linker-tools
+#18 3.310   llvm-14-runtime llvm-runtime nss-plugin-pem
+#18 3.379 0 upgraded, 22 newly installed, 0 to remove and 29 not upgraded.
+#18 3.379 Need to get 86.6 MB of archives.
+#18 3.379 After this operation, 555 MB of additional disk space will be used.
+#18 3.379 Get:1 http://deb.debian.org/debian bookworm/main amd64 libz3-4 amd64 4.8.12-3.1 [7216 kB]
+#18 4.131 Get:2 http://deb.debian.org/debian bookworm/main amd64 libllvm14 amd64 1:14.0.6-12 [21.8 MB]
+#18 5.004 Get:3 http://deb.debian.org/debian bookworm/main amd64 libclang-cpp14 amd64 1:14.0.6-12 [11.1 MB]
+#18 5.397 Get:4 http://deb.debian.org/debian bookworm/main amd64 libgc1 amd64 1:8.2.2-3 [245 kB]
+#18 5.417 Get:5 http://deb.debian.org/debian bookworm/main amd64 libobjc4 amd64 12.2.0-14+deb12u1 [43.2 kB]
+#18 5.431 Get:6 http://deb.debian.org/debian bookworm/main amd64 libobjc-12-dev amd64 12.2.0-14+deb12u1 [170 kB]
+#18 5.447 Get:7 http://deb.debian.org/debian bookworm/main amd64 libclang-common-14-dev all 1:14.0.6-12 [890 kB]
+#18 5.492 Get:8 http://deb.debian.org/debian bookworm/main amd64 llvm-14-linker-tools amd64 1:14.0.6-12 [1288 kB]
+#18 5.544 Get:9 http://deb.debian.org/debian bookworm/main amd64 libclang1-14 amd64 1:14.0.6-12 [6157 kB]
+#18 5.767 Get:10 http://deb.debian.org/debian bookworm/main amd64 clang-14 amd64 1:14.0.6-12 [102 kB]
+#18 5.772 Get:11 http://deb.debian.org/debian bookworm/main amd64 clang amd64 1:14.0-55.7~deb12u1 [5144 B]
+#18 6.024 Get:12 http://deb.debian.org/debian bookworm/main amd64 libclang-14-dev amd64 1:14.0.6-12 [23.1 MB]
+#18 6.876 Get:13 http://deb.debian.org/debian bookworm/main amd64 libclang-dev amd64 1:14.0-55.7~deb12u1 [4728 B]
+#18 6.884 Get:14 http://deb.debian.org/debian bookworm/main amd64 libnspr4 amd64 2:4.35-1 [113 kB]
+#18 6.897 Get:15 http://deb.debian.org/debian bookworm/main amd64 libnss3 amd64 2:3.87.1-1+deb12u2 [1332 kB]
+#18 7.064 Get:16 http://deb.debian.org/debian bookworm/main amd64 nss-plugin-pem amd64 1.0.8+1-1 [54.6 kB]
+#18 7.074 Get:17 http://deb.debian.org/debian bookworm/main amd64 libcurl3-nss amd64 7.88.1-10+deb12u14 [395 kB]
+#18 7.098 Get:18 http://deb.debian.org/debian bookworm/main amd64 libpfm4 amd64 4.13.0-1 [294 kB]
+#18 7.124 Get:19 http://deb.debian.org/debian bookworm/main amd64 llvm-14-runtime amd64 1:14.0.6-12 [477 kB]
+#18 7.140 Get:20 http://deb.debian.org/debian bookworm/main amd64 llvm-runtime amd64 1:14.0-55.7~deb12u1 [4812 B]
+#18 7.149 Get:21 http://deb.debian.org/debian bookworm/main amd64 llvm-14 amd64 1:14.0.6-12 [11.7 MB]
+#18 7.537 Get:22 http://deb.debian.org/debian bookworm/main amd64 llvm amd64 1:14.0-55.7~deb12u1 [7212 B]
+#18 7.815 debconf: delaying package configuration, since apt-utils is not installed
+#18 7.899 Fetched 86.6 MB in 4s (20.5 MB/s)
+#18 8.015 Selecting previously unselected package libz3-4:amd64.
+#18 8.015 (Reading database ... (Reading database ... 5%(Reading database ... 10%(Reading database ... 15%(Reading database ... 20%(Reading database ... 25%(Reading database ... 30%(Reading database ... 35%(Reading database ... 40%(Reading database ... 45%(Reading database ... 50%(Reading database ... 55%(Reading database ... 60%(Reading database ... 65%(Reading database ... 70%(Reading database ... 75%(Reading database ... 80%(Reading database ... 85%(Reading database ... 90%(Reading database ... 95%(Reading database ... 100%(Reading database ... 23256 files and directories currently installed.)
+#18 8.099 Preparing to unpack .../00-libz3-4_4.8.12-3.1_amd64.deb ...
+#18 8.118 Unpacking libz3-4:amd64 (4.8.12-3.1) ...
+#18 ...
+
+#17 [builder 10/10] RUN cargo build --release -p iicpc-ebpf-latency
+#17 7.633    Compiling synstructure v0.13.2
+#17 7.890    Compiling ppv-lite86 v0.2.21
+#17 7.955    Compiling proc-macro-crate v1.3.1
+#17 8.369    Compiling rand_chacha v0.3.1
+#17 8.532    Compiling num_enum_derive v0.5.11
+#17 8.563    Compiling rand v0.8.6
+#17 8.657    Compiling zerofrom-derive v0.1.7
+#17 8.658    Compiling yoke-derive v0.8.2
+#17 8.658    Compiling zerovec-derive v0.11.3
+#17 8.663    Compiling displaydoc v0.2.6
+#17 8.667    Compiling futures-macro v0.3.32
+#17 8.673    Compiling tokio-macros v2.7.0
+#17 8.678    Compiling serde_derive v1.0.228
+#17 8.679    Compiling tracing-attributes v0.1.31
+#17 8.936    Compiling thiserror-impl v1.0.69
+#17 9.236    Compiling num_enum v0.5.11
+#17 9.291    Compiling tokio v1.52.3
+#17 9.295    Compiling matchers v0.2.0
+#17 9.313    Compiling prometheus-client-derive-encode v0.4.2
+#17 9.396    Compiling thiserror-impl v2.0.18
+#17 9.419    Compiling futures-util v0.3.32
+#17 9.739    Compiling zerofrom v0.1.8
+#17 9.841    Compiling yoke v0.8.2
+#17 9.954    Compiling tracing v0.1.44
+#17 10.05    Compiling zerovec v0.11.6
+#17 10.11    Compiling zerotrie v0.2.4
+#17 10.22    Compiling tungstenite v0.23.0
+#17 11.01    Compiling tinystr v0.8.3
+#17 11.03    Compiling potential_utf v0.1.5
+#17 11.31    Compiling icu_locale_core v2.2.0
+#17 11.34    Compiling icu_collections v2.2.0
+#17 11.98    Compiling aya-obj v0.2.1
+#17 12.58    Compiling icu_provider v2.2.0
+#17 12.86    Compiling futures-executor v0.3.32
+#17 12.92    Compiling icu_properties v2.2.0
+#17 13.02    Compiling icu_normalizer v2.2.0
+#17 13.12    Compiling tracing-serde v0.2.0
+#17 13.22    Compiling serde_urlencoded v0.7.1
+#17 13.22    Compiling tracing-subscriber v0.3.23
+#17 13.24    Compiling rmp-serde v1.3.1
+#17 13.38    Compiling iicpc-schemas-rust v0.1.0 (/app/schemas/rust)
+#17 13.47    Compiling futures v0.3.32
+#17 13.52    Compiling aya v0.13.1
+#17 ...
+
+#18 [bpf-builder  2/11] RUN apt-get update     && apt-get install -y --no-install-recommends llvm clang libclang-dev pkg-config     && rm -rf /var/lib/apt/lists/*
+#18 8.680 Selecting previously unselected package libllvm14:amd64.
+#18 8.682 Preparing to unpack .../01-libllvm14_1%3a14.0.6-12_amd64.deb ...
+#18 8.691 Unpacking libllvm14:amd64 (1:14.0.6-12) ...
+#18 9.438 Selecting previously unselected package libclang-cpp14.
+#18 9.440 Preparing to unpack .../02-libclang-cpp14_1%3a14.0.6-12_amd64.deb ...
+#18 9.449 Unpacking libclang-cpp14 (1:14.0.6-12) ...
+#18 9.888 Selecting previously unselected package libgc1:amd64.
+#18 9.890 Preparing to unpack .../03-libgc1_1%3a8.2.2-3_amd64.deb ...
+#18 9.898 Unpacking libgc1:amd64 (1:8.2.2-3) ...
+#18 9.988 Selecting previously unselected package libobjc4:amd64.
+#18 9.992 Preparing to unpack .../04-libobjc4_12.2.0-14+deb12u1_amd64.deb ...
+#18 10.00 Unpacking libobjc4:amd64 (12.2.0-14+deb12u1) ...
+#18 10.07 Selecting previously unselected package libobjc-12-dev:amd64.
+#18 10.07 Preparing to unpack .../05-libobjc-12-dev_12.2.0-14+deb12u1_amd64.deb ...
+#18 10.08 Unpacking libobjc-12-dev:amd64 (12.2.0-14+deb12u1) ...
+#18 10.17 Selecting previously unselected package libclang-common-14-dev.
+#18 10.17 Preparing to unpack .../06-libclang-common-14-dev_1%3a14.0.6-12_all.deb ...
+#18 10.18 Unpacking libclang-common-14-dev (1:14.0.6-12) ...
+#18 10.34 Selecting previously unselected package llvm-14-linker-tools.
+#18 10.34 Preparing to unpack .../07-llvm-14-linker-tools_1%3a14.0.6-12_amd64.deb ...
+#18 10.35 Unpacking llvm-14-linker-tools (1:14.0.6-12) ...
+#18 10.51 Selecting previously unselected package libclang1-14.
+#18 10.51 Preparing to unpack .../08-libclang1-14_1%3a14.0.6-12_amd64.deb ...
+#18 10.52 Unpacking libclang1-14 (1:14.0.6-12) ...
+#18 10.98 Selecting previously unselected package clang-14.
+#18 10.99 Preparing to unpack .../09-clang-14_1%3a14.0.6-12_amd64.deb ...
+#18 11.00 Unpacking clang-14 (1:14.0.6-12) ...
+#18 11.11 Selecting previously unselected package clang.
+#18 11.11 Preparing to unpack .../10-clang_1%3a14.0-55.7~deb12u1_amd64.deb ...
+#18 11.12 Unpacking clang (1:14.0-55.7~deb12u1) ...
+#18 11.19 Selecting previously unselected package libclang-14-dev.
+#18 11.19 Preparing to unpack .../11-libclang-14-dev_1%3a14.0.6-12_amd64.deb ...
+#18 11.20 Unpacking libclang-14-dev (1:14.0.6-12) ...
+#18 12.42 Selecting previously unselected package libclang-dev.
+#18 12.43 Preparing to unpack .../12-libclang-dev_1%3a14.0-55.7~deb12u1_amd64.deb ...
+#18 12.44 Unpacking libclang-dev (1:14.0-55.7~deb12u1) ...
+#18 12.50 Selecting previously unselected package libnspr4:amd64.
+#18 12.51 Preparing to unpack .../13-libnspr4_2%3a4.35-1_amd64.deb ...
+#18 12.52 Unpacking libnspr4:amd64 (2:4.35-1) ...
+#18 12.60 Selecting previously unselected package libnss3:amd64.
+#18 12.60 Preparing to unpack .../14-libnss3_2%3a3.87.1-1+deb12u2_amd64.deb ...
+#18 12.61 Unpacking libnss3:amd64 (2:3.87.1-1+deb12u2) ...
+#18 12.77 Selecting previously unselected package nss-plugin-pem:amd64.
+#18 12.78 Preparing to unpack .../15-nss-plugin-pem_1.0.8+1-1_amd64.deb ...
+#18 12.78 Unpacking nss-plugin-pem:amd64 (1.0.8+1-1) ...
+#18 12.86 Selecting previously unselected package libcurl3-nss:amd64.
+#18 12.87 Preparing to unpack .../16-libcurl3-nss_7.88.1-10+deb12u14_amd64.deb ...
+#18 12.88 Unpacking libcurl3-nss:amd64 (7.88.1-10+deb12u14) ...
+#18 12.99 Selecting previously unselected package libpfm4:amd64.
+#18 12.99 Preparing to unpack .../17-libpfm4_4.13.0-1_amd64.deb ...
+#18 13.00 Unpacking libpfm4:amd64 (4.13.0-1) ...
+#18 13.12 Selecting previously unselected package llvm-14-runtime.
+#18 13.12 Preparing to unpack .../18-llvm-14-runtime_1%3a14.0.6-12_amd64.deb ...
+#18 13.14 Unpacking llvm-14-runtime (1:14.0.6-12) ...
+#18 13.24 Selecting previously unselected package llvm-runtime:amd64.
+#18 13.25 Preparing to unpack .../19-llvm-runtime_1%3a14.0-55.7~deb12u1_amd64.deb ...
+#18 13.26 Unpacking llvm-runtime:amd64 (1:14.0-55.7~deb12u1) ...
+#18 13.32 Selecting previously unselected package llvm-14.
+#18 13.32 Preparing to unpack .../20-llvm-14_1%3a14.0.6-12_amd64.deb ...
+#18 13.33 Unpacking llvm-14 (1:14.0.6-12) ...
+#18 13.91 Selecting previously unselected package llvm.
+#18 13.91 Preparing to unpack .../21-llvm_1%3a14.0-55.7~deb12u1_amd64.deb ...
+#18 13.92 Unpacking llvm (1:14.0-55.7~deb12u1) ...
+#18 14.02 Setting up libz3-4:amd64 (4.8.12-3.1) ...
+#18 14.04 Setting up libpfm4:amd64 (4.13.0-1) ...
+#18 14.07 Setting up libnspr4:amd64 (2:4.35-1) ...
+#18 14.10 Setting up libgc1:amd64 (1:8.2.2-3) ...
+#18 14.12 Setting up libllvm14:amd64 (1:14.0.6-12) ...
+#18 14.15 Setting up llvm-14-linker-tools (1:14.0.6-12) ...
+#18 14.17 Setting up libclang1-14 (1:14.0.6-12) ...
+#18 14.20 Setting up libobjc4:amd64 (12.2.0-14+deb12u1) ...
+#18 14.23 Setting up libnss3:amd64 (2:3.87.1-1+deb12u2) ...
+#18 14.26 Setting up llvm-14-runtime (1:14.0.6-12) ...
+#18 14.29 Setting up llvm-runtime:amd64 (1:14.0-55.7~deb12u1) ...
+#18 14.31 Setting up libclang-common-14-dev (1:14.0.6-12) ...
+#18 14.34 Setting up libclang-cpp14 (1:14.0.6-12) ...
+#18 14.37 Setting up libobjc-12-dev:amd64 (12.2.0-14+deb12u1) ...
+#18 14.40 Setting up libclang-14-dev (1:14.0.6-12) ...
+#18 14.42 Setting up clang-14 (1:14.0.6-12) ...
+#18 14.45 Setting up libclang-dev (1:14.0-55.7~deb12u1) ...
+#18 14.48 Setting up nss-plugin-pem:amd64 (1.0.8+1-1) ...
+#18 14.50 Setting up clang (1:14.0-55.7~deb12u1) ...
+#18 14.59 Setting up libcurl3-nss:amd64 (7.88.1-10+deb12u14) ...
+#18 14.63 Setting up llvm-14 (1:14.0.6-12) ...
+#18 14.65 Setting up llvm (1:14.0-55.7~deb12u1) ...
+#18 14.68 Processing triggers for libc-bin (2.36-9+deb12u14) ...
+#18 DONE 15.2s
+
+#19 [bpf-builder  3/11] RUN rustup toolchain install nightly --component rust-src     && cargo install bpf-linker --locked
+#19 0.298 info: syncing channel updates for nightly-x86_64-unknown-linux-gnu
+#19 4.566 info: latest update on 2026-06-10 for version 1.98.0-nightly (beae78130 2026-06-09)
+#19 4.568 info: downloading 4 components
+#19 ...
+
+#17 [builder 10/10] RUN cargo build --release -p iicpc-ebpf-latency
+#17 14.47    Compiling idna_adapter v1.2.2
+#17 14.59    Compiling idna v1.1.0
+#17 14.95    Compiling hyper v1.10.1
+#17 15.21    Compiling rustls-webpki v0.103.13
+#17 15.39    Compiling url v2.5.8
+#17 15.63    Compiling tower v0.5.3
+#17 16.25    Compiling hyper-util v0.1.20
+#17 16.29    Compiling tower-http v0.6.11
+#17 16.33    Compiling tokio-tungstenite v0.23.1
+#17 20.40    Compiling tokio-rustls v0.26.4
+#17 20.63    Compiling hyper-rustls v0.27.9
+#17 20.84    Compiling reqwest v0.12.28
+#17 22.65    Compiling iicpc-logger-rust v0.1.0 (/app/libs/rust/logger)
+#17 26.06    Compiling rdkafka v0.36.0
+#17 27.02    Compiling iicpc-bot-fleet v0.1.0 (/app/services/bot-fleet)
+#17 29.43    Compiling iicpc-ebpf-latency v0.1.0 (/app/services/ebpf-latency)
+#17 30.85     Finished `release` profile [optimized] target(s) in 30.63s
+#17 DONE 31.7s
+
+#19 [bpf-builder  3/11] RUN rustup toolchain install nightly --component rust-src     && cargo install bpf-linker --locked
+#19 ...
+
+#20 [stage-2 3/4] COPY --from=builder /app/target/release/iicpc-ebpf-latency /usr/local/bin/iicpc-ebpf-latency
+#20 DONE 0.1s
+
+#19 [bpf-builder  3/11] RUN rustup toolchain install nightly --component rust-src     && cargo install bpf-linker --locked
+#19 45.66 
+#19 45.67   nightly-x86_64-unknown-linux-gnu installed - rustc 1.98.0-nightly (beae78130 2026-06-09)
+#19 45.67 
+#19 45.68 info: checking for self-update (current version: 1.29.0)
+#19 45.80     Updating crates.io index
+#19 47.42  Downloading crates ...
+#19 47.58   Downloaded bpf-linker v0.10.3
+#19 47.63   Installing bpf-linker v0.10.3
+#19 47.63     Updating crates.io index
+#19 57.24     Updating crates.io index
+#19 57.32  Downloading crates ...
+#19 57.43   Downloaded anstyle-parse v1.0.0
+#19 57.43   Downloaded equivalent v1.0.2
+#19 57.43   Downloaded cargo-platform v0.3.2
+#19 57.43   Downloaded ar v0.9.0
+#19 57.43   Downloaded anstyle v1.0.13
+#19 57.43   Downloaded anstream v1.0.0
+#19 57.44   Downloaded aho-corasick v1.1.4
+#19 57.44   Downloaded cfg-if v1.0.4
+#19 57.45   Downloaded heck v0.5.0
+#19 57.45   Downloaded lazy_static v1.5.0
+#19 57.46   Downloaded colorchoice v1.0.4
+#19 57.46   Downloaded utf8parse v0.2.2
+#19 57.46   Downloaded clap_lex v1.0.0
+#19 57.46   Downloaded is_terminal_polyfill v1.70.2
+#19 57.47   Downloaded matchers v0.2.0
+#19 57.47   Downloaded itoa v1.0.16
+#19 57.47   Downloaded find-msvc-tools v0.1.5
+#19 57.47   Downloaded cargo_metadata v0.23.1
+#19 57.48   Downloaded num-conv v0.2.0
+#19 57.49   Downloaded powerfmt v0.2.0
+#19 57.49   Downloaded scopeguard v1.2.0
+#19 57.49   Downloaded stable_deref_trait v1.2.1
+#19 57.49   Downloaded deranged v0.5.5
+#19 57.50   Downloaded tracing-tree v0.4.1
+#19 57.51   Downloaded fallible-iterator v0.3.0
+#19 57.51   Downloaded thiserror v2.0.18
+#19 57.51   Downloaded nu-ansi-term v0.50.3
+#19 57.52   Downloaded camino v1.2.2
+#19 57.52   Downloaded thread_local v1.1.9
+#19 57.52   Downloaded time-core v0.1.8
+#19 57.52   Downloaded tracing-appender v0.2.4
+#19 57.52   Downloaded semver v1.0.27
+#19 57.52   Downloaded anyhow v1.0.102
+#19 57.53   Downloaded thiserror-impl v2.0.18
+#19 57.53   Downloaded shlex v1.3.0
+#19 57.53   Downloaded rustversion v1.0.22
+#19 57.53   Downloaded quote v1.0.45
+#19 57.54   Downloaded pin-project-lite v0.2.16
+#19 57.54   Downloaded unicode-ident v1.0.22
+#19 57.54   Downloaded strsim v0.11.1
+#19 57.55   Downloaded once_cell v1.21.3
+#19 57.55   Downloaded proc-macro2 v1.0.106
+#19 57.55   Downloaded serde_derive v1.0.228
+#19 57.55   Downloaded sharded-slab v0.1.7
+#19 57.56   Downloaded tracing-attributes v0.1.31
+#19 57.56   Downloaded crossbeam-channel v0.5.15
+#19 57.56   Downloaded tracing-core v0.1.36
+#19 57.57   Downloaded serde v1.0.228
+#19 57.57   Downloaded memchr v2.7.6
+#19 57.57   Downloaded regex-lite v0.1.8
+#19 57.58   Downloaded indexmap v2.13.0
+#19 57.58   Downloaded prettyplease v0.2.37
+#19 57.58   Downloaded log v0.4.29
+#19 57.59   Downloaded serde_core v1.0.228
+#19 57.59   Downloaded clap v4.6.0
+#19 57.60   Downloaded hashbrown v0.16.1
+#19 57.60   Downloaded llvm-sys v221.0.1
+#19 57.61   Downloaded crossbeam-utils v0.8.21
+#19 57.61   Downloaded time-macros v0.2.27
+#19 57.61   Downloaded clap_derive v4.6.0
+#19 57.61   Downloaded clap_builder v4.6.0
+#19 57.62   Downloaded tracing-subscriber v0.3.23
+#19 57.63   Downloaded time v0.3.47
+#19 57.64   Downloaded gimli v0.32.3
+#19 57.65   Downloaded syn v2.0.117
+#19 57.66   Downloaded object v0.38.1
+#19 57.67   Downloaded tracing v0.1.44
+#19 57.68   Downloaded regex-syntax v0.8.8
+#19 57.69   Downloaded libc v0.2.184
+#19 58.20   Downloaded zmij v0.1.8
+#19 58.21   Downloaded aya-rustc-llvm-proxy v0.10.0
+#19 58.25   Downloaded serde_json v1.0.147
+#19 58.26   Downloaded libloading v0.9.0
+#19 58.26   Downloaded cc v1.2.50
+#19 58.26   Downloaded anstyle-query v1.1.5
+#19 58.28   Downloaded regex-automata v0.4.13
+#19 58.40    Compiling proc-macro2 v1.0.106
+#19 58.40    Compiling quote v1.0.45
+#19 58.40    Compiling unicode-ident v1.0.22
+#19 58.40    Compiling serde_core v1.0.228
+#19 58.40    Compiling anyhow v1.0.102
+#19 58.40    Compiling thiserror v2.0.18
+#19 58.40    Compiling memchr v2.7.6
+#19 58.40    Compiling find-msvc-tools v0.1.5
+#19 58.40    Compiling shlex v1.3.0
+#19 58.40    Compiling cfg-if v1.0.4
+#19 58.41    Compiling camino v1.2.2
+#19 58.41    Compiling serde v1.0.228
+#19 58.41    Compiling lazy_static v1.5.0
+#19 58.41    Compiling serde_json v1.0.147
+#19 58.41    Compiling regex-lite v0.1.8
+#19 58.41    Compiling zmij v0.1.8
+#19 58.43    Compiling rustversion v1.0.22
+#19 58.46    Compiling regex-syntax v0.8.8
+#19 58.47    Compiling prettyplease v0.2.37
+#19 58.54    Compiling cc v1.2.50
+#19 58.55    Compiling once_cell v1.21.3
+#19 58.58    Compiling itoa v1.0.16
+#19 58.68    Compiling crossbeam-utils v0.8.21
+#19 58.68    Compiling object v0.38.1
+#19 58.68    Compiling utf8parse v0.2.2
+#19 58.70    Compiling pin-project-lite v0.2.16
+#19 58.71    Compiling libc v0.2.184
+#19 58.74    Compiling tracing-core v0.1.36
+#19 58.75    Compiling anstyle-parse v1.0.0
+#19 58.75    Compiling sharded-slab v0.1.7
+#19 58.77    Compiling thread_local v1.1.9
+#19 58.84    Compiling powerfmt v0.2.0
+#19 58.88    Compiling anstyle-query v1.1.5
+#19 58.91    Compiling is_terminal_polyfill v1.70.2
+#19 58.95    Compiling anstyle v1.0.13
+#19 58.98    Compiling colorchoice v1.0.4
+#19 58.99    Compiling deranged v0.5.5
+#19 59.18    Compiling anstream v1.0.0
+#19 59.19    Compiling hashbrown v0.16.1
+#19 59.25    Compiling num-conv v0.2.0
+#19 59.29    Compiling strsim v0.11.1
+#19 59.33    Compiling clap_lex v1.0.0
+#19 59.37    Compiling heck v0.5.0
+#19 59.47    Compiling syn v2.0.117
+#19 59.48    Compiling equivalent v1.0.2
+#19 59.48    Compiling time-core v0.1.8
+#19 59.53    Compiling clap_builder v4.6.0
+#19 59.56    Compiling bpf-linker v0.10.3
+#19 59.62    Compiling crossbeam-channel v0.5.15
+#19 59.79    Compiling libloading v0.9.0
+#19 59.80    Compiling fallible-iterator v0.3.0
+#19 59.83    Compiling nu-ansi-term v0.50.3
+#19 59.88    Compiling stable_deref_trait v1.2.1
+#19 59.93    Compiling indexmap v2.13.0
+#19 60.00    Compiling regex-automata v0.4.13
+#19 60.05    Compiling ar v0.9.0
+#19 60.08    Compiling scopeguard v1.2.0
+#19 60.10    Compiling log v0.4.29
+#19 60.47    Compiling time v0.3.47
+#19 60.86    Compiling semver v1.0.27
+#19 60.86    Compiling cargo-platform v0.3.2
+#19 61.03    Compiling gimli v0.32.3
+#19 61.17    Compiling llvm-sys v221.0.1
+#19 62.06    Compiling matchers v0.2.0
+#19 63.09    Compiling thiserror-impl v2.0.18
+#19 63.32    Compiling serde_derive v1.0.228
+#19 63.37    Compiling tracing-attributes v0.1.31
+#19 63.63    Compiling clap_derive v4.6.0
+#19 64.56    Compiling tracing v0.1.44
+#19 64.75    Compiling tracing-subscriber v0.3.23
+#19 65.01    Compiling clap v4.6.0
+#19 65.75    Compiling cargo_metadata v0.23.1
+#19 65.77    Compiling tracing-appender v0.2.4
+#19 65.77    Compiling tracing-tree v0.4.1
+#19 66.76    Compiling aya-rustc-llvm-proxy v0.10.0
+#19 75.06     Finished `release` profile [optimized + debuginfo] target(s) in 29.28s
+#19 75.06   Installing /usr/local/cargo/bin/bpf-linker
+#19 75.06    Installed package `bpf-linker v0.10.3` (executable `bpf-linker`)
+#19 DONE 75.2s
+
+#21 [bpf-builder  4/11] WORKDIR /app
+#21 DONE 0.1s
+
+#22 [bpf-builder  5/11] COPY Cargo.toml Cargo.lock* ./
+#22 DONE 0.1s
+
+#23 [bpf-builder  6/11] COPY libs/rust libs/rust
+#23 DONE 0.1s
+
+#24 [bpf-builder  7/11] COPY schemas/rust schemas/rust
+#24 DONE 0.1s
+
+#25 [bpf-builder  8/11] COPY services/bot-fleet services/bot-fleet
+#25 DONE 0.1s
+
+#26 [bpf-builder  9/11] COPY services/ebpf-latency services/ebpf-latency
+#26 DONE 0.1s
+
+#27 [bpf-builder 10/11] COPY services/telemetry-ingester services/telemetry-ingester
+#27 DONE 0.1s
+
+#28 [bpf-builder 11/11] RUN cargo +nightly build --release -p iicpc-ebpf-latency --lib     --target bpfel-unknown-none --features ebpf -Z build-std=core
+#28 0.259     Updating crates.io index
+#28 11.34  Downloading crates ...
+#28 11.39   Downloaded autocfg v1.5.1
+#28 11.42   Downloaded assert_matches v1.5.0
+#28 11.42   Downloaded atomic-waker v1.1.2
+#28 11.42   Downloaded allocator-api2 v0.2.21
+#28 11.44   Downloaded byteorder v1.5.0
+#28 11.45   Downloaded ryu v1.0.23
+#28 11.46   Downloaded errno v0.3.14
+#28 11.46   Downloaded rustls-pki-types v1.14.1
+#28 11.46   Downloaded futures-core v0.3.32
+#28 11.47   Downloaded cargo-platform v0.3.3
+#28 11.48   Downloaded http-body v1.0.1
+#28 11.48   Downloaded crypto-common v0.1.7
+#28 11.48   Downloaded futures-macro v0.3.32
+#28 11.48   Downloaded futures-task v0.3.32
+#28 11.48   Downloaded cfg_aliases v0.2.1
+#28 11.48   Downloaded block-buffer v0.10.4
+#28 11.49   Downloaded itoa v1.0.18
+#28 11.49   Downloaded lru-slab v0.1.2
+#28 11.49   Downloaded percent-encoding v2.3.2
+#28 11.49   Downloaded potential_utf v0.1.5
+#28 11.49   Downloaded prometheus-client-derive-encode v0.4.2
+#28 11.49   Downloaded tower-layer v0.3.3
+#28 11.49   Downloaded tower-service v0.3.3
+#28 11.49   Downloaded bytes v1.11.1
+#28 11.50   Downloaded core-error v0.0.0
+#28 11.50   Downloaded form_urlencoded v1.2.2
+#28 11.50   Downloaded generic-array v0.14.7
+#28 11.50   Downloaded slab v0.4.12
+#28 11.50   Downloaded proc-macro-crate v1.3.1
+#28 11.51   Downloaded signal-hook-registry v1.4.8
+#28 11.52   Downloaded rustls-webpki v0.103.13
+#28 11.53   Downloaded tinyvec_macros v0.1.1
+#28 11.53   Downloaded idna_adapter v1.2.2
+#28 11.53   Downloaded futures-sink v0.3.32
+#28 11.53   Downloaded utf-8 v0.7.6
+#28 11.53   Downloaded rand_chacha v0.3.1
+#28 11.55   Downloaded serde_urlencoded v0.7.1
+#28 11.55   Downloaded version_check v0.9.5
+#28 11.55   Downloaded cmake v0.1.58
+#28 11.55   Downloaded futures-io v0.3.32
+#28 11.56   Downloaded cpufeatures v0.2.17
+#28 11.56   Downloaded data-encoding v2.11.0
+#28 11.56   Downloaded digest v0.10.7
+#28 11.56   Downloaded http-body-util v0.1.3
+#28 11.56   Downloaded hyper-rustls v0.27.9
+#28 11.56   Downloaded toml_datetime v0.6.11
+#28 11.56   Downloaded rand_chacha v0.9.0
+#28 11.57   Downloaded rand_core v0.9.5
+#28 11.57   Downloaded foldhash v0.1.5
+#28 11.57   Downloaded dtoa v1.0.11
+#28 11.57   Downloaded futures-executor v0.3.32
+#28 11.57   Downloaded tokio-macros v2.7.0
+#28 11.57   Downloaded lock_api v0.4.14
+#28 11.57   Downloaded num_enum_derive v0.5.11
+#28 11.58   Downloaded pkg-config v0.3.33
+#28 11.58   Downloaded tracing-serde v0.2.0
+#28 11.59   Downloaded rand_core v0.6.4
+#28 11.59   Downloaded ipnet v2.12.0
+#28 11.59   Downloaded pin-project-lite v0.2.17
+#28 11.60   Downloaded sha1 v0.10.6
+#28 11.60   Downloaded crc32fast v1.5.0
+#28 11.60   Downloaded num_enum v0.5.11
+#28 11.61   Downloaded displaydoc v0.2.6
+#28 11.61   Downloaded once_cell v1.21.4
+#28 11.61   Downloaded want v0.3.1
+#28 11.61   Downloaded zerofrom v0.1.8
+#28 11.61   Downloaded subtle v2.6.1
+#28 11.62   Downloaded futures-channel v0.3.32
+#28 11.62   Downloaded getrandom v0.2.17
+#28 11.62   Downloaded litemap v0.8.2
+#28 11.62   Downloaded rmp v0.8.15
+#28 11.63   Downloaded bitflags v2.11.1
+#28 11.63   Downloaded ppv-lite86 v0.2.21
+#28 11.63   Downloaded quinn-udp v0.5.14
+#28 11.63   Downloaded parking_lot v0.12.5
+#28 11.63   Downloaded try-lock v0.2.5
+#28 11.64   Downloaded rustc-hash v2.1.2
+#28 11.64   Downloaded httparse v1.10.1
+#28 11.64   Downloaded parking_lot_core v0.9.12
+#28 11.64   Downloaded sync_wrapper v1.0.2
+#28 11.64   Downloaded zerofrom-derive v0.1.7
+#28 11.65   Downloaded getrandom v0.3.4
+#28 11.66   Downloaded icu_provider v2.2.0
+#28 11.67   Downloaded icu_properties v2.2.0
+#28 11.67   Downloaded rmp-serde v1.3.1
+#28 11.67   Downloaded num-traits v0.2.19
+#28 11.67   Downloaded icu_locale_core v2.2.0
+#28 11.68   Downloaded icu_normalizer_data v2.2.0
+#28 11.68   Downloaded prometheus-client v0.22.3
+#28 11.69   Downloaded futures v0.3.32
+#28 11.69   Downloaded yoke-derive v0.8.2
+#28 11.69   Downloaded icu_normalizer v2.2.0
+#28 11.70   Downloaded utf8_iter v1.0.4
+#28 11.70   Downloaded semver v1.0.28
+#28 11.70   Downloaded aya-obj v0.2.1
+#28 11.70   Downloaded base64 v0.22.1
+#28 11.71   Downloaded aya v0.13.1
+#28 11.71   Downloaded quinn v0.11.9
+#28 11.71   Downloaded untrusted v0.9.0
+#28 11.72   Downloaded zeroize v1.8.2
+#28 11.72   Downloaded rand v0.8.6
+#28 11.72   Downloaded memchr v2.8.0
+#28 11.73   Downloaded http v1.4.0
+#28 11.73   Downloaded icu_collections v2.2.0
+#28 11.74   Downloaded mio v1.2.0
+#28 11.75   Downloaded cc v1.2.62
+#28 11.75   Downloaded indexmap v2.14.0
+#28 11.75   Downloaded rand v0.9.4
+#28 11.76   Downloaded hyper-util v0.1.20
+#28 11.76   Downloaded synstructure v0.13.2
+#28 11.77   Downloaded tracing-log v0.2.0
+#28 11.77   Downloaded rdkafka v0.36.0
+#28 11.77   Downloaded writeable v0.6.3
+#28 11.78   Downloaded thiserror v1.0.69
+#28 11.78   Downloaded hashbrown v0.15.5
+#28 11.79   Downloaded idna v1.1.0
+#28 11.79   Downloaded reqwest v0.12.28
+#28 11.79   Downloaded hyper v1.10.1
+#28 11.80   Downloaded icu_properties_data v2.2.0
+#28 11.81   Downloaded tinystr v0.8.3
+#28 11.81   Downloaded futures-util v0.3.32
+#28 11.82   Downloaded hashbrown v0.17.1
+#28 11.83   Downloaded quinn-proto v0.11.14
+#28 11.83   Downloaded zmij v1.0.21
+#28 11.84   Downloaded object v0.36.7
+#28 11.85   Downloaded regex-syntax v0.8.10
+#28 11.85   Downloaded zerovec-derive v0.11.3
+#28 11.86   Downloaded yoke v0.8.2
+#28 11.86   Downloaded regex-automata v0.4.14
+#28 11.87   Downloaded tokio-rustls v0.26.4
+#28 11.87   Downloaded thiserror-impl v1.0.69
+#28 11.88   Downloaded libc v0.2.186
+#28 11.91   Downloaded tokio-tungstenite v0.23.1
+#28 11.91   Downloaded tinyvec v1.11.0
+#28 11.91   Downloaded unicode-ident v1.0.24
+#28 11.94   Downloaded socket2 v0.6.3
+#28 11.96   Downloaded smallvec v1.15.1
+#28 11.99   Downloaded tungstenite v0.23.0
+#28 11.99   Downloaded rdkafka-sys v4.7.0+2.3.0
+#28 12.05   Downloaded zerotrie v0.2.4
+#28 12.06   Downloaded url v2.5.8
+#28 12.06   Downloaded toml_edit v0.19.15
+#28 12.08   Downloaded serde_json v1.0.150
+#28 12.08   Downloaded tower v0.5.3
+#28 12.09   Downloaded typenum v1.20.0
+#28 12.10   Downloaded zerovec v0.11.6
+#28 12.10   Downloaded winnow v0.5.40
+#28 12.11   Downloaded tower-http v0.6.11
+#28 12.16   Downloaded syn v1.0.109
+#28 12.17   Downloaded webpki-roots v1.0.7
+#28 12.17   Downloaded aya-ebpf v0.1.1
+#28 12.18   Downloaded zerocopy v0.8.48
+#28 12.21   Downloaded rustls v0.23.40
+#28 12.22   Downloaded proc-macro2-diagnostics v0.10.1
+#28 12.25   Downloaded aya-build v0.1.3
+#28 12.25   Downloaded aya-ebpf-macros v0.1.2
+#28 12.26   Downloaded aya-ebpf-cty v0.2.3
+#28 12.28   Downloaded aya-ebpf-bindings v0.1.2
+#28 12.34   Downloaded tokio v1.52.3
+#28 12.39   Downloaded ring v0.17.14
+#28 12.45     Updating crates.io index
+#28 13.83  Downloading crates ...
+#28 13.84   Downloaded foldhash v0.2.0
+#28 13.84   Downloaded adler2 v2.0.1
+#28 13.84   Downloaded addr2line v0.25.1
+#28 13.85   Downloaded getopts v0.2.24
+#28 13.88   Downloaded libc v0.2.185
+#28 13.91   Downloaded miniz_oxide v0.8.9
+#28 13.92   Downloaded rustc-literal-escaper v0.0.7
+#28 13.92   Downloaded rustc-demangle v0.1.27
+#28 13.92   Downloaded object v0.37.3
+#28 13.98    Compiling proc-macro2 v1.0.106
+#28 13.98    Compiling quote v1.0.45
+#28 13.98    Compiling unicode-ident v1.0.24
+#28 13.98    Compiling serde_core v1.0.228
+#28 13.98    Compiling zmij v1.0.21
+#28 13.98    Compiling serde_json v1.0.150
+#28 13.98    Compiling thiserror v2.0.18
+#28 13.99    Compiling serde v1.0.228
+#28 13.99    Compiling camino v1.2.2
+#28 14.00    Compiling anyhow v1.0.102
+#28 14.00    Compiling itoa v1.0.18
+#28 14.00    Compiling memchr v2.8.0
+#28 14.00    Compiling compiler_builtins v0.1.160 (/usr/local/rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/compiler-builtins/compiler-builtins)
+#28 14.01    Compiling rustversion v1.0.22
+#28 14.01    Compiling version_check v0.9.5
+#28 14.01    Compiling core v0.0.0 (/usr/local/rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core)
+#28 14.22    Compiling proc-macro2-diagnostics v0.10.1
+#28 14.44    Compiling aya-ebpf v0.1.1
+#28 14.58    Compiling syn v2.0.117
+#28 15.42    Compiling semver v1.0.28
+#28 15.42    Compiling cargo-platform v0.3.3
+#28 16.05    Compiling thiserror-impl v2.0.18
+#28 16.05    Compiling serde_derive v1.0.228
+#28 16.05    Compiling aya-ebpf-macros v0.1.2
+#28 17.46    Compiling cargo_metadata v0.23.1
+#28 18.00    Compiling aya-build v0.1.3
+#28 18.09    Compiling aya-ebpf-cty v0.2.3
+#28 18.09    Compiling aya-ebpf-bindings v0.1.2
+#28 21.62    Compiling iicpc-ebpf-latency v0.1.0 (/app/services/ebpf-latency)
+#28 22.00 warning: linker stderr: unable to open LLVM shared lib /usr/local/rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/libLLVM-22-rust-1.98.0-nightly.so: dlopen failed
+#28 22.00   |
+#28 22.00   = note: `#[warn(linker_messages)]` on by default
+#28 22.00 
+#28 22.01 warning: `iicpc-ebpf-latency` (lib) generated 1 warning
+#28 22.01     Finished `release` profile [optimized] target(s) in 21.84s
+#28 DONE 22.2s
+
+#29 [stage-2 4/4] COPY --from=bpf-builder /app/target/bpfel-unknown-none/release/libiicpc_ebpf_latency.so      /opt/iicpc/ebpf/libiicpc_ebpf_latency.so
+#29 DONE 0.1s
+
+#30 exporting to image
+#30 exporting layers
+#30 exporting layers 0.2s done
+#30 writing image sha256:4d5a9a43a860c0151be03177c056a05299b0b3547c274edba4d50e14b8f81351 done
+#30 naming to docker.io/iicpc/ebpf-latency:dev done
+#30 DONE 0.2s
+#0 building with "default" instance using docker driver
+
+#1 [internal] load build definition from Dockerfile
+#1 transferring dockerfile: 2.15kB done
+#1 DONE 0.0s
+
+#2 [internal] load metadata for docker.io/library/node:22-alpine
+#2 DONE 0.0s
+
+#3 [internal] load .dockerignore
+#3 transferring context: 112B done
+#3 DONE 0.0s
+
+#4 [deps 1/4] FROM docker.io/library/node:22-alpine
+#4 DONE 0.0s
+
+#5 [internal] load build context
+#5 transferring context: 6.06kB done
+#5 DONE 0.0s
+
+#6 [deps 4/4] RUN npm ci --ignore-scripts
+#6 CACHED
+
+#7 [builder 3/5] COPY --from=deps /app/node_modules ./node_modules
+#7 CACHED
+
+#8 [deps 2/4] WORKDIR /app
+#8 CACHED
+
+#9 [deps 3/4] COPY package.json package-lock.json ./
+#9 CACHED
+
+#10 [builder 4/5] COPY . .
+#10 CACHED
+
+#11 [builder 5/5] RUN npm run build
+#11 0.721 
+#11 0.721 > @iicpc/frontend@0.1.0 build
+#11 0.721 > next build
+#11 0.721 
+#11 1.292   ▲ Next.js 14.2.30
+#11 1.292 
+#11 1.309    Creating an optimized production build ...
+#11 13.06  ✓ Compiled successfully
+#11 13.06    Linting and checking validity of types ...
+#11 15.85    Collecting page data ...
+#11 16.74    Generating static pages (0/8) ...
+#11 17.01    Generating static pages (2/8) 
+#11 17.03    Generating static pages (4/8) 
+#11 17.05    Generating static pages (6/8) 
+#11 17.08  ✓ Generating static pages (8/8)
+#11 17.39    Finalizing page optimization ...
+#11 17.39    Collecting build traces ...
+#11 22.98 
+#11 22.98 Route (app)                              Size     First Load JS
+#11 22.98 ┌ ○ /                                    147 B          87.6 kB
+#11 22.98 ├ ○ /_not-found                          147 B          87.6 kB
+#11 22.98 ├ ○ /auth/callback                       3.7 kB         91.1 kB
+#11 22.98 ├ ○ /leaderboard                         7.26 kB         145 kB
+#11 22.98 ├ ƒ /run                                 109 kB          251 kB
+#11 22.98 └ ○ /submit                              7.72 kB         156 kB
+#11 22.98 + First Load JS shared by all            87.4 kB
+#11 22.98   ├ chunks/117-bffe8b2085c6e3e9.js       31.8 kB
+#11 22.98   ├ chunks/fd9d1056-5d2b442a3a779853.js  53.6 kB
+#11 22.98   └ other shared chunks (total)          2.03 kB
+#11 22.98 
+#11 22.98 
+#11 22.98 ○  (Static)   prerendered as static content
+#11 22.98 ƒ  (Dynamic)  server-rendered on demand
+#11 22.98 
+#11 23.03 npm notice
+#11 23.03 npm notice New major version of npm available! 10.9.8 -> 11.16.0
+#11 23.03 npm notice Changelog: https://github.com/npm/cli/releases/tag/v11.16.0
+#11 23.03 npm notice To update run: npm install -g npm@11.16.0
+#11 23.03 npm notice
+#11 DONE 23.1s
+
+#12 [runtime  3/10] WORKDIR /app
+#12 CACHED
+
+#13 [runtime  4/10] COPY nginx/nginx.conf /etc/nginx/nginx.conf
+#13 CACHED
+
+#14 [runtime  5/10] COPY nginx/conf.d/default.conf /etc/nginx/templates/default.conf
+#14 CACHED
+
+#15 [runtime  2/10] RUN apk add --no-cache nginx gettext  && rm /etc/nginx/http.d/default.conf
+#15 CACHED
+
+#16 [runtime  6/10] COPY nginx/conf.d/security_headers.inc /etc/nginx/snippets/security_headers.inc
+#16 CACHED
+
+#17 [runtime  7/10] COPY --from=builder /app/.next/standalone ./
+#17 DONE 0.2s
+
+#18 [runtime  8/10] COPY --from=builder /app/.next/static /usr/share/nginx/html/_next/static
+#18 DONE 0.1s
+
+#19 [runtime  9/10] COPY --from=builder /app/public /usr/share/nginx/html/
+#19 DONE 0.1s
+
+#20 [runtime 10/10] RUN mkdir -p /etc/nginx/conf.d /var/cache/nginx  && chown -R nginx:nginx /usr/share/nginx/html /var/lib/nginx /var/log/nginx /etc/nginx/conf.d /var/cache/nginx
+#20 DONE 0.7s
+
+#21 exporting to image
+#21 exporting layers
+#21 exporting layers 0.2s done
+#21 writing image sha256:08a878360d381cb252fa6c620ce5b9a0f802e5f650397b148da1f157a6f7420e done
+#21 naming to docker.io/library/frontend:local done
+#21 DONE 0.2s
+ALL IMAGES BUILT
+frontend:local	196MB
+ghcr.io/agrawalx/auth-api:dev	8.51MB
+ghcr.io/agrawalx/bot-fleet-controller:dev	106MB
+ghcr.io/agrawalx/bot-fleet:dev	96.3MB
+ghcr.io/agrawalx/correctness-validator:dev	106MB
+ghcr.io/agrawalx/sandbox-orchestrator:dev	148MB
+ghcr.io/agrawalx/spawner:dev	180MB
+ghcr.io/agrawalx/submission-api:dev	109MB
+ghcr.io/agrawalx/telemetry-ingester:dev	97.2MB
+iicpc/ebpf-latency:dev	96.8MB
+leaderboard-api:local	17.9MB
+localhost:5000/agrawalx/bot-fleet-controller:obs	106MB
+localhost:5000/agrawalx/bot-fleet:obs	96.3MB
+localhost:5000/agrawalx/drain1:latest	75.8MB
+localhost:5000/agrawalx/frontend:obs	48.5MB
+localhost:5000/agrawalx/leaderboard-api:obs	17.9MB
+localhost:5000/agrawalx/submission-api:obs	109MB
+localhost:5000/agrawalx/telemetry-ingester:obs	97.2MB
+score-computer:local	18.1MB

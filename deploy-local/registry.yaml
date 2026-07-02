@@ -1,0 +1,48 @@
+# In-cluster Docker registry for contestant images. Kaniko (build ns) pushes
+# here; the sandbox algo pod's kubelet pulls from here. Exposed on the node at
+# :5000 via hostPort so both the in-cluster Kaniko pod (via node IP) and the
+# node's containerd (via the registries.yaml mirror) reach the same endpoint.
+# Ephemeral storage — fine for a smoke; images survive only until the pod dies.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: registry
+  namespace: build
+  labels: { app: registry }
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: registry }
+  template:
+    metadata:
+      labels: { app: registry }
+    spec:
+      containers:
+        - name: registry
+          image: registry:2
+          ports:
+            - containerPort: 5000
+              hostPort: 5000
+          env:
+            - name: REGISTRY_HTTP_ADDR
+              value: ":5000"
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/registry
+          resources:
+            requests: { cpu: 50m, memory: 128Mi }
+            limits: { cpu: 500m, memory: 512Mi }
+      volumes:
+        - name: data
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: registry
+  namespace: build
+spec:
+  selector: { app: registry }
+  ports:
+    - port: 5000
+      targetPort: 5000

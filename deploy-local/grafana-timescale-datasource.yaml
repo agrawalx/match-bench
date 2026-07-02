@@ -1,0 +1,40 @@
+# Local overlay: add Prometheus + Loki + TimescaleDB datasources to Grafana.
+# TimescaleDB is where the real latency lives (metrics.p50/p90/p99_ns, tps_1s),
+# so adding it lets you chart per-engine latency/throughput in Grafana Explore
+# or a panel. Replaces the in-cluster grafana-datasources ConfigMap.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-datasources
+  namespace: observability
+data:
+  datasources.yaml: |
+    apiVersion: 1
+    datasources:
+      - name: Prometheus
+        type: prometheus
+        access: proxy
+        uid: prometheus
+        url: http://prometheus.observability.svc.cluster.local:9090
+        isDefault: true
+        editable: false
+      - name: Loki
+        type: loki
+        access: proxy
+        uid: loki
+        url: http://loki.observability.svc.cluster.local:3100
+        editable: false
+      - name: TimescaleDB
+        type: postgres
+        access: proxy
+        uid: timescaledb
+        url: timescaledb.data.svc.cluster.local:5432
+        user: iicpc
+        jsonData:
+          database: metrics
+          sslmode: disable
+          postgresVersion: 1600
+          timescaledb: true
+        secureJsonData:
+          password: devpass
+        editable: false

@@ -48,6 +48,8 @@ pub struct Snapshot {
     pub hdr_encoded: Vec<u8>,
     pub rt_hdr_encoded: Vec<u8>,
     pub slip_hdr_encoded: Vec<u8>,
+    /// match_latency HDR (taker-fill t7-t3). Independent of hdr/rt/slip; its own chart.
+    pub match_hdr_encoded: Vec<u8>,
 }
 
 /// Window stores the state passed across this module boundary.
@@ -55,7 +57,10 @@ pub struct Snapshot {
 struct Window {
     contestant_id: String,
     service_time: Histogram<u64>,
-    fill_latency: Histogram<u64>,
+    // match_latency: per-taker-fill matching cost (t7-t3) sampled ONLY on fills the
+    // engine flags as taker (FIX LastLiquidityInd 851=2). Maker fills are market
+    // wait, not engine time, so they're excluded. Independent of service_time.
+    match_latency: Histogram<u64>,
     response_time: Histogram<u64>,
     schedule_slip: Histogram<u64>,
     last_update_ns: u64,
@@ -74,7 +79,7 @@ impl Window {
         Self {
             contestant_id,
             service_time: new_hist(),
-            fill_latency: new_hist(),
+            match_latency: new_hist(),
             response_time: new_hist(),
             schedule_slip: new_hist(),
             last_update_ns: now_ns,
@@ -117,6 +122,12 @@ fn is_reject(exec_type: &str) -> bool {
 /// It keeps validation, side effects, and returned values within this module's contract.
 fn is_fill(exec_type: &str, fill_qty: u64) -> bool {
     fill_qty > 0 && matches!(exec_type, "1" | "2" | "F")
+}
+
+/// is_taker reports whether a fill is the aggressor side per FIX LastLiquidityInd
+/// (851): 2 = taker (removed liquidity). 1 = maker, 0 = unknown/absent → not counted.
+fn is_taker(liquidity_ind: u8) -> bool {
+    liquidity_ind == 2
 }
 
 /// Aggregator stores the state passed across this module boundary.
@@ -248,7 +259,13 @@ impl Aggregator {
         }
         if is_fill(&e.exec_type, e.fill_qty) {
             w.fills += 1;
-            record(&mut w.fill_latency, e.pod_service_time_ns);
+        }
+        // Matching latency: sample t7-t3 ONLY for taker fills (851=2). The taker is
+        // the aggressor whose arrival did the matching, so this is engine cost; maker
+        // fills (851=1) are market wait and excluded. Per-fill, no grouping — a deep
+        // sweep contributes several samples, and its worst level shows in the tail.
+        if is_taker(e.liquidity_ind) {
+            record(&mut w.match_latency, e.pod_service_time_ns);
         }
         w.last_update_ns = w.last_update_ns.max(e.t7_xdp_egress_ns);
     }
@@ -296,6 +313,7 @@ impl Aggregator {
                     hdr_encoded: serialize_hist(&w.service_time),
                     rt_hdr_encoded: serialize_hist(&w.response_time),
                     slip_hdr_encoded: serialize_hist(&w.schedule_slip),
+                    match_hdr_encoded: serialize_hist(&w.match_latency),
                 });
             }
             w.offered = 0;
@@ -377,6 +395,24 @@ mod tests {
             orig_order_id: String::new(),
             reordering_detected: false,
             retransmission_count: 0,
+            liquidity_ind: 0,
+        }
+    }
+
+    /// acked_liq builds an acked event with an explicit FIX 851 liquidity indicator
+    /// (1=maker, 2=taker), for exercising the match-latency sampling path.
+    fn acked_liq(
+        session: &str,
+        order: &str,
+        t3: u64,
+        t7: u64,
+        exec: &str,
+        fill_qty: u64,
+        liquidity_ind: u8,
+    ) -> OrderAckedEvent {
+        OrderAckedEvent {
+            liquidity_ind,
+            ..acked(session, order, t3, t7, exec, fill_qty)
         }
     }
 
@@ -433,6 +469,42 @@ mod tests {
         assert_eq!(a.wave_of("sess", t0), 1);
         assert_eq!(b.wave_of("sess", t0), 1);
         assert_eq!(a.wave_of("sess", t0), b.wave_of("sess", t0));
+    }
+
+    /// decode_count deserializes a V2-deflate HDR blob and returns its sample count
+    /// (0 for an empty/never-recorded histogram).
+    fn decode_count(blob: &[u8]) -> u64 {
+        use hdrhistogram::serialization::Deserializer;
+        if blob.is_empty() {
+            return 0;
+        }
+        Deserializer::new()
+            .deserialize::<u64, _>(&mut std::io::Cursor::new(blob))
+            .map(|h| h.len())
+            .unwrap_or(0)
+    }
+
+    #[test]
+    /// match_latency_samples_taker_fills_only verifies the dedicated match-latency
+    /// histogram counts ONLY taker fills (851=2), excludes maker/ack, and that the
+    /// service_time histogram is untouched by the new path.
+    fn match_latency_samples_taker_fills_only() {
+        let mut a = Aggregator::new(DEFAULT_WAVE_NS);
+        // o1: ack (no liquidity) then a taker fill -> 1 match sample.
+        a.observe_acked(&acked_liq("S", "o1", 1_000, 101_000, "0", 0, 0));
+        a.observe_acked(&acked_liq("S", "o1", 1_000, 201_000, "2", 12, 2));
+        // o2: ack then a maker fill -> 0 match samples (market wait, not engine time).
+        a.observe_acked(&acked_liq("S", "o2", 1_000, 101_000, "0", 0, 0));
+        a.observe_acked(&acked_liq("S", "o2", 1_000, 901_000, "2", 5, 1));
+
+        let snaps = a.snapshot(1_000_000_000, 1.0);
+        assert_eq!(snaps.len(), 1);
+        let s = &snaps[0];
+        // exactly the one taker fill counted into match_latency.
+        assert_eq!(decode_count(&s.match_hdr_encoded), 1, "only the taker fill");
+        // service_time still records one first-response per order (o1, o2) = 2,
+        // proving the new path didn't disturb the existing histogram.
+        assert_eq!(decode_count(&s.hdr_encoded), 2, "service_time unchanged");
     }
 
     #[test]

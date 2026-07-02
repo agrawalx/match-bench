@@ -51,6 +51,14 @@ ALTER TABLE correctness_summary ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DE
 ALTER TABLE correctness_summary ADD COLUMN IF NOT EXISTS sent_count BIGINT NOT NULL DEFAULT 0;
 ALTER TABLE correctness_summary ADD COLUMN IF NOT EXISTS acked_count BIGINT NOT NULL DEFAULT 0;
 ALTER TABLE correctness_summary ADD COLUMN IF NOT EXISTS matched_count BIGINT NOT NULL DEFAULT 0;
+-- Per-category violation counts. phantom_fills / overfills / price_violations
+-- already exist above; these three complete the set so the summary row is the
+-- single source for the violations breakdown. The raw per-violation table is no
+-- longer persisted (it grew to tens of millions of rows at high TPS and is
+-- useless for display), so these aggregates must be written here at score time.
+ALTER TABLE correctness_summary ADD COLUMN IF NOT EXISTS time_violations BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE correctness_summary ADD COLUMN IF NOT EXISTS self_trades BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE correctness_summary ADD COLUMN IF NOT EXISTS cancel_replace_loss BIGINT NOT NULL DEFAULT 0;
 CREATE TABLE IF NOT EXISTS correctness_violations (
     id             BIGSERIAL PRIMARY KEY,
     session_id     TEXT NOT NULL,
@@ -129,32 +137,46 @@ func (s *Store) Save(ctx context.Context, rec Record) (bool, error) {
 	if status == "" {
 		status = StatusScored
 	}
-	tx, err := s.pool.Begin(ctx)
-	if err != nil {
-		return false, fmt.Errorf("begin tx: %w", err)
+	// Count time / self_trade / cancel_replace_loss by exact violation type. The
+	// Report.TimeViolations field also counts cancel-replace priority losses, so
+	// counting the entries directly is the only way to get the true per-type
+	// split. phantom/overfill/price already have dedicated report counters.
+	var timeCount, selfTradeCount, crlCount int64
+	for _, v := range rec.Report.Violations {
+		switch v.Type {
+		case validate.Time:
+			timeCount++
+		case validate.SelfTrade:
+			selfTradeCount++
+		case validate.CancelReplaceLoss:
+			crlCount++
+		}
 	}
-	defer tx.Rollback(ctx)
 
-	tag, err := tx.Exec(ctx, `
+	tag, err := s.pool.Exec(ctx, `
 INSERT INTO correctness_summary
     (session_id, contestant_id, valid_fills, total_fills, correctness_score, violation_count,
      phantom_fills, overfills, price_violations, computed_at_ns, status,
-     sent_count, acked_count, matched_count)
-VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+     sent_count, acked_count, matched_count,
+     time_violations, self_trades, cancel_replace_loss)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
 ON CONFLICT (session_id) DO UPDATE SET
-    contestant_id     = EXCLUDED.contestant_id,
-    valid_fills       = EXCLUDED.valid_fills,
-    total_fills       = EXCLUDED.total_fills,
-    correctness_score = EXCLUDED.correctness_score,
-    violation_count   = EXCLUDED.violation_count,
-    phantom_fills     = EXCLUDED.phantom_fills,
-    overfills         = EXCLUDED.overfills,
-    price_violations  = EXCLUDED.price_violations,
-    computed_at_ns    = EXCLUDED.computed_at_ns,
-    status            = EXCLUDED.status,
-    sent_count        = EXCLUDED.sent_count,
-    acked_count       = EXCLUDED.acked_count,
-    matched_count     = EXCLUDED.matched_count
+    contestant_id       = EXCLUDED.contestant_id,
+    valid_fills         = EXCLUDED.valid_fills,
+    total_fills         = EXCLUDED.total_fills,
+    correctness_score   = EXCLUDED.correctness_score,
+    violation_count     = EXCLUDED.violation_count,
+    phantom_fills       = EXCLUDED.phantom_fills,
+    overfills           = EXCLUDED.overfills,
+    price_violations    = EXCLUDED.price_violations,
+    computed_at_ns      = EXCLUDED.computed_at_ns,
+    status              = EXCLUDED.status,
+    sent_count          = EXCLUDED.sent_count,
+    acked_count         = EXCLUDED.acked_count,
+    matched_count       = EXCLUDED.matched_count,
+    time_violations     = EXCLUDED.time_violations,
+    self_trades         = EXCLUDED.self_trades,
+    cancel_replace_loss = EXCLUDED.cancel_replace_loss
 WHERE correctness_summary.status = 'timed_out' AND EXCLUDED.status = 'scored'`,
 		rec.SessionID, rec.ContestantID,
 		int64(rec.Report.ValidFills), int64(rec.Report.TotalFills),
@@ -162,31 +184,15 @@ WHERE correctness_summary.status = 'timed_out' AND EXCLUDED.status = 'scored'`,
 		int64(rec.Report.PhantomFills), int64(rec.Report.Overfills), int64(rec.Report.PriceViolations),
 		int64(rec.ComputedAtNS), status,
 		int64(rec.SentCount), int64(rec.AckedCount), int64(rec.MatchedCount),
+		timeCount, selfTradeCount, crlCount,
 	)
 	if err != nil {
 		return false, fmt.Errorf("insert summary: %w", err)
 	}
-	if tag.RowsAffected() == 0 {
-		return false, tx.Commit(ctx)
-	}
-
-	if len(rec.Report.Violations) > 0 {
-		rows := make([][]any, 0, len(rec.Report.Violations))
-		for _, v := range rec.Report.Violations {
-			rows = append(rows, []any{
-				rec.SessionID, rec.ContestantID, string(v.Type), v.OrderID,
-				int64(v.ReportedQty), v.ReportedPrice, v.Detail,
-			})
-		}
-		if _, err := tx.CopyFrom(ctx,
-			pgx.Identifier{"correctness_violations"},
-			[]string{"session_id", "contestant_id", "violation_type", "order_id", "reported_qty", "reported_price", "detail"},
-			pgx.CopyFromRows(rows),
-		); err != nil {
-			return false, fmt.Errorf("copy violations: %w", err)
-		}
-	}
-	return true, tx.Commit(ctx)
+	// The per-violation table (correctness_violations) is intentionally no longer
+	// written: it reached tens of millions of rows at high TPS and only the
+	// per-category totals above are ever rendered.
+	return tag.RowsAffected() > 0, nil
 }
 
 // LoadScore applies behavior for its receiver performs the package-specific operation described by its name.

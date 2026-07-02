@@ -107,5 +107,9 @@ func leaderboardCacheKey(q LeaderboardQuery) string {
 	if limit <= 0 || limit > maxLeaderboardRows {
 		limit = defaultLeaderboardRows
 	}
-	return "leaderboard-api:v1:top:" + strconv.Itoa(limit)
+	scenario := strings.TrimSpace(q.Scenario)
+	if scenario == "" {
+		scenario = "all"
+	}
+	return "leaderboard-api:v1:top:" + strconv.Itoa(limit) + ":" + scenario
 }

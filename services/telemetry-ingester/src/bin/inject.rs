@@ -122,6 +122,7 @@ async fn main() -> Result<()> {
                         orig_order_id: String::new(),
                         reordering_detected: false,
                         retransmission_count: 0,
+                        liquidity_ind: 0,
                     };
                     let e = by_part.entry(p).or_default();
                     e.0.push(sent);

@@ -119,6 +119,24 @@ func TestCacheableLeaderboardOnlyDefaultTopRank(t *testing.T) {
 	if cacheableLeaderboard(LeaderboardQuery{Limit: 50, ContestantID: "c1"}) {
 		t.Fatal("filtered leaderboard should not be cacheable")
 	}
+	if !cacheableLeaderboard(LeaderboardQuery{Limit: 50, Scenario: "constant"}) {
+		t.Fatal("scenario-only leaderboard should be cacheable")
+	}
+}
+
+// TestLeaderboardCacheKeyIncludesScenario ensures per-scenario boards do not
+// collide in cache: distinct scenarios must produce distinct keys, and the
+// empty scenario stays on the shared "all" key.
+func TestLeaderboardCacheKeyIncludesScenario(t *testing.T) {
+	all := leaderboardCacheKey(LeaderboardQuery{Limit: 50})
+	constant := leaderboardCacheKey(LeaderboardQuery{Limit: 50, Scenario: "constant"})
+	ramp := leaderboardCacheKey(LeaderboardQuery{Limit: 50, Scenario: "ramp"})
+	if all == constant || constant == ramp {
+		t.Fatalf("scenario keys must differ: all=%q constant=%q ramp=%q", all, constant, ramp)
+	}
+	if all != leaderboardCacheKey(LeaderboardQuery{Limit: 50, Scenario: ""}) {
+		t.Fatal("empty scenario must map to the shared aggregate key")
+	}
 }
 
 // TestIsUndefinedTable performs the package-specific operation described by its name.

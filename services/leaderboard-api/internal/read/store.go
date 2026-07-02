@@ -86,6 +86,10 @@ type LeaderboardQuery struct {
 	ContestantID string
 	TeamID       string
 	TeamName     string
+	// Scenario filters to run-groups that ran a session with this scenario name
+	// (constant / ramp / stress). Empty = every scenario. The scores row is
+	// per run-group, so this is an EXISTS join to runs+scenarios, not a column.
+	Scenario string
 }
 
 // LeaderboardRow groups the state and dependencies used by this package.
@@ -137,8 +141,12 @@ SELECT rank, run_group_id, submission_id, contestant_id, team_name, peak_sustain
    AND ($2='' OR submission_id=$2)
    AND ($3='' OR contestant_id=$3)
    AND ($4='' OR team_name ILIKE '%' || $4 || '%')
+   AND ($7='' OR EXISTS (
+         SELECT 1 FROM runs r2
+           JOIN scenarios sc2 ON sc2.scenario_id = r2.scenario_id
+          WHERE r2.run_group_id = ranked.run_group_id AND sc2.name = $7))
  ORDER BY `+orderBy+`
- LIMIT $5 OFFSET $6`, q.RunGroupID, q.SubmissionID, contestantFilter, q.TeamName, limit+1, offset)
+ LIMIT $5 OFFSET $6`, q.RunGroupID, q.SubmissionID, contestantFilter, q.TeamName, limit+1, offset, q.Scenario)
 	if err != nil {
 		if isUndefinedTable(err) {
 			return LeaderboardResponse{Source: "frozen", Rows: []LeaderboardRow{}}, nil
@@ -191,10 +199,14 @@ type leaderboardCursor struct {
 // RunDetail groups the state and dependencies used by this package.
 // Keep this type aligned with the runtime contract around it.
 type RunDetail struct {
-	RunGroupID string           `json:"run_group_id"`
-	Score      *LeaderboardRow  `json:"score,omitempty"`
-	Sessions   []SessionDetail  `json:"sessions"`
-	Violations []ViolationEntry `json:"violations"`
+	RunGroupID string          `json:"run_group_id"`
+	Score      *LeaderboardRow `json:"score,omitempty"`
+	Sessions   []SessionDetail `json:"sessions"`
+	// ViolationCounts is the aggregate count per (session, violation_type) for
+	// this run-group — computed with GROUP BY, not a truncated row sample. The
+	// orderbook can emit tens of millions of violation rows, so returning them
+	// raw is neither useful nor affordable.
+	ViolationCounts []ViolationCount `json:"violation_counts"`
 }
 
 // SessionDetail groups the state and dependencies used by this package.
@@ -227,17 +239,16 @@ type MetricPoint struct {
 	HDREncoded     string  `json:"hdr_encoded,omitempty"`
 	RTHDREncoded   string  `json:"rt_hdr_encoded,omitempty"`
 	SlipHDREncoded string  `json:"slip_hdr_encoded,omitempty"`
+	// MatchHDREncoded: taker-fill matching-latency HDR (FIX 851=2). Own chart.
+	MatchHDREncoded string `json:"match_hdr_encoded,omitempty"`
 }
 
-// ViolationEntry groups the state and dependencies used by this package.
-// Keep this type aligned with the runtime contract around it.
-type ViolationEntry struct {
+// ViolationCount is the aggregate number of correctness violations of one type
+// within one session. Keep this type aligned with the runtime contract around it.
+type ViolationCount struct {
 	SessionID     string `json:"session_id"`
-	ContestantID  string `json:"contestant_id"`
 	ViolationType string `json:"violation_type"`
-	OrderID       string `json:"order_id"`
-	Detail        string `json:"detail"`
-	DetectedAtNS  int64  `json:"detected_at_ns"`
+	Count         int64  `json:"count"`
 }
 
 // RunDetail applies behavior for its receiver performs the package-specific operation described by its name.
@@ -286,14 +297,14 @@ SELECT r.session_id, sc.name, r.status, p.correctness_score, p.valid_fills, p.to
 	if d.Sessions == nil {
 		d.Sessions = []SessionDetail{}
 	}
-	d.Violations, err = s.Violations(ctx, runGroupID)
-	if d.Violations == nil {
-		d.Violations = []ViolationEntry{}
+	d.ViolationCounts, err = s.ViolationCounts(ctx, runGroupID)
+	if d.ViolationCounts == nil {
+		d.ViolationCounts = []ViolationCount{}
 	}
 	return d, err
 }
 
-// keepLastPerWaveHDR clears the HDR base64 blobs (hdr/rt/slip) on every metric point except
+// keepLastPerWaveHDR clears the HDR base64 blobs (hdr/rt/slip/match) on every metric point except
 // the latest one per wave_index. The timeline is ordered by time, so the last occurrence of a
 // wave is its newest. Numeric fields are left untouched. Used to slim the run-detail payload;
 // the per-session /api/charts endpoint keeps full HDR.
@@ -307,6 +318,7 @@ func keepLastPerWaveHDR(tl []MetricPoint) {
 			tl[i].HDREncoded = ""
 			tl[i].RTHDREncoded = ""
 			tl[i].SlipHDREncoded = ""
+			tl[i].MatchHDREncoded = ""
 		}
 	}
 }
@@ -318,7 +330,7 @@ func (s *Store) Chart(ctx context.Context, sessionID string) ([]MetricPoint, err
 SELECT EXTRACT(EPOCH FROM time) * 1000000000, wave_index,
        COALESCE(p50_ns,0), COALESCE(p90_ns,0), COALESCE(p99_ns,0),
        COALESCE(rt_p50_ns,0), COALESCE(rt_p90_ns,0), COALESCE(rt_p99_ns,0),
-       COALESCE(tps_1s,0), COALESCE(error_rate,0), hdr_encoded, rt_hdr_encoded, slip_hdr_encoded
+       COALESCE(tps_1s,0), COALESCE(error_rate,0), hdr_encoded, rt_hdr_encoded, slip_hdr_encoded, match_hdr_encoded
   FROM metrics
  WHERE session_id=$1
  ORDER BY time
@@ -332,8 +344,8 @@ SELECT EXTRACT(EPOCH FROM time) * 1000000000, wave_index,
 		var p MetricPoint
 		var p50, p90, p99, rt50, rt90, rt99 int64
 		var nsFloat float64
-		var hdr, rtHdr, slipHdr []byte
-		if err := rows.Scan(&nsFloat, &p.WaveIndex, &p50, &p90, &p99, &rt50, &rt90, &rt99, &p.TPS1S, &p.ErrorRate, &hdr, &rtHdr, &slipHdr); err != nil {
+		var hdr, rtHdr, slipHdr, matchHdr []byte
+		if err := rows.Scan(&nsFloat, &p.WaveIndex, &p50, &p90, &p99, &rt50, &rt90, &rt99, &p.TPS1S, &p.ErrorRate, &hdr, &rtHdr, &slipHdr, &matchHdr); err != nil {
 			return nil, err
 		}
 		p.TimeUnixNS = int64(nsFloat)
@@ -348,35 +360,48 @@ SELECT EXTRACT(EPOCH FROM time) * 1000000000, wave_index,
 		if len(slipHdr) > 0 {
 			p.SlipHDREncoded = base64.StdEncoding.EncodeToString(slipHdr)
 		}
+		if len(matchHdr) > 0 {
+			p.MatchHDREncoded = base64.StdEncoding.EncodeToString(matchHdr)
+		}
 		out = append(out, p)
 	}
 	return out, rows.Err()
 }
 
-// Violations applies behavior for its receiver performs the package-specific operation described by its name.
-// It keeps validation, side effects, and returned values within this package's contract.
-func (s *Store) Violations(ctx context.Context, runGroupID string) ([]ViolationEntry, error) {
+// ViolationCounts returns the per-category violation totals for a run-group,
+// read straight from the pre-aggregated correctness_summary row (one row per
+// session). The raw per-violation table is no longer scanned — the validator
+// writes these six category counters at score time.
+func (s *Store) ViolationCounts(ctx context.Context, runGroupID string) ([]ViolationCount, error) {
 	rows, err := s.meta.Query(ctx, `
-SELECT v.session_id, v.contestant_id, v.violation_type, v.order_id,
-       COALESCE(v.detail,''), v.detected_at
-  FROM correctness_violations v
-  JOIN runs r ON r.session_id=v.session_id
- WHERE r.run_group_id=$1
- ORDER BY v.detected_at, v.id
- LIMIT $2`, runGroupID, maxViolationRows)
+SELECT r.session_id, cs.price_violations, cs.self_trades, cs.phantom_fills,
+       cs.time_violations, cs.cancel_replace_loss, cs.overfills
+  FROM runs r
+  JOIN correctness_summary cs ON cs.session_id = r.session_id
+ WHERE r.run_group_id = $1`, runGroupID)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var out []ViolationEntry
+	var out []ViolationCount
 	for rows.Next() {
-		var v ViolationEntry
-		var detected time.Time
-		if err := rows.Scan(&v.SessionID, &v.ContestantID, &v.ViolationType, &v.OrderID, &v.Detail, &detected); err != nil {
+		var sessionID string
+		var price, selfTrade, phantom, timeV, crl, overfill int64
+		if err := rows.Scan(&sessionID, &price, &selfTrade, &phantom, &timeV, &crl, &overfill); err != nil {
 			return nil, err
 		}
-		v.DetectedAtNS = detected.UnixNano()
-		out = append(out, v)
+		for _, c := range []ViolationCount{
+			{SessionID: sessionID, ViolationType: "price", Count: price},
+			{SessionID: sessionID, ViolationType: "self_trade", Count: selfTrade},
+			{SessionID: sessionID, ViolationType: "phantom", Count: phantom},
+			{SessionID: sessionID, ViolationType: "time", Count: timeV},
+			{SessionID: sessionID, ViolationType: "cancel_replace_loss", Count: crl},
+			{SessionID: sessionID, ViolationType: "overfill", Count: overfill},
+		} {
+			if c.Count > 0 {
+				out = append(out, c)
+			}
+		}
 	}
 	return out, rows.Err()
 }

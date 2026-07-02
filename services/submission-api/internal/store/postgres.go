@@ -189,6 +189,7 @@ type RunGroupMeta struct {
 	RunGroupID   string
 	SubmissionID string
 	ContestantID string
+	TeamName     string
 	Status       string
 	CreatedAt    time.Time
 	UpdatedAt    time.Time
@@ -197,7 +198,12 @@ type RunGroupMeta struct {
 // RunGroupListFilter groups the state and dependencies used by this package.
 // Keep this type aligned with the runtime contract around it.
 type RunGroupListFilter struct {
-	ContestantID  string
+	// ContestantID, when non-empty, restricts to one contestant. Empty lists
+	// every contestant's run-groups (auth is off — the runs page is public).
+	ContestantID string
+	// Search is a case-insensitive substring matched against contestant_id and
+	// the submission's team_name. Empty = no search filter.
+	Search        string
 	SubmissionIDs []string
 	Limit         int
 }
@@ -275,16 +281,21 @@ func (s *PostgresStore) ListRunGroups(ctx context.Context, filter RunGroupListFi
 		submissionIDs = []string{}
 	}
 	rows, err := s.pool.Query(ctx, `
-		SELECT run_group_id, submission_id, contestant_id, status, created_at, updated_at
-		  FROM run_groups
-		 WHERE contestant_id = $1
+		SELECT rg.run_group_id, rg.submission_id, rg.contestant_id,
+		       COALESCE(s.team_name, ''), rg.status, rg.created_at, rg.updated_at
+		  FROM run_groups rg
+		  LEFT JOIN submissions s ON s.submission_id = rg.submission_id
+		 WHERE ($1 = '' OR rg.contestant_id = $1)
 		   AND (cardinality(COALESCE($2::text[], ARRAY[]::text[])) = 0
-		        OR submission_id = ANY($2::text[]))
-		 ORDER BY created_at DESC
+		        OR rg.submission_id = ANY($2::text[]))
+		   AND ($4 = '' OR rg.contestant_id ILIKE '%' || $4 || '%'
+		        OR COALESCE(s.team_name, '') ILIKE '%' || $4 || '%')
+		 ORDER BY rg.created_at DESC
 		 LIMIT $3`,
 		filter.ContestantID,
 		submissionIDs,
 		limit,
+		filter.Search,
 	)
 	if err != nil {
 		recordDB("submission-api", "list_run_groups", start, err)
@@ -294,7 +305,7 @@ func (s *PostgresStore) ListRunGroups(ctx context.Context, filter RunGroupListFi
 	var out []RunGroupMeta
 	for rows.Next() {
 		var g RunGroupMeta
-		if err := rows.Scan(&g.RunGroupID, &g.SubmissionID, &g.ContestantID, &g.Status, &g.CreatedAt, &g.UpdatedAt); err != nil {
+		if err := rows.Scan(&g.RunGroupID, &g.SubmissionID, &g.ContestantID, &g.TeamName, &g.Status, &g.CreatedAt, &g.UpdatedAt); err != nil {
 			recordDB("submission-api", "list_run_groups", start, err)
 			return nil, fmt.Errorf("%w: scan run-group: %v", cerrs.ErrStoreDatabaseFailed, err)
 		}

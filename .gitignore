@@ -34,10 +34,10 @@ target/
 bootstrap/secrets-live/
 /auth-api
 services/auth-api/auth-api
-deploy-local/
 
 # junk
 *.tfstate
 *.tfstate.backup
 wget-log
 infra/terraform/.terraform/
+deploy-local/images.tar

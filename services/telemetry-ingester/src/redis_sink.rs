@@ -90,6 +90,7 @@ mod tests {
             hdr_encoded: Vec::new(),
             rt_hdr_encoded: Vec::new(),
             slip_hdr_encoded: Vec::new(),
+            match_hdr_encoded: Vec::new(),
         }
     }
 

@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -39,6 +40,8 @@ type runGroupChild struct {
 type benchmarkResponse struct {
 	RunGroupID   string          `json:"run_group_id"`
 	SubmissionID string          `json:"submission_id"`
+	ContestantID string          `json:"contestant_id,omitempty"`
+	TeamName     string          `json:"team_name,omitempty"`
 	Status       string          `json:"status"` // run-group's status (requested | running | completed | failed)
 	CreatedAt    time.Time       `json:"created_at"`
 	Runs         []runGroupChild `json:"runs"`
@@ -220,13 +223,11 @@ func ListRunGroups(pg *store.PostgresStore, log *slog.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		q := r.URL.Query()
 		limit, _ := strconv.Atoi(q.Get("limit"))
-		contestantID := contestantIDFromContext(r.Context())
-		if contestantID == "" {
-			writeError(w, http.StatusUnauthorized, "authentication required")
-			return
-		}
+		// Auth is off: the runs page is public and lists every contestant's
+		// run-groups. `?contestant=` is a free-text search over contestant_id /
+		// team_name, not an identity gate.
 		filter := store.RunGroupListFilter{
-			ContestantID:  contestantID,
+			Search:        strings.TrimSpace(q.Get("contestant")),
 			SubmissionIDs: q["submission_id"],
 			Limit:         limit,
 		}
@@ -278,13 +279,8 @@ func GetRunGroup(pg *store.PostgresStore, log *slog.Logger) http.HandlerFunc {
 			writeError(w, http.StatusNotFound, "run-group not found")
 			return
 		}
-		if contestantID := contestantIDFromContext(r.Context()); contestantID == "" {
-			writeError(w, http.StatusUnauthorized, "authentication required")
-			return
-		} else if group.ContestantID != contestantID {
-			writeError(w, http.StatusNotFound, "run-group not found")
-			return
-		}
+		// Auth is off: run-group detail is public (any run is viewable by anyone),
+		// so no per-contestant ownership gate here.
 		scenarios, err := pg.ListScenarios(ctx)
 		if err != nil {
 			log.ErrorContext(ctx, "list scenarios", "error", err)
@@ -386,6 +382,8 @@ func groupResponse(
 	return benchmarkResponse{
 		RunGroupID:   group.RunGroupID,
 		SubmissionID: group.SubmissionID,
+		ContestantID: group.ContestantID,
+		TeamName:     group.TeamName,
 		Status:       group.Status,
 		CreatedAt:    group.CreatedAt,
 		Runs:         children,

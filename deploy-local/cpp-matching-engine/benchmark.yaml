@@ -1,0 +1,18 @@
+# IICPC contestant manifest (validated by submission-api/internal/validator/zip.go).
+#
+# A C++20 price-time-priority limit order book (ayankg07-cloud/Orderbook-
+# Implementation-in-cpp) wrapped in a FIX 4.2 TCP front-end (src/fix_server.cpp)
+# so the platform can drive it. Handles NewOrderSingle (35=D, limit + market),
+# Cancel (35=F) and Replace (35=G); emits a New ack per order plus a Fill
+# ExecutionReport per trade.
+#
+# NOTE: the engine fills each side at its own limit price (not the maker price)
+# and loses time priority on replace, so its correctness score reflects those
+# real differences from the platform's reference book.
+protocol: FIX          # FIX | REST | WS
+language: cpp          # cpp | rust | go
+port: 9898             # must be a port the eBPF capture filters (9898 or 8080)
+team_name: cpp-orderbook-ayankg
+build:
+  type: cmake          # cmake (cpp) | cargo (rust) | go
+  target: matching_engine   # must match the add_executable() name in CMakeLists.txt

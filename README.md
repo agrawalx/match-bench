@@ -75,11 +75,11 @@ The important detail is where measurement happens. match-bench does not ask the 
 
 A completed run in the contestant UI — scored kernel-stamped service time vs the full round trip, the HDR latency histogram, the live throughput timeline, and per-scenario (constant / spike / ramp) verdicts:
 
-![Run detail page](docs/architecture/assets/result_image.png)
+![Run detail page](docs/graph1.png)
 
 The latency-by-percentile decomposition: the flat lower curve is the scored algo service time (`t7 − t3`); the rising tail is the full round trip (`r9 − t0`). The gap between them is non-algo overhead — coordinated omission + network + kernel queueing:
 
-![Latency by percentile distribution](docs/architecture/assets/run2.jpeg)
+![Latency by percentile distribution](docs/graph2.png)
 
 ## Architecture
 

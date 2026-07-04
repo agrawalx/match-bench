@@ -148,7 +148,7 @@ pub struct OrderSentEvent {
     pub worker_id: String,
     pub task_id: u32,
     pub order_id: String,
-    pub target_send_ts_ns: u64,
+    pub target_send_ts_ns: u64, // t0
     pub send_ts_ns: u64,
     pub recv_done_ts_ns: u64,
     pub timed_out: bool,
@@ -191,6 +191,8 @@ pub struct OrderAckedEvent {
     pub orig_order_id: String,
     pub reordering_detected: bool,
     pub retransmission_count: u32,
+    #[serde(default)]
+    pub liquidity_ind: u8,
 }
 
 #[derive(Debug, Clone, Copy, Serialize)]
@@ -212,6 +214,7 @@ pub struct OrderAckedEventRef<'a> {
     pub orig_order_id: &'a str,
     pub reordering_detected: bool,
     pub retransmission_count: u32,
+    pub liquidity_ind: u8,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

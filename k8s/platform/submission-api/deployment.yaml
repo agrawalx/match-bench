@@ -72,13 +72,18 @@ spec:
             - name: RAMP_DURATION_S
               value: "180"
             - name: CONSTANT_TOTAL_RPS
-              value: "10000"
+              value: "25000"
             - name: SPIKE_PEAK_RPS
               value: "50000"
             - name: RAMP_PEAK_RPS
               value: "90000"
             - name: RESEED_SCENARIOS
-              value: "false"
+              value: "true"
+            # Seed only the constant scenario. SeedScenarios never deletes, so
+            # any pre-existing spike/ramp rows must be dropped once via SQL; they
+            # are never re-created after that.
+            - name: SEED_SCENARIOS
+              value: "constant"
           livenessProbe:
             httpGet:
               path: /health

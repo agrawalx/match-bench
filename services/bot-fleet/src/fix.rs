@@ -251,8 +251,6 @@ fn build_rest_request(method: &str, target_host: &str, path: &str, json: &str) -
     rest.into_bytes()
 }
 
-/// build_frame performs the module-specific operation described by its name.
-/// It keeps validation, side effects, and returned values within this module's contract.
 fn build_frame(
     fix_version: &str,
     session_id: &str,

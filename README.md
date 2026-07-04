@@ -123,7 +123,7 @@ design.md                  Detailed engineering design
 
 There are two local paths, both current:
 
-**1. Dependency stack + services from source (fast dev loop).** Bring up Postgres, TimescaleDB, Redis, Kafka, and MinIO (optionally the platform APIs and observability too) with Docker Compose, then run individual services from source. Full steps and the local endpoint table are in **[docs/local-run.md](./docs/local-run.md)**.
+**1. Dependency stack + services from source (fast dev loop).** Bring up Postgres, TimescaleDB, Redis, Kafka, and MinIO (optionally the platform APIs and observability too) with Docker Compose, then run individual services from source. Full steps and the local endpoint table are in **[deploy-local/README.md](./deploy-local/README.md)**.
 
 ```bash
 cp .env.example .env
@@ -159,9 +159,9 @@ e2e/01-images.sh && e2e/02-bootstrap.sh && e2e/04-scenarios.sh   # then run via 
 
 For deeper or alternative needs:
 
-- **[DEPLOYMENT_EKS.md](./DEPLOYMENT_EKS.md)** — the detailed, manual EKS reference (node groups, network policies, IRSA, KEDA, ALB controller, secrets, dependency-correct deploy order, gVisor).
+- **[docs/aws-deployment.md](./docs/aws-deployment.md)** — the detailed, manual EKS reference (node groups, network policies, IRSA, KEDA, ALB controller, secrets, dependency-correct deploy order, gVisor).
 - **Scaling tiers:** [`bench/`](./bench/) drives the ~2M orders/s platform self-benchmark (multi-broker Kafka, 96 partitions, 8 ingesters); [`deploy-bench/`](./deploy-bench/) runs the load-generator capacity sweep (drain sink, 1→2 nodes).
-- **Supporting:** [infra/README.md](./infra/README.md), the [secret bootstrap guide](./bootstrap/README.md), and the higher-level [docs/aws-deployment.md](./docs/aws-deployment.md).
+- **Supporting:** [infra/README.md](./infra/README.md) and the [secret bootstrap guide](./bootstrap/README.md).
 
 > **Free-plan caveat:** new AWS Free-plan accounts cap nodes at 2 vCPU, which cannot run the platform (the data tier alone needs ~5 vCPU and the exclusive-core sandbox needs ≥4 vCPU). Use a paid account for EKS, or the local k3s path above for a no-cost demo. See the [architecture doc's deployment section](docs/architecture/ARCHITECTURE.md#deployment-isolation--observability) for details.
 

@@ -224,7 +224,9 @@ mod tests {
     /// It keeps validation, side effects, and returned values within this module's contract.
     fn response_without_request_is_unmatched() {
         let mut m = Matcher::new();
-        assert!(m.on_response("ghost", 200, "0", 0, 0, "", false, 0).is_none());
+        assert!(m
+            .on_response("ghost", 200, "0", 0, 0, "", false, 0)
+            .is_none());
         assert_eq!(m.unmatched_responses, 1);
     }
 

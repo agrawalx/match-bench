@@ -134,7 +134,7 @@ pub async fn run(mut config: Config) -> Result<()> {
     .await?;
 
     let control_producer = kafka::control_producer(&config.kafka_brokers)?; // the one which sends ready signals back to bot fleet controller
-    let telemetry_producer = kafka::telemetry_producer(&config.kafka_brokers)?; // the one which is responsible for sending orders.acked to kafka 
+    let telemetry_producer = kafka::telemetry_producer(&config.kafka_brokers)?; // the one which is responsible for sending orders.acked to kafka
     if let Some(n) = kafka::topic_partition_count(&telemetry_producer, &config.orders_sent_topic) {
         if n != config.orders_partitions {
             tracing::info!(

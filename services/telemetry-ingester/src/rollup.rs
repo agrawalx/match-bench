@@ -118,7 +118,10 @@ pub fn merge_partials(rows: &[PartialRow]) -> Merged {
     let svc: Vec<&[u8]> = rows.iter().map(|r| r.hdr_encoded.as_slice()).collect();
     let rt: Vec<&[u8]> = rows.iter().map(|r| r.rt_hdr_encoded.as_slice()).collect();
     let slip: Vec<&[u8]> = rows.iter().map(|r| r.slip_hdr_encoded.as_slice()).collect();
-    let matched: Vec<&[u8]> = rows.iter().map(|r| r.match_hdr_encoded.as_slice()).collect();
+    let matched: Vec<&[u8]> = rows
+        .iter()
+        .map(|r| r.match_hdr_encoded.as_slice())
+        .collect();
     let tps_1s: f64 = rows.iter().map(|r| r.tps_1s).sum();
     let offered: u64 = rows.iter().map(|r| r.offered).sum();
     let errors: u64 = rows.iter().map(|r| r.errors).sum();

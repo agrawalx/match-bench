@@ -339,16 +339,31 @@ async fn create_topics(brokers: &str, topics: &[&str]) -> Result<()> {
     let admin: AdminClient<DefaultClientContext> = ClientConfig::new()
         .set("bootstrap.servers", brokers)
         .create()?;
+    // RF=1 default so the example runs against a local single-broker Kafka;
+    // set EXAMPLE_TOPIC_RF=3 (with min.insync.replicas=2) on a real cluster.
+    let rf: i32 = env::var("EXAMPLE_TOPIC_RF")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1);
+    let min_isr = if rf >= 3 { "2" } else { "1" };
     let news: Vec<NewTopic> = topics
         .iter()
         .map(|t| {
-            NewTopic::new(t, 3, TopicReplication::Fixed(3))
-                .set("min.insync.replicas", "2")
+            NewTopic::new(t, 3, TopicReplication::Fixed(rf))
+                .set("min.insync.replicas", min_isr)
                 .set("retention.ms", "86400000")
                 .set("max.message.bytes", "1048576")
         })
         .collect();
-    let _ = admin.create_topics(&news, &AdminOptions::new()).await;
+    let results = admin
+        .create_topics(&news, &AdminOptions::new())
+        .await
+        .context("admin create_topics")?;
+    for r in results {
+        if let Err((topic, code)) = r {
+            return Err(anyhow!("create topic {topic} failed: {code}"));
+        }
+    }
     Ok(())
 }
 

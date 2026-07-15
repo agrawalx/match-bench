@@ -158,7 +158,9 @@ async fn async_main() -> Result<()> {
         telemetry_batch_size: 64,
         telemetry_channel_capacity: 4096,
         max_bots_per_worker: 1000,
-        ..Config::default()
+        // from_env, not default: keeps BOT_MAX_INFLIGHT_PER_TASK / BOT_WRITE_BATCH
+        // overrides working for load runs (explicit fields above still win).
+        ..Config::from_env()
     };
     let worker_handle: JoinHandle<()> = tokio::spawn(async move {
         if let Err(err) = worker::run(config).await {
@@ -505,6 +507,16 @@ async fn serve_one_fix_connection(
     let mut chunk = [0u8; 4096];
     let mut response_seq: u64 = 1;
     let mut order_count: u64 = 0;
+
+    // EXAMPLE_SINK=drain: pure read-and-discard (no FIX parse, no replies) —
+    // matches the deploy-bench drain contestant used for raw send-capacity runs.
+    if env::var("EXAMPLE_SINK").as_deref() == Ok("drain") {
+        loop {
+            if stream.read(&mut chunk).await? == 0 {
+                return Ok(());
+            }
+        }
+    }
 
     loop {
         let n = stream.read(&mut chunk).await?;

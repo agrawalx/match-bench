@@ -9,8 +9,10 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net"
 	"strconv"
 	"strings"
+	"time"
 
 	cerrs "github.com/iicpc/sandbox-orchestrator/internal/errors"
 	"github.com/iicpc/sandbox-orchestrator/internal/store"
@@ -136,16 +138,21 @@ func validateConfig(cfg Config) error {
 
 // CreateSlot applies behavior for its receiver performs the package-specific operation described by its name.
 // It keeps validation, side effects, and returned values within this package's contract.
-func (m *Manager) CreateSlot(ctx context.Context, slotID, contestantID, image string, port int) error {
+func (m *Manager) CreateSlot(ctx context.Context, slotID, contestantID, image string, ports []int) error {
+	if len(ports) == 0 {
+		return fmt.Errorf("%w: at least one port is required", cerrs.ErrInvalidRequest)
+	}
 	if m.captureEnabled {
-		if _, ok := capturablePorts[port]; !ok {
-			return fmt.Errorf("%w: port %d is not in the eBPF-capture set {8080, 9898}", cerrs.ErrInvalidRequest, port)
+		for _, port := range ports {
+			if _, ok := capturablePorts[port]; !ok {
+				return fmt.Errorf("%w: port %d is not in the eBPF-capture set {8080, 9898}", cerrs.ErrInvalidRequest, port)
+			}
 		}
 	}
 
 	resourceName := podName(slotID)
 
-	existing, err := m.ensurePod(ctx, resourceName, slotID, contestantID, image, port)
+	existing, err := m.ensurePod(ctx, resourceName, slotID, contestantID, image, ports)
 	if err != nil {
 		return err
 	}
@@ -161,7 +168,7 @@ func (m *Manager) CreateSlot(ctx context.Context, slotID, contestantID, image st
 		if !apierrors.IsNotFound(err) {
 			return fmt.Errorf("get service: %w", err)
 		}
-		if _, err := m.client.CoreV1().Services(m.namespace).Create(ctx, m.serviceSpec(slotID, port), metav1.CreateOptions{}); err != nil && !apierrors.IsAlreadyExists(err) {
+		if _, err := m.client.CoreV1().Services(m.namespace).Create(ctx, m.serviceSpec(slotID, ports), metav1.CreateOptions{}); err != nil && !apierrors.IsAlreadyExists(err) {
 			return fmt.Errorf("create service: %w", err)
 		}
 	}
@@ -171,13 +178,13 @@ func (m *Manager) CreateSlot(ctx context.Context, slotID, contestantID, image st
 
 // ensurePod applies behavior for its receiver performs the package-specific operation described by its name.
 // It keeps validation, side effects, and returned values within this package's contract.
-func (m *Manager) ensurePod(ctx context.Context, resourceName, slotID, contestantID, image string, port int) (*corev1.Pod, error) {
+func (m *Manager) ensurePod(ctx context.Context, resourceName, slotID, contestantID, image string, ports []int) (*corev1.Pod, error) {
 	existing, err := m.client.CoreV1().Pods(m.namespace).Get(ctx, resourceName, metav1.GetOptions{})
 	switch {
 	case err == nil:
 		return existing, nil
 	case apierrors.IsNotFound(err):
-		created, err := m.client.CoreV1().Pods(m.namespace).Create(ctx, m.podSpec(slotID, contestantID, image, port), metav1.CreateOptions{})
+		created, err := m.client.CoreV1().Pods(m.namespace).Create(ctx, m.podSpec(slotID, contestantID, image, ports), metav1.CreateOptions{})
 		if err != nil {
 			if apierrors.IsAlreadyExists(err) {
 				existing, err := m.client.CoreV1().Pods(m.namespace).Get(ctx, resourceName, metav1.GetOptions{})
@@ -225,12 +232,54 @@ func (m *Manager) Refresh(ctx context.Context, slotID string) (store.SlotState, 
 		return "", "", fmt.Errorf("get pod: %w", err)
 	}
 	state, msg := deriveState(pod)
-	if state == store.StateReady && m.captureEnabled {
-		if err := m.ensureCapture(ctx, pod); err != nil {
-			slog.Default().Warn("ensure capture job", "slot_id", slotID, "error", err)
+	if state == store.StateReady {
+		// QoL-7: the k8s readinessProbe only gates the primary port
+		// (ContainerPort[0]) — a contestant that binds one declared port but
+		// not the others would otherwise pass PodReady and fail mid-run
+		// instead of at WaitForReady. TCP-dial every remaining declared port
+		// before reporting the slot ready.
+		if ports := containerPorts(pod); len(ports) > 1 {
+			if ready, waitMsg := dialAllPorts(pod.Status.PodIP, ports[1:]); !ready {
+				return store.StateCreating, waitMsg, nil
+			}
+		}
+		if m.captureEnabled {
+			if err := m.ensureCapture(ctx, pod); err != nil {
+				slog.Default().Warn("ensure capture job", "slot_id", slotID, "error", err)
+			}
 		}
 	}
 	return state, msg, nil
+}
+
+// containerPorts extracts every declared container port from a pod's first
+// container, in declaration order.
+func containerPorts(pod *corev1.Pod) []int {
+	if len(pod.Spec.Containers) == 0 {
+		return nil
+	}
+	ports := make([]int, 0, len(pod.Spec.Containers[0].Ports))
+	for _, p := range pod.Spec.Containers[0].Ports {
+		ports = append(ports, int(p.ContainerPort))
+	}
+	return ports
+}
+
+// dialAllPorts TCP-dials every given port on the pod IP with a short
+// timeout, used to gate readiness on ports beyond the one covered by the
+// native k8s readinessProbe (QoL-7).
+func dialAllPorts(podIP string, ports []int) (bool, string) {
+	if podIP == "" {
+		return false, "pod scheduling / readiness probe pending"
+	}
+	for _, port := range ports {
+		conn, err := net.DialTimeout("tcp", fmt.Sprintf("%s:%d", podIP, port), 300*time.Millisecond)
+		if err != nil {
+			return false, fmt.Sprintf("waiting for port %d to accept connections", port)
+		}
+		conn.Close()
+	}
+	return true, ""
 }
 
 // ListExisting applies behavior for its receiver performs the package-specific operation described by its name.
@@ -251,18 +300,20 @@ func (m *Manager) ListExisting(ctx context.Context) ([]store.Slot, int, error) {
 			continue
 		}
 		image := ""
-		port := 0
 		if len(pod.Spec.Containers) > 0 {
 			image = pod.Spec.Containers[0].Image
-			if len(pod.Spec.Containers[0].Ports) > 0 {
-				port = int(pod.Spec.Containers[0].Ports[0].ContainerPort)
-			}
+		}
+		ports := containerPorts(&pod)
+		port := 0
+		if len(ports) > 0 {
+			port = ports[0]
 		}
 		state, msg := deriveState(&pod)
 		out = append(out, store.Slot{
 			SlotID:    slotID,
 			Image:     image,
 			Port:      port,
+			Ports:     ports,
 			State:     state,
 			Message:   msg,
 			Endpoint:  store.Endpoint{Host: ServiceFQDN(slotID, m.namespace), Port: port},
@@ -315,7 +366,7 @@ func ServiceFQDN(slotID, namespace string) string {
 
 // podSpec applies behavior for its receiver performs the package-specific operation described by its name.
 // It keeps validation, side effects, and returned values within this package's contract.
-func (m *Manager) podSpec(slotID, contestantID, image string, port int) *corev1.Pod {
+func (m *Manager) podSpec(slotID, contestantID, image string, ports []int) *corev1.Pod {
 	labels := map[string]string{
 		LabelApp:       AppValue,
 		LabelSlot:      slotID,
@@ -354,10 +405,15 @@ func (m *Manager) podSpec(slotID, contestantID, image string, port int) *corev1.
 				Name:            "algo",
 				Image:           image,
 				ImagePullPolicy: corev1.PullIfNotPresent,
-				Ports:           []corev1.ContainerPort{{ContainerPort: int32(port), Protocol: corev1.ProtocolTCP}},
+				Ports:           containerPortSpecs(ports),
+				// The k8s readinessProbe only supports one probe per
+				// container; it gates the primary (first declared) port.
+				// Remaining ports are gated in Refresh via a direct TCP
+				// dial (QoL-7) so a contestant binding only some declared
+				// ports fails WaitForReady instead of mid-run.
 				ReadinessProbe: &corev1.Probe{
 					ProbeHandler: corev1.ProbeHandler{
-						TCPSocket: &corev1.TCPSocketAction{Port: intstr.FromInt(port)},
+						TCPSocket: &corev1.TCPSocketAction{Port: intstr.FromInt(ports[0])},
 					},
 					InitialDelaySeconds: 1,
 					PeriodSeconds:       1,
@@ -399,6 +455,15 @@ func (m *Manager) podSpec(slotID, contestantID, image string, port int) *corev1.
 	return pod
 }
 
+// containerPortSpecs builds one corev1.ContainerPort per declared port.
+func containerPortSpecs(ports []int) []corev1.ContainerPort {
+	specs := make([]corev1.ContainerPort, len(ports))
+	for i, p := range ports {
+		specs[i] = corev1.ContainerPort{ContainerPort: int32(p), Protocol: corev1.ProtocolTCP}
+	}
+	return specs
+}
+
 // writableVolumes performs the package-specific operation described by its name.
 // It keeps validation, side effects, and returned values within this package's contract.
 func writableVolumes() []corev1.Volume {
@@ -431,11 +496,21 @@ func writableMounts() []corev1.VolumeMount {
 
 // serviceSpec applies behavior for its receiver performs the package-specific operation described by its name.
 // It keeps validation, side effects, and returned values within this package's contract.
-func (m *Manager) serviceSpec(slotID string, port int) *corev1.Service {
+func (m *Manager) serviceSpec(slotID string, ports []int) *corev1.Service {
 	labels := map[string]string{
 		LabelApp:       AppValue,
 		LabelSlot:      slotID,
 		LabelManagedBy: ManagedByValue,
+	}
+	svcPorts := make([]corev1.ServicePort, len(ports))
+	for i, p := range ports {
+		svcPorts[i] = corev1.ServicePort{
+			// Name is required once a Service declares more than one port.
+			Name:       fmt.Sprintf("port-%d", p),
+			Port:       int32(p),
+			TargetPort: intstr.FromInt(p),
+			Protocol:   corev1.ProtocolTCP,
+		}
 	}
 	return &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{
@@ -448,11 +523,7 @@ func (m *Manager) serviceSpec(slotID string, port int) *corev1.Service {
 				LabelApp:  AppValue,
 				LabelSlot: slotID,
 			},
-			Ports: []corev1.ServicePort{{
-				Port:       int32(port),
-				TargetPort: intstr.FromInt(port),
-				Protocol:   corev1.ProtocolTCP,
-			}},
+			Ports: svcPorts,
 		},
 	}
 }

@@ -32,7 +32,7 @@ func bugfixManager(captureEnabled bool) *Manager {
 // TestAlgoPodHardened performs the package-specific operation described by its name.
 // It keeps validation, side effects, and returned values within this package's contract.
 func TestAlgoPodHardened(t *testing.T) {
-	sc := bugfixManager(false).podSpec("s1", "c1", "img", 9898).Spec.Containers[0].SecurityContext
+	sc := bugfixManager(false).podSpec("s1", "c1", "img", []int{9898}).Spec.Containers[0].SecurityContext
 	if sc == nil {
 		t.Fatal("algo container has no SecurityContext")
 	}
@@ -53,7 +53,7 @@ func TestAlgoPodHardened(t *testing.T) {
 // TestAlgoPodHasActiveDeadline performs the package-specific operation described by its name.
 // It keeps validation, side effects, and returned values within this package's contract.
 func TestAlgoPodHasActiveDeadline(t *testing.T) {
-	pod := bugfixManager(false).podSpec("s1", "c1", "img", 9898)
+	pod := bugfixManager(false).podSpec("s1", "c1", "img", []int{9898})
 	if pod.Spec.ActiveDeadlineSeconds == nil || *pod.Spec.ActiveDeadlineSeconds <= 0 {
 		t.Fatalf("algo pod missing ActiveDeadlineSeconds backstop: %v", pod.Spec.ActiveDeadlineSeconds)
 	}
@@ -64,13 +64,13 @@ func TestAlgoPodHasActiveDeadline(t *testing.T) {
 func TestCreateSlotRejectsUncapturablePort(t *testing.T) {
 	ctx := context.Background()
 	m := bugfixManager(true)
-	if err := m.CreateSlot(ctx, "s-bad", "c1", "img", 1234); !errors.Is(err, cerrs.ErrInvalidRequest) {
+	if err := m.CreateSlot(ctx, "s-bad", "c1", "img", []int{1234}); !errors.Is(err, cerrs.ErrInvalidRequest) {
 		t.Fatalf("port 1234 (capture on): got %v, want ErrInvalidRequest", err)
 	}
-	if err := m.CreateSlot(ctx, "s-ok", "c1", "img", 9898); errors.Is(err, cerrs.ErrInvalidRequest) {
+	if err := m.CreateSlot(ctx, "s-ok", "c1", "img", []int{9898}); errors.Is(err, cerrs.ErrInvalidRequest) {
 		t.Fatalf("port 9898 (capture on) wrongly rejected: %v", err)
 	}
-	if err := bugfixManager(false).CreateSlot(ctx, "s-any", "c1", "img", 1234); errors.Is(err, cerrs.ErrInvalidRequest) {
+	if err := bugfixManager(false).CreateSlot(ctx, "s-any", "c1", "img", []int{1234}); errors.Is(err, cerrs.ErrInvalidRequest) {
 		t.Fatalf("port 1234 (capture off) wrongly rejected: %v", err)
 	}
 }

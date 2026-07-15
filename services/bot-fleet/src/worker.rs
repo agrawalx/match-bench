@@ -5,7 +5,7 @@
 //! The comments in this file describe public structure and callable behavior.
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     net::SocketAddr,
     sync::{Arc, Mutex},
     time::Duration,
@@ -545,6 +545,34 @@ struct PendingOrder {
 
 type PendingMap = Arc<Mutex<HashMap<String, PendingOrder>>>;
 
+// P3: watchdog expiry without a full-map scan per tick. Orders are inserted (and
+// written) in send order within a single task's writer, so `send_ts_ns` — and
+// therefore `deadline_ns = send_ts_ns + RESPONSE_TIMEOUT_NS` — is monotonically
+// non-decreasing across pushes. That makes a FIFO queue sufficient: the watchdog
+// only ever needs to pop from the front. Entries are pushed once a write succeeds
+// (mirrors the map insert timing) and popped either when their deadline is due or
+// on the task's final tick (`last_tick`), which must drain everything regardless
+// of deadline — matching the prior `HashMap::retain` semantics where `last_tick`
+// forced eviction of every remaining entry. An id may already be gone from the
+// map (acked, or evicted by a previous pass) by the time it's popped; that's not
+// an error, it's just skipped.
+type ExpiryQueue = Arc<Mutex<VecDeque<(u64, String)>>>;
+
+/// Pops every queue entry that is due (`deadline_ns <= now_ns`), or all of them if
+/// `last_tick`, preserving FIFO order. Pure and unit-testable independent of the
+/// pending map / telemetry plumbing around it.
+fn pop_due_expirations(queue: &mut VecDeque<(u64, String)>, now_ns: u64, last_tick: bool) -> Vec<String> {
+    let mut ids = Vec::new();
+    while let Some(&(deadline_ns, _)) = queue.front() {
+        if !last_tick && deadline_ns > now_ns {
+            break;
+        }
+        let (_, id) = queue.pop_front().expect("front just peeked");
+        ids.push(id);
+    }
+    ids
+}
+
 impl ConnectedTask {
     #[allow(clippy::too_many_arguments)]
     /// run performs the module-specific operation described by its name.
@@ -619,6 +647,7 @@ async fn run_fix_task(task: TaskSpec, fix: FixConnection, ctx: TaskContext) -> R
 
     let pending: PendingMap = Arc::new(Mutex::new(HashMap::new()));
     let notify: Arc<Notify> = Arc::new(Notify::new());
+    let expiry: ExpiryQueue = Arc::new(Mutex::new(VecDeque::new()));
 
     let mut set: JoinSet<Result<u64>> = JoinSet::new();
 
@@ -626,6 +655,7 @@ async fn run_fix_task(task: TaskSpec, fix: FixConnection, ctx: TaskContext) -> R
         fix.write_half,
         task.clone(),
         pending.clone(),
+        expiry.clone(),
         notify.clone(),
         ctx.session_id.clone(),
         ctx.target_host.clone(),
@@ -652,6 +682,7 @@ async fn run_fix_task(task: TaskSpec, fix: FixConnection, ctx: TaskContext) -> R
     set.spawn(watchdog_loop(
         task.task_id,
         pending.clone(),
+        expiry.clone(),
         notify.clone(),
         ctx.telemetry.clone(),
         ctx.session_id.clone(),
@@ -721,6 +752,7 @@ async fn fix_write_loop(
     mut write_half: WriteHalf<TcpStream>,
     task: TaskSpec,
     pending: PendingMap,
+    expiry: ExpiryQueue,
     notify: Arc<Notify>,
     session_id: String,
     target_host: String,
@@ -871,6 +903,13 @@ async fn fix_write_loop(
                         }
                     }
                 }
+                {
+                    let deadline_ns = send_ts_ns.saturating_add(RESPONSE_TIMEOUT_NS);
+                    let mut queue = expiry.lock().expect("expiry queue poisoned");
+                    for frame in frames.iter() {
+                        queue.push_back((deadline_ns, frame.order_id.clone()));
+                    }
+                }
                 for &target in targets.iter() {
                     metrics::observe_slip(
                         metrics::protocol_label(Protocol::Fix),
@@ -994,11 +1033,16 @@ async fn fix_read_loop(
 }
 
 #[allow(clippy::too_many_arguments)]
-/// watchdog_loop performs the module-specific operation described by its name.
-/// It keeps validation, side effects, and returned values within this module's contract.
+/// Evicts due orders (or, on the task's final tick, everything left) without
+/// scanning the whole pending map: pops only the front of the per-task expiry
+/// queue, which is deadline-ordered because a task's writer inserts orders (and
+/// pushes their deadlines) in send order. Ids already removed from `pending`
+/// (acked by the read loop, or evicted by a prior pass) are silently skipped —
+/// they're stale queue entries, not errors.
 async fn watchdog_loop(
     task_id: u32,
     pending: PendingMap,
+    expiry: ExpiryQueue,
     notify: Arc<Notify>,
     telemetry: TelemetrySink,
     session_id: String,
@@ -1012,24 +1056,13 @@ async fn watchdog_loop(
         let now_ns = unix_nanos();
         let last_tick = now_ns >= drain_end_ns;
 
+        let due_ids = {
+            let mut queue = expiry.lock().expect("expiry queue poisoned");
+            pop_due_expirations(&mut queue, now_ns, last_tick)
+        };
         let to_evict: Vec<PendingOrder> = {
             let mut map = pending.lock().expect("pending map poisoned");
-            let mut evicted = Vec::new();
-            map.retain(|_, p| {
-                let age_ns = if p.send_ts_ns == 0 {
-                    0
-                } else {
-                    now_ns.saturating_sub(p.send_ts_ns)
-                };
-                let expired = age_ns >= RESPONSE_TIMEOUT_NS || last_tick;
-                if expired {
-                    evicted.push(p.clone());
-                    false
-                } else {
-                    true
-                }
-            });
-            evicted
+            due_ids.into_iter().filter_map(|id| map.remove(&id)).collect()
         };
 
         metrics::inflight_sub(to_evict.len());
@@ -1085,16 +1118,38 @@ impl RwWriter {
         }
     }
 
-    /// write_order performs the module-specific operation described by its name.
-    /// It keeps validation, side effects, and returned values within this module's contract.
-    async fn write_order(&mut self, frame: &OrderFrame) -> Result<()> {
+    /// write_batch mirrors the FIX write loop's coalescing (P3'): REST concatenates
+    /// every frame into one buffer and issues a single `write_all` (HTTP/1.1
+    /// pipelining — the peer must answer in request order, verified against the
+    /// sample engines separately). WS keeps tungstenite owning the socket (see
+    /// module notes on the deferred raw-frame path) but batches at the sink level:
+    /// `feed` queues each frame without a syscall, and the trailing `flush` issues
+    /// one write for the whole batch — same syscall-amortization shape as REST
+    /// without bypassing tungstenite's framing/masking.
+    async fn write_batch(&mut self, frames: &[OrderFrame], scratch: &mut Vec<u8>) -> Result<()> {
         match self {
-            Self::Rest(w) => w.write_all(&frame.bytes).await.context("write REST order"),
-            Self::Ws(s) => s
-                .send(WsMessage::Binary(frame.bytes.clone()))
-                .await
-                .context("write WS order"),
+            Self::Rest(w) => {
+                concat_frames(frames, scratch);
+                w.write_all(scratch).await.context("write REST batch")
+            }
+            Self::Ws(s) => {
+                for frame in frames {
+                    s.feed(WsMessage::Binary(frame.bytes.clone()))
+                        .await
+                        .context("feed WS order")?;
+                }
+                s.flush().await.context("flush WS batch")
+            }
         }
+    }
+}
+
+/// Concatenates each frame's bytes into `out` (cleared first), so REST's batch
+/// write is a single `write_all` over N pipelined HTTP requests.
+fn concat_frames(frames: &[OrderFrame], out: &mut Vec<u8>) {
+    out.clear();
+    for frame in frames {
+        out.extend_from_slice(&frame.bytes);
     }
 }
 
@@ -1143,12 +1198,14 @@ async fn run_readwrite_task(
 
     let pending: PendingMap = Arc::new(Mutex::new(HashMap::new()));
     let notify: Arc<Notify> = Arc::new(Notify::new());
+    let expiry: ExpiryQueue = Arc::new(Mutex::new(VecDeque::new()));
     let mut set: JoinSet<Result<u64>> = JoinSet::new();
 
     set.spawn(rw_write_loop(
         writer,
         task.clone(),
         pending.clone(),
+        expiry.clone(),
         notify.clone(),
         ctx.session_id.clone(),
         ctx.target_host.clone(),
@@ -1159,6 +1216,7 @@ async fn run_readwrite_task(
         ctx.write_timeout,
         ctx.cancel.clone(),
         ctx.max_inflight,
+        ctx.write_batch,
     ));
     match reader {
         ReadSource::Rest(read_half) => set.spawn(rest_read_loop(
@@ -1187,6 +1245,7 @@ async fn run_readwrite_task(
     set.spawn(watchdog_loop(
         task.task_id,
         pending.clone(),
+        expiry.clone(),
         notify.clone(),
         ctx.telemetry.clone(),
         ctx.session_id.clone(),
@@ -1208,12 +1267,16 @@ async fn run_readwrite_task(
 }
 
 #[allow(clippy::too_many_arguments)]
-/// rw_write_loop performs the module-specific operation described by its name.
-/// It keeps validation, side effects, and returned values within this module's contract.
+/// rw_write_loop mirrors `fix_write_loop`'s batching (P3'): coalesces up to
+/// `batch_max` already-due backlog orders into one write. `target_send_ts_ns` is
+/// still captured per order at the moment it becomes due, before any sleep or
+/// write — the coordinated-omission contract is unchanged, only the write
+/// syscall is amortized across the batch.
 async fn rw_write_loop(
     mut writer: RwWriter,
     task: TaskSpec,
     pending: PendingMap,
+    expiry: ExpiryQueue,
     notify: Arc<Notify>,
     session_id: String,
     target_host: String,
@@ -1227,11 +1290,13 @@ async fn rw_write_loop(
     _write_timeout: Duration,
     cancel: CancelToken,
     max_inflight: usize,
+    batch_max: usize,
 ) -> Result<u64> {
     time::sleep_until(instant_from_unix_nanos(task_start_ns)).await;
 
     let interval_ns = 1_000_000_000_u64 / u64::from(task.target_rps);
     let mut next_send_ns = task_start_ns;
+    let barrier_epoch_ns = task_start_ns.saturating_sub(task.start_offset_ns);
     let mut generator = TaskGenerator::new(
         session_id.clone(),
         u64::from(task.task_id),
@@ -1244,6 +1309,10 @@ async fn rw_write_loop(
     // One template per FrameKind, reused for the task's whole lifetime (P2').
     let mut template_cache =
         fix::TemplateCache::new(writer.protocol(), &fix_version, &session_id, &target_host, u64::from(task.task_id));
+
+    let mut frames: Vec<OrderFrame> = Vec::with_capacity(batch_max);
+    let mut targets: Vec<u64> = Vec::with_capacity(batch_max);
+    let mut scratch: Vec<u8> = Vec::with_capacity(batch_max * 256);
 
     loop {
         if should_stop_sending(&cancel, task_end_ns) {
@@ -1269,7 +1338,7 @@ async fn rw_write_loop(
             }
         }
 
-        let target_send_ts_ns = next_send_ns;
+        // Pace: park only when genuinely ahead of the next due order.
         if next_send_ns > unix_nanos() {
             tokio::select! {
                 _ = time::sleep_until(instant_from_unix_nanos(next_send_ns)) => {}
@@ -1277,27 +1346,42 @@ async fn rw_write_loop(
             }
         }
 
-        let action = generator.next();
-        let seq = action.seq();
-        let frame = render_frame(&mut template_cache, &action);
+        // Collect every order that is now due (up to batch_max). target_send_ts_ns is
+        // captured here, per order, exactly as before batching was added.
+        frames.clear();
+        targets.clear();
+        let now_ns = unix_nanos();
+        while frames.len() < batch_max && next_send_ns <= now_ns {
+            let action = generator.next();
+            let frame = render_frame(&mut template_cache, &action);
+            targets.push(next_send_ns);
+            frames.push(frame);
+            next_send_ns = next_send_ns.saturating_add(interval_ns);
+        }
+        if frames.is_empty() {
+            continue;
+        }
+        let count = frames.len();
 
         {
             let mut map = pending.lock().expect("pending map poisoned");
-            map.insert(
-                frame.order_id.clone(),
-                PendingOrder {
-                    order_id: frame.order_id.clone(),
-                    orig_order_id: frame.orig_order_id.clone(),
-                    target_send_ts_ns,
-                    send_ts_ns: 0,
-                    barrier_epoch_ns: task_start_ns.saturating_sub(task.start_offset_ns),
-                    price: frame.price,
-                    qty: frame.qty,
-                    side: frame.side,
-                    payload_type: frame.payload_type,
-                    ord_type: frame.ord_type,
-                },
-            );
+            for (frame, &target) in frames.iter().zip(targets.iter()) {
+                map.insert(
+                    frame.order_id.clone(),
+                    PendingOrder {
+                        order_id: frame.order_id.clone(),
+                        orig_order_id: frame.orig_order_id.clone(),
+                        target_send_ts_ns: target,
+                        send_ts_ns: 0,
+                        barrier_epoch_ns,
+                        price: frame.price,
+                        qty: frame.qty,
+                        side: frame.side,
+                        payload_type: frame.payload_type,
+                        ord_type: frame.ord_type,
+                    },
+                );
+            }
         }
 
         let write_start_ns = unix_nanos();
@@ -1310,37 +1394,50 @@ async fn rw_write_loop(
         // (the ramp-collapse symptom). Cancellation still tears the loop down promptly at session
         // end, and a genuinely dead peer surfaces as a write error below.
         let write_res = tokio::select! {
-            res = writer.write_order(&frame) => res,
+            res = writer.write_batch(&frames, &mut scratch) => res,
             _ = cancel.cancelled() => break,
         };
         let protocol_label = metrics::protocol_label(writer.protocol());
         match write_res {
             Ok(()) => {
                 let send_ts_ns = unix_nanos();
-                metrics::order_sent(protocol_label);
-                metrics::observe_write(protocol_label, send_ts_ns.saturating_sub(write_start_ns), 1);
-                metrics::observe_slip(protocol_label, send_ts_ns.saturating_sub(target_send_ts_ns));
-                if let Some(p) = pending
-                    .lock()
-                    .expect("pending map poisoned")
-                    .get_mut(&frame.order_id)
+                metrics::orders_sent_by(protocol_label, count);
+                metrics::observe_write(protocol_label, send_ts_ns.saturating_sub(write_start_ns), count);
                 {
-                    p.send_ts_ns = send_ts_ns;
+                    let mut map = pending.lock().expect("pending map poisoned");
+                    for frame in frames.iter() {
+                        if let Some(p) = map.get_mut(&frame.order_id) {
+                            p.send_ts_ns = send_ts_ns;
+                        }
+                    }
                 }
-                sent += 1;
+                {
+                    let deadline_ns = send_ts_ns.saturating_add(RESPONSE_TIMEOUT_NS);
+                    let mut queue = expiry.lock().expect("expiry queue poisoned");
+                    for frame in frames.iter() {
+                        queue.push_back((deadline_ns, frame.order_id.clone()));
+                    }
+                }
+                for &target in targets.iter() {
+                    metrics::observe_slip(protocol_label, send_ts_ns.saturating_sub(target));
+                }
+                sent += count as u64;
             }
             Err(err) => {
-                pending
-                    .lock()
-                    .expect("pending map poisoned")
-                    .remove(&frame.order_id);
+                {
+                    let mut map = pending.lock().expect("pending map poisoned");
+                    for frame in frames.iter() {
+                        map.remove(&frame.order_id);
+                    }
+                }
                 metrics::order_write_error(protocol_label);
-                warn!(task_id = task.task_id, seq, error = %err, "REST/WS write failed; writer exiting");
+                warn!(
+                    task_id = task.task_id,
+                    error = %err, "REST/WS batch write failed; writer exiting"
+                );
                 return Ok(sent);
             }
         }
-
-        next_send_ns = next_send_ns.saturating_add(interval_ns);
     }
 
     Ok(sent)
@@ -1388,9 +1485,33 @@ async fn emit_response(
         .await;
 }
 
-/// clordid_from_json performs the module-specific operation described by its name.
-/// It keeps validation, side effects, and returned values within this module's contract.
+/// Cheap `"cl_ord_id"` key scan (P4), avoiding `serde_json::from_slice` + a
+/// `Resp` alloc per response on the hot read-loop path. Mirrors
+/// `services/ebpf-latency/src/parse.rs::json_string`: find the key, the colon,
+/// the opening quote, then the closing quote. ClOrdID is a bot-generated,
+/// unpadded `sess_bot_seq_[OR]` token (see fix.rs) that never contains a
+/// backslash or a literal `"` in the values bot-fleet itself produces — but a
+/// contestant's response is untrusted input, so if a `\` shows up before the
+/// closing quote this falls back to full `serde_json` parsing instead of
+/// guessing at escape handling.
 fn clordid_from_json(body: &[u8]) -> Option<String> {
+    const KEY: &[u8] = b"\"cl_ord_id\"";
+    let key_pos = find_subslice(body, KEY)?;
+    let rest = &body[key_pos + KEY.len()..];
+    let colon = rest.iter().position(|&b| b == b':')?;
+    let after_colon = &rest[colon + 1..];
+    let open = after_colon.iter().position(|&b| b == b'"')?;
+    let value_start = &after_colon[open + 1..];
+    let close = value_start.iter().position(|&b| b == b'"')?;
+    let value = &value_start[..close];
+
+    if value.contains(&b'\\') {
+        return clordid_from_json_serde(body);
+    }
+    std::str::from_utf8(value).ok().map(str::to_string)
+}
+
+fn clordid_from_json_serde(body: &[u8]) -> Option<String> {
     #[derive(serde::Deserialize)]
     struct Resp {
         cl_ord_id: Option<String>,
@@ -1753,6 +1874,100 @@ mod tests {
         assert_eq!(clordid_from_json(payload).as_deref(), Some("ord-ws-1"));
         assert_eq!(clordid_from_json(b"not json"), None);
         assert_eq!(clordid_from_json(b"{\"other\":1}"), None);
+    }
+
+    #[test]
+    /// clordid_key_scan_matches_full_json_field_ordering_and_whitespace covers the
+    /// P4 cheap-parse path across a few response shapes a contestant might send.
+    fn clordid_key_scan_matches_full_json_field_ordering_and_whitespace() {
+        assert_eq!(
+            clordid_from_json(br#"{"exec_type":"0","cl_ord_id":"ord-2"}"#).as_deref(),
+            Some("ord-2")
+        );
+        assert_eq!(
+            clordid_from_json(br#"{ "cl_ord_id" : "ord-3" , "exec_type":"0" }"#).as_deref(),
+            Some("ord-3")
+        );
+        assert_eq!(clordid_from_json(br#"{"cl_ord_id":""}"#).as_deref(), Some(""));
+    }
+
+    #[test]
+    /// clordid_falls_back_to_serde_when_the_value_contains_a_backslash ensures the
+    /// key-scan fast path never mis-parses an escaped value; it defers to the exact
+    /// serde_json behavior in that case instead of guessing at unescaping.
+    fn clordid_falls_back_to_serde_when_the_value_contains_a_backslash() {
+        let body = br#"{"cl_ord_id":"ord\"weird","exec_type":"0"}"#;
+        assert_eq!(clordid_from_json(body).as_deref(), Some("ord\"weird"));
+    }
+
+    #[test]
+    /// pop_due_expirations_evicts_only_due_entries_in_fifo_order verifies the P3
+    /// expiry queue: due entries pop from the front, later (not-yet-due) entries
+    /// stay queued, and `last_tick` forces every remaining entry out regardless of
+    /// deadline (matching the prior `HashMap::retain(... || last_tick)` semantics).
+    fn pop_due_expirations_evicts_only_due_entries_in_fifo_order() {
+        let mut queue: VecDeque<(u64, String)> = VecDeque::new();
+        queue.push_back((100, "a".to_string()));
+        queue.push_back((200, "b".to_string()));
+        queue.push_back((300, "c".to_string()));
+
+        let due = pop_due_expirations(&mut queue, 200, false);
+        assert_eq!(due, vec!["a".to_string(), "b".to_string()]);
+        assert_eq!(queue.len(), 1);
+        assert_eq!(queue.front().unwrap().1, "c");
+
+        let due = pop_due_expirations(&mut queue, 0, false);
+        assert!(due.is_empty(), "nothing due yet before last_tick");
+        assert_eq!(queue.len(), 1);
+    }
+
+    #[test]
+    /// pop_due_expirations_last_tick_drains_everything covers the final-tick flush.
+    fn pop_due_expirations_last_tick_drains_everything() {
+        let mut queue: VecDeque<(u64, String)> = VecDeque::new();
+        queue.push_back((u64::MAX, "a".to_string()));
+        queue.push_back((u64::MAX, "b".to_string()));
+
+        let due = pop_due_expirations(&mut queue, 0, true);
+        assert_eq!(due, vec!["a".to_string(), "b".to_string()]);
+        assert!(queue.is_empty());
+    }
+
+    #[test]
+    /// pop_due_expirations_skips_nothing_and_is_empty_on_empty_queue is the trivial
+    /// boundary case.
+    fn pop_due_expirations_on_empty_queue_returns_empty() {
+        let mut queue: VecDeque<(u64, String)> = VecDeque::new();
+        assert!(pop_due_expirations(&mut queue, u64::MAX, true).is_empty());
+    }
+
+    #[test]
+    /// concat_frames_batches_bytes_in_order verifies the REST batch-write helper
+    /// (P3') concatenates frame payloads in order with no separators, matching
+    /// HTTP/1.1 pipelining semantics (back-to-back requests on one write).
+    fn concat_frames_batches_bytes_in_order() {
+        fn frame(bytes: &[u8]) -> OrderFrame {
+            OrderFrame {
+                order_id: "id".into(),
+                orig_order_id: String::new(),
+                price: 0,
+                qty: 0,
+                side: Side::Buy,
+                bytes: bytes.to_vec(),
+                tag52_offset: None,
+                payload_type: PayloadType::New,
+                ord_type: OrdType::Limit,
+            }
+        }
+        let frames = vec![frame(b"AAA"), frame(b"BB"), frame(b"C")];
+        let mut out = Vec::new();
+        concat_frames(&frames, &mut out);
+        assert_eq!(out, b"AAABBC");
+
+        // Reused buffer must not retain a previous batch's bytes.
+        let frames2 = vec![frame(b"Z")];
+        concat_frames(&frames2, &mut out);
+        assert_eq!(out, b"Z");
     }
 
     #[tokio::test]

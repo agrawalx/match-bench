@@ -60,7 +60,9 @@ struct OrderSentBatchOwned {
     events: Vec<OrderSentEventOwned>,
 }
 
-const FIX_BIND: &str = "127.0.0.1:9876";
+fn fix_bind() -> String {
+    env::var("EXAMPLE_BIND").unwrap_or_else(|_| "127.0.0.1:9876".to_string())
+}
 const SESSION_ID: &str = "roundtrip-session";
 const SUBMISSION_ID: &str = "roundtrip-submission";
 // Defaults preserve the original correctness-roundtrip behavior; env overrides
@@ -89,10 +91,18 @@ fn bench_mode() -> bool {
     env::var("EXAMPLE_BENCH").as_deref() == Ok("1")
 }
 
-#[tokio::main(flavor = "multi_thread", worker_threads = 4)]
-/// main performs the module-specific operation described by its name.
-/// It keeps validation, side effects, and returned values within this module's contract.
-async fn main() -> Result<()> {
+// EXAMPLE_WORKER_THREADS sizes the tokio runtime (default 4) so the task-count
+// sweep can compare 1 process x N threads vs N pinned single-thread processes.
+fn main() -> Result<()> {
+    let threads = env_u64("EXAMPLE_WORKER_THREADS", 4) as usize;
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(threads)
+        .enable_all()
+        .build()?
+        .block_on(async_main())
+}
+
+async fn async_main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
         .with_env_filter(
@@ -107,7 +117,7 @@ async fn main() -> Result<()> {
     let suffix = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
-        .as_millis();
+        .as_millis() as u64 + std::process::id() as u64;
     let workload_topic = format!("test.workload.{suffix}");
     let barrier_topic = format!("test.barrier.{suffix}");
     let ready_topic = format!("test.ready.{suffix}");
@@ -132,8 +142,8 @@ async fn main() -> Result<()> {
     )
     .await?;
 
-    let echo = spawn_fix_echo_server(FIX_BIND, echo_latency_ms(), drop_every()).await?;
-    eprintln!("fix echo server up on {FIX_BIND}");
+    let echo = spawn_fix_echo_server(&fix_bind(), echo_latency_ms(), drop_every()).await?;
+    eprintln!("fix echo server up on {}", fix_bind());
 
     let config = Config {
         worker_id: "roundtrip-worker".to_string(),
@@ -160,8 +170,9 @@ async fn main() -> Result<()> {
 
     let barrier_epoch_ns = 0u64;
 
-    let host = FIX_BIND.split(':').next().unwrap().to_string();
-    let port: u16 = FIX_BIND.split(':').nth(1).unwrap().parse().unwrap();
+    let bind = fix_bind();
+    let host = bind.split(':').next().unwrap().to_string();
+    let port: u16 = bind.split(':').nth(1).unwrap().parse().unwrap();
     let spec = WorkloadSpec {
         session_id: SESSION_ID.to_string(),
         submission_id: SUBMISSION_ID.to_string(),
@@ -404,7 +415,22 @@ async fn create_topics(brokers: &str, topics: &[&str]) -> Result<()> {
             return Err(anyhow!("create topic {topic} failed: {code}"));
         }
     }
-    Ok(())
+    // Creation is acked by the controller before metadata propagates to brokers;
+    // a consumer subscribing in that window dies on UnknownTopicOrPartition.
+    // Poll metadata until every topic is visible.
+    let probe: StreamConsumer = ClientConfig::new()
+        .set("bootstrap.servers", brokers)
+        .set("group.id", "topic-probe")
+        .create()?;
+    for _ in 0..50 {
+        let md = probe.fetch_metadata(None, Duration::from_secs(2))?;
+        let visible: HashSet<&str> = md.topics().iter().map(|t| t.name()).collect();
+        if topics.iter().all(|t| visible.contains(t)) {
+            return Ok(());
+        }
+        sleep(Duration::from_millis(100)).await;
+    }
+    Err(anyhow!("topics not visible in metadata after 5s"))
 }
 
 /// collect_events performs the module-specific operation described by its name.

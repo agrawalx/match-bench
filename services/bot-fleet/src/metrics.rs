@@ -28,6 +28,12 @@ use prometheus_client::{
 // tell that survives even if Prometheus scraping (15s) is too coarse or the
 // port-forward dies. Separate from the write_seconds histogram, which is cumulative.
 static MAX_WRITE_BLOCK_NS: AtomicU64 = AtomicU64::new(0);
+// Same read-and-reset pattern for the pacing-fidelity signals the task-count
+// sweep keys on: worst coalesced batch and worst schedule slip since last snapshot,
+// plus write count so the logger can derive orders-per-write.
+static MAX_BATCH_SIZE: AtomicU64 = AtomicU64::new(0);
+static MAX_SLIP_NS: AtomicU64 = AtomicU64::new(0);
+static WRITES_TOTAL: AtomicU64 = AtomicU64::new(0);
 
 type ResultFamily = Family<[(&'static str, &'static str); 1], Counter>;
 type ProtocolFamily = Family<[(&'static str, &'static str); 1], Counter>;
@@ -317,6 +323,8 @@ pub fn observe_write(protocol: &'static str, write_ns: u64, batch_size: usize) {
         .observe(write_ns as f64 / 1e9);
     METRICS.write_batch_size.observe(batch_size as f64);
     MAX_WRITE_BLOCK_NS.fetch_max(write_ns, Ordering::Relaxed);
+    MAX_BATCH_SIZE.fetch_max(batch_size as u64, Ordering::Relaxed);
+    WRITES_TOTAL.fetch_add(1, Ordering::Relaxed);
 }
 
 /// observe_slip records one order's lateness vs its paced schedule (ns) on `protocol`.
@@ -325,6 +333,7 @@ pub fn observe_slip(protocol: &'static str, slip_ns: u64) {
         .schedule_slip_seconds
         .get_or_create(&[("protocol", protocol)])
         .observe(slip_ns as f64 / 1e9);
+    MAX_SLIP_NS.fetch_max(slip_ns, Ordering::Relaxed);
 }
 
 /// inflight_add increments the global sent-but-unacked gauge by `n` (one write batch).
@@ -357,6 +366,23 @@ pub fn write_errors_value() -> u64 {
 /// call and resets the tracker to zero (read-and-reset for per-second reporting).
 pub fn take_max_write_block_ns() -> u64 {
     MAX_WRITE_BLOCK_NS.swap(0, Ordering::Relaxed)
+}
+
+/// take_max_batch_size returns the largest coalesced write batch since the last
+/// call (read-and-reset). 1 = every order got its own write (distinct t1).
+pub fn take_max_batch_size() -> u64 {
+    MAX_BATCH_SIZE.swap(0, Ordering::Relaxed)
+}
+
+/// take_max_slip_ns returns the worst schedule slip since the last call
+/// (read-and-reset).
+pub fn take_max_slip_ns() -> u64 {
+    MAX_SLIP_NS.swap(0, Ordering::Relaxed)
+}
+
+/// writes_value returns the cumulative count of write_all calls across protocols.
+pub fn writes_value() -> u64 {
+    WRITES_TOTAL.load(Ordering::Relaxed)
 }
 
 /// render performs the module-specific operation described by its name.

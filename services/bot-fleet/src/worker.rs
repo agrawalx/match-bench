@@ -153,7 +153,7 @@ pub async fn run(mut config: Config) -> Result<()> {
 
     let cancel = CancelToken::new();
     {
-        let cancel = cancel.clone();
+        let cancel = cancel.clone(); // clone does not create a independent copy of the flag. 
         tokio::spawn(async move {
             let mut sigterm =
                 match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
@@ -293,13 +293,25 @@ async fn run_workload(
         let mut ticker = time::interval(Duration::from_secs(1));
         ticker.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
         let mut last_sent = metrics::orders_sent_value();
+        let mut last_writes = metrics::writes_value();
         let start = unix_nanos();
         loop {
             ticker.tick().await;
             let now_sent = metrics::orders_sent_value();
             let rate = now_sent.saturating_sub(last_sent);
             last_sent = now_sent;
+            let now_writes = metrics::writes_value();
+            let writes = now_writes.saturating_sub(last_writes);
+            last_writes = now_writes;
             let max_block_ms = metrics::take_max_write_block_ns() as f64 / 1e6;
+            // avg_batch = orders per write_all this second; with max_batch these are
+            // the t1-fidelity signals the task-count sweep keys on (1.0 = every
+            // order got its own write and timestamp).
+            let avg_batch = if writes > 0 {
+                rate as f64 / writes as f64
+            } else {
+                0.0
+            };
             info!(
                 session_id = %snapshot_session,
                 t_s = (unix_nanos().saturating_sub(start)) / 1_000_000_000,
@@ -307,6 +319,9 @@ async fn run_workload(
                 send_rate_per_s = rate,
                 inflight = metrics::inflight_value(),
                 max_write_block_ms = max_block_ms,
+                avg_batch = format!("{avg_batch:.2}").as_str(),
+                max_batch = metrics::take_max_batch_size(),
+                max_slip_ms = format!("{:.3}", metrics::take_max_slip_ns() as f64 / 1e6).as_str(),
                 write_errors = metrics::write_errors_value(),
                 "bot send snapshot"
             );

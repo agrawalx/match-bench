@@ -4,7 +4,7 @@
 //! behavior consistent with the service contracts documented in design.md.
 //! The comments in this file describe public structure and callable behavior.
 
-use iicpc_schemas_rust::{OrdType, PayloadType, Side};
+use iicpc_schemas_rust::{OrdType, PayloadType, Protocol, Side};
 
 use crate::time;
 
@@ -26,17 +26,16 @@ pub fn replace_order_id(session_id: &str, bot_id: u64, seq: u64) -> String {
 }
 
 #[derive(Debug, Clone)]
-/// OrderFrame stores the state passed across this module boundary.
-/// Keep field changes compatible with callers and serialized contracts.
+/// OrderFrame carries exactly one wire representation — the one selected by the
+/// task's protocol at render time. `tag52_offset` is only ever `Some` for FIX
+/// frames (there is no tag 52 to patch in REST/WS payloads).
 pub struct OrderFrame {
     pub order_id: String,
     pub orig_order_id: String,
     pub price: u64,
     pub qty: u64,
     pub side: Side,
-    pub fix: Vec<u8>,
-    pub rest: Vec<u8>,
-    pub ws_bytes: Vec<u8>,
+    pub bytes: Vec<u8>,
     pub tag52_offset: Option<usize>,
     pub payload_type: PayloadType,
     pub ord_type: OrdType,
@@ -55,24 +54,24 @@ impl OrderFrame {
         let mut old_sum = 0u32;
         let mut new_sum = 0u32;
         for i in 0..FIX_TIMESTAMP_LEN {
-            old_sum += u32::from(self.fix[offset + i]);
+            old_sum += u32::from(self.bytes[offset + i]);
             new_sum += u32::from(new_ts[i]);
-            self.fix[offset + i] = new_ts[i];
+            self.bytes[offset + i] = new_ts[i];
         }
 
-        let chk_offset = self.fix.len() - 4;
-        let old_chk_digit1 = self.fix[chk_offset] - b'0';
-        let old_chk_digit2 = self.fix[chk_offset + 1] - b'0';
-        let old_chk_digit3 = self.fix[chk_offset + 2] - b'0';
+        let chk_offset = self.bytes.len() - 4;
+        let old_chk_digit1 = self.bytes[chk_offset] - b'0';
+        let old_chk_digit2 = self.bytes[chk_offset + 1] - b'0';
+        let old_chk_digit3 = self.bytes[chk_offset + 2] - b'0';
         let old_checksum = u32::from(old_chk_digit1) * 100
             + u32::from(old_chk_digit2) * 10
             + u32::from(old_chk_digit3);
 
         let new_checksum = (old_checksum + 256 + (new_sum % 256) - (old_sum % 256)) % 256;
 
-        self.fix[chk_offset] = b'0' + (new_checksum / 100) as u8;
-        self.fix[chk_offset + 1] = b'0' + ((new_checksum / 10) % 10) as u8;
-        self.fix[chk_offset + 2] = b'0' + (new_checksum % 10) as u8;
+        self.bytes[chk_offset] = b'0' + (new_checksum / 100) as u8;
+        self.bytes[chk_offset + 1] = b'0' + ((new_checksum / 10) % 10) as u8;
+        self.bytes[chk_offset + 2] = b'0' + (new_checksum % 10) as u8;
     }
 }
 
@@ -251,7 +250,9 @@ fn build_rest_request(method: &str, target_host: &str, path: &str, json: &str) -
     rest.into_bytes()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_frame(
+    protocol: Protocol,
     fix_version: &str,
     session_id: &str,
     target_host: &str,
@@ -265,17 +266,28 @@ fn build_frame(
 ) -> OrderFrame {
     let order_id = kind.order_id(session_id, bot_id, seq);
 
-    let body = build_fix_body(kind, seq, &order_id, orig_order_id, price, qty, side);
-    let fix = finalize_fix(fix_version, &body);
-
-    let json = build_json_payload(kind, &order_id, orig_order_id, price, qty, side);
-    let rest = build_rest_request(
-        kind.rest_method(),
-        target_host,
-        &kind.rest_path(orig_order_id.unwrap_or("")),
-        &json,
-    );
-    let tag52_offset = find_tag52_offset(&fix);
+    let (bytes, tag52_offset) = match protocol {
+        Protocol::Fix => {
+            let body = build_fix_body(kind, seq, &order_id, orig_order_id, price, qty, side);
+            let fix = finalize_fix(fix_version, &body);
+            let tag52_offset = find_tag52_offset(&fix);
+            (fix, tag52_offset)
+        }
+        Protocol::Rest => {
+            let json = build_json_payload(kind, &order_id, orig_order_id, price, qty, side);
+            let rest = build_rest_request(
+                kind.rest_method(),
+                target_host,
+                &kind.rest_path(orig_order_id.unwrap_or("")),
+                &json,
+            );
+            (rest, None)
+        }
+        Protocol::Ws => {
+            let json = build_json_payload(kind, &order_id, orig_order_id, price, qty, side);
+            (json.into_bytes(), None)
+        }
+    };
 
     OrderFrame {
         order_id,
@@ -283,9 +295,7 @@ fn build_frame(
         price,
         qty,
         side,
-        fix,
-        rest,
-        ws_bytes: json.into_bytes(),
+        bytes,
         tag52_offset,
         payload_type: kind.payload_type(),
         ord_type: kind.ord_type(),
@@ -294,7 +304,9 @@ fn build_frame(
 
 /// order_frame performs the module-specific operation described by its name.
 /// It keeps validation, side effects, and returned values within this module's contract.
+#[allow(clippy::too_many_arguments)]
 pub fn order_frame(
+    protocol: Protocol,
     fix_version: &str,
     session_id: &str,
     target_host: &str,
@@ -305,6 +317,7 @@ pub fn order_frame(
     side: Side,
 ) -> OrderFrame {
     build_frame(
+        protocol,
         fix_version,
         session_id,
         target_host,
@@ -320,7 +333,9 @@ pub fn order_frame(
 
 /// market_frame performs the module-specific operation described by its name.
 /// It keeps validation, side effects, and returned values within this module's contract.
+#[allow(clippy::too_many_arguments)]
 pub fn market_frame(
+    protocol: Protocol,
     fix_version: &str,
     session_id: &str,
     target_host: &str,
@@ -330,6 +345,7 @@ pub fn market_frame(
     side: Side,
 ) -> OrderFrame {
     build_frame(
+        protocol,
         fix_version,
         session_id,
         target_host,
@@ -345,7 +361,9 @@ pub fn market_frame(
 
 /// cancel_frame performs the module-specific operation described by its name.
 /// It keeps validation, side effects, and returned values within this module's contract.
+#[allow(clippy::too_many_arguments)]
 pub fn cancel_frame(
+    protocol: Protocol,
     fix_version: &str,
     session_id: &str,
     target_host: &str,
@@ -357,6 +375,7 @@ pub fn cancel_frame(
     side: Side,
 ) -> OrderFrame {
     build_frame(
+        protocol,
         fix_version,
         session_id,
         target_host,
@@ -372,7 +391,9 @@ pub fn cancel_frame(
 
 /// replace_frame performs the module-specific operation described by its name.
 /// It keeps validation, side effects, and returned values within this module's contract.
+#[allow(clippy::too_many_arguments)]
 pub fn replace_frame(
+    protocol: Protocol,
     fix_version: &str,
     session_id: &str,
     target_host: &str,
@@ -384,6 +405,7 @@ pub fn replace_frame(
     side: Side,
 ) -> OrderFrame {
     build_frame(
+        protocol,
         fix_version,
         session_id,
         target_host,
@@ -512,10 +534,11 @@ pub fn execution_report_frame(fix_version: &str, seq: u64, clord_id: &str) -> Ve
 mod tests {
     use super::*;
 
-    // Offline serialization-cost breakdown for the raw-send bottleneck. build_frame
-    // currently serializes FIX + JSON + REST(HTTP) for EVERY order but only one is
-    // sent — this quantifies that waste and the FIX-vs-REST split. Run with:
-    //   cargo test -p iicpc-bot-fleet --lib serialization_cost -- --ignored --nocapture
+    // Offline serialization-cost breakdown for the raw-send bottleneck. Post-P1,
+    // build_frame renders only the protocol the caller asks for — this measures each
+    // protocol's render cost in isolation via the real order_frame entry point (no
+    // more all3/manual-path split, since there is no all3 path left to measure). Run
+    // with: cargo test -p iicpc-bot-fleet --lib serialization_cost -- --ignored --nocapture
     #[test]
     #[ignore]
     fn serialization_cost_breakdown() {
@@ -527,39 +550,37 @@ mod tests {
             "10.0.0.5:9898",
         );
 
-        // all three (what build_frame does today, per order)
-        let t = Instant::now();
         let mut sink = 0usize;
-        for seq in 0..n {
-            let f = order_frame(fv, sid, host, 42, seq, 10_000, 25, Side::Buy);
-            sink += f.fix.len() + f.rest.len() + f.ws_bytes.len();
-        }
-        let all3 = t.elapsed().as_nanos() / n as u128;
 
-        // FIX only
         let t = Instant::now();
         for seq in 0..n {
-            let oid = FrameKind::New.order_id(sid, 42, seq);
-            let body = build_fix_body(FrameKind::New, seq, &oid, None, 10_000, 25, Side::Buy);
-            sink += finalize_fix(fv, &body).len();
+            let f = order_frame(Protocol::Fix, fv, sid, host, 42, seq, 10_000, 25, Side::Buy);
+            sink += f.bytes.len();
         }
         let fix_only = t.elapsed().as_nanos() / n as u128;
 
-        // REST only (JSON + HTTP request)
         let t = Instant::now();
         for seq in 0..n {
-            let oid = FrameKind::New.order_id(sid, 42, seq);
-            let json = build_json_payload(FrameKind::New, &oid, None, 10_000, 25, Side::Buy);
-            sink += build_rest_request("POST", host, "/orders", &json).len();
+            let f = order_frame(Protocol::Rest, fv, sid, host, 42, seq, 10_000, 25, Side::Buy);
+            sink += f.bytes.len();
         }
         let rest_only = t.elapsed().as_nanos() / n as u128;
 
-        eprintln!("SERTIME ns/order  all3={all3}  fix_only={fix_only}  rest_only={rest_only}  (sink={sink})");
+        let t = Instant::now();
+        for seq in 0..n {
+            let f = order_frame(Protocol::Ws, fv, sid, host, 42, seq, 10_000, 25, Side::Buy);
+            sink += f.bytes.len();
+        }
+        let ws_only = t.elapsed().as_nanos() / n as u128;
+
         eprintln!(
-            "SERTIME implied max ser-only throughput/core: all3={}/s fix={}/s rest={}/s",
-            1_000_000_000 / all3.max(1),
+            "SERTIME ns/order  fix_only={fix_only}  rest_only={rest_only}  ws_only={ws_only}  (sink={sink})"
+        );
+        eprintln!(
+            "SERTIME implied max ser-only throughput/core: fix={}/s rest={}/s ws={}/s",
             1_000_000_000 / fix_only.max(1),
-            1_000_000_000 / rest_only.max(1)
+            1_000_000_000 / rest_only.max(1),
+            1_000_000_000 / ws_only.max(1)
         );
     }
 
@@ -570,15 +591,15 @@ mod tests {
         let logon = logon_frame("FIX.4.2", 1);
         assert_eq!(extract_tag(&logon, b"34"), Some(b"1".as_ref()));
 
-        let first = order_frame("FIX.4.2", "sess1", "host", 7, 1, 10_000, 5, Side::Buy);
-        let second = order_frame("FIX.4.2", "sess1", "host", 7, 2, 10_000, 5, Side::Buy);
+        let first = order_frame(Protocol::Fix, "FIX.4.2", "sess1", "host", 7, 1, 10_000, 5, Side::Buy);
+        let second = order_frame(Protocol::Fix, "FIX.4.2", "sess1", "host", 7, 2, 10_000, 5, Side::Buy);
 
-        assert_eq!(extract_tag(&first.fix, b"34"), Some(b"2".as_ref()));
-        assert_eq!(extract_tag(&second.fix, b"34"), Some(b"3".as_ref()));
+        assert_eq!(extract_tag(&first.bytes, b"34"), Some(b"2".as_ref()));
+        assert_eq!(extract_tag(&second.bytes, b"34"), Some(b"3".as_ref()));
 
         assert_eq!(first.order_id, "sess1_7_1_O");
         assert_eq!(
-            extract_tag(&first.fix, b"11"),
+            extract_tag(&first.bytes, b"11"),
             Some(b"sess1_7_1_O".as_ref())
         );
         assert_eq!(second.order_id, "sess1_7_2_O");
@@ -658,26 +679,39 @@ mod tests {
     /// patch_timestamp_sets_sending_time_and_keeps_checksum_valid performs the module-specific operation described by its name.
     /// It keeps validation, side effects, and returned values within this module's contract.
     fn patch_timestamp_sets_sending_time_and_keeps_checksum_valid() {
-        let mut frame = order_frame("FIX.4.2", "sess1", "host", 7, 42, 10_000, 5, Side::Buy);
+        let mut frame = order_frame(Protocol::Fix, "FIX.4.2", "sess1", "host", 7, 42, 10_000, 5, Side::Buy);
         let off = frame.tag52_offset.expect("tag 52 offset must be located");
 
         assert_eq!(
-            &frame.fix[off..off + FIX_TIMESTAMP_LEN],
+            &frame.bytes[off..off + FIX_TIMESTAMP_LEN],
             &FIX_TIMESTAMP_PLACEHOLDER[..]
         );
-        assert!(embedded_checksum_is_valid(&frame.fix));
+        assert!(embedded_checksum_is_valid(&frame.bytes));
 
         let ns = 1_716_023_400_123_000_000_u64;
         frame.patch_timestamp(ns);
 
         let expected = time::format_fix_timestamp(ns);
-        assert_eq!(&frame.fix[off..off + FIX_TIMESTAMP_LEN], &expected[..]);
+        assert_eq!(&frame.bytes[off..off + FIX_TIMESTAMP_LEN], &expected[..]);
         assert_ne!(
-            &frame.fix[off..off + FIX_TIMESTAMP_LEN],
+            &frame.bytes[off..off + FIX_TIMESTAMP_LEN],
             &FIX_TIMESTAMP_PLACEHOLDER[..]
         );
 
-        assert!(embedded_checksum_is_valid(&frame.fix));
+        assert!(embedded_checksum_is_valid(&frame.bytes));
+    }
+
+    #[test]
+    /// rest_and_ws_frames_have_no_tag52_offset_and_carry_no_fix_bytes ensures the
+    /// single-protocol render (P1) really only builds the requested representation.
+    fn rest_and_ws_frames_have_no_tag52_offset_and_carry_no_fix_bytes() {
+        let rest = order_frame(Protocol::Rest, "FIX.4.2", "sess1", "host", 7, 1, 10_000, 5, Side::Buy);
+        assert!(rest.tag52_offset.is_none());
+        assert!(rest.bytes.starts_with(b"POST /orders HTTP/1.1"));
+
+        let ws = order_frame(Protocol::Ws, "FIX.4.2", "sess1", "host", 7, 1, 10_000, 5, Side::Buy);
+        assert!(ws.tag52_offset.is_none());
+        assert!(ws.bytes.starts_with(b"{\"cl_ord_id\""));
     }
 
     #[test]
@@ -689,6 +723,7 @@ mod tests {
         let mut expected: Vec<String> = Vec::new();
         for seq in 1..=N {
             let f = order_frame(
+                Protocol::Fix,
                 "FIX.4.2",
                 "sess1",
                 "host",
@@ -699,7 +734,7 @@ mod tests {
                 Side::Buy,
             );
             expected.push(f.order_id.clone());
-            wire.extend_from_slice(&f.fix);
+            wire.extend_from_slice(&f.bytes);
         }
 
         for &chunk in &[1usize, 64, 256, 512, 1024, 4096, wire.len()] {

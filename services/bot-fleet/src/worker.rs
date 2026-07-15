@@ -7,7 +7,7 @@
 use std::{
     collections::HashMap,
     net::SocketAddr,
-    sync::{Arc, LazyLock, Mutex},
+    sync::{Arc, Mutex},
     time::Duration,
 };
 
@@ -24,7 +24,7 @@ use rand::{rngs::SmallRng, Rng};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt, ReadHalf, WriteHalf},
     net::{lookup_host, TcpStream},
-    sync::watch,
+    sync::{watch, Notify},
     task::JoinSet,
     time::{self, Instant},
 };
@@ -47,24 +47,17 @@ const RESPONSE_TIMEOUT_NS: u64 = 5_000_000_000;
 
 const BARRIER_WAIT: Duration = Duration::from_secs(120);
 
-// Closed-loop in-flight cap (per task), shared by EVERY protocol write loop (FIX,
-// REST, WS) so backpressure behaviour is identical across them. A slow contestant —
-// or a stalled telemetry path — makes the per-task pending map (sent-but-unacked
-// orders) grow without bound and OOMs the worker. Cap in-flight orders: at the cap
-// the send loop backpressures instead of firing more, pacing the connection to the
-// contestant's real ack rate. A healthy contestant keeps in-flight at ~rate×RTT
-// (orders of magnitude below the cap → never engages); only an over-driven slow
-// contestant is throttled, to its honest sustainable rate. Default 10k/task
-// (~2.4 MiB) → bounded worker memory that fits a small node, and well above
-// per_task_rate × RESPONSE_TIMEOUT for any realistic rate, so it never
+// Closed-loop in-flight cap (per task, `Config::max_inflight_per_task`), shared by
+// EVERY protocol write loop (FIX, REST, WS) so backpressure behaviour is identical
+// across them. A slow contestant — or a stalled telemetry path — makes the per-task
+// pending map (sent-but-unacked orders) grow without bound and OOMs the worker. Cap
+// in-flight orders: at the cap the send loop backpressures instead of firing more,
+// pacing the connection to the contestant's real ack rate. A healthy contestant
+// keeps in-flight at ~rate×RTT (orders of magnitude below the cap → never engages);
+// only an over-driven slow contestant is throttled, to its honest sustainable rate.
+// Default 10k/task (~2.4 MiB) → bounded worker memory that fits a small node, and
+// well above per_task_rate × RESPONSE_TIMEOUT for any realistic rate, so it never
 // false-throttles (e.g. an 835k/500-task drain sits at ~8.4k in-flight, under 10k).
-static MAX_INFLIGHT: LazyLock<usize> = LazyLock::new(|| {
-    std::env::var("BOT_MAX_INFLIGHT_PER_TASK")
-        .ok()
-        .and_then(|v| v.parse::<usize>().ok())
-        .filter(|&n| n >= 1)
-        .unwrap_or(10_000)
-});
 
 #[derive(Clone)]
 /// CancelToken stores the state passed across this module boundary.
@@ -493,6 +486,8 @@ async fn fire_workload(
         let global_seed = spec.global_seed;
         let telemetry = telemetry.clone();
         let cancel = cancel.clone();
+        let max_inflight = config.max_inflight_per_task;
+        let write_batch = config.write_batch;
         set.spawn(async move {
             ct.run(
                 &session_id,
@@ -504,6 +499,8 @@ async fn fire_workload(
                 write_timeout,
                 telemetry,
                 cancel,
+                max_inflight,
+                write_batch,
             )
             .await
         });
@@ -563,6 +560,8 @@ impl ConnectedTask {
         write_timeout: Duration,
         telemetry: TelemetrySink,
         cancel: CancelToken,
+        max_inflight: usize,
+        write_batch: usize,
     ) -> Result<u64> {
         let ctx = TaskContext {
             session_id: session_id.to_string(),
@@ -575,6 +574,8 @@ impl ConnectedTask {
             write_timeout,
             telemetry,
             cancel,
+            max_inflight,
+            write_batch,
         };
 
         match self.client {
@@ -598,6 +599,8 @@ struct TaskContext {
     write_timeout: Duration,
     telemetry: TelemetrySink,
     cancel: CancelToken,
+    max_inflight: usize,
+    write_batch: usize,
 }
 
 /// FixConnection stores the state passed across this module boundary.
@@ -615,6 +618,7 @@ async fn run_fix_task(task: TaskSpec, fix: FixConnection, ctx: TaskContext) -> R
     let drain_end_ns = task_end_ns.saturating_add(RESPONSE_TIMEOUT_NS);
 
     let pending: PendingMap = Arc::new(Mutex::new(HashMap::new()));
+    let notify: Arc<Notify> = Arc::new(Notify::new());
 
     let mut set: JoinSet<Result<u64>> = JoinSet::new();
 
@@ -622,6 +626,7 @@ async fn run_fix_task(task: TaskSpec, fix: FixConnection, ctx: TaskContext) -> R
         fix.write_half,
         task.clone(),
         pending.clone(),
+        notify.clone(),
         ctx.session_id.clone(),
         ctx.target_host.clone(),
         ctx.fix_version.clone(),
@@ -630,11 +635,14 @@ async fn run_fix_task(task: TaskSpec, fix: FixConnection, ctx: TaskContext) -> R
         task_end_ns,
         ctx.write_timeout,
         ctx.cancel.clone(),
+        ctx.max_inflight,
+        ctx.write_batch,
     ));
     set.spawn(fix_read_loop(
         fix.read_half,
         task.task_id,
         pending.clone(),
+        notify.clone(),
         ctx.telemetry.clone(),
         ctx.session_id.clone(),
         ctx.submission_id.clone(),
@@ -644,6 +652,7 @@ async fn run_fix_task(task: TaskSpec, fix: FixConnection, ctx: TaskContext) -> R
     set.spawn(watchdog_loop(
         task.task_id,
         pending.clone(),
+        notify.clone(),
         ctx.telemetry.clone(),
         ctx.session_id.clone(),
         ctx.submission_id.clone(),
@@ -673,9 +682,10 @@ fn mix_from_task(task: &TaskSpec) -> content::OrderMix {
     }
 }
 
-/// render_frame performs the module-specific operation described by its name.
-/// It keeps validation, side effects, and returned values within this module's contract.
+/// render_frame builds only the wire representation for `protocol` (P1: no more
+/// building FIX+JSON+REST for every order when only one is ever sent).
 fn render_frame(
+    protocol: Protocol,
     fix_version: &str,
     session_id: &str,
     target_host: &str,
@@ -690,6 +700,7 @@ fn render_frame(
             qty,
             side,
         } => fix::order_frame(
+            protocol,
             fix_version,
             session_id,
             target_host,
@@ -700,6 +711,7 @@ fn render_frame(
             *side,
         ),
         Action::NewMarket { seq, qty, side } => fix::market_frame(
+            protocol,
             fix_version,
             session_id,
             target_host,
@@ -715,6 +727,7 @@ fn render_frame(
             qty,
             side,
         } => fix::cancel_frame(
+            protocol,
             fix_version,
             session_id,
             target_host,
@@ -732,6 +745,7 @@ fn render_frame(
             qty,
             side,
         } => fix::replace_frame(
+            protocol,
             fix_version,
             session_id,
             target_host,
@@ -752,6 +766,7 @@ async fn fix_write_loop(
     mut write_half: WriteHalf<TcpStream>,
     task: TaskSpec,
     pending: PendingMap,
+    notify: Arc<Notify>,
     session_id: String,
     target_host: String,
     fix_version: String,
@@ -762,26 +777,18 @@ async fn fix_write_loop(
     // site) — it turns sink backpressure into permanent task death and collapses aggregate load.
     _write_timeout: Duration,
     cancel: CancelToken,
+    max_inflight: usize,
+    batch_max: usize,
 ) -> Result<u64> {
     time::sleep_until(instant_from_unix_nanos(task_start_ns)).await;
 
-    // BOT_WRITE_BATCH coalesces up to N already-DUE orders into a single write_all,
-    // so one write() syscall + one reactor round-trip amortises across many orders —
-    // the dominant per-order cost found by profiling (CPU-bound, ~42us/order, mostly
-    // the per-order write().await). Default 64; 1 reproduces legacy per-order sends.
-    // Pacing is unchanged: only orders past their schedule are batched (catch-up), so
-    // an under-the-ceiling task still paces normally and just writes batches of one.
-    static MAX_WRITE_BATCH: LazyLock<usize> = LazyLock::new(|| {
-        std::env::var("BOT_WRITE_BATCH")
-            .ok()
-            .and_then(|v| v.parse::<usize>().ok())
-            .filter(|&n| n >= 1)
-            .unwrap_or(64)
-    });
-    let batch_max = *MAX_WRITE_BATCH;
-
-    // Per-task closed-loop in-flight cap (module-level MAX_INFLIGHT, shared with the REST/WS path).
-    let max_inflight = *MAX_INFLIGHT;
+    // batch_max (Config::write_batch, env BOT_WRITE_BATCH) coalesces up to N already-DUE
+    // orders into a single write_all, so one write() syscall + one reactor round-trip
+    // amortises across many orders — the dominant per-order cost found by profiling
+    // (CPU-bound, ~42us/order, mostly the per-order write().await). Default 64; 1
+    // reproduces legacy per-order sends. Pacing is unchanged: only orders past their
+    // schedule are batched (catch-up), so an under-the-ceiling task still paces
+    // normally and just writes batches of one.
 
     let interval_ns = 1_000_000_000_u64 / u64::from(task.target_rps);
     let mut next_send_ns = task_start_ns;
@@ -807,13 +814,19 @@ async fn fix_write_loop(
 
         // In-flight backpressure: if too many orders are awaiting acks (contestant can't keep
         // up, or telemetry is stalled), wait for pending to drain — via acks or watchdog
-        // eviction — before issuing more, instead of growing memory unbounded.
+        // eviction — before issuing more, instead of growing memory unbounded. Woken by
+        // `notify` (signaled wherever the pending map shrinks) instead of polling every 1ms.
         while pending.lock().expect("pending map poisoned").len() >= max_inflight {
             if should_stop_sending(&cancel, task_end_ns) {
                 return Ok(sent);
             }
+            let notified = notify.notified();
+            tokio::pin!(notified);
+            if pending.lock().expect("pending map poisoned").len() < max_inflight {
+                break;
+            }
             tokio::select! {
-                _ = time::sleep(Duration::from_millis(1)) => {}
+                _ = &mut notified => {}
                 _ = cancel.cancelled() => return Ok(sent),
             }
         }
@@ -834,6 +847,7 @@ async fn fix_write_loop(
         while frames.len() < batch_max && next_send_ns <= now_ns {
             let action = generator.next();
             let mut frame = render_frame(
+                Protocol::Fix,
                 &fix_version,
                 &session_id,
                 &target_host,
@@ -841,7 +855,7 @@ async fn fix_write_loop(
                 &action,
             );
             frame.patch_timestamp(unix_nanos());
-            batch_buf.extend_from_slice(&frame.fix);
+            batch_buf.extend_from_slice(&frame.bytes);
             targets.push(next_send_ns);
             frames.push(frame);
             next_send_ns = next_send_ns.saturating_add(interval_ns);
@@ -891,8 +905,12 @@ async fn fix_write_loop(
         match write_res {
             Ok(()) => {
                 let send_ts_ns = unix_nanos();
-                metrics::orders_sent_by(count);
-                metrics::observe_write(send_ts_ns.saturating_sub(write_start_ns), count);
+                metrics::orders_sent_by(metrics::protocol_label(Protocol::Fix), count);
+                metrics::observe_write(
+                    metrics::protocol_label(Protocol::Fix),
+                    send_ts_ns.saturating_sub(write_start_ns),
+                    count,
+                );
                 {
                     let mut map = pending.lock().expect("pending map poisoned");
                     for frame in frames.iter() {
@@ -902,7 +920,10 @@ async fn fix_write_loop(
                     }
                 }
                 for &target in targets.iter() {
-                    metrics::observe_slip(send_ts_ns.saturating_sub(target));
+                    metrics::observe_slip(
+                        metrics::protocol_label(Protocol::Fix),
+                        send_ts_ns.saturating_sub(target),
+                    );
                 }
                 sent += count as u64;
             }
@@ -914,7 +935,7 @@ async fn fix_write_loop(
                     }
                 }
                 metrics::inflight_sub(count);
-                metrics::order_write_error();
+                metrics::order_write_error(metrics::protocol_label(Protocol::Fix));
                 warn!(
                     task_id = task.task_id,
                     error = %err, "FIX batch write failed; task writer exiting"
@@ -934,6 +955,7 @@ async fn fix_read_loop(
     mut read_half: ReadHalf<TcpStream>,
     task_id: u32,
     pending: PendingMap,
+    notify: Arc<Notify>,
     telemetry: TelemetrySink,
     session_id: String,
     submission_id: String,
@@ -981,6 +1003,7 @@ async fn fix_read_loop(
             };
             let Some(p) = pending_order else { continue };
             metrics::inflight_sub(1);
+            notify.notify_one();
 
             let recv_done_ts_ns = unix_nanos();
             telemetry
@@ -1024,6 +1047,7 @@ async fn fix_read_loop(
 async fn watchdog_loop(
     task_id: u32,
     pending: PendingMap,
+    notify: Arc<Notify>,
     telemetry: TelemetrySink,
     session_id: String,
     submission_id: String,
@@ -1057,6 +1081,9 @@ async fn watchdog_loop(
         };
 
         metrics::inflight_sub(to_evict.len());
+        if !to_evict.is_empty() {
+            notify.notify_one();
+        }
         for p in to_evict {
             telemetry
                 .record(OrderSentEvent {
@@ -1097,13 +1124,22 @@ enum RwWriter {
 }
 
 impl RwWriter {
+    /// protocol reports which wire representation this writer expects `render_frame`
+    /// to build (P1: the frame carries exactly one payload, selected up-front).
+    fn protocol(&self) -> Protocol {
+        match self {
+            Self::Rest(_) => Protocol::Rest,
+            Self::Ws(_) => Protocol::Ws,
+        }
+    }
+
     /// write_order performs the module-specific operation described by its name.
     /// It keeps validation, side effects, and returned values within this module's contract.
     async fn write_order(&mut self, frame: &OrderFrame) -> Result<()> {
         match self {
-            Self::Rest(w) => w.write_all(&frame.rest).await.context("write REST order"),
+            Self::Rest(w) => w.write_all(&frame.bytes).await.context("write REST order"),
             Self::Ws(s) => s
-                .send(WsMessage::Binary(frame.ws_bytes.clone()))
+                .send(WsMessage::Binary(frame.bytes.clone()))
                 .await
                 .context("write WS order"),
         }
@@ -1154,12 +1190,14 @@ async fn run_readwrite_task(
     let drain_end_ns = task_end_ns.saturating_add(RESPONSE_TIMEOUT_NS);
 
     let pending: PendingMap = Arc::new(Mutex::new(HashMap::new()));
+    let notify: Arc<Notify> = Arc::new(Notify::new());
     let mut set: JoinSet<Result<u64>> = JoinSet::new();
 
     set.spawn(rw_write_loop(
         writer,
         task.clone(),
         pending.clone(),
+        notify.clone(),
         ctx.session_id.clone(),
         ctx.target_host.clone(),
         ctx.fix_version.clone(),
@@ -1168,12 +1206,14 @@ async fn run_readwrite_task(
         task_end_ns,
         ctx.write_timeout,
         ctx.cancel.clone(),
+        ctx.max_inflight,
     ));
     match reader {
         ReadSource::Rest(read_half) => set.spawn(rest_read_loop(
             read_half,
             task.task_id,
             pending.clone(),
+            notify.clone(),
             ctx.telemetry.clone(),
             ctx.session_id.clone(),
             ctx.submission_id.clone(),
@@ -1184,6 +1224,7 @@ async fn run_readwrite_task(
             stream,
             task.task_id,
             pending.clone(),
+            notify.clone(),
             ctx.telemetry.clone(),
             ctx.session_id.clone(),
             ctx.submission_id.clone(),
@@ -1194,6 +1235,7 @@ async fn run_readwrite_task(
     set.spawn(watchdog_loop(
         task.task_id,
         pending.clone(),
+        notify.clone(),
         ctx.telemetry.clone(),
         ctx.session_id.clone(),
         ctx.submission_id.clone(),
@@ -1220,6 +1262,7 @@ async fn rw_write_loop(
     mut writer: RwWriter,
     task: TaskSpec,
     pending: PendingMap,
+    notify: Arc<Notify>,
     session_id: String,
     target_host: String,
     fix_version: String,
@@ -1231,6 +1274,7 @@ async fn rw_write_loop(
     // Matches the FIX path; backpressure comes from the in-flight cap + blocking write instead.
     _write_timeout: Duration,
     cancel: CancelToken,
+    max_inflight: usize,
 ) -> Result<u64> {
     time::sleep_until(instant_from_unix_nanos(task_start_ns)).await;
 
@@ -1244,7 +1288,6 @@ async fn rw_write_loop(
         global_seed ^ u64::from(task.task_id),
     );
     let mut sent: u64 = 0;
-    let max_inflight = *MAX_INFLIGHT;
 
     loop {
         if should_stop_sending(&cancel, task_end_ns) {
@@ -1254,12 +1297,18 @@ async fn rw_write_loop(
         // In-flight backpressure (same as the FIX path): if too many orders are awaiting acks
         // (contestant can't keep up, or telemetry is stalled), wait for pending to drain — via
         // acks or watchdog eviction — before issuing more, instead of growing memory unbounded.
+        // Woken by `notify` instead of polling every 1ms.
         while pending.lock().expect("pending map poisoned").len() >= max_inflight {
             if should_stop_sending(&cancel, task_end_ns) {
                 return Ok(sent);
             }
+            let notified = notify.notified();
+            tokio::pin!(notified);
+            if pending.lock().expect("pending map poisoned").len() < max_inflight {
+                break;
+            }
             tokio::select! {
-                _ = time::sleep(Duration::from_millis(1)) => {}
+                _ = &mut notified => {}
                 _ = cancel.cancelled() => return Ok(sent),
             }
         }
@@ -1275,6 +1324,7 @@ async fn rw_write_loop(
         let action = generator.next();
         let seq = action.seq();
         let frame = render_frame(
+            writer.protocol(),
             &fix_version,
             &session_id,
             &target_host,
@@ -1314,12 +1364,13 @@ async fn rw_write_loop(
             res = writer.write_order(&frame) => res,
             _ = cancel.cancelled() => break,
         };
+        let protocol_label = metrics::protocol_label(writer.protocol());
         match write_res {
             Ok(()) => {
                 let send_ts_ns = unix_nanos();
-                metrics::order_sent();
-                metrics::observe_write(send_ts_ns.saturating_sub(write_start_ns), 1);
-                metrics::observe_slip(send_ts_ns.saturating_sub(target_send_ts_ns));
+                metrics::order_sent(protocol_label);
+                metrics::observe_write(protocol_label, send_ts_ns.saturating_sub(write_start_ns), 1);
+                metrics::observe_slip(protocol_label, send_ts_ns.saturating_sub(target_send_ts_ns));
                 if let Some(p) = pending
                     .lock()
                     .expect("pending map poisoned")
@@ -1334,7 +1385,7 @@ async fn rw_write_loop(
                     .lock()
                     .expect("pending map poisoned")
                     .remove(&frame.order_id);
-                metrics::order_write_error();
+                metrics::order_write_error(protocol_label);
                 warn!(task_id = task.task_id, seq, error = %err, "REST/WS write failed; writer exiting");
                 return Ok(sent);
             }
@@ -1352,6 +1403,7 @@ async fn rw_write_loop(
 async fn emit_response(
     telemetry: &TelemetrySink,
     pending: &PendingMap,
+    notify: &Notify,
     session_id: &str,
     submission_id: &str,
     worker_id: &str,
@@ -1363,6 +1415,7 @@ async fn emit_response(
         map.remove(clord_id)
     };
     let Some(p) = pending_order else { return };
+    notify.notify_one();
     let recv_done_ts_ns = unix_nanos();
     telemetry
         .record(OrderSentEvent {
@@ -1473,6 +1526,7 @@ async fn rest_read_loop(
     mut read_half: ReadHalf<TcpStream>,
     task_id: u32,
     pending: PendingMap,
+    notify: Arc<Notify>,
     telemetry: TelemetrySink,
     session_id: String,
     submission_id: String,
@@ -1504,6 +1558,7 @@ async fn rest_read_loop(
                 emit_response(
                     &telemetry,
                     &pending,
+                    &notify,
                     &session_id,
                     &submission_id,
                     &worker_id,
@@ -1531,6 +1586,7 @@ async fn ws_read_loop(
     mut stream: SplitStream<WebSocketStream<MaybeTlsStream<TcpStream>>>,
     task_id: u32,
     pending: PendingMap,
+    notify: Arc<Notify>,
     telemetry: TelemetrySink,
     session_id: String,
     submission_id: String,
@@ -1561,6 +1617,7 @@ async fn ws_read_loop(
             emit_response(
                 &telemetry,
                 &pending,
+                &notify,
                 &session_id,
                 &submission_id,
                 &worker_id,
@@ -1836,7 +1893,7 @@ mod tests {
             qty: 5,
             side: Side::Buy,
         };
-        let frame = render_frame("FIX.4.2", "sess1", "host", 7, &new);
+        let frame = render_frame(Protocol::Fix, "FIX.4.2", "sess1", "host", 7, &new);
         assert_eq!(frame.orig_order_id, "", "new limit must have empty orig");
 
         let market = Action::NewMarket {
@@ -1844,7 +1901,7 @@ mod tests {
             qty: 5,
             side: Side::Buy,
         };
-        let frame = render_frame("FIX.4.2", "sess1", "host", 7, &market);
+        let frame = render_frame(Protocol::Fix, "FIX.4.2", "sess1", "host", 7, &market);
         assert_eq!(frame.orig_order_id, "", "market must have empty orig");
 
         let cancel = Action::Cancel {
@@ -1854,7 +1911,7 @@ mod tests {
             qty: 5,
             side: Side::Buy,
         };
-        let frame = render_frame("FIX.4.2", "sess1", "host", 7, &cancel);
+        let frame = render_frame(Protocol::Fix, "FIX.4.2", "sess1", "host", 7, &cancel);
         assert_eq!(frame.orig_order_id, "sess1_7_1_O");
 
         let replace = Action::Replace {
@@ -1864,7 +1921,7 @@ mod tests {
             qty: 5,
             side: Side::Buy,
         };
-        let frame = render_frame("FIX.4.2", "sess1", "host", 7, &replace);
+        let frame = render_frame(Protocol::Fix, "FIX.4.2", "sess1", "host", 7, &replace);
         assert_eq!(frame.orig_order_id, "sess1_7_1_O");
 
         let pending = PendingOrder {

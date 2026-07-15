@@ -22,7 +22,8 @@ run_one() { # $1=tasks $2=threads $3=cpulist $4=bind $5=logfile
   local pin=()
   [ -n "$3" ] && pin=(taskset -c "$3")
   BOT_DISABLE_TELEMETRY=1 EXAMPLE_BENCH=1 EXAMPLE_TASKS="$1" EXAMPLE_RPS="$RPS" \
-  EXAMPLE_DURATION_S="$DUR" EXAMPLE_ECHO_LATENCY_MS=0 EXAMPLE_DROP_EVERY=0 \
+  EXAMPLE_DURATION_S="$DUR" EXAMPLE_ECHO_LATENCY_MS=0 EXAMPLE_DROP_EVERY="${DROP_EVERY:-0}" \
+  BOT_MAX_INFLIGHT_PER_TASK="${MAX_INFLIGHT:-10000}" \
   EXAMPLE_WORKER_THREADS="$2" EXAMPLE_BIND="$4" \
   "${pin[@]}" "$BIN" >"$5" 2>&1 &
   echo $!

@@ -22,26 +22,6 @@ const (
 )
 
 const (
-	mixHFTPct           uint32 = 60
-	mixRetailPct        uint32 = 25
-	mixInstitutionalPct uint32 = 15
-)
-
-const (
-	hftMarketPct  uint8 = 10
-	hftCancelPct  uint8 = 30
-	hftReplacePct uint8 = 10
-
-	retailMarketPct  uint8 = 65
-	retailCancelPct  uint8 = 5
-	retailReplacePct uint8 = 0
-
-	institutionalMarketPct  uint8 = 20
-	institutionalCancelPct  uint8 = 0
-	institutionalReplacePct uint8 = 0
-)
-
-const (
 	rampWaveCount   = 9 // 9 waves; peak ≈ RampPeakRPS held at the top of the ramp
 	rampWaveCadence = 20 * time.Second
 )
@@ -59,6 +39,26 @@ type Config struct {
 
 	SpikePreWindow   time.Duration
 	SpikeBurstWindow time.Duration
+
+	// Population mix: share of the RPS budget assigned to each bot profile.
+	// Must sum to 100 (validate()).
+	MixHFTPct           uint32
+	MixRetailPct        uint32
+	MixInstitutionalPct uint32
+
+	// Per-profile action mix: percentage of a task's orders that are market
+	// orders / cancels / replaces (the remainder are new limit orders).
+	HFTMarketPct  uint8
+	HFTCancelPct  uint8
+	HFTReplacePct uint8
+
+	RetailMarketPct  uint8
+	RetailCancelPct  uint8
+	RetailReplacePct uint8
+
+	InstitutionalMarketPct  uint8
+	InstitutionalCancelPct  uint8
+	InstitutionalReplacePct uint8
 }
 
 // DefaultConfig performs the package-specific operation described by its name.
@@ -73,6 +73,22 @@ func DefaultConfig() Config {
 		RampPeakRPS:      90000,
 		SpikePreWindow:   25 * time.Second,
 		SpikeBurstWindow: 10 * time.Second,
+
+		MixHFTPct:           60,
+		MixRetailPct:        25,
+		MixInstitutionalPct: 15,
+
+		HFTMarketPct:  10,
+		HFTCancelPct:  30,
+		HFTReplacePct: 10,
+
+		RetailMarketPct:  65,
+		RetailCancelPct:  5,
+		RetailReplacePct: 0,
+
+		InstitutionalMarketPct:  20,
+		InstitutionalCancelPct:  0,
+		InstitutionalReplacePct: 0,
 	}
 }
 
@@ -88,6 +104,23 @@ func ConfigFromEnv() Config {
 	c.RampPeakRPS = envUint32("RAMP_PEAK_RPS", c.RampPeakRPS)
 	c.SpikePreWindow = envSeconds("SPIKE_PREWINDOW_S", c.SpikePreWindow)
 	c.SpikeBurstWindow = envSeconds("SPIKE_BURST_S", c.SpikeBurstWindow)
+
+	c.MixHFTPct = envUint32("MIX_HFT_PCT", c.MixHFTPct)
+	c.MixRetailPct = envUint32("MIX_RETAIL_PCT", c.MixRetailPct)
+	c.MixInstitutionalPct = envUint32("MIX_INSTITUTIONAL_PCT", c.MixInstitutionalPct)
+
+	c.HFTMarketPct = envUint8("HFT_MARKET_PCT", c.HFTMarketPct)
+	c.HFTCancelPct = envUint8("HFT_CANCEL_PCT", c.HFTCancelPct)
+	c.HFTReplacePct = envUint8("HFT_REPLACE_PCT", c.HFTReplacePct)
+
+	c.RetailMarketPct = envUint8("RETAIL_MARKET_PCT", c.RetailMarketPct)
+	c.RetailCancelPct = envUint8("RETAIL_CANCEL_PCT", c.RetailCancelPct)
+	c.RetailReplacePct = envUint8("RETAIL_REPLACE_PCT", c.RetailReplacePct)
+
+	c.InstitutionalMarketPct = envUint8("INSTITUTIONAL_MARKET_PCT", c.InstitutionalMarketPct)
+	c.InstitutionalCancelPct = envUint8("INSTITUTIONAL_CANCEL_PCT", c.InstitutionalCancelPct)
+	c.InstitutionalReplacePct = envUint8("INSTITUTIONAL_REPLACE_PCT", c.InstitutionalReplacePct)
+
 	return c
 }
 
@@ -112,6 +145,19 @@ func (c Config) validate() error {
 	if c.RampDuration <= time.Duration(rampWaveCount-1)*rampWaveCadence {
 		return fmt.Errorf("ramp duration %v too short for %d waves at %v cadence",
 			c.RampDuration, rampWaveCount, rampWaveCadence)
+	}
+	if sum := c.MixHFTPct + c.MixRetailPct + c.MixInstitutionalPct; sum != 100 {
+		return fmt.Errorf("population mix must sum to 100, got %d (hft=%d retail=%d institutional=%d)",
+			sum, c.MixHFTPct, c.MixRetailPct, c.MixInstitutionalPct)
+	}
+	for _, pct := range []uint8{
+		c.HFTMarketPct, c.HFTCancelPct, c.HFTReplacePct,
+		c.RetailMarketPct, c.RetailCancelPct, c.RetailReplacePct,
+		c.InstitutionalMarketPct, c.InstitutionalCancelPct, c.InstitutionalReplacePct,
+	} {
+		if pct > 100 {
+			return fmt.Errorf("action mix percentages must be 0-100, got %d", pct)
+		}
 	}
 	return nil
 }
@@ -142,7 +188,7 @@ func BuildAll(cfg Config) ([]ScenarioRow, error) {
 			Name:       "constant",
 			SortOrder:  1,
 			DurationNs: uint64(cfg.ConstantDuration.Nanoseconds()),
-			TaskSpecs:  buildConstantTasks(0, 0, cfg.ConstantDuration, cfg.ConstantTotalRPS),
+			TaskSpecs:  buildConstantTasks(cfg, 0, 0, cfg.ConstantDuration, cfg.ConstantTotalRPS),
 		},
 		{
 			ScenarioID: spikeID,
@@ -173,28 +219,29 @@ type ScenarioRow struct {
 
 // botCountsForBudget performs the package-specific operation described by its name.
 // It keeps validation, side effects, and returned values within this package's contract.
-func botCountsForBudget(totalRPS uint32) (hft, retail, inst, realisedRPS uint32) {
-	hft = (totalRPS * mixHFTPct / 100) / rpsPerHFT
-	retail = (totalRPS * mixRetailPct / 100) / rpsPerRetail
-	inst = (totalRPS * mixInstitutionalPct / 100) / rpsPerInstitutional
+func botCountsForBudget(cfg Config, totalRPS uint32) (hft, retail, inst, realisedRPS uint32) {
+	hft = (totalRPS * cfg.MixHFTPct / 100) / rpsPerHFT
+	retail = (totalRPS * cfg.MixRetailPct / 100) / rpsPerRetail
+	inst = (totalRPS * cfg.MixInstitutionalPct / 100) / rpsPerInstitutional
 	realisedRPS = hft*rpsPerHFT + retail*rpsPerRetail + inst*rpsPerInstitutional
 	return hft, retail, inst, realisedRPS
 }
 
 // buildConstantTasks performs the package-specific operation described by its name.
 // It keeps validation, side effects, and returned values within this package's contract.
-func buildConstantTasks(startTaskID uint32, startOffset, duration time.Duration, totalRPS uint32) []topics.TaskSpec {
-	hft, retail, inst, _ := botCountsForBudget(totalRPS)
-	return buildLayer(startTaskID, startOffset, duration, hft, retail, inst)
+func buildConstantTasks(cfg Config, startTaskID uint32, startOffset, duration time.Duration, totalRPS uint32) []topics.TaskSpec {
+	hft, retail, inst, _ := botCountsForBudget(cfg, totalRPS)
+	return buildLayer(cfg, startTaskID, startOffset, duration, hft, retail, inst)
 }
 
 // buildSpikeTasks performs the package-specific operation described by its name.
 // It keeps validation, side effects, and returned values within this package's contract.
 func buildSpikeTasks(cfg Config) []topics.TaskSpec {
-	baseline := buildConstantTasks(0, 0, cfg.SpikeDuration, cfg.ConstantTotalRPS)
+	baseline := buildConstantTasks(cfg, 0, 0, cfg.SpikeDuration, cfg.ConstantTotalRPS)
 
-	extraHFT, extraRetail, extraInst, _ := botCountsForBudget(cfg.SpikePeakRPS - cfg.ConstantTotalRPS)
+	extraHFT, extraRetail, extraInst, _ := botCountsForBudget(cfg, cfg.SpikePeakRPS-cfg.ConstantTotalRPS)
 	spike := buildLayer(
+		cfg,
 		uint32(len(baseline)),
 		cfg.SpikePreWindow,
 		cfg.SpikeBurstWindow,
@@ -219,8 +266,8 @@ func buildRampTasks(cfg Config) []topics.TaskSpec {
 		if duration <= 0 {
 			continue
 		}
-		hft, retail, inst, _ := botCountsForBudget(perWaveRPS)
-		layer := buildLayer(uint32(len(out)), startOffset, duration, hft, retail, inst)
+		hft, retail, inst, _ := botCountsForBudget(cfg, perWaveRPS)
+		layer := buildLayer(cfg, uint32(len(out)), startOffset, duration, hft, retail, inst)
 		out = append(out, layer...)
 	}
 	return out
@@ -228,7 +275,7 @@ func buildRampTasks(cfg Config) []topics.TaskSpec {
 
 // buildLayer performs the package-specific operation described by its name.
 // It keeps validation, side effects, and returned values within this package's contract.
-func buildLayer(startTaskID uint32, startOffset, duration time.Duration,
+func buildLayer(cfg Config, startTaskID uint32, startOffset, duration time.Duration,
 	hftBots, retailBots, institutionalBots uint32) []topics.TaskSpec {
 	total := hftBots + retailBots + institutionalBots
 	tasks := make([]topics.TaskSpec, 0, total)
@@ -241,9 +288,9 @@ func buildLayer(startTaskID uint32, startOffset, duration time.Duration,
 			TargetRPS:     rpsPerHFT,
 			StartOffsetNs: uint64(startOffset.Nanoseconds()),
 			DurationNs:    uint64(duration.Nanoseconds()),
-			MarketPct:     hftMarketPct,
-			CancelPct:     hftCancelPct,
-			ReplacePct:    hftReplacePct,
+			MarketPct:     cfg.HFTMarketPct,
+			CancelPct:     cfg.HFTCancelPct,
+			ReplacePct:    cfg.HFTReplacePct,
 		})
 		id++
 	}
@@ -254,9 +301,9 @@ func buildLayer(startTaskID uint32, startOffset, duration time.Duration,
 			TargetRPS:     rpsPerRetail,
 			StartOffsetNs: uint64(startOffset.Nanoseconds()),
 			DurationNs:    uint64(duration.Nanoseconds()),
-			MarketPct:     retailMarketPct,
-			CancelPct:     retailCancelPct,
-			ReplacePct:    retailReplacePct,
+			MarketPct:     cfg.RetailMarketPct,
+			CancelPct:     cfg.RetailCancelPct,
+			ReplacePct:    cfg.RetailReplacePct,
 		})
 		id++
 	}
@@ -267,9 +314,9 @@ func buildLayer(startTaskID uint32, startOffset, duration time.Duration,
 			TargetRPS:     rpsPerInstitutional,
 			StartOffsetNs: uint64(startOffset.Nanoseconds()),
 			DurationNs:    uint64(duration.Nanoseconds()),
-			MarketPct:     institutionalMarketPct,
-			CancelPct:     institutionalCancelPct,
-			ReplacePct:    institutionalReplacePct,
+			MarketPct:     cfg.InstitutionalMarketPct,
+			CancelPct:     cfg.InstitutionalCancelPct,
+			ReplacePct:    cfg.InstitutionalReplacePct,
 		})
 		id++
 	}
@@ -313,4 +360,20 @@ func envUint32(key string, def uint32) uint32 {
 		return def
 	}
 	return uint32(n)
+}
+
+// envUint8 performs the package-specific operation described by its name.
+// It keeps validation, side effects, and returned values within this package's contract.
+// Unlike envUint32, 0 is a valid override (several action-mix percentages default to
+// 0, e.g. RetailReplacePct), so only a parse error or out-of-range value falls back.
+func envUint8(key string, def uint8) uint8 {
+	v := os.Getenv(key)
+	if v == "" {
+		return def
+	}
+	n, err := strconv.ParseUint(v, 10, 8)
+	if err != nil {
+		return def
+	}
+	return uint8(n)
 }

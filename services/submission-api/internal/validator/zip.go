@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	"github.com/BurntSushi/toml"
+	"github.com/iicpc/schemas/topics"
 	cerrs "github.com/iicpc/submission-api/internal/errors"
 	"gopkg.in/yaml.v3"
 )
@@ -20,7 +21,12 @@ import (
 const MaxZipBytes = 100 << 20      // 100 MB
 const maxRootConfigBytes = 1 << 20 // 1 MB per root config/build file after decompression
 
-var validProtocols = map[string]struct{}{"FIX": {}, "REST": {}, "WS": {}}
+// ProtocolAll is the sentinel a submission declares in benchmark.yaml to
+// offer all three transports (FIX + REST + WS) to the same contestant
+// simultaneously. See docs/tps-improvement-plan.md §7.3.
+const ProtocolAll = "ALL"
+
+var validProtocols = map[string]struct{}{"FIX": {}, "REST": {}, "WS": {}, ProtocolAll: {}}
 var validLanguages = map[string]struct{}{"cpp": {}, "rust": {}, "go": {}}
 
 // BuildSection groups the state and dependencies used by this package.
@@ -134,6 +140,9 @@ func ValidateSubmissionZip(r io.ReaderAt, size int64) (*BenchmarkConfig, error) 
 	if cfg.Port < 1024 || cfg.Port > 65535 {
 		return nil, cerrs.ErrInvalidPortRange
 	}
+	if err := validatePortPolicy(cfg.Protocol, cfg.Port); err != nil {
+		return nil, err
+	}
 
 	if err := validateBuildTarget(&cfg, buildFileName, buildFileContent); err != nil {
 		return nil, err
@@ -156,6 +165,21 @@ func readLimitedRootFile(r io.Reader) ([]byte, error) {
 }
 
 var validBuildTargetName = regexp.MustCompile(`^[A-Za-z0-9_.-]{1,64}$`)
+
+// validatePortPolicy enforces the platform-mandated port table: FIX must
+// declare 9898, REST/WS must declare 8080. Ports are platform constants, not
+// contestant-chosen (docs/tps-improvement-plan.md §7.3). A submission
+// declaring ProtocolAll offers all protocols on their respective mandated
+// ports, so its declared port is not checked against a single value.
+func validatePortPolicy(protocol string, port int) error {
+	if protocol == ProtocolAll {
+		return nil
+	}
+	if uint16(port) != topics.PortForProtocol(protocol) {
+		return cerrs.ErrPortProtocolMismatch
+	}
+	return nil
+}
 
 // validateBuildTarget performs the package-specific operation described by its name.
 // It keeps validation, side effects, and returned values within this package's contract.

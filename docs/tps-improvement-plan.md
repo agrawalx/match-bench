@@ -206,6 +206,13 @@ helps here too.
   lists, and docs (fixed-port policy §7.3 enables it).
 - **Merge contestant variants** (echo/drain/matching) into one binary behind `--mode`
   flags to cut the e2e matrix maintenance.
+- **Template-render the echo contestant's execution reports.** Measured (local task
+  sweep, 2026-07-15): the echo's per-order reply — old `format!` builder + one
+  unbatched write per response — moved the worker's pacing knee from ~500-700k/s
+  (drain) down to ~300k/s (echo). Since the echo is the sink for
+  `measure-capacity-sweep.sh`, an unoptimized echo caps what the measurement pipeline
+  *appears* able to sustain. Same fix as P2, applied to
+  `execution_report_frame`.
 
 ### Explicit non-actions
 

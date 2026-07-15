@@ -20,6 +20,21 @@ pub const TOPIC_SCORES_CORRECTNESS: &str = "scores.correctness";
 pub const TOPIC_LEADERBOARD_UPDATES: &str = "leaderboard.updates";
 pub const TELEMETRY_PRICE_SCALE: u64 = 1_000_000_000;
 
+/// Platform-mandated port for FIX. Contestants do not choose this; the eBPF
+/// capture filter hardcodes it (see docs/tps-improvement-plan.md §7.3 port policy).
+pub const PORT_FIX: u16 = 9898;
+/// Platform-mandated port shared by REST and WS (WS upgrades from HTTP on the
+/// same connection). See docs/tps-improvement-plan.md §7.3 port policy.
+pub const PORT_HTTP_WS: u16 = 8080;
+
+/// port_for_protocol returns the platform-mandated port for a protocol.
+pub fn port_for_protocol(protocol: Protocol) -> u16 {
+    match protocol {
+        Protocol::Fix => PORT_FIX,
+        Protocol::Rest | Protocol::Ws => PORT_HTTP_WS,
+    }
+}
+
 /// partition_for maps an order id onto the Kafka partition contract.
 /// It uses FNV-1a 64-bit hashing so sent and acked producers select the same
 /// partition deterministically for a given order id.
@@ -75,6 +90,14 @@ pub enum BotProfile {
     Institutional,
 }
 
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+/// TargetSpec names one protocol+port a workload can dispatch tasks to.
+/// Ports are platform-mandated (see `port_for_protocol`), not contestant-chosen.
+pub struct TargetSpec {
+    pub protocol: Protocol,
+    pub port: u16,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 /// WorkloadSpec stores the state passed across this module boundary.
 /// Keep field changes compatible with callers and serialized contracts.
@@ -86,6 +109,8 @@ pub struct WorkloadSpec {
     pub target_host: String,
     pub target_port: u16,
     pub protocol: Protocol,
+    #[serde(default)]
+    pub targets: Vec<TargetSpec>,
     pub worker_index: u32,
     pub worker_count: u32,
     pub global_seed: u64,
@@ -98,6 +123,21 @@ pub struct WorkloadSpec {
     #[serde(default)]
     pub barrier_epoch_ns: u64,
     pub tasks: Vec<TaskSpec>,
+}
+
+impl WorkloadSpec {
+    /// resolved_targets returns `targets` if populated, otherwise a single-entry
+    /// vec built from the legacy `protocol`/`target_port` fields, so callers never
+    /// have to special-case old messages.
+    pub fn resolved_targets(&self) -> Vec<TargetSpec> {
+        if !self.targets.is_empty() {
+            return self.targets.clone();
+        }
+        vec![TargetSpec {
+            protocol: self.protocol,
+            port: self.target_port,
+        }]
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -115,6 +155,10 @@ pub struct TaskSpec {
     pub cancel_pct: u8,
     #[serde(default)]
     pub replace_pct: u8,
+    /// Index into the owning WorkloadSpec's `targets` (or its single resolved
+    /// legacy target when `targets` is empty). Defaults to 0.
+    #[serde(default)]
+    pub target_idx: u8,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -343,6 +387,57 @@ mod tests {
         assert_eq!(spec.protocol, Protocol::Fix);
         assert_eq!(spec.tasks.len(), 1);
         assert_eq!(spec.tasks[0].profile, BotProfile::Hft);
+        assert_eq!(spec.tasks[0].target_idx, 0);
+        assert!(spec.targets.is_empty());
+        assert_eq!(
+            spec.resolved_targets(),
+            vec![TargetSpec {
+                protocol: Protocol::Fix,
+                port: 8080
+            }]
+        );
+    }
+
+    #[test]
+    /// workload_spec_decodes_multi_target_payload verifies the Shape A schema:
+    /// a targets table plus per-task target_idx round-trip and resolve directly
+    /// without falling back to the legacy single protocol/port fields.
+    fn workload_spec_decodes_multi_target_payload() {
+        let payload = br#"{
+            "session_id":"sess-1",
+            "submission_id":"sub-1",
+            "target_host":"algo-sess-1.sandbox.svc.cluster.local",
+            "target_port":9898,
+            "protocol":"FIX",
+            "targets":[
+                {"protocol":"FIX","port":9898},
+                {"protocol":"REST","port":8080},
+                {"protocol":"WS","port":8080}
+            ],
+            "worker_index":0,
+            "worker_count":1,
+            "global_seed":42,
+            "tasks":[
+                {"task_id":1,"profile":"hft","target_rps":50,"start_offset_ns":0,"duration_ns":1000000000,"target_idx":2}
+            ]
+        }"#;
+
+        let spec: WorkloadSpec = serde_json::from_slice(payload).expect("decode workload spec");
+        assert_eq!(spec.targets.len(), 3);
+        assert_eq!(spec.tasks[0].target_idx, 2);
+        assert_eq!(spec.resolved_targets(), spec.targets);
+        assert_eq!(spec.targets[spec.tasks[0].target_idx as usize].protocol, Protocol::Ws);
+    }
+
+    #[test]
+    /// port_for_protocol_matches_platform_policy pins the mandated port table
+    /// so worker/orchestrator/eBPF stay in sync per docs/tps-improvement-plan.md §7.3.
+    fn port_for_protocol_matches_platform_policy() {
+        assert_eq!(port_for_protocol(Protocol::Fix), PORT_FIX);
+        assert_eq!(port_for_protocol(Protocol::Rest), PORT_HTTP_WS);
+        assert_eq!(port_for_protocol(Protocol::Ws), PORT_HTTP_WS);
+        assert_eq!(PORT_FIX, 9898);
+        assert_eq!(PORT_HTTP_WS, 8080);
     }
 
     #[test]

@@ -21,7 +21,24 @@ const (
 	TopicScoresCorrectness        = "scores.correctness"
 	TopicLeaderboardUpdates       = "leaderboard.updates"
 	TelemetryPriceScale           = uint64(1_000_000_000)
+
+	// PortFIX is the platform-mandated port for FIX. Contestants do not choose
+	// this; the eBPF capture filter hardcodes it. See
+	// docs/tps-improvement-plan.md §7.3 port policy.
+	PortFIX = uint16(9898)
+	// PortHTTPWS is the platform-mandated port shared by REST and WS. See
+	// docs/tps-improvement-plan.md §7.3 port policy.
+	PortHTTPWS = uint16(8080)
 )
+
+// PortForProtocol returns the platform-mandated port for a protocol string
+// ("FIX" | "REST" | "WS").
+func PortForProtocol(protocol string) uint16 {
+	if protocol == "FIX" {
+		return PortFIX
+	}
+	return PortHTTPWS
+}
 
 // SubmissionBuildRequested groups the state and dependencies used by this package.
 // Keep this type aligned with the runtime contract around it.
@@ -125,19 +142,37 @@ type SubmissionStatusUpdated struct {
 // WorkloadSpec groups the state and dependencies used by this package.
 // Keep this type aligned with the runtime contract around it.
 type WorkloadSpec struct {
-	SessionID        string     `json:"session_id"`
-	SubmissionID     string     `json:"submission_id"`
-	ContestantID     string     `json:"contestant_id"`
-	TargetHost       string     `json:"target_host"` // IP of contestant pod
-	TargetPort       uint16     `json:"target_port"`
-	Protocol         string     `json:"protocol"` // FIX | REST | WS
-	WorkerIndex      uint32     `json:"worker_index"`
-	WorkerCount      uint32     `json:"worker_count"` // Total worker pods
-	GlobalSeed       uint64     `json:"global_seed"`
-	FIXVersion       string     `json:"fix_version"`
-	ConnectTimeoutMS uint64     `json:"connect_timeout_ms"`
-	WriteTimeoutMS   uint64     `json:"write_timeout_ms"`
-	Tasks            []TaskSpec `json:"tasks"` // this worker's slice of the scenario's task list
+	SessionID        string       `json:"session_id"`
+	SubmissionID     string       `json:"submission_id"`
+	ContestantID     string       `json:"contestant_id"`
+	TargetHost       string       `json:"target_host"` // IP of contestant pod
+	TargetPort       uint16       `json:"target_port"`
+	Protocol         string       `json:"protocol"` // FIX | REST | WS
+	Targets          []TargetSpec `json:"targets,omitempty"`
+	WorkerIndex      uint32       `json:"worker_index"`
+	WorkerCount      uint32       `json:"worker_count"` // Total worker pods
+	GlobalSeed       uint64       `json:"global_seed"`
+	FIXVersion       string       `json:"fix_version"`
+	ConnectTimeoutMS uint64       `json:"connect_timeout_ms"`
+	WriteTimeoutMS   uint64       `json:"write_timeout_ms"`
+	Tasks            []TaskSpec   `json:"tasks"` // this worker's slice of the scenario's task list
+}
+
+// TargetSpec names one protocol+port a workload can dispatch tasks to. Ports
+// are platform-mandated (see PortForProtocol), not contestant-chosen.
+type TargetSpec struct {
+	Protocol string `json:"protocol"` // FIX | REST | WS
+	Port     uint16 `json:"port"`
+}
+
+// ResolvedTargets returns Targets if populated, otherwise a single-entry
+// slice built from the legacy Protocol/TargetPort fields, so callers never
+// have to special-case old messages.
+func (w WorkloadSpec) ResolvedTargets() []TargetSpec {
+	if len(w.Targets) > 0 {
+		return w.Targets
+	}
+	return []TargetSpec{{Protocol: w.Protocol, Port: w.TargetPort}}
 }
 
 // TaskSpec groups the state and dependencies used by this package.
@@ -151,6 +186,9 @@ type TaskSpec struct {
 	MarketPct     uint8  `json:"market_pct"`
 	CancelPct     uint8  `json:"cancel_pct"`
 	ReplacePct    uint8  `json:"replace_pct"`
+	// TargetIdx indexes the owning WorkloadSpec's Targets (or its single
+	// resolved legacy target when Targets is empty). Defaults to 0.
+	TargetIdx uint8 `json:"target_idx"`
 }
 
 // Scenario groups the state and dependencies used by this package.

@@ -682,16 +682,12 @@ fn mix_from_task(task: &TaskSpec) -> content::OrderMix {
     }
 }
 
-/// render_frame builds only the wire representation for `protocol` (P1: no more
-/// building FIX+JSON+REST for every order when only one is ever sent).
-fn render_frame(
-    protocol: Protocol,
-    fix_version: &str,
-    session_id: &str,
-    target_host: &str,
-    task_id: u64,
-    action: &content::Action,
-) -> fix::OrderFrame {
+/// render_frame patches `action` into `cache`'s per-`FrameKind` template (P2: no
+/// more `format!`-rebuilding the whole frame from scratch every order). `cache`
+/// is created once per task (see `fix::TemplateCache`) and lives for the task's
+/// lifetime; only ClOrdID-width rollovers and (for REST/WS) side/qty/price
+/// digit-width changes force it to re-render a kind's template.
+fn render_frame(cache: &mut fix::TemplateCache, action: &content::Action) -> fix::OrderFrame {
     use content::Action;
     match action {
         Action::NewLimit {
@@ -699,63 +695,22 @@ fn render_frame(
             price,
             qty,
             side,
-        } => fix::order_frame(
-            protocol,
-            fix_version,
-            session_id,
-            target_host,
-            task_id,
-            u64::from(*seq),
-            *price,
-            *qty,
-            *side,
-        ),
-        Action::NewMarket { seq, qty, side } => fix::market_frame(
-            protocol,
-            fix_version,
-            session_id,
-            target_host,
-            task_id,
-            u64::from(*seq),
-            *qty,
-            *side,
-        ),
+        } => cache.render_new(u64::from(*seq), *price, *qty, *side),
+        Action::NewMarket { seq, qty, side } => cache.render_market(u64::from(*seq), *qty, *side),
         Action::Cancel {
             seq,
             orig_order_id,
             price,
             qty,
             side,
-        } => fix::cancel_frame(
-            protocol,
-            fix_version,
-            session_id,
-            target_host,
-            task_id,
-            u64::from(*seq),
-            orig_order_id,
-            *price,
-            *qty,
-            *side,
-        ),
+        } => cache.render_cancel(u64::from(*seq), orig_order_id, *price, *qty, *side),
         Action::Replace {
             seq,
             orig_order_id,
             price,
             qty,
             side,
-        } => fix::replace_frame(
-            protocol,
-            fix_version,
-            session_id,
-            target_host,
-            task_id,
-            u64::from(*seq),
-            orig_order_id,
-            *price,
-            *qty,
-            *side,
-        ),
+        } => cache.render_replace(u64::from(*seq), orig_order_id, *price, *qty, *side),
     }
 }
 
@@ -802,6 +757,10 @@ async fn fix_write_loop(
     );
     let mut sent: u64 = 0;
 
+    // One template per FrameKind, reused for the task's whole lifetime (P2).
+    let mut template_cache =
+        fix::TemplateCache::new(Protocol::Fix, &fix_version, &session_id, &target_host, u64::from(task.task_id));
+
     // Reused across iterations to avoid per-batch allocation.
     let mut frames: Vec<OrderFrame> = Vec::with_capacity(batch_max);
     let mut targets: Vec<u64> = Vec::with_capacity(batch_max);
@@ -846,14 +805,7 @@ async fn fix_write_loop(
         let now_ns = unix_nanos();
         while frames.len() < batch_max && next_send_ns <= now_ns {
             let action = generator.next();
-            let mut frame = render_frame(
-                Protocol::Fix,
-                &fix_version,
-                &session_id,
-                &target_host,
-                u64::from(task.task_id),
-                &action,
-            );
+            let mut frame = render_frame(&mut template_cache, &action);
             frame.patch_timestamp(unix_nanos());
             batch_buf.extend_from_slice(&frame.bytes);
             targets.push(next_send_ns);
@@ -1289,6 +1241,10 @@ async fn rw_write_loop(
     );
     let mut sent: u64 = 0;
 
+    // One template per FrameKind, reused for the task's whole lifetime (P2').
+    let mut template_cache =
+        fix::TemplateCache::new(writer.protocol(), &fix_version, &session_id, &target_host, u64::from(task.task_id));
+
     loop {
         if should_stop_sending(&cancel, task_end_ns) {
             break;
@@ -1323,14 +1279,7 @@ async fn rw_write_loop(
 
         let action = generator.next();
         let seq = action.seq();
-        let frame = render_frame(
-            writer.protocol(),
-            &fix_version,
-            &session_id,
-            &target_host,
-            u64::from(task.task_id),
-            &action,
-        );
+        let frame = render_frame(&mut template_cache, &action);
 
         {
             let mut map = pending.lock().expect("pending map poisoned");
@@ -1887,13 +1836,15 @@ mod tests {
     fn cancel_replace_frames_carry_orig_order_id_new_orders_empty() {
         use content::Action;
 
+        let mut cache = fix::TemplateCache::new(Protocol::Fix, "FIX.4.2", "sess1", "host", 7);
+
         let new = Action::NewLimit {
             seq: 1,
             price: 10_000,
             qty: 5,
             side: Side::Buy,
         };
-        let frame = render_frame(Protocol::Fix, "FIX.4.2", "sess1", "host", 7, &new);
+        let frame = render_frame(&mut cache, &new);
         assert_eq!(frame.orig_order_id, "", "new limit must have empty orig");
 
         let market = Action::NewMarket {
@@ -1901,7 +1852,7 @@ mod tests {
             qty: 5,
             side: Side::Buy,
         };
-        let frame = render_frame(Protocol::Fix, "FIX.4.2", "sess1", "host", 7, &market);
+        let frame = render_frame(&mut cache, &market);
         assert_eq!(frame.orig_order_id, "", "market must have empty orig");
 
         let cancel = Action::Cancel {
@@ -1911,7 +1862,7 @@ mod tests {
             qty: 5,
             side: Side::Buy,
         };
-        let frame = render_frame(Protocol::Fix, "FIX.4.2", "sess1", "host", 7, &cancel);
+        let frame = render_frame(&mut cache, &cancel);
         assert_eq!(frame.orig_order_id, "sess1_7_1_O");
 
         let replace = Action::Replace {
@@ -1921,7 +1872,7 @@ mod tests {
             qty: 5,
             side: Side::Buy,
         };
-        let frame = render_frame(Protocol::Fix, "FIX.4.2", "sess1", "host", 7, &replace);
+        let frame = render_frame(&mut cache, &replace);
         assert_eq!(frame.orig_order_id, "sess1_7_1_O");
 
         let pending = PendingOrder {

@@ -17,8 +17,8 @@ use futures::{
     SinkExt, StreamExt,
 };
 use iicpc_schemas_rust::{
-    BotProfile, OrdType, OrderSentEvent, PayloadType, Protocol, ReadySignal, Side, TaskSpec,
-    WorkloadSpec,
+    BotProfile, OrdType, OrderSentEvent, PayloadType, Protocol, ReadySignal, Side, TargetSpec,
+    TaskSpec, WorkloadSpec,
 };
 use rand::{rngs::SmallRng, Rng};
 use tokio::{
@@ -423,15 +423,19 @@ fn validate_identifier(name: &str, value: &str) -> Result<()> {
 /// connect_tasks performs the module-specific operation described by its name.
 /// It keeps validation, side effects, and returned values within this module's contract.
 async fn connect_tasks(spec: &WorkloadSpec) -> Result<Vec<ConnectedTask>> {
-    let addr = resolve_target(&spec.target_host, spec.target_port).await?;
+    let targets = spec.resolved_targets();
     let mut set = JoinSet::new();
     let shared_spec = Arc::new(spec.clone());
+    let shared_targets = Arc::new(targets);
 
     for task in &spec.tasks {
         let spec = Arc::clone(&shared_spec);
+        let targets = Arc::clone(&shared_targets);
         let task = task.clone();
         set.spawn(async move {
-            let client = TargetClient::connect(&spec, addr).await?;
+            let target = resolve_task_target(&targets, &task);
+            let addr = resolve_target(&spec.target_host, target.port).await?;
+            let client = TargetClient::connect(&spec, target, addr).await?;
             Ok::<_, anyhow::Error>(ConnectedTask {
                 task,
                 target_host: spec.target_host.clone(),
@@ -451,6 +455,15 @@ async fn connect_tasks(spec: &WorkloadSpec) -> Result<Vec<ConnectedTask>> {
         }
     }
     Ok(tasks)
+}
+
+/// resolve_task_target picks a task's connection target from the spec's
+/// resolved targets table by `target_idx`, falling back to the first target
+/// if the index is out of range (defensive against a malformed message).
+fn resolve_task_target(targets: &[TargetSpec], task: &TaskSpec) -> TargetSpec {
+    *targets
+        .get(task.target_idx as usize)
+        .unwrap_or(&targets[0])
 }
 
 /// resolve_target performs the module-specific operation described by its name.
@@ -1768,9 +1781,9 @@ enum TargetClient {
 impl TargetClient {
     /// connect performs the module-specific operation described by its name.
     /// It keeps validation, side effects, and returned values within this module's contract.
-    async fn connect(spec: &WorkloadSpec, addr: SocketAddr) -> Result<Self> {
+    async fn connect(spec: &WorkloadSpec, target: TargetSpec, addr: SocketAddr) -> Result<Self> {
         let timeout = Duration::from_millis(spec.connect_timeout_ms);
-        match spec.protocol {
+        match target.protocol {
             Protocol::Fix => {
                 let mut stream = time::timeout(timeout, TcpStream::connect(addr))
                     .await
@@ -1796,7 +1809,7 @@ impl TargetClient {
                 Ok(Self::Rest(stream))
             }
             Protocol::Ws => {
-                let url = format!("ws://{}:{}/", spec.target_host, spec.target_port);
+                let url = format!("ws://{}:{}/", spec.target_host, target.port);
                 let (ws, _) = time::timeout(timeout, connect_async(url))
                     .await
                     .context("timed out connecting WS bot")?
@@ -1970,6 +1983,61 @@ mod tests {
         assert_eq!(out, b"Z");
     }
 
+    #[test]
+    /// resolve_task_target_picks_target_idx_entry verifies §7.3 Shape A: a task
+    /// resolves its connection target by target_idx into the spec's targets
+    /// table, independent of the legacy single protocol/target_port fields.
+    fn resolve_task_target_picks_target_idx_entry() {
+        let targets = vec![
+            TargetSpec {
+                protocol: Protocol::Fix,
+                port: 9898,
+            },
+            TargetSpec {
+                protocol: Protocol::Rest,
+                port: 8080,
+            },
+            TargetSpec {
+                protocol: Protocol::Ws,
+                port: 8080,
+            },
+        ];
+        let mut task = valid_spec().tasks.remove(0);
+
+        task.target_idx = 0;
+        assert_eq!(resolve_task_target(&targets, &task), targets[0]);
+        task.target_idx = 2;
+        assert_eq!(resolve_task_target(&targets, &task), targets[2]);
+    }
+
+    #[test]
+    /// resolve_task_target_falls_back_out_of_range guards against a malformed
+    /// or stale target_idx (e.g. a controller bug) crashing the worker.
+    fn resolve_task_target_falls_back_out_of_range() {
+        let targets = vec![TargetSpec {
+            protocol: Protocol::Fix,
+            port: 9898,
+        }];
+        let mut task = valid_spec().tasks.remove(0);
+        task.target_idx = 5;
+        assert_eq!(resolve_task_target(&targets, &task), targets[0]);
+    }
+
+    #[test]
+    /// legacy_spec_resolves_single_target_from_protocol_and_port verifies a
+    /// spec with an empty targets table (pre-Shape-A message) still resolves
+    /// a valid single target for connect_tasks/TargetClient::connect.
+    fn legacy_spec_resolves_single_target_from_protocol_and_port() {
+        let spec = valid_spec();
+        assert!(spec.targets.is_empty());
+        let resolved = spec.resolved_targets();
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0].protocol, spec.protocol);
+        assert_eq!(resolved[0].port, spec.target_port);
+        let task = &spec.tasks[0];
+        assert_eq!(resolve_task_target(&resolved, task), resolved[0]);
+    }
+
     #[tokio::test]
     /// resolves_hostname_target performs the module-specific operation described by its name.
     /// It keeps validation, side effects, and returned values within this module's contract.
@@ -2014,6 +2082,7 @@ mod tests {
             target_host: "127.0.0.1".into(),
             target_port: 8080,
             protocol: Protocol::Fix,
+            targets: Vec::new(),
             worker_index: 0,
             worker_count: 1,
             global_seed: 42,
@@ -2030,6 +2099,7 @@ mod tests {
                 market_pct: 0,
                 cancel_pct: 0,
                 replace_pct: 0,
+                target_idx: 0,
             }],
         }
     }

@@ -148,6 +148,7 @@ async fn main() -> Result<()> {
         target_host: host,
         target_port: port,
         protocol: Protocol::Fix,
+        targets: Vec::new(),
         worker_index: 0,
         worker_count: 1,
         global_seed: 42,
@@ -164,6 +165,7 @@ async fn main() -> Result<()> {
             market_pct: 0,
             cancel_pct: 0,
             replace_pct: 0,
+            target_idx: 0,
         }],
     };
 

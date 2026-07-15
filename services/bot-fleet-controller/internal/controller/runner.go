@@ -333,6 +333,28 @@ func (r *Runner) awaitReady(ctx context.Context, sess *Session, log *slog.Logger
 	return nil
 }
 
+// protocolAll is the benchmark.yaml sentinel (validator.ProtocolAll) a
+// submission declares to offer FIX + REST + WS to the same contestant
+// simultaneously. Duplicated here (not imported) to avoid a dependency from
+// the controller onto submission-api's validator package.
+const protocolAll = "ALL"
+
+// submissionTargets returns the TargetSpec table for a submission: one
+// target for a single-protocol submission, or all three platform-mandated
+// targets for a submission declaring multi-protocol support (§7.3 Shape A).
+func submissionTargets(sub *store.SubmissionInfo) []topics.TargetSpec {
+	if sub.Protocol == protocolAll {
+		return []topics.TargetSpec{
+			{Protocol: "FIX", Port: topics.PortFIX},
+			{Protocol: "REST", Port: topics.PortHTTPWS},
+			{Protocol: "WS", Port: topics.PortHTTPWS},
+		}
+	}
+	return []topics.TargetSpec{
+		{Protocol: sub.Protocol, Port: topics.PortForProtocol(sub.Protocol)},
+	}
+}
+
 // buildWorkloadSpecs applies behavior for its receiver performs the package-specific operation described by its name.
 // It keeps validation, side effects, and returned values within this package's contract.
 func (r *Runner) buildWorkloadSpecs(
@@ -341,15 +363,27 @@ func (r *Runner) buildWorkloadSpecs(
 	scenario *topics.Scenario,
 	workerCount uint32,
 ) []topics.WorkloadSpec {
+	targets := submissionTargets(sub)
+
 	tasksByWorker := make([][]topics.TaskSpec, workerCount)
 	for i := range tasksByWorker {
 		tasksByWorker[i] = make([]topics.TaskSpec, 0)
 	}
+	// Round-robin across declared targets first, so each task's target_idx
+	// is stable regardless of worker sharding; keeps the RPS budget split
+	// even across protocols and preserves globally-unique task_ids (§7.3
+	// rationale 1 — no ClOrdID collisions across protocol sets).
 	for i, ts := range scenario.TaskSpecs {
+		ts.TargetIdx = uint8(i % len(targets))
 		shard := uint32(i) % workerCount
 		tasksByWorker[shard] = append(tasksByWorker[shard], ts)
 	}
 
+	// Legacy protocol/target_port mirror the first declared target so old
+	// consumers (and the Rust Protocol enum, which has no "ALL" variant)
+	// always see a valid single-protocol fallback; workers with the Shape A
+	// change read Targets/TargetIdx instead and ignore these.
+	legacyTarget := targets[0]
 	specs := make([]topics.WorkloadSpec, 0, workerCount)
 	for i := uint32(0); i < workerCount; i++ {
 		specs = append(specs, topics.WorkloadSpec{
@@ -357,8 +391,9 @@ func (r *Runner) buildWorkloadSpecs(
 			SubmissionID:     sess.SubmissionID,
 			ContestantID:     sub.ContestantID,
 			TargetHost:       sess.Endpoint.Host,
-			TargetPort:       uint16(sess.Endpoint.Port),
-			Protocol:         sub.Protocol,
+			TargetPort:       legacyTarget.Port,
+			Protocol:         legacyTarget.Protocol,
+			Targets:          targets,
 			WorkerIndex:      i,
 			WorkerCount:      workerCount,
 			GlobalSeed:       r.runConfig.GlobalSeed,

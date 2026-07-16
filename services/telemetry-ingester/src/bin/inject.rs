@@ -25,8 +25,8 @@ use rdkafka::producer::{FutureProducer, FutureRecord};
 use rdkafka::util::Timeout;
 
 use iicpc_schemas_rust::{
-    partition_for, OrdType, OrderAckedBatch, OrderAckedEvent, OrderSentBatch, OrderSentEvent,
-    PayloadType, Side, TOPIC_ORDERS_ACKED, TOPIC_ORDERS_SENT,
+    session_band_partition, OrdType, OrderAckedBatch, OrderAckedEvent, OrderSentEvent,
+    PayloadType, Side, DEFAULT_PARTITION_BAND_WIDTH, TOPIC_ORDERS_ACKED, TOPIC_ORDERS_SENT,
 };
 
 fn env_or<T: std::str::FromStr>(k: &str, d: T) -> T {
@@ -86,7 +86,7 @@ async fn main() -> Result<()> {
                 for _ in 0..batch {
                     seq += threads;
                     let oid = format!("{session}-{tid}-{seq}-O");
-                    let p = partition_for(&oid, parts);
+                    let p = session_band_partition(&session, &oid, parts, DEFAULT_PARTITION_BAND_WIDTH);
                     let svc = 80_000u64; // 80us synthetic service time
                     let sent = OrderSentEvent {
                         session_id: session.clone(),
@@ -134,10 +134,19 @@ async fn main() -> Result<()> {
                 // per-message round-trips (the serial version capped ~56k/s).
                 let mut bufs: Vec<(i32, Vec<u8>, Vec<u8>)> = Vec::with_capacity(by_part.len());
                 for (p, (sents, ackeds)) in by_part {
-                    let sb = OrderSentBatch {
-                        session_id: session.clone(),
-                        worker_id: "inject".into(),
-                        events: sents,
+                    let submission_id = sents
+                        .first()
+                        .map(|e| e.submission_id.as_str())
+                        .unwrap_or("inject");
+                    let event_refs: Vec<iicpc_schemas_rust::OrderSentEventFieldsRef> = sents
+                        .iter()
+                        .map(iicpc_schemas_rust::OrderSentEventFieldsRef::from)
+                        .collect();
+                    let sb = iicpc_schemas_rust::OrderSentBatchV2Ref {
+                        session_id: &session,
+                        submission_id,
+                        worker_id: "inject",
+                        events: &event_refs,
                     };
                     let ab = OrderAckedBatch {
                         session_id: session.clone(),

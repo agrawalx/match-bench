@@ -35,6 +35,17 @@ pub fn port_for_protocol(protocol: Protocol) -> u16 {
     }
 }
 
+/// fnv1a_64 hashes bytes with FNV-1a 64-bit. Shared by every partition-selection
+/// function in this module so producers stay deterministically consistent.
+fn fnv1a_64(bytes: &[u8]) -> u64 {
+    let mut hash: u64 = 0xcbf29ce484222325;
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
+}
+
 /// partition_for maps an order id onto the Kafka partition contract.
 /// It uses FNV-1a 64-bit hashing so sent and acked producers select the same
 /// partition deterministically for a given order id.
@@ -43,12 +54,42 @@ pub fn partition_for(order_id: &str, num_partitions: i32) -> i32 {
     if num_partitions <= 1 {
         return 0;
     }
-    let mut hash: u64 = 0xcbf29ce484222325;
-    for byte in order_id.as_bytes() {
-        hash ^= u64::from(*byte);
-        hash = hash.wrapping_mul(0x100000001b3);
+    (fnv1a_64(order_id.as_bytes()) % num_partitions as u64) as i32
+}
+
+/// Default width (in partitions) of a session's partition band, used when
+/// BOT_PARTITION_BAND_WIDTH / ORDERS_PARTITION_BAND_WIDTH is unset.
+pub const DEFAULT_PARTITION_BAND_WIDTH: i32 = 8;
+
+/// session_band_partition maps (session_id, order_id) onto a Kafka partition.
+///
+/// The partition space is divided into bands of `band_width` partitions. A
+/// session is pinned to one band (hash(session_id) mod num_bands), and its
+/// orders are hashed within that band (hash(order_id) mod band_width). This
+/// keeps a session's traffic concentrated on a handful of partitions (better
+/// consumer batching / cache locality per session) while still spreading a
+/// single busy session across `band_width` partitions instead of one.
+///
+/// CRITICAL invariant: this is a pure function of (session_id, order_id,
+/// num_partitions, band_width) — orders.sent and orders.acked producers calling
+/// it with the same session_id, order_id, num_partitions, and band_width always
+/// land on the same partition for a given order.
+pub fn session_band_partition(
+    session_id: &str,
+    order_id: &str,
+    num_partitions: i32,
+    band_width: i32,
+) -> i32 {
+    debug_assert!(num_partitions > 0, "num_partitions must be positive");
+    if num_partitions <= 1 {
+        return 0;
     }
-    (hash % num_partitions as u64) as i32
+    let band_width = band_width.clamp(1, num_partitions);
+    let num_bands = (num_partitions / band_width).max(1);
+    let band = (fnv1a_64(session_id.as_bytes()) % num_bands as u64) as i32;
+    let base = band * band_width;
+    let within = (fnv1a_64(order_id.as_bytes()) % band_width as u64) as i32;
+    (base + within) % num_partitions
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
@@ -214,6 +255,138 @@ pub struct OrderSentBatch {
     pub session_id: String,
     pub worker_id: String,
     pub events: Vec<OrderSentEvent>,
+}
+
+/// OrderSentEventFields is the per-order wire payload for the positional
+/// orders.sent batch envelope: session_id/submission_id/worker_id are hoisted
+/// out to `OrderSentBatchV2` (identical across every event in a batch), so this
+/// struct only carries fields that vary per order. Field order here IS the wire
+/// contract for `rmp_serde::to_vec`/`from_slice` (positional msgpack) — producer
+/// (bot-fleet) and consumer (telemetry-ingester) must keep it identical.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OrderSentEventFields {
+    pub task_id: u32,
+    pub order_id: String,
+    pub target_send_ts_ns: u64,
+    pub send_ts_ns: u64,
+    pub recv_done_ts_ns: u64,
+    pub timed_out: bool,
+    pub price: u64,
+    pub qty: u64,
+    pub side: Side,
+    pub payload_type: PayloadType,
+    pub ord_type: OrdType,
+    pub orig_order_id: String,
+    pub barrier_epoch_ns: u64,
+}
+
+/// OrderSentEventFieldsRef is the zero-copy encode-side mirror of
+/// `OrderSentEventFields`. Field order MUST match it exactly.
+#[derive(Debug, Clone, Copy, Serialize)]
+pub struct OrderSentEventFieldsRef<'a> {
+    pub task_id: u32,
+    pub order_id: &'a str,
+    pub target_send_ts_ns: u64,
+    pub send_ts_ns: u64,
+    pub recv_done_ts_ns: u64,
+    pub timed_out: bool,
+    pub price: u64,
+    pub qty: u64,
+    pub side: Side,
+    pub payload_type: PayloadType,
+    pub ord_type: OrdType,
+    pub orig_order_id: &'a str,
+    pub barrier_epoch_ns: u64,
+}
+
+impl<'a> From<&'a OrderSentEvent> for OrderSentEventFieldsRef<'a> {
+    fn from(e: &'a OrderSentEvent) -> Self {
+        Self {
+            task_id: e.task_id,
+            order_id: &e.order_id,
+            target_send_ts_ns: e.target_send_ts_ns,
+            send_ts_ns: e.send_ts_ns,
+            recv_done_ts_ns: e.recv_done_ts_ns,
+            timed_out: e.timed_out,
+            price: e.price,
+            qty: e.qty,
+            side: e.side,
+            payload_type: e.payload_type,
+            ord_type: e.ord_type,
+            orig_order_id: &e.orig_order_id,
+            barrier_epoch_ns: e.barrier_epoch_ns,
+        }
+    }
+}
+
+impl OrderSentEventFields {
+    /// into_event reconstitutes a full `OrderSentEvent` by re-attaching the
+    /// batch-level envelope fields hoisted out of the wire format.
+    pub fn into_event(
+        self,
+        session_id: String,
+        submission_id: String,
+        worker_id: String,
+    ) -> OrderSentEvent {
+        OrderSentEvent {
+            session_id,
+            submission_id,
+            worker_id,
+            task_id: self.task_id,
+            order_id: self.order_id,
+            target_send_ts_ns: self.target_send_ts_ns,
+            send_ts_ns: self.send_ts_ns,
+            recv_done_ts_ns: self.recv_done_ts_ns,
+            timed_out: self.timed_out,
+            price: self.price,
+            qty: self.qty,
+            side: self.side,
+            payload_type: self.payload_type,
+            ord_type: self.ord_type,
+            orig_order_id: self.orig_order_id,
+            barrier_epoch_ns: self.barrier_epoch_ns,
+        }
+    }
+}
+
+/// OrderSentBatchV2 is the positional-msgpack wire envelope for orders.sent
+/// batches: session_id/submission_id/worker_id are hoisted to the envelope
+/// (identical across every event in the batch) instead of repeated per event.
+/// Field order IS the wire contract — see `OrderSentEventFields`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OrderSentBatchV2 {
+    pub session_id: String,
+    pub submission_id: String,
+    pub worker_id: String,
+    pub events: Vec<OrderSentEventFields>,
+}
+
+impl OrderSentBatchV2 {
+    /// into_events reconstitutes full `OrderSentEvent`s from the hoisted
+    /// envelope, for consumers (e.g. the aggregator) that operate on the
+    /// per-event struct.
+    pub fn into_events(self) -> Vec<OrderSentEvent> {
+        let OrderSentBatchV2 {
+            session_id,
+            submission_id,
+            worker_id,
+            events,
+        } = self;
+        events
+            .into_iter()
+            .map(|f| f.into_event(session_id.clone(), submission_id.clone(), worker_id.clone()))
+            .collect()
+    }
+}
+
+/// OrderSentBatchV2Ref is the zero-copy encode-side mirror of
+/// `OrderSentBatchV2`. Field order MUST match it exactly.
+#[derive(Debug, Clone, Copy, Serialize)]
+pub struct OrderSentBatchV2Ref<'a> {
+    pub session_id: &'a str,
+    pub submission_id: &'a str,
+    pub worker_id: &'a str,
+    pub events: &'a [OrderSentEventFieldsRef<'a>],
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -545,6 +718,109 @@ mod tests {
     #[test]
     fn partition_for_handles_single_partition() {
         assert_eq!(partition_for("anything", 1), 0);
+    }
+
+    /// session_band_partition_same_order_same_partition pins the CRITICAL cross-topic
+    /// invariant: orders.sent and orders.acked producers computing the partition for
+    /// the same (session_id, order_id) with the same (num_partitions, band_width)
+    /// must land on the same partition, since it's the same pure function.
+    #[test]
+    fn session_band_partition_same_order_same_partition() {
+        let session = "01890dd2-71f3-7abc-9def-0123456789ab";
+        let order = "01890dd2-71f3-7abc-9def-0123456789ab_42_99_O";
+        let sent_side = session_band_partition(session, order, 24, 8);
+        let acked_side = session_band_partition(session, order, 24, 8);
+        assert_eq!(sent_side, acked_side);
+        assert!((0..24).contains(&sent_side));
+    }
+
+    /// session_band_partition_confines_session_to_its_band checks that every order
+    /// belonging to a session lands within that session's band, not spread across
+    /// the whole partition space.
+    #[test]
+    fn session_band_partition_confines_session_to_its_band() {
+        let n = 24;
+        let band_width = 8;
+        let session = "sess-abc";
+        let base = session_band_partition(session, "anchor_order", n, band_width);
+        let band_start = (base / band_width) * band_width;
+        let mut seen = std::collections::HashSet::new();
+        for i in 0..500 {
+            let p = session_band_partition(session, &format!("order_{i}"), n, band_width);
+            assert!(
+                (band_start..band_start + band_width).contains(&p),
+                "partition {p} escaped session band [{band_start}, {})",
+                band_start + band_width
+            );
+            seen.insert(p);
+        }
+        assert!(seen.len() > 1, "a busy session should still spread within its band");
+    }
+
+    /// session_band_partition_spreads_sessions_across_bands checks different
+    /// sessions land in different bands (not all funneled to one).
+    #[test]
+    fn session_band_partition_spreads_sessions_across_bands() {
+        let n = 24;
+        let band_width = 8;
+        let mut seen = std::collections::HashSet::new();
+        for i in 0..50 {
+            let session = format!("sess-{i}");
+            let base = session_band_partition(&session, "order_0", n, band_width);
+            seen.insert(base / band_width);
+        }
+        assert!(seen.len() > 1, "sessions must spread across more than one band");
+    }
+
+    /// order_sent_batch_v2_positional_round_trips_field_order pins the wire contract
+    /// for the hoisted-envelope, positional-msgpack orders.sent format: bot-fleet's
+    /// telemetry.rs encodes `OrderSentBatchV2Ref` with `rmp_serde::to_vec` (positional)
+    /// and telemetry-ingester decodes it as `OrderSentBatchV2`. Field order here IS
+    /// the cross-crate contract; a mismatch decodes garbage instead of erroring.
+    #[test]
+    fn order_sent_batch_v2_positional_round_trips_field_order() {
+        let events = [OrderSentEvent {
+            session_id: "sess-1".into(),
+            submission_id: "sub-1".into(),
+            worker_id: "worker-1".into(),
+            task_id: 7,
+            order_id: "sess-1_7_3_O".into(),
+            target_send_ts_ns: 100,
+            send_ts_ns: 110,
+            recv_done_ts_ns: 900,
+            timed_out: false,
+            price: 10_000,
+            qty: 25,
+            side: Side::Buy,
+            payload_type: PayloadType::New,
+            ord_type: OrdType::Limit,
+            orig_order_id: String::new(),
+            barrier_epoch_ns: 1_770_000_000_000_000_000,
+        }];
+        let event_refs: Vec<OrderSentEventFieldsRef> =
+            events.iter().map(OrderSentEventFieldsRef::from).collect();
+        let batch_ref = OrderSentBatchV2Ref {
+            session_id: "sess-1",
+            submission_id: "sub-1",
+            worker_id: "worker-1",
+            events: &event_refs,
+        };
+
+        let bytes = rmp_serde::to_vec(&batch_ref).expect("positional encode");
+        let decoded: OrderSentBatchV2 = rmp_serde::from_slice(&bytes).expect("positional decode");
+
+        assert_eq!(decoded.session_id, "sess-1");
+        assert_eq!(decoded.submission_id, "sub-1");
+        assert_eq!(decoded.worker_id, "worker-1");
+        assert_eq!(decoded.events.len(), 1);
+        assert_eq!(decoded.events[0].order_id, "sess-1_7_3_O");
+        assert_eq!(decoded.events[0].barrier_epoch_ns, 1_770_000_000_000_000_000);
+
+        let reconstituted = decoded.into_events();
+        assert_eq!(reconstituted[0].session_id, events[0].session_id);
+        assert_eq!(reconstituted[0].submission_id, events[0].submission_id);
+        assert_eq!(reconstituted[0].worker_id, events[0].worker_id);
+        assert_eq!(reconstituted[0].order_id, events[0].order_id);
     }
 
     /// order_sent_event_barrier_epoch_round_trips checks msgpack compatibility.

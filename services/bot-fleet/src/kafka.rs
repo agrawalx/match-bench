@@ -129,19 +129,26 @@ pub fn telemetry_producer(brokers: &str) -> Result<KafkaProducer> {
     // WITHOUT awaiting delivery (enqueue_to_partition/send_result) and lets rdkafka's
     // background threads pipeline + batch them — so a deep internal queue is what
     // decouples the producer's drain rate from per-batch broker round-trips. linger
-    // accumulates a few ms of batches; lz4 shrinks the wire; the large
-    // queue.buffering bounds in-flight memory and provides backpressure (send_result
-    // returns QueueFull when saturated, which the aggregator handles losslessly).
+    // accumulates a few ms of batches; zstd shrinks the wire further than lz4 (now
+    // that the vendored librdkafka is built with the `zstd` cargo feature, i.e.
+    // libzstd IS compiled in); the large queue.buffering bounds in-flight memory and
+    // provides backpressure (send_result returns QueueFull when saturated, which the
+    // aggregator handles losslessly).
+    let compression_level = std::env::var("KAFKA_TELEMETRY_COMPRESSION_LEVEL")
+        .ok()
+        .and_then(|v| v.parse::<i32>().ok())
+        .filter(|n| (-131_072..=22).contains(n))
+        .unwrap_or(3); // zstd level 3: fast, good ratio; matches librdkafka's own default
     let inner: FutureProducer = ClientConfig::new()
         .set("bootstrap.servers", brokers)
         .set("acks", "1")
         // Drain the producer faster per broker round-trip: a longer linger accumulates many
         // app-batches into one large produce request (fewer requests = less broker per-request
-        // CPU + fewer fsyncs), lz4 shrinks the wire (zstd would be better but libzstd isn't
-        // compiled into the vendored librdkafka), and the larger batch ceilings let those big
-        // requests form.
+        // CPU + fewer fsyncs), zstd shrinks the wire more than lz4 did, and the larger batch
+        // ceilings let those big requests form.
         .set("linger.ms", "20")
-        .set("compression.type", "lz4")
+        .set("compression.type", "zstd")
+        .set("compression.level", compression_level.to_string())
         .set("batch.num.messages", "100000")
         .set("batch.size", "4194304") // 4 MiB produce-batch ceiling
         .set("queue.buffering.max.messages", "1000000")

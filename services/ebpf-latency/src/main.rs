@@ -26,7 +26,8 @@ use aya::{
 use iicpc_bot_fleet::kafka::{self, KafkaProducer};
 use iicpc_logger_rust::loki;
 use iicpc_schemas_rust::{
-    partition_for, OrderAckedBatchRef, OrderAckedEventRef, TOPIC_ORDERS_ACKED,
+    session_band_partition, OrderAckedBatchRef, OrderAckedEventRef, DEFAULT_PARTITION_BAND_WIDTH,
+    TOPIC_ORDERS_ACKED,
 };
 use std::collections::BTreeMap;
 use tokio::signal::unix::{signal, Signal, SignalKind};
@@ -67,6 +68,7 @@ struct Config {
     batch_size: usize,
     clamp_mtu: usize,
     orders_partitions: i32,
+    partition_band_width: i32,
 }
 
 impl Config {
@@ -109,6 +111,11 @@ impl Config {
             batch_size: env_usize("EBPF_BATCH_SIZE", DEFAULT_BATCH_SIZE),
             clamp_mtu: env_usize("CAPTURE_CLAMP_MTU", DEFAULT_CLAMP_MTU),
             orders_partitions: env_usize("ORDERS_PARTITIONS", 24).max(1) as i32,
+            partition_band_width: env_usize(
+                "BOT_PARTITION_BAND_WIDTH",
+                DEFAULT_PARTITION_BAND_WIDTH as usize,
+            )
+            .max(1) as i32,
         })
     }
 
@@ -280,12 +287,19 @@ fn drain_ringbuf(
 // sent event did), each chunk <= MAX_EVENTS_PER_BATCH. Pure + unit-tested.
 fn batch_by_partition(
     events: &mut Vec<MatchedEvent>,
+    session_id: &str,
     orders_partitions: i32,
+    partition_band_width: i32,
 ) -> Vec<(i32, Vec<MatchedEvent>)> {
     let mut by_part: BTreeMap<i32, Vec<MatchedEvent>> = BTreeMap::new();
     for e in events.drain(..) {
         by_part
-            .entry(partition_for(&e.order_id, orders_partitions))
+            .entry(session_band_partition(
+                session_id,
+                &e.order_id,
+                orders_partitions,
+                partition_band_width,
+            ))
             .or_default()
             .push(e);
     }
@@ -310,7 +324,12 @@ fn flush(producer: &KafkaProducer, config: &Config, events: &mut Vec<MatchedEven
     if events.is_empty() {
         return;
     }
-    for (part, chunk) in batch_by_partition(events, config.orders_partitions) {
+    for (part, chunk) in batch_by_partition(
+        events,
+        &config.session_id,
+        config.orders_partitions,
+        config.partition_band_width,
+    ) {
         let event_refs = chunk
             .iter()
             .map(|e| OrderAckedEventRef {
@@ -632,9 +651,11 @@ mod tests {
     #[test]
     fn batch_by_partition_drains_all_events_chunked_and_co_partitioned() {
         let n = 8i32;
+        let band_width = DEFAULT_PARTITION_BAND_WIDTH;
+        let session_id = "sess-test";
         let mut events: Vec<MatchedEvent> =
             (0..2500).map(|i| mk_event(&format!("ord-{i}"))).collect();
-        let batches = batch_by_partition(&mut events, n);
+        let batches = batch_by_partition(&mut events, session_id, n, band_width);
 
         assert!(events.is_empty(), "events must be fully drained");
         let total: usize = batches.iter().map(|(_, c)| c.len()).sum();
@@ -647,18 +668,42 @@ mod tests {
             );
             for e in chunk {
                 assert_eq!(
-                    partition_for(&e.order_id, n),
+                    session_band_partition(session_id, &e.order_id, n, band_width),
                     *part,
-                    "co-partitioned by order_id"
+                    "co-partitioned by session_id+order_id"
                 );
             }
         }
     }
 
+    /// batch_by_partition_matches_bot_fleet_sender_partition pins the CRITICAL
+    /// cross-topic invariant: an order's orders.acked partition (computed here)
+    /// must equal its orders.sent partition (computed by bot-fleet's
+    /// PartitionBatcher via the same `session_band_partition` function), so a
+    /// consumer joining sent+acked by order_id can rely on both landing on the
+    /// same partition.
+    #[test]
+    fn batch_by_partition_matches_bot_fleet_sender_partition() {
+        let n = 24i32;
+        let band_width = DEFAULT_PARTITION_BAND_WIDTH;
+        let session_id = "01890dd2-71f3-7abc-9def-0123456789ab";
+        let order_id = "01890dd2-71f3-7abc-9def-0123456789ab_42_7_O";
+
+        let mut events = vec![mk_event(order_id)];
+        let batches = batch_by_partition(&mut events, session_id, n, band_width);
+        let (acked_partition, _) = &batches[0];
+
+        let sent_partition = session_band_partition(session_id, order_id, n, band_width);
+        assert_eq!(
+            *acked_partition, sent_partition,
+            "orders.acked and orders.sent must land on the same partition for the same order"
+        );
+    }
+
     #[test]
     fn batch_by_partition_empty_is_empty() {
         let mut events: Vec<MatchedEvent> = Vec::new();
-        assert!(batch_by_partition(&mut events, 24).is_empty());
+        assert!(batch_by_partition(&mut events, "sess", 24, DEFAULT_PARTITION_BAND_WIDTH).is_empty());
     }
 
     const ENV_KEYS: &[&str] = &[
@@ -746,6 +791,7 @@ mod tests {
             batch_size: DEFAULT_BATCH_SIZE,
             clamp_mtu: DEFAULT_CLAMP_MTU,
             orders_partitions: 24,
+            partition_band_width: DEFAULT_PARTITION_BAND_WIDTH,
         };
         let mut events = vec![MatchedEvent {
             order_id: format!("order-{suffix}"),

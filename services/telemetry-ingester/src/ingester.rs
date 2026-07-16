@@ -7,7 +7,9 @@
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
-use iicpc_schemas_rust::{OrderAckedBatch, OrderSentBatch, TOPIC_ORDERS_ACKED, TOPIC_ORDERS_SENT};
+use iicpc_schemas_rust::{
+    OrderAckedBatch, OrderSentBatchV2, TOPIC_ORDERS_ACKED, TOPIC_ORDERS_SENT,
+};
 use rdkafka::message::Message;
 use tokio::time;
 use tracing::{info, warn};
@@ -75,11 +77,16 @@ pub async fn run(cfg: Config) -> Result<()> {
 /// It keeps validation, side effects, and returned values within this module's contract.
 fn ingest(agg: &mut Aggregator, topic: &str, payload: &[u8]) {
     match topic {
-        TOPIC_ORDERS_SENT => match rmp_serde::from_slice::<OrderSentBatch>(payload) {
+        // Positional msgpack with session_id/submission_id/worker_id hoisted into the
+        // batch envelope (see OrderSentBatchV2 in schemas/rust) — must mirror
+        // bot-fleet's telemetry.rs encode side exactly (rmp_serde::to_vec, not
+        // to_vec_named).
+        TOPIC_ORDERS_SENT => match rmp_serde::from_slice::<OrderSentBatchV2>(payload) {
             Ok(b) => {
-                metrics::events_consumed(TOPIC_ORDERS_SENT, b.events.len() as u64);
-                for e in &b.events {
-                    agg.observe_sent(e);
+                let count = b.events.len() as u64;
+                metrics::events_consumed(TOPIC_ORDERS_SENT, count);
+                for e in b.into_events() {
+                    agg.observe_sent(&e);
                 }
             }
             Err(e) => {

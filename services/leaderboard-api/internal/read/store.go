@@ -459,6 +459,41 @@ SELECT rg.run_group_id, COALESCE(sub.team_name,''), r.session_id, sc.name, r.sta
 	return out, rows.Err()
 }
 
+// ActiveSessionContestant groups the state and dependencies used by this package.
+// Keep this type aligned with the runtime contract around it.
+type ActiveSessionContestant struct {
+	SessionID    string
+	ContestantID string
+}
+
+// ActiveSessionContestants returns the contestant_id for each session belonging to a run
+// that is not yet completed or failed.
+func (s *Store) ActiveSessionContestants(ctx context.Context) ([]ActiveSessionContestant, error) {
+	rows, err := s.meta.Query(ctx, `
+SELECT r.session_id, COALESCE(sub.contestant_id,'')
+  FROM run_groups rg
+  JOIN runs r ON r.run_group_id = rg.run_group_id
+  LEFT JOIN submissions sub ON sub.submission_id = rg.submission_id
+ WHERE rg.run_group_id IN (
+   SELECT run_group_id FROM runs WHERE status NOT IN ('completed','failed')
+ )`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []ActiveSessionContestant
+	for rows.Next() {
+		var sc ActiveSessionContestant
+		if err := rows.Scan(&sc.SessionID, &sc.ContestantID); err != nil {
+			return nil, err
+		}
+		if sc.ContestantID != "" {
+			out = append(out, sc)
+		}
+	}
+	return out, rows.Err()
+}
+
 // String applies behavior for its receiver performs the package-specific operation described by its name.
 // It keeps validation, side effects, and returned values within this package's contract.
 func (s *Store) String() string { return fmt.Sprintf("read.Store(%p)", s) }

@@ -3,13 +3,51 @@
  * It is part of the IICPC frontend and keeps UI, API, or test behavior
  * scoped to this module so callers can rely on stable boundaries.
  */
-import { describe, expect, it } from "vitest";
+import { act, renderHook, waitFor } from "@testing-library/react";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import type { ReactNode } from "react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type {
   LeaderboardEntry,
   LeaderboardResponse,
   LeaderboardUpdateEvent,
+  LiveMetricsEvent,
 } from "@/types/leaderboard";
-import { applyLeaderboardUpdate } from "./useLeaderboard";
+import { applyLeaderboardUpdate, useLeaderboard } from "./useLeaderboard";
+
+vi.mock("@/api/leaderboard", () => ({
+  getLeaderboard: vi.fn(() =>
+    Promise.resolve({ source: "store", rows: [] } as LeaderboardResponse),
+  ),
+}));
+
+class FakeEventSource {
+  static instances: FakeEventSource[] = [];
+  url: string;
+  closed = false;
+  onopen: (() => void) | null = null;
+  onerror: (() => void) | null = null;
+  private listeners = new Map<string, Array<(event: MessageEvent) => void>>();
+
+  constructor(url: string) {
+    this.url = url;
+    FakeEventSource.instances.push(this);
+  }
+
+  addEventListener(type: string, listener: (event: MessageEvent) => void) {
+    this.listeners.set(type, [...(this.listeners.get(type) ?? []), listener]);
+  }
+
+  emit(type: string, data: string) {
+    for (const listener of this.listeners.get(type) ?? []) {
+      listener(new MessageEvent(type, { data }));
+    }
+  }
+
+  close() {
+    this.closed = true;
+  }
+}
 
 /**
  * entry performs the module-specific operation described by its name.
@@ -125,5 +163,88 @@ describe("applyLeaderboardUpdate", () => {
     const merged = next.rows.find((row) => row.run_group_id === "rg-1");
     expect(merged?.disqualified).toBe(true);
     expect(merged?.disqualification_code).toBe("DQ_SPOOF");
+  });
+});
+
+function liveMetricsEvent(
+  overrides: Partial<LiveMetricsEvent> = {},
+): LiveMetricsEvent {
+  return {
+    contestant_id: "c-1",
+    session_id: "sess-1",
+    wave_index: 3,
+    p50_ns: 100_000,
+    p99_ns: 900_000,
+    p999_ns: 1_500_000,
+    tps_1s: 12345.6,
+    error_rate: 0.01,
+    updated_at_ns: 9999,
+    ...overrides,
+  };
+}
+
+describe("useLeaderboard live_metrics", () => {
+  beforeEach(() => {
+    FakeEventSource.instances = [];
+    vi.stubGlobal("EventSource", FakeEventSource);
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  function wrapper({ children }: { children: ReactNode }) {
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+    return (
+      <QueryClientProvider client={queryClient}>
+        {children}
+      </QueryClientProvider>
+    );
+  }
+
+  it("keys incoming live_metrics events by session_id:contestant_id", async () => {
+    const { result } = renderHook(() => useLeaderboard(), { wrapper });
+
+    await waitFor(() => expect(FakeEventSource.instances).toHaveLength(1));
+
+    const source = FakeEventSource.instances[0];
+    const event = liveMetricsEvent();
+    act(() => source.emit("live_metrics", JSON.stringify(event)));
+
+    await waitFor(() =>
+      expect(result.current.liveMetrics["sess-1:c-1"]).toEqual(event),
+    );
+  });
+
+  it("keeps separate entries per session/contestant and updates in place", async () => {
+    const { result } = renderHook(() => useLeaderboard(), { wrapper });
+
+    await waitFor(() => expect(FakeEventSource.instances).toHaveLength(1));
+    const source = FakeEventSource.instances[0];
+
+    act(() =>
+      source.emit(
+        "live_metrics",
+        JSON.stringify(liveMetricsEvent({ session_id: "sess-2", tps_1s: 1 })),
+      ),
+    );
+    await waitFor(() =>
+      expect(result.current.liveMetrics["sess-2:c-1"]?.tps_1s).toBe(1),
+    );
+
+    act(() =>
+      source.emit(
+        "live_metrics",
+        JSON.stringify(
+          liveMetricsEvent({ session_id: "sess-2", tps_1s: 42 }),
+        ),
+      ),
+    );
+    await waitFor(() =>
+      expect(result.current.liveMetrics["sess-2:c-1"]?.tps_1s).toBe(42),
+    );
+    expect(Object.keys(result.current.liveMetrics)).toEqual(["sess-2:c-1"]);
   });
 });

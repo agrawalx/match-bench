@@ -64,7 +64,7 @@ func main() {
 	go consumer.RunStatus(ctx, cfg.StatusGroup)
 	go consumer.RunCorrectness(ctx, cfg.CorrectnessGroup)
 
-	w := worker.New(st, redisClient, pub, cfg.LeaderboardKey, log)
+	w := worker.New(st, redisClient, pub, log)
 	for i := 0; i < cfg.Concurrency; i++ {
 		go w.Run(ctx, ready)
 	}

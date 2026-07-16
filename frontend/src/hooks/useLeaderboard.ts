@@ -14,6 +14,7 @@ import type {
   LeaderboardEntry,
   LeaderboardResponse,
   LeaderboardUpdateEvent,
+  LiveMetricsEvent,
   SSEEvent,
 } from "@/types/leaderboard";
 import { useSSE, type SSEStatus } from "./useSSE";
@@ -58,6 +59,9 @@ export function useLeaderboard(scenario?: string) {
   const queryClient = useQueryClient();
   const [sseStatus, setSseStatus] = useState<SSEStatus>("closed");
   const [flashedRows, setFlashedRows] = useState<Set<string>>(new Set());
+  const [liveMetrics, setLiveMetrics] = useState<
+    Record<string, LiveMetricsEvent>
+  >({});
 
   const query = useQuery<LeaderboardResponse, ApiError>({
     queryKey: ["leaderboard", scenario ?? "all"],
@@ -92,6 +96,13 @@ export function useLeaderboard(scenario?: string) {
         );
         flash(event.data.contestant_id);
       }
+      if (event.type === "live_metrics") {
+        const metricsKey = `${event.data.session_id}:${event.data.contestant_id}`;
+        setLiveMetrics((current) => ({
+          ...current,
+          [metricsKey]: event.data,
+        }));
+      }
     },
     [flash, queryClient, key],
   );
@@ -108,5 +119,6 @@ export function useLeaderboard(scenario?: string) {
     error: query.error,
     sseStatus,
     flashedRows,
+    liveMetrics,
   };
 }

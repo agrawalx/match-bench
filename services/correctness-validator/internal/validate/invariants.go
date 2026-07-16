@@ -4,16 +4,17 @@
 // full reference-book replay that pass 1 (single-connection, invariants.go's sibling
 // batch/stream validators) already owns.
 //
-// Memory during ingestion is O(inflight): one lightweight record per live order (no
-// book, no price levels). The cross-flow inversion sweep and jitter histogram are
-// computed once at Finish() over the accumulated per-order records — O(n log n) to
-// sort by processing order, O(k) pairwise inversion checks where k is the number of
-// actual inversions found (cheap in practice: a compliant engine has ~zero). This is
-// a deliberate simplification versus a fully bounded sliding-window streaming sweep;
-// see the package-level note in the correctness-validator design doc.
+// Memory during ingestion is O(reorder_window + flows), independent of session
+// length: orders are fed through a bounded T7 reorder window (t7Reorderer, mirroring
+// source/reorder.go's T3 window but keyed by minT7Ns) and emerge in processing order.
+// Every check — per-flow FIFO, cross-flow priority vs t3, jitter — runs INCREMENTALLY
+// as each order emerges from the window, then the record is dropped immediately. There
+// is no per-session map and no Finish()-time batch pass: Finish only flushes whatever
+// is still buffered in the window and returns the report accumulated so far.
 package validate
 
 import (
+	"math/bits"
 	"sort"
 
 	"github.com/iicpc/correctness-validator/internal/model"
@@ -22,6 +23,10 @@ import (
 // DefaultCrossFlowWindowUs is the default W for the cross-flow priority-vs-t3 check
 // (env CROSS_FLOW_WINDOW_US).
 const DefaultCrossFlowWindowUs = 500
+
+// DefaultT7ReorderWindow caps the in-flight T7 reorder buffer (orders). Same
+// magnitude as source.DefaultReorderWindow (env VALIDATOR_T7_REORDER_WINDOW).
+const DefaultT7ReorderWindow = 1 << 20
 
 // CrossFlowPredicate is the P-F/P-G W-window predicate, pinned down precisely:
 //
@@ -66,102 +71,222 @@ type JitterStats struct {
 	MaxUs         float64
 }
 
-// jitterHistogram accumulates inversion magnitudes (ns) for one session and derives
-// percentiles on demand. A plain sorted-slice percentile calculator rather than a
-// true HDR histogram — adequate at per-session scale and exact, at the cost of O(n
-// log n) at Finish() instead of O(1) per sample; acceptable because in practice
-// inversions are rare for a compliant engine.
+// jitterHistogram accumulates inversion magnitudes (ns) for one session in a
+// fixed-bucket log2 histogram: one uint64 counter per power-of-two bucket (ns range
+// covered by uint64 needs at most 65 buckets), plus a running max and count kept
+// exactly. Size is O(1) — independent of the number of samples — which is what makes
+// jitter tracking safe for an unbounded-length session; a sorted-slice percentile
+// calculator (the old approach) grows without bound and reintroduces the same OOM
+// failure class this redesign removes. Percentiles are therefore bucket-resolution
+// estimates (the lower bound of the bucket containing the percentile rank); Count and
+// MaxUs remain exact since those don't require bucketing.
 type jitterHistogram struct {
-	samplesNs []uint64
+	buckets [65]uint64 // buckets[0] = ns==0, buckets[i] = ns in [2^(i-1), 2^i) for i>=1
+	count   uint64
+	maxNs   uint64
 }
 
-func (h *jitterHistogram) record(ns uint64) { h.samplesNs = append(h.samplesNs, ns) }
+func (h *jitterHistogram) record(ns uint64) {
+	idx := bits.Len64(ns)
+	h.buckets[idx]++
+	h.count++
+	if ns > h.maxNs {
+		h.maxNs = ns
+	}
+}
+
+func (h *jitterHistogram) percentileNs(p float64) uint64 {
+	if h.count == 0 {
+		return 0
+	}
+	rank := uint64(p * float64(h.count-1))
+	var cum uint64
+	for i, c := range h.buckets {
+		cum += c
+		if cum > rank {
+			if i == 0 {
+				return 0
+			}
+			return uint64(1) << uint(i-1)
+		}
+	}
+	return h.maxNs
+}
 
 func (h *jitterHistogram) stats(totalProcessed uint64) JitterStats {
-	n := len(h.samplesNs)
-	if n == 0 {
+	if h.count == 0 {
 		return JitterStats{}
-	}
-	sorted := make([]uint64, n)
-	copy(sorted, h.samplesNs)
-	sort.Slice(sorted, func(i, j int) bool { return sorted[i] < sorted[j] })
-	pct := func(p float64) float64 {
-		idx := int(p * float64(n-1))
-		if idx < 0 {
-			idx = 0
-		}
-		if idx >= n {
-			idx = n - 1
-		}
-		return float64(sorted[idx]) / 1000.0 // ns -> us
 	}
 	rate := 0.0
 	if totalProcessed > 0 {
-		rate = float64(n) / float64(totalProcessed)
+		rate = float64(h.count) / float64(totalProcessed)
 	}
 	return JitterStats{
-		Count:         uint64(n),
+		Count:         h.count,
 		InversionRate: rate,
-		P50Us:         pct(0.50),
-		P99Us:         pct(0.99),
-		P999Us:        pct(0.999),
-		MaxUs:         float64(sorted[n-1]) / 1000.0,
+		P50Us:         float64(h.percentileNs(0.50)) / 1000.0,
+		P99Us:         float64(h.percentileNs(0.99)) / 1000.0,
+		P999Us:        float64(h.percentileNs(0.999)) / 1000.0,
+		MaxUs:         float64(h.maxNs) / 1000.0,
 	}
 }
 
-// invOrder is the lightweight per-order record kept for invariants mode — no book
-// state, just what's needed for the accounting + cross-flow checks.
-type invOrder struct {
+// invRec is the lightweight record carried through the T7 reorder window — just what
+// the incremental checks need. It is dropped as soon as the incremental checks for it
+// have run; nothing keyed by order ID is retained across orders.
+type invRec struct {
 	orderID string
-	kind    model.Kind
 	flow    model.Flow
 	tcpSeq  uint32
 	t3Ns    uint64
-	qty     uint64
 	minT7Ns uint64
-	hasResp bool
+}
+
+// t7Reorderer emits invRecs in ascending minT7Ns order using bounded memory, mirroring
+// source/reorder.go's Reorderer pattern (accumulate to 2*window, sort, release the
+// safe first half) but keyed directly by minT7Ns — no per-flow promotion is needed
+// here since minT7Ns is already known in full at Push time (unlike T3, which needs
+// head-of-line promotion from TCP retransmission ordering).
+type t7Reorderer struct {
+	window    int
+	buf       []invRec
+	watermark uint64
+	started   bool
+	emit      func(invRec)
+	late      func()
+}
+
+func newT7Reorderer(window int, emit func(invRec), late func()) *t7Reorderer {
+	if window < 1 {
+		window = 1
+	}
+	return &t7Reorderer{window: window, emit: emit, late: late}
+}
+
+// push adds one record. If it arrives after the watermark already advanced past its
+// minT7Ns (i.e. its correct slot in the emission order was already released), it
+// cannot be inserted into an already-sorted-and-released prefix — count it as a late
+// arrival instead of silently corrupting the FIFO/cross-flow checks with an
+// out-of-order record.
+func (r *t7Reorderer) push(rec invRec) {
+	if r.started && rec.minT7Ns < r.watermark {
+		r.late()
+		return
+	}
+	r.buf = append(r.buf, rec)
+	if len(r.buf) >= 2*r.window {
+		r.release(r.window)
+	}
+}
+
+func (r *t7Reorderer) flush() {
+	r.release(len(r.buf))
+}
+
+func (r *t7Reorderer) release(n int) {
+	if n <= 0 || len(r.buf) == 0 {
+		return
+	}
+	if n > len(r.buf) {
+		n = len(r.buf)
+	}
+	sortInvRecs(r.buf)
+	for i := 0; i < n; i++ {
+		rec := r.buf[i]
+		if rec.minT7Ns > r.watermark || !r.started {
+			r.watermark = rec.minT7Ns
+			r.started = true
+		}
+		r.emit(rec)
+	}
+	rest := make([]invRec, len(r.buf)-n)
+	copy(rest, r.buf[n:])
+	r.buf = rest
+}
+
+func sortInvRecs(buf []invRec) {
+	sort.SliceStable(buf, func(i, j int) bool { return buf[i].minT7Ns < buf[j].minT7Ns })
 }
 
 // InvariantsValidator implements the pass-2 book-free checks. Feed it every order (in
-// any order — arrival/EffectiveT3 order from the existing Reorderer is fine) via
-// Apply, then call Finish for the report.
+// any order — arrival/EffectiveT3 order from the existing source Reorderer is fine)
+// via Apply, then call Finish for the report. Internally, orders with a response are
+// pushed through a bounded T7 reorder window and checked incrementally as they emerge
+// in processing (min-T7) order; orders with zero responses are counted as lost
+// immediately in Apply and never enter the window (see Apply's doc comment for why).
 type InvariantsValidator struct {
 	windowUs uint64
-	orders   map[string]*invOrder
 	rep      Report
+	window   *t7Reorderer
+
+	// Incremental per-flow FIFO state: O(flows).
+	lastSeq    map[model.Flow]uint32
+	lastSeqSet map[model.Flow]bool
+
+	// Incremental cross-flow tracker: O(1). Running max t3 seen so far in
+	// processing order, plus a second-best from a different flow so a same-flow
+	// max never masks a cross-flow jump (see the comment on the original
+	// Finish()-time version below, now inlined into onEmit).
+	max1T3, max2T3   uint64
+	max1Flow         model.Flow
+	max1Set, max2Set bool
+
+	jitter    *jitterHistogram
+	processed uint64
 }
 
 // NewInvariantsValidator constructs an invariants-mode validator with cross-flow
-// window W (env CROSS_FLOW_WINDOW_US, default DefaultCrossFlowWindowUs).
+// window W (env CROSS_FLOW_WINDOW_US, default DefaultCrossFlowWindowUs) and the
+// default T7 reorder window (env VALIDATOR_T7_REORDER_WINDOW via
+// NewInvariantsValidatorWithWindow).
 func NewInvariantsValidator(windowUs uint64) *InvariantsValidator {
+	return NewInvariantsValidatorWithWindow(windowUs, DefaultT7ReorderWindow)
+}
+
+// NewInvariantsValidatorWithWindow is NewInvariantsValidator with an explicit T7
+// reorder window size (orders), for tests and for main.go's VALIDATOR_T7_REORDER_WINDOW
+// env wiring.
+func NewInvariantsValidatorWithWindow(windowUs uint64, t7Window int) *InvariantsValidator {
 	if windowUs == 0 {
 		windowUs = DefaultCrossFlowWindowUs
 	}
-	return &InvariantsValidator{windowUs: windowUs, orders: make(map[string]*invOrder)}
+	if t7Window <= 0 {
+		t7Window = DefaultT7ReorderWindow
+	}
+	v := &InvariantsValidator{
+		windowUs:   windowUs,
+		lastSeq:    make(map[model.Flow]uint32),
+		lastSeqSet: make(map[model.Flow]bool),
+		jitter:     &jitterHistogram{},
+	}
+	v.window = newT7Reorderer(t7Window, v.onEmit, v.onLate)
+	return v
 }
 
 // Apply registers one order's accounting: overfill (own qty only — book-free) is
-// checked immediately; per-flow FIFO and cross-flow priority are checked at Finish,
-// once every order's minT7 is known.
+// checked immediately in Apply (as before — already streaming). Lost order/cancel
+// accounting is ALSO decided immediately here rather than deferred: an order with
+// zero responses never gets a minT7Ns, so it can never take part in the T7-ordered
+// FIFO/cross-flow checks anyway — there is nothing cheaper available from the
+// assembly/source layer (model.Order carries only Responses; there's no separate
+// "timed out with zero acks" signal from upstream), so detecting hasResp==false here,
+// at Apply time, is the cheapest correct place to count it and is O(1), no retention.
+// Orders WITH at least one response are pushed into the bounded T7 reorder window;
+// FIFO/cross-flow/jitter checks run on each as it emerges (onEmit), and the record is
+// dropped immediately after.
 func (v *InvariantsValidator) Apply(o *model.Order) {
-	rec := &invOrder{
-		orderID: o.OrderID,
-		kind:    o.Kind,
-		flow:    o.Flow,
-		tcpSeq:  o.TCPSeq,
-		t3Ns:    o.T3Ns,
-		qty:     o.Qty,
-	}
 	var cumFilled uint64
+	var hasResp bool
+	var minT7Ns uint64
 	for _, resp := range o.Responses {
 		if !isFill(resp.ExecType, resp.FillQty) {
 			continue
 		}
 		v.rep.TotalFills++
 		cumFilled += resp.FillQty
-		if !rec.hasResp || resp.T7Ns < rec.minT7Ns {
-			rec.minT7Ns = resp.T7Ns
-			rec.hasResp = true
+		if !hasResp || resp.T7Ns < minT7Ns {
+			minT7Ns = resp.T7Ns
+			hasResp = true
 		}
 		if cumFilled > o.Qty {
 			v.rep.Overfills++
@@ -171,16 +296,84 @@ func (v *InvariantsValidator) Apply(o *model.Order) {
 			v.rep.ValidFills++
 		}
 	}
-	if !rec.hasResp {
+	if !hasResp {
 		for _, resp := range o.Responses {
 			if resp.T7Ns != 0 {
-				rec.hasResp = true
-				rec.minT7Ns = resp.T7Ns
+				hasResp = true
+				minT7Ns = resp.T7Ns
 				break
 			}
 		}
 	}
-	v.orders[o.OrderID] = rec
+	if !hasResp {
+		v.rep.add(lostViolationType(o.Kind), o.OrderID, 0, 0,
+			"order/cancel sent but never received any response")
+		if o.Kind == model.Cancel {
+			v.rep.LostCancels++
+		} else {
+			v.rep.LostOrders++
+		}
+		return
+	}
+	v.window.push(invRec{
+		orderID: o.OrderID,
+		flow:    o.Flow,
+		tcpSeq:  o.TCPSeq,
+		t3Ns:    o.T3Ns,
+		minT7Ns: minT7Ns,
+	})
+}
+
+// onEmit runs the FIFO + cross-flow + jitter checks for one order the instant it
+// emerges from the T7 reorder window in processing order, then discards it — this is
+// the incremental replacement for the old Finish()-time batch sweep.
+func (v *InvariantsValidator) onEmit(rec invRec) {
+	v.processed++
+
+	// Per-flow FIFO: within a flow, TCPSeq must be non-decreasing in processing
+	// (min-T7) order. A "Time violation" is out-of-order TCPSeq within one flow.
+	if v.lastSeqSet[rec.flow] && seqLE(rec.tcpSeq, v.lastSeq[rec.flow]) {
+		v.rep.TimeViolations++
+		v.rep.add(Time, rec.orderID, 0, 0, "out-of-order TCPSeq within one flow")
+	}
+	v.lastSeq[rec.flow] = rec.tcpSeq
+	v.lastSeqSet[rec.flow] = true
+
+	// Cross-flow priority vs t3, within window W. Each order contributes at most
+	// ONE jitter sample — the gap to the latest-arriving cross-flow order
+	// processed before it (a running max of t3, with a second-best from a
+	// different flow so a same-flow max never masks a cross-flow jump).
+	candT3, candSet := v.max1T3, v.max1Set
+	if v.max1Set && rec.flow == v.max1Flow {
+		candT3, candSet = v.max2T3, v.max2Set
+	}
+	if candSet {
+		isInv, violation, jitterNs := CrossFlowPredicate(rec.t3Ns, candT3, v.windowUs)
+		if isInv {
+			v.jitter.record(jitterNs)
+			if violation {
+				v.rep.TimeViolations++
+				v.rep.add(Time, rec.orderID, 0, 0, "cross-flow processed after a later-arriving order beyond window W")
+			}
+		}
+	}
+	if !v.max1Set || rec.t3Ns > v.max1T3 {
+		if v.max1Set && v.max1Flow != rec.flow && (!v.max2Set || v.max1T3 > v.max2T3) {
+			v.max2T3, v.max2Set = v.max1T3, true
+		}
+		v.max1T3, v.max1Flow, v.max1Set = rec.t3Ns, rec.flow, true
+	} else if rec.flow != v.max1Flow && (!v.max2Set || rec.t3Ns > v.max2T3) {
+		v.max2T3, v.max2Set = rec.t3Ns, true
+	}
+}
+
+// onLate counts a record that arrived after the T7 reorder window's watermark had
+// already advanced past its minT7Ns — its correct slot in processing order was
+// already released and checked, so re-inserting it now would produce an incorrect
+// (out-of-order) FIFO/cross-flow result rather than a merely-missing one. Counted and
+// dropped instead of crashing or silently corrupting state.
+func (v *InvariantsValidator) onLate() {
+	v.rep.T7ReorderLate++
 }
 
 // AddUnmatched records a response reported for an order_id never sent. Kept as the
@@ -190,75 +383,13 @@ func (v *InvariantsValidator) AddUnmatched(_ string, _ uint64, _ int64) {
 	v.rep.PhantomFills++
 }
 
-// Finish runs the two checks that need the full order set (per-flow FIFO, lost
-// order/cancel accounting, cross-flow priority vs t3) and returns the report.
+// Finish flushes whatever remains buffered in the T7 reorder window (running the same
+// incremental onEmit checks on it) and returns the accumulated report. There is no
+// separate batch pass here — Finish's only job left is draining the tail of the
+// window.
 func (v *InvariantsValidator) Finish() Report {
-	responded := make([]*invOrder, 0, len(v.orders))
-	for _, rec := range v.orders {
-		if rec.hasResp {
-			responded = append(responded, rec)
-		} else {
-			v.rep.add(lostViolationType(rec.kind), rec.orderID, 0, 0,
-				"order/cancel sent but never received any response")
-			if rec.kind == model.Cancel {
-				v.rep.LostCancels++
-			} else {
-				v.rep.LostOrders++
-			}
-		}
-	}
-
-	// Per-flow FIFO: process in min-T7 order; within a flow, TCPSeq must be
-	// non-decreasing. A "Time violation" is out-of-order TCPSeq within one flow.
-	sort.Slice(responded, func(i, j int) bool { return responded[i].minT7Ns < responded[j].minT7Ns })
-	lastSeq := make(map[model.Flow]uint32)
-	lastSeqSet := make(map[model.Flow]bool)
-	for _, rec := range responded {
-		if lastSeqSet[rec.flow] && seqLE(rec.tcpSeq, lastSeq[rec.flow]) {
-			v.rep.TimeViolations++
-			v.rep.add(Time, rec.orderID, 0, 0, "out-of-order TCPSeq within one flow")
-		}
-		lastSeq[rec.flow] = rec.tcpSeq
-		lastSeqSet[rec.flow] = true
-	}
-
-	// Cross-flow priority vs t3, within window W. Single pass in processing
-	// (min-T7) order: each order contributes at most ONE jitter sample — the gap to
-	// the latest-arriving cross-flow order processed before it (a running max of
-	// t3, with a second-best from a different flow so a same-flow max never
-	// masks a cross-flow jump). Per-victim sampling keeps this O(n log n) overall
-	// — a pairwise enumeration is quadratic in both time and sample count and
-	// cannot survive pass-2 volumes — and reads as "how far was this order
-	// jumped", which is the jitter definition in docs/multi-contestant-audit.md §5.
-	jitter := &jitterHistogram{}
-	var max1T3, max2T3 uint64
-	var max1Flow model.Flow
-	var max1Set, max2Set bool
-	for _, rec := range responded {
-		candT3, candSet := max1T3, max1Set
-		if max1Set && rec.flow == max1Flow {
-			candT3, candSet = max2T3, max2Set
-		}
-		if candSet {
-			isInv, violation, jitterNs := CrossFlowPredicate(rec.t3Ns, candT3, v.windowUs)
-			if isInv {
-				jitter.record(jitterNs)
-				if violation {
-					v.rep.TimeViolations++
-					v.rep.add(Time, rec.orderID, 0, 0, "cross-flow processed after a later-arriving order beyond window W")
-				}
-			}
-		}
-		if !max1Set || rec.t3Ns > max1T3 {
-			if max1Set && max1Flow != rec.flow && (!max2Set || max1T3 > max2T3) {
-				max2T3, max2Set = max1T3, true
-			}
-			max1T3, max1Flow, max1Set = rec.t3Ns, rec.flow, true
-		} else if rec.flow != max1Flow && (!max2Set || rec.t3Ns > max2T3) {
-			max2T3, max2Set = rec.t3Ns, true
-		}
-	}
-	v.rep.Jitter = jitter.stats(uint64(len(responded)))
+	v.window.flush()
+	v.rep.Jitter = v.jitter.stats(v.processed)
 	return v.rep
 }
 

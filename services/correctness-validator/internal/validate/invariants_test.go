@@ -186,3 +186,64 @@ func TestInvariants_EndToEndSyntheticStream(t *testing.T) {
 		t.Fatalf("expected max jitter 2000us (far pair), got %+v", r.Jitter)
 	}
 }
+
+// TestInvariants_ChecksFireOnEmergenceNotAtFinish proves violations are visible as
+// soon as the offending order emerges from the (small) T7 reorder window, well before
+// Finish is called on the rest of the stream.
+func TestInvariants_ChecksFireOnEmergenceNotAtFinish(t *testing.T) {
+	v := NewInvariantsValidatorWithWindow(500, 2) // tiny window forces frequent release
+
+	// Same-flow FIFO breach: seq 2 processed (T7) before seq 1.
+	v.Apply(invOrd("O1", model.NewLimit, flowA(), 1, 1000, 10, respAt(10, 100, 5000)))
+	v.Apply(invOrd("O2", model.NewLimit, flowA(), 2, 1500, 10, respAt(10, 100, 2000)))
+	// More pushes to cross the 2*window=4 release threshold twice, so O1 (seq=1,
+	// t7=5000 — the highest T7 among the first four, so it's held back by the first
+	// release) itself emerges and its FIFO breach against the meanwhile-advanced
+	// lastSeq is actually checked.
+	v.Apply(invOrd("O3", model.NewLimit, flowA(), 3, 2000, 10, respAt(10, 100, 3000)))
+	v.Apply(invOrd("O4", model.NewLimit, flowA(), 4, 2500, 10, respAt(10, 100, 4000)))
+	v.Apply(invOrd("O5", model.NewLimit, flowA(), 5, 3000, 10, respAt(10, 100, 6000)))
+	v.Apply(invOrd("O6", model.NewLimit, flowA(), 6, 3500, 10, respAt(10, 100, 7000)))
+
+	// At this point the window has released at least twice; the FIFO breach between
+	// O1/O2 must already be counted, without ever calling Finish.
+	if v.rep.TimeViolations == 0 {
+		t.Fatalf("expected FIFO violation to be visible before Finish, got %+v", v.rep)
+	}
+
+	// Feed a long tail well past the window and confirm the buffered window state
+	// (not the report) stays bounded — O(window), not O(total orders fed).
+	for i := 0; i < 5000; i++ {
+		v.Apply(invOrd("bulk", model.NewLimit, flowB(), uint32(i+1), uint64(i+1)*1000,
+			10, respAt(10, 100, uint64(i+1)*1000)))
+	}
+	if len(v.window.buf) > 2*v.window.window {
+		t.Fatalf("T7 reorder window buffer grew unbounded: len=%d, window=%d", len(v.window.buf), v.window.window)
+	}
+
+	v.Finish()
+}
+
+// TestInvariants_LateArrivalCountedNotCrash: an order whose minT7Ns falls behind the
+// window's watermark (its correct slot in processing order was already released and
+// checked) must be counted as T7ReorderLate, not crash and not corrupt the FIFO/
+// cross-flow result for already-emitted orders.
+func TestInvariants_LateArrivalCountedNotCrash(t *testing.T) {
+	v := NewInvariantsValidatorWithWindow(500, 1) // window=1 -> release triggers at buf len 2
+
+	v.Apply(invOrd("A", model.NewLimit, flowA(), 1, 1000, 10, respAt(10, 100, 100_000)))
+	v.Apply(invOrd("B", model.NewLimit, flowA(), 2, 2000, 10, respAt(10, 100, 200_000)))
+	// The push above should have released A (watermark=100_000) once the buffer hit
+	// 2*window=2.
+	if v.window.watermark == 0 {
+		t.Fatalf("expected window to have released at least once, watermark=%d", v.window.watermark)
+	}
+
+	// A "late" order with minT7Ns behind the watermark.
+	v.Apply(invOrd("late1", model.NewLimit, flowA(), 3, 3000, 10, respAt(10, 100, 50_000)))
+
+	r := v.Finish()
+	if r.T7ReorderLate != 1 {
+		t.Fatalf("expected 1 late arrival counted, got %+v", r)
+	}
+}

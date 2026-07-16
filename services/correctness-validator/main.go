@@ -67,6 +67,7 @@ func main() {
 	// on every session — out of scope here; accepted deviation, see final report.
 	validatorMode := envOr("VALIDATOR_MODE", "full")
 	crossFlowWindowUs := uint64(envInt("CROSS_FLOW_WINDOW_US", int(validate.DefaultCrossFlowWindowUs)))
+	t7ReorderWindow := envInt("VALIDATOR_T7_REORDER_WINDOW", validate.DefaultT7ReorderWindow)
 	brokers := parseBrokers(kafkaBrokers)
 	if err := checkTimeoutConfig(validationTimeout, settleDelay); err != nil {
 		log.Error("invalid validation timeout config", "validation_timeout_ms", validationTimeout.Milliseconds(), "settle_ms", settleDelay.Milliseconds(), "error", err)
@@ -95,6 +96,7 @@ func main() {
 		reorderWindow:     reorderWindow,
 		mode:              validatorMode,
 		crossFlowWindowUs: crossFlowWindowUs,
+		t7ReorderWindow:   t7ReorderWindow,
 	}
 
 	for i := 0; i < concurrency; i++ {
@@ -145,6 +147,7 @@ type validator struct {
 	reorderWindow     int
 	mode              string // "full" | "invariants" (VALIDATOR_MODE)
 	crossFlowWindowUs uint64
+	t7ReorderWindow   int
 	inflight          atomic.Int64
 }
 
@@ -220,7 +223,7 @@ func (v *validator) validateSession(ctx context.Context, sessionID string) error
 		report     validate.Report
 	)
 	if v.mode == "invariants" {
-		iv := validate.NewInvariantsValidator(v.crossFlowWindowUs)
+		iv := validate.NewInvariantsValidatorWithWindow(v.crossFlowWindowUs, v.t7ReorderWindow)
 		counts, contestant, err = source.StreamSession(ctx, v.brokers, sessionID, v.reorderWindow,
 			iv.Apply,
 			iv.AddUnmatched,

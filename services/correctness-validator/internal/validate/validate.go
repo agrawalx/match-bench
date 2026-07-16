@@ -62,6 +62,11 @@ type Report struct {
 	LostOrders  uint64
 	LostCancels uint64
 	Jitter      JitterStats
+	// T7ReorderLate counts orders whose minT7Ns arrived after the T7 reorder
+	// window had already evicted (and released) that point in the timeline. These
+	// are excluded from the incremental FIFO/cross-flow checks (their ordering
+	// slot is gone) but must not crash or silently vanish.
+	T7ReorderLate uint64
 }
 
 // CorrectnessScore applies behavior for its receiver performs the package-specific operation described by its name.

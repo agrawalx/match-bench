@@ -224,7 +224,7 @@ Per-session replay (G2) works by full-topic scan + in-decoder filter: `StreamSes
    contestant-influenced, and pass 1 has already proven the matching logic honest.
    Hard checks that remain trust-free in pass 2: per-flow TCPSeq as an inviolable
    invariant, `T7 ≥ T3` and a capped `T7 − T3` window as anti-gaming bounds, and the
-   ordering-insensitive violation classes (Overfill, Phantom, per-flow Time) — which
+   ordering-insensitive violation classes (Overfill, per-flow Time) — which
    also catch cross-connection *concurrency bugs* (lock races, lost updates, torn
    state) that a single-connection run cannot exercise. An engine with a real
    concurrency bug fails pass 2 because its fills are inconsistent with any
@@ -269,7 +269,6 @@ Per-session replay (G2) works by full-topic scan + in-decoder filter: `StreamSes
 
 | Violation | Definition | Pass 1 (single-conn, full book replay) | Pass 2 (full-scale, book-free) |
 |---|---|---|---|
-| Phantom fill | fill for an order never sent, or after an effective cancel | exact | exact (sent-set only) |
 | Overfill | fills exceed order qty | exact | exact (own qty only) |
 | Lost order/cancel | arrived on TCP, never acted on | exact | exact (per-order accounting) |
 | Time (per-flow) | same-connection FIFO breach | exact | exact (TCPSeq per flow) |
@@ -280,6 +279,11 @@ Per-session replay (G2) works by full-topic scan + in-decoder filter: `StreamSes
 | Latency (t7−t3), TPS | graded metrics | measured, not graded | graded |
 | Jitter (P-G) | t3-gap distribution of cross-flow inversions | ~zero by construction | graded, 4th leaderboard metric |
 
+Phantom-fill is REMOVED as a scored violation class (decision 2026-07-16): every acked
+event is joined against `orders.sent` by order_id before it ever reaches scoring, so a
+fabricated fill cannot enter the fill set — it fails the join and is already surfaced
+by the `unmatched_responses` counter. Scoring it again was double-counting the join.
+
 Rationale for the drop-list: Price/SelfTrade test matching *logic*, identical code under 1
 or 1000 connections — pass 1 exercises it exactly under max pressure. Multi-connection
 load adds *concurrency* failure modes (drops, duplicates, overfills, per-flow misorder),
@@ -289,7 +293,7 @@ including sustained-load degradation (the t=34s class).
 Recommendation (final): **P-A immediately as the interim knob; P-F two-pass as the
 structural fix (pass 1: short single-connection saturating run, full book replay, the
 graded correctness score; pass 2: full-duration multi-connection run, book-free
-invariant checks — per-flow FIFO, Overfill, Phantom, lost orders — plus cross-flow
+invariant checks — per-flow FIFO, Overfill, lost orders — plus cross-flow
 priority vs t3 with published window W); P-G jitter as the fourth graded metric,
 computed in pass 2; P-C behind a flag as the appeals path.** Standalone P-B (ungated)
 remains withdrawn; the expensive reference-book replay is deleted from full-scale runs

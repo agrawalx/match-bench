@@ -16,19 +16,38 @@ import (
 	kafka "github.com/segmentio/kafka-go"
 )
 
+const defaultMaxConcurrentSessions = 4
+
+// sessionRunner is the subset of *Runner the consumer needs to dispatch a
+// session; narrowed to an interface so tests can inject a fake and assert on
+// concurrent dispatch without standing up Postgres/orchestrator dependencies.
+type sessionRunner interface {
+	Run(ctx context.Context, req topics.BenchmarkRequested)
+}
+
 // Consumer groups the state and dependencies used by this package.
 // Keep this type aligned with the runtime contract around it.
 type Consumer struct {
 	benchmarkReader *kafka.Reader
 	botReadyReader  *kafka.Reader
-	runner          *Runner
+	runner          sessionRunner
 	sessions        *SessionManager
 	log             *slog.Logger
+	sem             chan struct{}
 }
 
 // NewConsumer performs the package-specific operation described by its name.
 // It keeps validation, side effects, and returned values within this package's contract.
-func NewConsumer(brokers, benchmarkGroup, botReadyGroup string, runner *Runner, sessions *SessionManager, log *slog.Logger) *Consumer {
+func NewConsumer(brokers, benchmarkGroup, botReadyGroup string, runner sessionRunner, sessions *SessionManager, log *slog.Logger) *Consumer {
+	return NewConsumerWithConcurrency(brokers, benchmarkGroup, botReadyGroup, runner, sessions, log, defaultMaxConcurrentSessions)
+}
+
+// NewConsumerWithConcurrency is NewConsumer with an explicit bound on
+// simultaneously-dispatched sessions (MAX_CONCURRENT_SESSIONS).
+func NewConsumerWithConcurrency(brokers, benchmarkGroup, botReadyGroup string, runner sessionRunner, sessions *SessionManager, log *slog.Logger, maxConcurrentSessions int) *Consumer {
+	if maxConcurrentSessions <= 0 {
+		maxConcurrentSessions = defaultMaxConcurrentSessions
+	}
 	brokerList := parseBrokers(brokers)
 	return &Consumer{
 		benchmarkReader: kafka.NewReader(kafka.ReaderConfig{
@@ -52,6 +71,7 @@ func NewConsumer(brokers, benchmarkGroup, botReadyGroup string, runner *Runner, 
 		runner:   runner,
 		sessions: sessions,
 		log:      log,
+		sem:      make(chan struct{}, maxConcurrentSessions),
 	}
 }
 
@@ -76,26 +96,70 @@ func (c *Consumer) StartBenchmarkRequested(ctx context.Context) {
 			c.log.Error("fetch benchmark.requested", "error", err)
 			continue
 		}
-		start := time.Now()
-
 		var req topics.BenchmarkRequested
 		if err := json.Unmarshal(m.Value, &req); err != nil {
-			recordConsumer(topics.TopicBenchmarkRequested, "decode_error", metrics.SinceSeconds(start))
+			recordConsumer(topics.TopicBenchmarkRequested, "decode_error", 0)
 			c.log.Error("unmarshal benchmark.requested", "error", err, "key", string(m.Key))
 			recordControllerCommit(topics.TopicBenchmarkRequested, c.benchmarkReader.CommitMessages(ctx, m))
 			continue
 		}
 
-		c.runner.Run(ctx, req)
-		recordConsumer(topics.TopicBenchmarkRequested, "ok", metrics.SinceSeconds(start))
+		if !c.acquireDispatchSlot(ctx) {
+			return
+		}
 
+		// Commit on dispatch acceptance, not on session completion: a
+		// session now runs for its full duration in a background
+		// goroutine, and holding the fetch/commit loop open until it
+		// finishes would collapse concurrency back to one session at a
+		// time. This makes redelivery at-most-once for a session that was
+		// accepted but crashes mid-dispatch (e.g. controller restart) —
+		// acceptable because a failed run is user-retryable, and strictly
+		// better than the at-least-once alternative, which would leak
+		// duplicate goroutines racing the same session ID.
 		if err := c.benchmarkReader.CommitMessages(ctx, m); err != nil {
 			recordControllerCommit(topics.TopicBenchmarkRequested, err)
 			c.log.Warn("commit benchmark.requested", "session_id", req.SessionID, "error", err)
 		} else {
 			recordControllerCommit(topics.TopicBenchmarkRequested, nil)
 		}
+
+		go c.dispatch(ctx, req)
 	}
+}
+
+// acquireDispatchSlot blocks until a concurrency slot is free or ctx is
+// done, returning false in the latter case.
+func (c *Consumer) acquireDispatchSlot(ctx context.Context) bool {
+	select {
+	case c.sem <- struct{}{}:
+		return true
+	default:
+	}
+	metrics.Counter("controller_admission_blocked_total", "Session admissions blocked by scarce capacity.", metrics.Labels("reason", "concurrency_limit"), 1)
+	select {
+	case c.sem <- struct{}{}:
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
+
+// dispatch runs one session's full lifecycle in its own goroutine, isolated
+// from every other in-flight session: a panic or slow run here neither
+// blocks the fetch/commit loop nor any other session's dispatch goroutine.
+func (c *Consumer) dispatch(ctx context.Context, req topics.BenchmarkRequested) {
+	start := time.Now()
+	log := c.log.With("session_id", req.SessionID, "submission_id", req.SubmissionID)
+	defer func() {
+		<-c.sem
+		if p := recover(); p != nil {
+			recordConsumer(topics.TopicBenchmarkRequested, "panic", metrics.SinceSeconds(start))
+			log.Error("session dispatch panicked", "panic", p)
+		}
+	}()
+	c.runner.Run(ctx, req)
+	recordConsumer(topics.TopicBenchmarkRequested, "ok", metrics.SinceSeconds(start))
 }
 
 // StartBotReady applies behavior for its receiver performs the package-specific operation described by its name.

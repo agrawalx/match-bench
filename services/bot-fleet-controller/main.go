@@ -74,10 +74,21 @@ func main() {
 		os.Exit(1)
 	}
 
+	partitionCtx, partitionCancel := context.WithTimeout(ctx, 30*time.Second)
+	workloadPartitions, err := producer.WorkloadPartitionCount(partitionCtx)
+	partitionCancel()
+	if err != nil {
+		log.Error("read workload.assignments partition count failed", "error", err)
+		os.Exit(1)
+	}
+	leases := controller.NewPartitionLeaseAllocator(workloadPartitions)
+
+	maxConcurrentSessions := envOrInt("MAX_CONCURRENT_SESSIONS", 4)
+
 	orchClient := orchestrator.NewClient(orchURL)
 	sessions := controller.NewSessionManager()
-	runner := controller.NewRunner(sessions, st, orchClient, producer, runConfig, log)
-	consumer := controller.NewConsumer(kafkaBrokers, benchmarkGroup, botReadyGroup, runner, sessions, log)
+	runner := controller.NewRunner(sessions, st, orchClient, producer, leases, runConfig, log)
+	consumer := controller.NewConsumerWithConcurrency(kafkaBrokers, benchmarkGroup, botReadyGroup, runner, sessions, log, maxConcurrentSessions)
 	defer consumer.Close()
 
 	go consumer.StartBenchmarkRequested(ctx)
@@ -151,6 +162,8 @@ func runConfigFromEnv() controller.RunConfig {
 		BarrierSafetyGap: envOrDuration("BARRIER_SAFETY_GAP", 500*time.Millisecond),
 
 		MaxTasksPerWorker: envOrInt("MAX_TASKS_PER_WORKER", controller.DefaultMaxTasksPerWorker),
+
+		LeaseAcquireTimeout: envOrDuration("LEASE_ACQUIRE_TIMEOUT", 60*time.Second),
 	}
 }
 

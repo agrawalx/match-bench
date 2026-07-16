@@ -8,6 +8,7 @@ package controller
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"time"
 
@@ -32,6 +33,13 @@ type RunConfig struct {
 	BarrierSafetyGap time.Duration
 
 	MaxTasksPerWorker int
+
+	// LeaseAcquireTimeout bounds how long a session blocks waiting for free
+	// workload.assignments partitions before admission fails outright. This
+	// is the cross-session capacity gate: validateWorkerCapacity used to
+	// check one session's worker count against the partition count with no
+	// notion of partitions other sessions already held.
+	LeaseAcquireTimeout time.Duration
 }
 
 // Runner groups the state and dependencies used by this package.
@@ -41,18 +49,20 @@ type Runner struct {
 	store     *store.Store
 	orch      *orchestrator.Client
 	producer  *Producer
+	leases    *PartitionLeaseAllocator
 	runConfig RunConfig
 	log       *slog.Logger
 }
 
 // NewRunner performs the package-specific operation described by its name.
 // It keeps validation, side effects, and returned values within this package's contract.
-func NewRunner(sessions *SessionManager, st *store.Store, orch *orchestrator.Client, producer *Producer, runConfig RunConfig, log *slog.Logger) *Runner {
+func NewRunner(sessions *SessionManager, st *store.Store, orch *orchestrator.Client, producer *Producer, leases *PartitionLeaseAllocator, runConfig RunConfig, log *slog.Logger) *Runner {
 	return &Runner{
 		sessions:  sessions,
 		store:     st,
 		orch:      orch,
 		producer:  producer,
+		leases:    leases,
 		runConfig: runConfig,
 		log:       log,
 	}
@@ -111,7 +121,16 @@ func (r *Runner) Run(parent context.Context, req topics.BenchmarkRequested) {
 	}
 	defer r.sessions.Drop(sess.SessionID)
 
-	r.runSession(ctx, sess, scenario, workerCount, log)
+	leaseCtx, leaseCancel := context.WithTimeout(ctx, r.runConfig.LeaseAcquireTimeout)
+	leases, err := r.leases.Acquire(leaseCtx, sess.SessionID, int(workerCount))
+	leaseCancel()
+	if err != nil {
+		r.publishFailure(parent, req, "acquire partition leases: "+err.Error(), log)
+		return
+	}
+	defer r.leases.Release(sess.SessionID)
+
+	r.runSession(ctx, sess, scenario, workerCount, leases, log)
 }
 
 // runSession applies behavior for its receiver performs the package-specific operation described by its name.
@@ -121,6 +140,7 @@ func (r *Runner) runSession(
 	sess *Session,
 	scenario *topics.Scenario,
 	workerCount uint32,
+	leases []int,
 	log *slog.Logger,
 ) {
 	sessionStart := time.Now()
@@ -174,8 +194,23 @@ func (r *Runner) runSession(
 	sess.Endpoint = &slot.Endpoint
 
 	specs := r.buildWorkloadSpecs(sess, sub, scenario, workerCount)
+
+	// Pre-scale gate: record leased-demand (this session's workerCount plus
+	// whatever every other in-flight session already holds) against the
+	// partition budget, so bot-fleet under-provisioning shows up before the
+	// ready-fan-in deadline races KEDA's scale-up. Deviation from the audit:
+	// no k8s client is wired into this service to compare against
+	// readyReplicas directly, so the gate is metric/log-only for now
+	// (controller_leased_partitions) rather than a live readyReplicas
+	// comparison; PARTIAL_READY_POLICY=fail (awaitReady above) is the hard
+	// backstop if bot-fleet can't actually keep up.
+	log.Info("pre-scale gate: leased-partition demand",
+		"session_worker_count", workerCount,
+		"total_leased_partitions", r.leases.LeasedCount(),
+	)
+
 	stageStart = time.Now()
-	if err := r.producer.PublishWorkloadSpec(ctx, specs); err != nil {
+	if err := r.producer.PublishWorkloadSpec(ctx, specs, leases); err != nil {
 		recordSessionStage("publish_workload", stageStart, err)
 		r.fail(ctx, sess, "publish workload specs: "+err.Error(), log)
 		r.releaseSlot(sess, log)
@@ -319,12 +354,16 @@ func (r *Runner) awaitReady(ctx context.Context, sess *Session, log *slog.Logger
 				metrics.Counter("ready_none_total", "Sessions with no ready signals before deadline.", nil, 1)
 				return errors.New("no ready signals before deadline")
 			}
+			// Partial fan-in is a hard failure, not a degraded mode: a
+			// contestant benchmarked with fewer bot-fleet workers than
+			// leased silently receives a fraction of intended TPS, which
+			// is an integrity failure for a competitive benchmark, not
+			// something to proceed through quietly.
 			metrics.Counter("ready_partial_total", "Sessions with partial ready fan-in.", nil, 1)
-			log.Warn("ready deadline expired with partial fan-in",
-				"received", len(sess.ReadyReceived),
-				"expected", sess.WorkerCount,
+			return fmt.Errorf(
+				"ready deadline expired with partial fan-in: received %d of %d worker ready signals",
+				len(sess.ReadyReceived), sess.WorkerCount,
 			)
-			return nil
 		case <-ctx.Done():
 			return ctx.Err()
 		}

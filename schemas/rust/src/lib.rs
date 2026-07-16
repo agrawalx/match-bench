@@ -469,6 +469,16 @@ pub struct CorrectnessScoreEvent {
     pub acked_count: u64,
     #[serde(default)]
     pub matched_count: u64,
+    #[serde(default)]
+    pub jitter_p50_us: f64,
+    #[serde(default)]
+    pub jitter_p99_us: f64,
+    #[serde(default)]
+    pub jitter_p999_us: f64,
+    #[serde(default)]
+    pub jitter_max_us: f64,
+    #[serde(default)]
+    pub jitter_inversion_rate: f64,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -657,6 +667,31 @@ mod tests {
         assert_eq!(ev.sent_count, 0);
         assert_eq!(ev.acked_count, 0);
         assert_eq!(ev.matched_count, 0);
+        assert_eq!(ev.jitter_p50_us, 0.0);
+        assert_eq!(ev.jitter_max_us, 0.0);
+        assert_eq!(ev.jitter_inversion_rate, 0.0);
+
+        let with_jitter = br#"{
+            "session_id":"sess-1",
+            "contestant_id":"team-1",
+            "valid_fills":2,
+            "total_fills":4,
+            "correctness_score":0.5,
+            "violation_count":2,
+            "computed_at_ns":123,
+            "jitter_p50_us":12.5,
+            "jitter_p99_us":90.0,
+            "jitter_p999_us":150.0,
+            "jitter_max_us":800.0,
+            "jitter_inversion_rate":0.02
+        }"#;
+        let ev: CorrectnessScoreEvent =
+            serde_json::from_slice(with_jitter).expect("decode correctness score event with jitter");
+        assert_eq!(ev.jitter_p50_us, 12.5);
+        assert_eq!(ev.jitter_p99_us, 90.0);
+        assert_eq!(ev.jitter_p999_us, 150.0);
+        assert_eq!(ev.jitter_max_us, 800.0);
+        assert_eq!(ev.jitter_inversion_rate, 0.02);
     }
 
     #[test]

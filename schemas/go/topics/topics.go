@@ -110,6 +110,14 @@ type CorrectnessScoreEvent struct {
 	SentCount        uint64  `json:"sent_count"`    // orders.sent events drained for the session
 	AckedCount       uint64  `json:"acked_count"`   // orders.acked events drained (post-dedup)
 	MatchedCount     uint64  `json:"matched_count"` // distinct orders present in both streams
+	// P-G jitter (docs/multi-contestant-audit.md §5): cross-flow processing-order
+	// inversion magnitude distribution, in microseconds. Zero-valued (all-zero) in
+	// full-replay mode and for sessions with no recorded inversions.
+	JitterP50US   float64 `json:"jitter_p50_us"`
+	JitterP99US   float64 `json:"jitter_p99_us"`
+	JitterP999US  float64 `json:"jitter_p999_us"`
+	JitterMaxUS   float64 `json:"jitter_max_us"`
+	JitterInvRate float64 `json:"jitter_inversion_rate"` // inversions / total processed orders
 }
 
 // LeaderboardUpdateEvent groups the state and dependencies used by this package.

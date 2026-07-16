@@ -261,6 +261,47 @@ func TestConfigFromEnv_UnsetMixFallsBackToDefaults(t *testing.T) {
 
 // find performs the package-specific operation described by its name.
 // It keeps validation, side effects, and returned values within this package's contract.
+func TestCorrectnessScenario_SingleMaxRateTask(t *testing.T) {
+	cfg := DefaultConfig()
+	rows, err := BuildAll(cfg)
+	if err != nil {
+		t.Fatalf("BuildAll: %v", err)
+	}
+	c := find(t, rows, "correctness")
+
+	if len(c.TaskSpecs) != 1 {
+		t.Fatalf("expected exactly 1 task, got %d", len(c.TaskSpecs))
+	}
+	task := c.TaskSpecs[0]
+	if task.TargetRPS != 0 {
+		t.Errorf("expected TargetRPS=0 (max-rate sentinel), got %d", task.TargetRPS)
+	}
+	if task.Profile != "hft" {
+		t.Errorf("expected hft profile, got %q", task.Profile)
+	}
+	if c.DurationNs != uint64(cfg.CorrectnessDuration.Nanoseconds()) {
+		t.Errorf("DurationNs = %d, want %d", c.DurationNs, cfg.CorrectnessDuration.Nanoseconds())
+	}
+	if task.MarketPct != cfg.HFTMarketPct || task.CancelPct != cfg.HFTCancelPct || task.ReplacePct != cfg.HFTReplacePct {
+		t.Errorf("correctness task action mix should match HFT mix, got %+v", task)
+	}
+}
+
+func TestCorrectnessScenario_DurationFromEnv(t *testing.T) {
+	t.Setenv("CORRECTNESS_DURATION_S", "90")
+	cfg := ConfigFromEnv()
+	if cfg.CorrectnessDuration != 90*time.Second {
+		t.Fatalf("expected 90s from env, got %v", cfg.CorrectnessDuration)
+	}
+}
+
+func TestCorrectnessScenario_DefaultDuration(t *testing.T) {
+	cfg := DefaultConfig()
+	if cfg.CorrectnessDuration != 45*time.Second {
+		t.Fatalf("expected default 45s, got %v", cfg.CorrectnessDuration)
+	}
+}
+
 func find(t *testing.T, rows []ScenarioRow, name string) ScenarioRow {
 	t.Helper()
 	for _, r := range rows {

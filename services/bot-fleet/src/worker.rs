@@ -359,13 +359,8 @@ fn validate_spec(config: &Config, spec: &WorkloadSpec) -> Result<()> {
         .into());
     }
     for task in &spec.tasks {
-        if task.target_rps == 0 {
-            return Err(crate::errors::BotFleetError::ValidationError(format!(
-                "task {} has target_rps=0",
-                task.task_id
-            ))
-            .into());
-        }
+        // target_rps == 0 is the max-rate sentinel (no pacer, send back-to-back); it is
+        // a valid spec, not an error.
         if task.duration_ns == 0 {
             return Err(crate::errors::BotFleetError::ValidationError(format!(
                 "task {} has duration_ns=0",
@@ -401,6 +396,17 @@ fn validate_spec(config: &Config, spec: &WorkloadSpec) -> Result<()> {
 /// It keeps validation, side effects, and returned values within this module's contract.
 fn barrier_group(consumer_group: &str, _session_id: &str, worker_id: &str) -> String {
     format!("{consumer_group}-barrier-{worker_id}")
+}
+
+/// pacer_interval_ns computes the fixed inter-send interval for a paced task.
+/// `target_rps == 0` is the max-rate sentinel: no pacer, so this returns `None` and
+/// callers must send back-to-back instead of scheduling on a fixed cadence.
+fn pacer_interval_ns(target_rps: u32) -> Option<u64> {
+    if target_rps == 0 {
+        None
+    } else {
+        Some(1_000_000_000_u64 / u64::from(target_rps))
+    }
 }
 
 /// worst_case_wall_time_ns performs the module-specific operation described by its name.
@@ -805,7 +811,8 @@ async fn fix_write_loop(
     // schedule are batched (catch-up), so an under-the-ceiling task still paces
     // normally and just writes batches of one.
 
-    let interval_ns = 1_000_000_000_u64 / u64::from(task.target_rps);
+    let max_rate = task.target_rps == 0;
+    let interval_ns = pacer_interval_ns(task.target_rps).unwrap_or(0);
     let mut next_send_ns = task_start_ns;
     let barrier_epoch_ns = task_start_ns.saturating_sub(task.start_offset_ns);
     let mut generator = TaskGenerator::new(
@@ -850,27 +857,31 @@ async fn fix_write_loop(
             }
         }
 
-        // Pace: park only when genuinely ahead of the next due order.
-        if next_send_ns > unix_nanos() {
+        // Pace: park only when genuinely ahead of the next due order. Max-rate mode
+        // (target_rps == 0) has no schedule, so never parks here.
+        if !max_rate && next_send_ns > unix_nanos() {
             tokio::select! {
                 _ = time::sleep_until(instant_from_unix_nanos(next_send_ns)) => {}
                 _ = cancel.cancelled() => break,
             }
         }
 
-        // Collect every order that is now due (up to batch_max) into one buffer.
+        // Collect every order that is now due (up to batch_max) into one buffer. In
+        // max-rate mode every order is "due" immediately — fill the batch back-to-back.
         frames.clear();
         targets.clear();
         batch_buf.clear();
         let now_ns = unix_nanos();
-        while frames.len() < batch_max && next_send_ns <= now_ns {
+        while frames.len() < batch_max && (max_rate || next_send_ns <= now_ns) {
             let action = generator.next();
             let mut frame = render_frame(&mut template_cache, &action);
             frame.patch_timestamp(unix_nanos());
             batch_buf.extend_from_slice(&frame.bytes);
             targets.push(next_send_ns);
             frames.push(frame);
-            next_send_ns = next_send_ns.saturating_add(interval_ns);
+            if !max_rate {
+                next_send_ns = next_send_ns.saturating_add(interval_ns);
+            }
         }
         if frames.is_empty() {
             continue;
@@ -928,6 +939,11 @@ async fn fix_write_loop(
                     for frame in frames.iter() {
                         if let Some(p) = map.get_mut(&frame.order_id) {
                             p.send_ts_ns = send_ts_ns;
+                            // Max-rate mode has no schedule: target == send time by
+                            // definition, so slip downstream is exactly zero.
+                            if max_rate {
+                                p.target_send_ts_ns = send_ts_ns;
+                            }
                         }
                     }
                 }
@@ -938,11 +954,13 @@ async fn fix_write_loop(
                         queue.push_back((deadline_ns, frame.order_id.clone()));
                     }
                 }
-                for &target in targets.iter() {
-                    metrics::observe_slip(
-                        metrics::protocol_label(Protocol::Fix),
-                        send_ts_ns.saturating_sub(target),
-                    );
+                if !max_rate {
+                    for &target in targets.iter() {
+                        metrics::observe_slip(
+                            metrics::protocol_label(Protocol::Fix),
+                            send_ts_ns.saturating_sub(target),
+                        );
+                    }
                 }
                 sent += count as u64;
             }
@@ -1322,7 +1340,8 @@ async fn rw_write_loop(
 ) -> Result<u64> {
     time::sleep_until(instant_from_unix_nanos(task_start_ns)).await;
 
-    let interval_ns = 1_000_000_000_u64 / u64::from(task.target_rps);
+    let max_rate = task.target_rps == 0;
+    let interval_ns = pacer_interval_ns(task.target_rps).unwrap_or(0);
     let mut next_send_ns = task_start_ns;
     let barrier_epoch_ns = task_start_ns.saturating_sub(task.start_offset_ns);
     let mut generator = TaskGenerator::new(
@@ -1366,8 +1385,9 @@ async fn rw_write_loop(
             }
         }
 
-        // Pace: park only when genuinely ahead of the next due order.
-        if next_send_ns > unix_nanos() {
+        // Pace: park only when genuinely ahead of the next due order. Max-rate mode
+        // (target_rps == 0) has no schedule, so never parks here.
+        if !max_rate && next_send_ns > unix_nanos() {
             tokio::select! {
                 _ = time::sleep_until(instant_from_unix_nanos(next_send_ns)) => {}
                 _ = cancel.cancelled() => break,
@@ -1375,16 +1395,19 @@ async fn rw_write_loop(
         }
 
         // Collect every order that is now due (up to batch_max). target_send_ts_ns is
-        // captured here, per order, exactly as before batching was added.
+        // captured here, per order, exactly as before batching was added. In max-rate
+        // mode every order is "due" immediately.
         frames.clear();
         targets.clear();
         let now_ns = unix_nanos();
-        while frames.len() < batch_max && next_send_ns <= now_ns {
+        while frames.len() < batch_max && (max_rate || next_send_ns <= now_ns) {
             let action = generator.next();
             let frame = render_frame(&mut template_cache, &action);
             targets.push(next_send_ns);
             frames.push(frame);
-            next_send_ns = next_send_ns.saturating_add(interval_ns);
+            if !max_rate {
+                next_send_ns = next_send_ns.saturating_add(interval_ns);
+            }
         }
         if frames.is_empty() {
             continue;
@@ -1436,6 +1459,11 @@ async fn rw_write_loop(
                     for frame in frames.iter() {
                         if let Some(p) = map.get_mut(&frame.order_id) {
                             p.send_ts_ns = send_ts_ns;
+                            // Max-rate mode has no schedule: target == send time by
+                            // definition, so slip downstream is exactly zero.
+                            if max_rate {
+                                p.target_send_ts_ns = send_ts_ns;
+                            }
                         }
                     }
                 }
@@ -1446,8 +1474,10 @@ async fn rw_write_loop(
                         queue.push_back((deadline_ns, frame.order_id.clone()));
                     }
                 }
-                for &target in targets.iter() {
-                    metrics::observe_slip(protocol_label, send_ts_ns.saturating_sub(target));
+                if !max_rate {
+                    for &target in targets.iter() {
+                        metrics::observe_slip(protocol_label, send_ts_ns.saturating_sub(target));
+                    }
                 }
                 sent += count as u64;
             }
@@ -1842,6 +1872,18 @@ impl TargetClient {
 mod tests {
     use super::*;
     use std::net::SocketAddr;
+
+    #[test]
+    fn pacer_interval_ns_zero_target_is_max_rate_sentinel() {
+        assert_eq!(pacer_interval_ns(0), None);
+    }
+
+    #[test]
+    fn pacer_interval_ns_computes_fixed_period() {
+        assert_eq!(pacer_interval_ns(1), Some(1_000_000_000));
+        assert_eq!(pacer_interval_ns(1000), Some(1_000_000));
+        assert_eq!(pacer_interval_ns(10), Some(100_000_000));
+    }
 
     #[test]
     /// http_response_framed_by_content_length_and_clordid_extracted performs the module-specific operation described by its name.

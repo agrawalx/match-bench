@@ -29,9 +29,10 @@ const (
 // Config groups the state and dependencies used by this package.
 // Keep this type aligned with the runtime contract around it.
 type Config struct {
-	ConstantDuration time.Duration
-	SpikeDuration    time.Duration
-	RampDuration     time.Duration
+	ConstantDuration    time.Duration
+	SpikeDuration       time.Duration
+	RampDuration        time.Duration
+	CorrectnessDuration time.Duration
 
 	ConstantTotalRPS uint32
 	SpikePeakRPS     uint32
@@ -65,10 +66,11 @@ type Config struct {
 // It keeps validation, side effects, and returned values within this package's contract.
 func DefaultConfig() Config {
 	return Config{
-		ConstantDuration: 60 * time.Second,
-		SpikeDuration:    60 * time.Second,
-		RampDuration:     180 * time.Second,
-		ConstantTotalRPS: 10000,
+		ConstantDuration:    60 * time.Second,
+		SpikeDuration:       60 * time.Second,
+		RampDuration:        180 * time.Second,
+		CorrectnessDuration: 45 * time.Second,
+		ConstantTotalRPS:    10000,
 		SpikePeakRPS:     50000,
 		RampPeakRPS:      90000,
 		SpikePreWindow:   25 * time.Second,
@@ -99,6 +101,7 @@ func ConfigFromEnv() Config {
 	c.ConstantDuration = envSeconds("CONSTANT_DURATION_S", c.ConstantDuration)
 	c.SpikeDuration = envSeconds("SPIKE_DURATION_S", c.SpikeDuration)
 	c.RampDuration = envSeconds("RAMP_DURATION_S", c.RampDuration)
+	c.CorrectnessDuration = envSeconds("CORRECTNESS_DURATION_S", c.CorrectnessDuration)
 	c.ConstantTotalRPS = envUint32("CONSTANT_TOTAL_RPS", c.ConstantTotalRPS)
 	c.SpikePeakRPS = envUint32("SPIKE_PEAK_RPS", c.SpikePeakRPS)
 	c.RampPeakRPS = envUint32("RAMP_PEAK_RPS", c.RampPeakRPS)
@@ -127,9 +130,9 @@ func ConfigFromEnv() Config {
 // validate applies behavior for its receiver performs the package-specific operation described by its name.
 // It keeps validation, side effects, and returned values within this package's contract.
 func (c Config) validate() error {
-	if c.ConstantDuration <= 0 || c.SpikeDuration <= 0 || c.RampDuration <= 0 {
-		return fmt.Errorf("scenario durations must be positive (constant=%v spike=%v ramp=%v)",
-			c.ConstantDuration, c.SpikeDuration, c.RampDuration)
+	if c.ConstantDuration <= 0 || c.SpikeDuration <= 0 || c.RampDuration <= 0 || c.CorrectnessDuration <= 0 {
+		return fmt.Errorf("scenario durations must be positive (constant=%v spike=%v ramp=%v correctness=%v)",
+			c.ConstantDuration, c.SpikeDuration, c.RampDuration, c.CorrectnessDuration)
 	}
 	if c.ConstantTotalRPS == 0 || c.SpikePeakRPS == 0 || c.RampPeakRPS == 0 {
 		return fmt.Errorf("scenario RPS budgets must be positive (constant=%d spikePeak=%d rampPeak=%d)",
@@ -181,6 +184,10 @@ func BuildAll(cfg Config) ([]ScenarioRow, error) {
 	if err != nil {
 		return nil, err
 	}
+	correctnessID, err := newUUID()
+	if err != nil {
+		return nil, err
+	}
 
 	return []ScenarioRow{
 		{
@@ -204,7 +211,34 @@ func BuildAll(cfg Config) ([]ScenarioRow, error) {
 			DurationNs: uint64(cfg.RampDuration.Nanoseconds()),
 			TaskSpecs:  buildRampTasks(cfg),
 		},
+		{
+			ScenarioID: correctnessID,
+			Name:       "correctness",
+			SortOrder:  4,
+			DurationNs: uint64(cfg.CorrectnessDuration.Nanoseconds()),
+			TaskSpecs:  buildCorrectnessTasks(cfg),
+		},
 	}, nil
+}
+
+// buildCorrectnessTasks builds the pass-1 single-connection, max-rate,
+// full-book-replay correctness gate scenario (docs/multi-contestant-audit.md
+// §5, P-F pass 1): exactly one task, no pacer (TargetRPS: 0 is the max-rate
+// sentinel honored by bot-fleet's write loops), single connection so TCPSeq
+// gives an unambiguous total order, HFT action mix.
+func buildCorrectnessTasks(cfg Config) []topics.TaskSpec {
+	return []topics.TaskSpec{
+		{
+			TaskID:        0,
+			Profile:       "hft",
+			TargetRPS:     0,
+			StartOffsetNs: 0,
+			DurationNs:    uint64(cfg.CorrectnessDuration.Nanoseconds()),
+			MarketPct:     cfg.HFTMarketPct,
+			CancelPct:     cfg.HFTCancelPct,
+			ReplacePct:    cfg.HFTReplacePct,
+		},
+	}
 }
 
 // ScenarioRow groups the state and dependencies used by this package.

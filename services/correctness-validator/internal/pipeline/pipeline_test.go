@@ -61,8 +61,11 @@ func TestEndToEndCleanSessionWithPhantomAndExcludedOrder(t *testing.T) {
 	if report.TotalFills != 3 || report.ValidFills != 2 || report.PhantomFills != 1 {
 		t.Fatalf("expected 3 total / 2 valid / 1 phantom, got %+v", report)
 	}
-	if got := report.CorrectnessScore(); got < 0.66 || got > 0.67 {
-		t.Fatalf("expected score ~0.667, got %v", got)
+	// Phantom-fill is no longer part of the score (docs/multi-contestant-audit.md §5):
+	// a fabricated fill is already surfaced by PhantomFills/unmatched_responses, so
+	// the 2 valid fills out of the 2 legitimately-sent orders score 1.0, not 2/3.
+	if got := report.CorrectnessScore(); got != 1.0 {
+		t.Fatalf("expected score 1.0 (phantom excluded from scoring), got %v", got)
 	}
 }
 

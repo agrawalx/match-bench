@@ -59,6 +59,14 @@ func main() {
 	concurrency := envInt("VALIDATOR_CONCURRENCY", 4)
 	validate.AggressiveFillToleranceNs = uint64(envInt("AGGRESSIVE_FILL_TOLERANCE_US", 0)) * 1000
 	reorderWindow := envInt("REORDER_WINDOW", 0) // 0 -> source.DefaultReorderWindow
+	// VALIDATOR_MODE: full (default) is the current book-replay behavior; invariants
+	// is the pass-2 book-free mode (docs/multi-contestant-audit.md §5, P-F). This is a
+	// blunt global switch: no per-session signal (e.g. scenario name from
+	// BenchmarkRequested.ScenarioID) is threaded through the store/status-updated path
+	// today, and wiring one up would mean a DB lookup of scenario name by scenario_id
+	// on every session — out of scope here; accepted deviation, see final report.
+	validatorMode := envOr("VALIDATOR_MODE", "full")
+	crossFlowWindowUs := uint64(envInt("CROSS_FLOW_WINDOW_US", int(validate.DefaultCrossFlowWindowUs)))
 	brokers := parseBrokers(kafkaBrokers)
 	if err := checkTimeoutConfig(validationTimeout, settleDelay); err != nil {
 		log.Error("invalid validation timeout config", "validation_timeout_ms", validationTimeout.Milliseconds(), "settle_ms", settleDelay.Milliseconds(), "error", err)
@@ -85,6 +93,8 @@ func main() {
 		settleDelay:       settleDelay,
 		validationTimeout: validationTimeout,
 		reorderWindow:     reorderWindow,
+		mode:              validatorMode,
+		crossFlowWindowUs: crossFlowWindowUs,
 	}
 
 	for i := 0; i < concurrency; i++ {
@@ -133,6 +143,8 @@ type validator struct {
 	settleDelay       time.Duration
 	validationTimeout time.Duration
 	reorderWindow     int
+	mode              string // "full" | "invariants" (VALIDATOR_MODE)
+	crossFlowWindowUs uint64
 	inflight          atomic.Int64
 }
 
@@ -202,19 +214,38 @@ func (v *validator) validateSession(ctx context.Context, sessionID string) error
 	}
 
 	drainStart := time.Now()
-	sv := validate.NewStreamValidator()
-	counts, contestant, err := source.StreamSession(ctx, v.brokers, sessionID, v.reorderWindow,
-		sv.Apply,
-		func(id string, qty uint64, price int64) {
-			sv.AddPhantom(validate.ReportedFill{OrderID: id, Qty: qty, Price: price})
-		},
+	var (
+		counts     source.StreamCounts
+		contestant string
+		report     validate.Report
 	)
-	if err != nil {
-		metrics.Counter("validator_validation_errors_total", "Correctness-validator validation errors by stage.", metrics.Labels("stage", "drain"), 1)
-		metrics.Counter("validator_sessions_validated_total", "Correctness-validator sessions processed by result.", metrics.Labels("result", "error"), 1)
-		return fmt.Errorf("stream session: %w", err)
+	if v.mode == "invariants" {
+		iv := validate.NewInvariantsValidator(v.crossFlowWindowUs)
+		counts, contestant, err = source.StreamSession(ctx, v.brokers, sessionID, v.reorderWindow,
+			iv.Apply,
+			iv.AddUnmatched,
+		)
+		if err != nil {
+			metrics.Counter("validator_validation_errors_total", "Correctness-validator validation errors by stage.", metrics.Labels("stage", "drain"), 1)
+			metrics.Counter("validator_sessions_validated_total", "Correctness-validator sessions processed by result.", metrics.Labels("result", "error"), 1)
+			return fmt.Errorf("stream session: %w", err)
+		}
+		report = iv.Finish()
+	} else {
+		sv := validate.NewStreamValidator()
+		counts, contestant, err = source.StreamSession(ctx, v.brokers, sessionID, v.reorderWindow,
+			sv.Apply,
+			func(id string, qty uint64, price int64) {
+				sv.AddPhantom(validate.ReportedFill{OrderID: id, Qty: qty, Price: price})
+			},
+		)
+		if err != nil {
+			metrics.Counter("validator_validation_errors_total", "Correctness-validator validation errors by stage.", metrics.Labels("stage", "drain"), 1)
+			metrics.Counter("validator_sessions_validated_total", "Correctness-validator sessions processed by result.", metrics.Labels("result", "error"), 1)
+			return fmt.Errorf("stream session: %w", err)
+		}
+		report = sv.Finish()
 	}
-	report := sv.Finish()
 	metrics.Histogram("validator_drain_duration_seconds", "Correctness-validator per-session Kafka drain duration in seconds.", nil, metrics.SinceSeconds(drainStart))
 	metrics.Counter("validator_events_drained_total", "Correctness-validator events drained from Kafka by topic.", metrics.Labels("topic", "orders_sent"), float64(counts.SentEvents))
 	metrics.Counter("validator_events_drained_total", "Correctness-validator events drained from Kafka by topic.", metrics.Labels("topic", "orders_acked"), float64(counts.AckedEvents))
@@ -252,6 +283,11 @@ func (v *validator) validateSession(ctx context.Context, sessionID string) error
 		SentCount:        counts.SentEvents,
 		AckedCount:       counts.AckedEvents,
 		MatchedCount:     counts.MatchedOrders,
+		JitterP50US:      report.Jitter.P50Us,
+		JitterP99US:      report.Jitter.P99Us,
+		JitterP999US:     report.Jitter.P999Us,
+		JitterMaxUS:      report.Jitter.MaxUs,
+		JitterInvRate:    report.Jitter.InversionRate,
 	}); err != nil {
 		metrics.Counter("validator_validation_errors_total", "Correctness-validator validation errors by stage.", metrics.Labels("stage", "publish"), 1)
 		metrics.Counter("validator_sessions_validated_total", "Correctness-validator sessions processed by result.", metrics.Labels("result", "error"), 1)

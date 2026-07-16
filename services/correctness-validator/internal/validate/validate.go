@@ -22,6 +22,10 @@ const (
 	Time              ViolationType = "time"
 	SelfTrade         ViolationType = "self_trade"
 	CancelReplaceLoss ViolationType = "cancel_replace_loss"
+	// LostOrder/LostCancel are invariants-mode-only (VALIDATOR_MODE=invariants):
+	// an order/cancel sent on the wire that never got any response.
+	LostOrder  ViolationType = "lost_order"
+	LostCancel ViolationType = "lost_cancel"
 )
 
 // Violation groups the state and dependencies used by this package.
@@ -53,15 +57,25 @@ type Report struct {
 	TimeViolations  uint64
 	SelfTrades      uint64
 	Violations      []Violation
+
+	// Invariants-mode-only fields (zero in full-replay mode).
+	LostOrders  uint64
+	LostCancels uint64
+	Jitter      JitterStats
 }
 
 // CorrectnessScore applies behavior for its receiver performs the package-specific operation described by its name.
 // It keeps validation, side effects, and returned values within this package's contract.
 func (r Report) CorrectnessScore() float64 {
-	if r.TotalFills == 0 {
+	// Phantom-fill is removed as a scored violation class (docs/multi-contestant-audit.md
+	// §5, decision 2026-07-16): a fabricated fill is already excluded from the assembled
+	// order set upstream (it fails the orders.sent join), so PhantomFills is kept as the
+	// unmatched_responses metric only and is not counted against the score.
+	scored := r.TotalFills - r.PhantomFills
+	if scored == 0 {
 		return 1.0
 	}
-	return float64(r.ValidFills) / float64(r.TotalFills)
+	return float64(r.ValidFills) / float64(scored)
 }
 
 // ViolationCount applies behavior for its receiver performs the package-specific operation described by its name.

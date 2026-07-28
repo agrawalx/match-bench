@@ -63,6 +63,11 @@ pub const DEFAULT_PARTITION_BAND_WIDTH: i32 = 8;
 
 /// session_band_partition maps (session_id, order_id) onto a Kafka partition.
 ///
+/// DEPRECATED fallback: exclusive per-session bands are now controller-leased
+/// (see `band_partition`); this hash-derived variant remains only so
+/// band-unaware messages (unset `WorkloadSpec::order_band`, i.e.
+/// `ORDER_BAND_UNSET`) keep working during rollout / back-compat.
+///
 /// The partition space is divided into bands of `band_width` partitions. A
 /// session is pinned to one band (hash(session_id) mod num_bands), and its
 /// orders are hashed within that band (hash(order_id) mod band_width). This
@@ -90,6 +95,36 @@ pub fn session_band_partition(
     let num_bands = (num_partitions as u32).div_ceil(band_width as u32).max(1) as i32;
     let band = (fnv1a_64(session_id.as_bytes()) % num_bands as u64) as i32;
     let base = band * band_width;
+    let within = (fnv1a_64(order_id.as_bytes()) % band_width as u64) as i32;
+    (base + within) % num_partitions
+}
+
+/// Sentinel for `WorkloadSpec::order_band` meaning "unassigned — fall back to
+/// hash-derived banding via `session_band_partition`". Chosen as `u32::MAX`
+/// (mirrored in Go as `math.MaxUint32`) since valid bands are always small
+/// (< `num_partitions`), leaving the max value permanently free as a sentinel
+/// in both languages without needing a signed type or an `Option`/pointer on
+/// the wire.
+pub const ORDER_BAND_UNSET: u32 = u32::MAX;
+
+/// band_partition maps (band, order_id) onto a Kafka partition using an
+/// EXCLUSIVELY leased band (see `bot-fleet-controller`'s band lease
+/// allocator), rather than a hash-derived one. `base = band * band_width`;
+/// `order_id` is hashed only within `[base, base + band_width)`. Unlike
+/// `session_band_partition`, two different sessions never share a band here
+/// because the controller leases bands exclusively per session — this
+/// function only does the within-band placement.
+///
+/// CRITICAL invariant: pure function of (band, order_id, num_partitions,
+/// band_width) — orders.sent and orders.acked producers/consumers calling it
+/// with the same inputs land on the same partition for a given order.
+pub fn band_partition(band: u32, order_id: &str, num_partitions: i32, band_width: i32) -> i32 {
+    debug_assert!(num_partitions > 0, "num_partitions must be positive");
+    if num_partitions <= 1 {
+        return 0;
+    }
+    let band_width = band_width.clamp(1, num_partitions);
+    let base = (band as i64 * band_width as i64) as i32;
     let within = (fnv1a_64(order_id.as_bytes()) % band_width as u64) as i32;
     (base + within) % num_partitions
 }
@@ -170,7 +205,20 @@ pub struct WorkloadSpec {
     /// that don't set it) and must be treated as NOT stale by consumers.
     #[serde(default)]
     pub published_at_unix_ns: u64,
+    /// order_band is the exclusively-leased partition band index for this
+    /// session's orders.sent/orders.acked traffic (band N covers partitions
+    /// `[N*band_width, (N+1)*band_width)`). `ORDER_BAND_UNSET` (`u32::MAX`,
+    /// serde default) means unassigned — fall back to hash-derived
+    /// `session_band_partition` for back-compat with band-unaware producers.
+    #[serde(default = "default_order_band")]
+    pub order_band: u32,
     pub tasks: Vec<TaskSpec>,
+}
+
+/// default_order_band is the serde default for `WorkloadSpec::order_band`:
+/// `ORDER_BAND_UNSET`, meaning "fall back to hash-derived banding."
+fn default_order_band() -> u32 {
+    ORDER_BAND_UNSET
 }
 
 impl WorkloadSpec {
@@ -857,6 +905,90 @@ mod tests {
                  reachable, only hit {seen:?}"
             );
         }
+    }
+
+    /// band_partition_same_order_same_partition pins the CRITICAL cross-topic
+    /// invariant for leased bands: sent and acked producers computing the
+    /// partition for the same (band, order_id, num_partitions, band_width)
+    /// land on the same partition.
+    #[test]
+    fn band_partition_same_order_same_partition() {
+        let order = "01890dd2-71f3-7abc-9def-0123456789ab_42_99_O";
+        let sent_side = band_partition(2, order, 24, 6);
+        let acked_side = band_partition(2, order, 24, 6);
+        assert_eq!(sent_side, acked_side);
+        assert!((0..24).contains(&sent_side));
+    }
+
+    /// band_partition_confines_band_to_its_range checks every order for a given
+    /// band lands within that band's exact partition range, never touching a
+    /// partition belonging to a different (concurrently leased) band.
+    #[test]
+    fn band_partition_confines_band_to_its_range() {
+        let n = 24;
+        let band_width = 6;
+        for band in 0..4u32 {
+            let band_start = band as i32 * band_width;
+            for i in 0..500 {
+                let p = band_partition(band, &format!("order_{i}"), n, band_width);
+                assert!(
+                    (band_start..band_start + band_width).contains(&p),
+                    "partition {p} escaped band {band} range [{band_start}, {})",
+                    band_start + band_width
+                );
+            }
+        }
+    }
+
+    /// band_partition_exclusive_across_leased_bands checks that the four
+    /// exclusive bands (0-5, 6-11, 12-17, 18-23) never overlap in partition
+    /// range, which is the whole point of leasing bands instead of hashing
+    /// sessions into them.
+    #[test]
+    fn band_partition_exclusive_across_leased_bands() {
+        let n = 24;
+        let band_width = 6;
+        let mut ranges = Vec::new();
+        for band in 0..4u32 {
+            let mut seen = std::collections::HashSet::new();
+            for i in 0..1000 {
+                seen.insert(band_partition(band, &format!("o_{band}_{i}"), n, band_width));
+            }
+            ranges.push(seen);
+        }
+        for i in 0..ranges.len() {
+            for j in (i + 1)..ranges.len() {
+                assert!(
+                    ranges[i].is_disjoint(&ranges[j]),
+                    "band {i} and band {j} partitions overlap: {:?} vs {:?}",
+                    ranges[i],
+                    ranges[j]
+                );
+            }
+        }
+    }
+
+    /// order_band_unset_sentinel_defaults_and_round_trips checks the WorkloadSpec
+    /// back-compat contract: an old payload without `order_band` decodes to the
+    /// unset sentinel, and the sentinel round-trips through JSON.
+    #[test]
+    fn order_band_unset_sentinel_defaults_and_round_trips() {
+        let payload = br#"{
+            "session_id":"sess-1",
+            "submission_id":"sub-1",
+            "target_host":"algo-sess-1.sandbox.svc.cluster.local",
+            "target_port":8080,
+            "protocol":"FIX",
+            "worker_index":0,
+            "worker_count":1,
+            "global_seed":42,
+            "tasks":[]
+        }"#;
+        let spec: WorkloadSpec = serde_json::from_slice(payload).expect("decode workload spec");
+        assert_eq!(spec.order_band, ORDER_BAND_UNSET);
+
+        let value = serde_json::to_value(&spec).expect("encode");
+        assert_eq!(value["order_band"], ORDER_BAND_UNSET);
     }
 
     /// order_sent_batch_v2_positional_round_trips_field_order pins the wire contract

@@ -16,24 +16,45 @@ import (
 // in-memory bitmap — sufficient while the controller runs at replicas=1;
 // promote to a Postgres-backed table before scaling replicas.
 type PartitionLeaseAllocator struct {
-	mu       sync.Mutex
-	total    int
-	free     map[int]struct{}
-	leasedBy map[string][]int
-	waitCh   chan struct{}
+	mu         sync.Mutex
+	total      int
+	free       map[int]struct{}
+	leasedBy   map[string][]int
+	waitCh     chan struct{}
+	metricName string
+	reason     string
 }
 
-// NewPartitionLeaseAllocator builds an allocator over partitions [0, total).
+// NewPartitionLeaseAllocator builds an allocator over workload.assignments
+// partitions [0, total).
 func NewPartitionLeaseAllocator(total int) *PartitionLeaseAllocator {
+	return newLeaseAllocator(total, "partitions", "partition_leases")
+}
+
+// NewBandLeaseAllocator builds a second, independent allocator over EXCLUSIVE
+// orders.sent/orders.acked partition bands [0, total) — same generic
+// bitmap-lease mechanics as PartitionLeaseAllocator (Acquire blocks until
+// count free bands are available, Release returns them), just over band
+// indices instead of workload.assignments partition indices. Bands are
+// acquired alongside partition leases at session admission (both-or-block,
+// same LEASE_ACQUIRE_TIMEOUT) so a session never runs with only one of the
+// two leases held.
+func NewBandLeaseAllocator(total int) *PartitionLeaseAllocator {
+	return newLeaseAllocator(total, "order_bands", "order_band_leases")
+}
+
+func newLeaseAllocator(total int, metricName, reason string) *PartitionLeaseAllocator {
 	free := make(map[int]struct{}, total)
 	for i := 0; i < total; i++ {
 		free[i] = struct{}{}
 	}
 	return &PartitionLeaseAllocator{
-		total:    total,
-		free:     free,
-		leasedBy: make(map[string][]int),
-		waitCh:   make(chan struct{}),
+		total:      total,
+		free:       free,
+		leasedBy:   make(map[string][]int),
+		waitCh:     make(chan struct{}),
+		metricName: metricName,
+		reason:     reason,
 	}
 }
 
@@ -78,7 +99,7 @@ func (a *PartitionLeaseAllocator) Acquire(ctx context.Context, sessionID string,
 
 		if !blocked {
 			blocked = true
-			metrics.Counter("controller_admission_blocked_total", "Session admissions blocked by scarce capacity.", metrics.Labels("reason", "partition_leases"), 1)
+			metrics.Counter("controller_admission_blocked_total", "Session admissions blocked by scarce capacity.", metrics.Labels("reason", a.reason), 1)
 		}
 
 		select {
@@ -116,7 +137,12 @@ func (a *PartitionLeaseAllocator) LeasedCount() int {
 
 // reportLocked publishes the leased-partitions gauge. Callers must hold mu.
 func (a *PartitionLeaseAllocator) reportLocked() {
-	metrics.Gauge("controller_leased_partitions", "workload.assignments partitions currently leased by in-flight sessions.", nil, float64(a.total-len(a.free)))
+	metrics.Gauge(
+		"controller_leased_"+a.metricName,
+		"Resources ("+a.metricName+") currently leased by in-flight sessions.",
+		nil,
+		float64(a.total-len(a.free)),
+	)
 }
 
 // notifyLocked wakes every Acquire currently blocked in this allocator.

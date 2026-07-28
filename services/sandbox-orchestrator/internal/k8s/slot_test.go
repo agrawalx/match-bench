@@ -8,6 +8,7 @@ package k8s
 import (
 	"testing"
 
+	"github.com/iicpc/schemas/topics"
 	"github.com/iicpc/sandbox-orchestrator/internal/store"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -150,13 +151,13 @@ func TestPodNameAndFQDN(t *testing.T) {
 // It keeps validation, side effects, and returned values within this package's contract.
 func TestPodSpecRuntimeClassOptional(t *testing.T) {
 	mgr := &Manager{namespace: "sandbox", cpu: "2", memory: "1Gi"}
-	pod := mgr.podSpec("s1", "", "img:tag", []int{8080})
+	pod := mgr.podSpec("s1", "", "img:tag", []int{8080}, topics.OrderBandUnset)
 	if pod.Spec.RuntimeClassName != nil {
 		t.Errorf("expected no runtime class when env unset, got %v", *pod.Spec.RuntimeClassName)
 	}
 
 	mgr.runtimeClass = "gvisor"
-	pod = mgr.podSpec("s1", "", "img:tag", []int{8080})
+	pod = mgr.podSpec("s1", "", "img:tag", []int{8080}, topics.OrderBandUnset)
 	if pod.Spec.RuntimeClassName == nil || *pod.Spec.RuntimeClassName != "gvisor" {
 		t.Errorf("expected gvisor runtime class, got %v", pod.Spec.RuntimeClassName)
 	}
@@ -166,13 +167,13 @@ func TestPodSpecRuntimeClassOptional(t *testing.T) {
 // It keeps validation, side effects, and returned values within this package's contract.
 func TestPodSpecImagePullSecretOptional(t *testing.T) {
 	mgr := &Manager{namespace: "sandbox", cpu: "2", memory: "1Gi"}
-	pod := mgr.podSpec("s1", "", "ghcr.io/iicpc/submission:latest", []int{8080})
+	pod := mgr.podSpec("s1", "", "ghcr.io/iicpc/submission:latest", []int{8080}, topics.OrderBandUnset)
 	if len(pod.Spec.ImagePullSecrets) != 0 {
 		t.Fatalf("expected no imagePullSecrets when env unset, got %v", pod.Spec.ImagePullSecrets)
 	}
 
 	mgr.imagePullSecretName = "registry-credentials"
-	pod = mgr.podSpec("s1", "", "ghcr.io/iicpc/submission:latest", []int{8080})
+	pod = mgr.podSpec("s1", "", "ghcr.io/iicpc/submission:latest", []int{8080}, topics.OrderBandUnset)
 	if got := pod.Spec.ImagePullSecrets; len(got) != 1 || got[0].Name != "registry-credentials" {
 		t.Fatalf("imagePullSecrets = %v, want registry-credentials", got)
 	}
@@ -182,7 +183,7 @@ func TestPodSpecImagePullSecretOptional(t *testing.T) {
 // It keeps validation, side effects, and returned values within this package's contract.
 func TestPodSpecLabels(t *testing.T) {
 	mgr := &Manager{namespace: "sandbox", cpu: "2", memory: "1Gi"}
-	pod := mgr.podSpec("sess-AAA", "", "img:tag", []int{8080})
+	pod := mgr.podSpec("sess-AAA", "", "img:tag", []int{8080}, topics.OrderBandUnset)
 	if pod.Labels[LabelApp] != AppValue {
 		t.Errorf("missing app label: %v", pod.Labels)
 	}
@@ -201,7 +202,7 @@ func TestPodSpecLabels(t *testing.T) {
 // It keeps validation, side effects, and returned values within this package's contract.
 func TestGuaranteedQoSShape(t *testing.T) {
 	mgr := &Manager{namespace: "sandbox", cpu: "2", memory: "1Gi"}
-	pod := mgr.podSpec("s1", "", "img:tag", []int{8080})
+	pod := mgr.podSpec("s1", "", "img:tag", []int{8080}, topics.OrderBandUnset)
 
 	c := pod.Spec.Containers[0]
 	cpuReq := c.Resources.Requests[corev1.ResourceCPU]
@@ -221,7 +222,7 @@ func TestGuaranteedQoSShape(t *testing.T) {
 // It keeps validation, side effects, and returned values within this package's contract.
 func TestReadOnlyRootAndTmpfsMounts(t *testing.T) {
 	mgr := &Manager{namespace: "sandbox", cpu: "2", memory: "1Gi"}
-	pod := mgr.podSpec("s1", "", "img:tag", []int{8080})
+	pod := mgr.podSpec("s1", "", "img:tag", []int{8080}, topics.OrderBandUnset)
 
 	c := pod.Spec.Containers[0]
 	if c.SecurityContext == nil || c.SecurityContext.ReadOnlyRootFilesystem == nil || !*c.SecurityContext.ReadOnlyRootFilesystem {
@@ -255,13 +256,13 @@ func TestReadOnlyRootAndTmpfsMounts(t *testing.T) {
 // It keeps validation, side effects, and returned values within this package's contract.
 func TestPodSpecNodePoolPinning(t *testing.T) {
 	mgr := &Manager{namespace: "sandbox", cpu: "2", memory: "1Gi"}
-	pod := mgr.podSpec("s1", "", "img:tag", []int{8080})
+	pod := mgr.podSpec("s1", "", "img:tag", []int{8080}, topics.OrderBandUnset)
 	if len(pod.Spec.Tolerations) != 0 || pod.Spec.NodeSelector != nil {
 		t.Errorf("expected no node pinning when SANDBOX_NODE_POOL unset")
 	}
 
 	mgr.nodePool = "sandbox"
-	pod = mgr.podSpec("s1", "", "img:tag", []int{8080})
+	pod = mgr.podSpec("s1", "", "img:tag", []int{8080}, topics.OrderBandUnset)
 	if pod.Spec.NodeSelector["pool"] != "sandbox" {
 		t.Errorf("expected pool=sandbox nodeSelector, got %v", pod.Spec.NodeSelector)
 	}
@@ -274,14 +275,14 @@ func TestPodSpecNodePoolPinning(t *testing.T) {
 // It keeps validation, side effects, and returned values within this package's contract.
 func TestBandwidthAnnotations(t *testing.T) {
 	mgr := &Manager{namespace: "sandbox", cpu: "2", memory: "1Gi"}
-	pod := mgr.podSpec("s1", "", "img:tag", []int{8080})
+	pod := mgr.podSpec("s1", "", "img:tag", []int{8080}, topics.OrderBandUnset)
 	if _, ok := pod.Annotations["kubernetes.io/egress-bandwidth"]; ok {
 		t.Errorf("expected no bandwidth annotation when env unset")
 	}
 
 	mgr.egressBwBps = "100M"
 	mgr.ingressBwBps = "50M"
-	pod = mgr.podSpec("s1", "", "img:tag", []int{8080})
+	pod = mgr.podSpec("s1", "", "img:tag", []int{8080}, topics.OrderBandUnset)
 	if pod.Annotations["kubernetes.io/egress-bandwidth"] != "100M" {
 		t.Errorf("egress bandwidth annotation not set")
 	}

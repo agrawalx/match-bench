@@ -45,26 +45,28 @@ type RunConfig struct {
 // Runner groups the state and dependencies used by this package.
 // Keep this type aligned with the runtime contract around it.
 type Runner struct {
-	sessions  *SessionManager
-	store     *store.Store
-	orch      *orchestrator.Client
-	producer  *Producer
-	leases    *PartitionLeaseAllocator
-	runConfig RunConfig
-	log       *slog.Logger
+	sessions   *SessionManager
+	store      *store.Store
+	orch       *orchestrator.Client
+	producer   *Producer
+	leases     *PartitionLeaseAllocator
+	bandLeases *PartitionLeaseAllocator
+	runConfig  RunConfig
+	log        *slog.Logger
 }
 
 // NewRunner performs the package-specific operation described by its name.
 // It keeps validation, side effects, and returned values within this package's contract.
-func NewRunner(sessions *SessionManager, st *store.Store, orch *orchestrator.Client, producer *Producer, leases *PartitionLeaseAllocator, runConfig RunConfig, log *slog.Logger) *Runner {
+func NewRunner(sessions *SessionManager, st *store.Store, orch *orchestrator.Client, producer *Producer, leases *PartitionLeaseAllocator, bandLeases *PartitionLeaseAllocator, runConfig RunConfig, log *slog.Logger) *Runner {
 	return &Runner{
-		sessions:  sessions,
-		store:     st,
-		orch:      orch,
-		producer:  producer,
-		leases:    leases,
-		runConfig: runConfig,
-		log:       log,
+		sessions:   sessions,
+		store:      st,
+		orch:       orch,
+		producer:   producer,
+		leases:     leases,
+		bandLeases: bandLeases,
+		runConfig:  runConfig,
+		log:        log,
 	}
 }
 
@@ -121,16 +123,38 @@ func (r *Runner) Run(parent context.Context, req topics.BenchmarkRequested) {
 	}
 	defer r.sessions.Drop(sess.SessionID)
 
+	// Both-or-block: a session must hold BOTH its workload.assignments
+	// partition leases AND its exclusive order band lease, or neither. They
+	// share one leaseCtx/timeout window so a session can't sit half-admitted
+	// (holding partitions but no band, or vice versa) while waiting out a
+	// second full LEASE_ACQUIRE_TIMEOUT for the other resource.
 	leaseCtx, leaseCancel := context.WithTimeout(ctx, r.runConfig.LeaseAcquireTimeout)
 	leases, err := r.leases.Acquire(leaseCtx, sess.SessionID, int(workerCount))
-	leaseCancel()
 	if err != nil {
+		leaseCancel()
 		r.publishFailure(parent, req, "acquire partition leases: "+err.Error(), log)
 		return
 	}
+	bands, err := r.bandLeases.Acquire(leaseCtx, sess.SessionID, 1)
+	leaseCancel()
+	if err != nil {
+		r.leases.Release(sess.SessionID)
+		r.publishFailure(parent, req, "acquire order band lease: "+err.Error(), log)
+		return
+	}
+	orderBand := uint32(bands[0])
+	// Release order: band lease is stale-tail-guarded independently by the
+	// validator (session-id filter on every read event) and by time-window
+	// pruning of old sessions' offsets, so releasing it here — even while a
+	// straggler order from this session is still in flight on the wire — is
+	// bounded-risk: the next session leased into this band can only ever be
+	// misread as this session's traffic within that guard window, never
+	// silently forever. Same reasoning already governs partition lease
+	// release timing.
 	defer r.leases.Release(sess.SessionID)
+	defer r.bandLeases.Release(sess.SessionID)
 
-	r.runSession(ctx, sess, scenario, workerCount, leases, log)
+	r.runSession(ctx, sess, scenario, workerCount, leases, orderBand, log)
 }
 
 // runSession applies behavior for its receiver performs the package-specific operation described by its name.
@@ -141,6 +165,7 @@ func (r *Runner) runSession(
 	scenario *topics.Scenario,
 	workerCount uint32,
 	leases []int,
+	orderBand uint32,
 	log *slog.Logger,
 ) {
 	sessionStart := time.Now()
@@ -169,7 +194,7 @@ func (r *Runner) runSession(
 	r.transition(ctx, sess, topics.RunStatusDeploying, "allocating sandbox slot", log)
 	image := sub.ImageRef
 	stageStart = time.Now()
-	if _, err := r.orch.CreateSlot(ctx, sess.SessionID, sess.ContestantID, image, sub.Port); err != nil {
+	if _, err := r.orch.CreateSlot(ctx, sess.SessionID, sess.ContestantID, image, sub.Port, orderBand); err != nil {
 		recordSessionStage("create_slot", stageStart, err)
 		r.fail(ctx, sess, "create slot: "+err.Error(), log)
 		return
@@ -198,7 +223,7 @@ func (r *Runner) runSession(
 	}
 	sess.Endpoint = &slot.Endpoint
 
-	specs := r.buildWorkloadSpecs(sess, sub, scenario, workerCount)
+	specs := r.buildWorkloadSpecs(sess, sub, scenario, workerCount, orderBand)
 
 	// Pre-scale gate: record leased-demand (this session's workerCount plus
 	// whatever every other in-flight session already holds) against the
@@ -399,6 +424,7 @@ func (r *Runner) buildWorkloadSpecs(
 	sub *store.SubmissionInfo,
 	scenario *topics.Scenario,
 	workerCount uint32,
+	orderBand uint32,
 ) []topics.WorkloadSpec {
 	targets := submissionTargets(sub)
 
@@ -438,6 +464,7 @@ func (r *Runner) buildWorkloadSpecs(
 			ConnectTimeoutMS:  r.runConfig.ConnectTimeoutMS,
 			WriteTimeoutMS:    r.runConfig.WriteTimeoutMS,
 			PublishedAtUnixNS: uint64(time.Now().UnixNano()),
+			OrderBand:         orderBand,
 			Tasks:             tasksByWorker[i],
 		})
 	}

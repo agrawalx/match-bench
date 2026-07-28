@@ -102,6 +102,89 @@ func TestPartitionLeaseAllocatorAcquireRespectsContextTimeout(t *testing.T) {
 	}
 }
 
+func TestBandLeaseAllocatorAcquireReleaseFourBands(t *testing.T) {
+	a := NewBandLeaseAllocator(4)
+
+	bands, err := a.Acquire(context.Background(), "sess-a", 1)
+	if err != nil {
+		t.Fatalf("Acquire: %v", err)
+	}
+	if len(bands) != 1 || bands[0] < 0 || bands[0] > 3 {
+		t.Fatalf("unexpected band lease: %v", bands)
+	}
+	if got := a.LeasedCount(); got != 1 {
+		t.Fatalf("LeasedCount = %d, want 1", got)
+	}
+	a.Release("sess-a")
+	if got := a.LeasedCount(); got != 0 {
+		t.Fatalf("LeasedCount after release = %d, want 0", got)
+	}
+}
+
+func TestBandLeaseAllocatorExclusiveNoTwoSessionsShareABand(t *testing.T) {
+	a := NewBandLeaseAllocator(4)
+	seen := map[int]string{}
+	for i := 0; i < 4; i++ {
+		sessionID := fmt.Sprintf("sess-%d", i)
+		bands, err := a.Acquire(context.Background(), sessionID, 1)
+		if err != nil {
+			t.Fatalf("Acquire %s: %v", sessionID, err)
+		}
+		for _, b := range bands {
+			if owner, ok := seen[b]; ok {
+				t.Fatalf("band %d leased to both %s and %s", b, owner, sessionID)
+			}
+			seen[b] = sessionID
+		}
+	}
+	// A 5th session must block: all 4 bands are exhausted.
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	if _, err := a.Acquire(ctx, "sess-overflow", 1); err == nil {
+		t.Fatal("expected 5th concurrent session to block/time out — only 4 exclusive bands exist")
+	}
+}
+
+// TestBothOrBlockAtomicity pins the admission contract in Runner.Run: a
+// session must never end up holding a partition lease without also holding
+// its order band lease, or vice versa. This test drives the two allocators
+// directly the way Run does — acquire partitions, then bands, releasing
+// partitions if the band acquire fails — and asserts the session holds
+// nothing in either allocator afterward.
+func TestBothOrBlockAtomicity(t *testing.T) {
+	partitions := NewPartitionLeaseAllocator(4)
+	bands := NewBandLeaseAllocator(1) // only 1 band total, forces the band acquire to fail for a 2nd session
+
+	// First session takes the only band, plus some partitions.
+	if _, err := partitions.Acquire(context.Background(), "sess-1", 2); err != nil {
+		t.Fatalf("sess-1 partitions: %v", err)
+	}
+	if _, err := bands.Acquire(context.Background(), "sess-1", 1); err != nil {
+		t.Fatalf("sess-1 band: %v", err)
+	}
+
+	// Second session: partitions succeed (plenty free), but the band
+	// allocator is exhausted — Run must release the partitions it just took.
+	leased, err := partitions.Acquire(context.Background(), "sess-2", 2)
+	if err != nil {
+		t.Fatalf("sess-2 partitions: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	if _, err := bands.Acquire(ctx, "sess-2", 1); err == nil {
+		t.Fatal("expected sess-2 band acquire to fail — only 1 band, held by sess-1")
+	}
+	partitions.Release("sess-2")
+
+	if got := partitions.LeasedCount(); got != 2 {
+		t.Fatalf("expected sess-2's partitions released, LeasedCount = %d, want 2 (only sess-1's)", got)
+	}
+	if got := bands.LeasedCount(); got != 1 {
+		t.Fatalf("expected only sess-1's band leased, LeasedCount = %d, want 1", got)
+	}
+	_ = leased
+}
+
 func TestPartitionLeaseAllocatorRejectsOverTotal(t *testing.T) {
 	a := NewPartitionLeaseAllocator(4)
 	if _, err := a.Acquire(context.Background(), "sess-1", 5); err == nil {

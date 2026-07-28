@@ -26,8 +26,8 @@ use aya::{
 use iicpc_bot_fleet::kafka::{self, KafkaProducer};
 use iicpc_logger_rust::loki;
 use iicpc_schemas_rust::{
-    session_band_partition, OrderAckedBatchRef, OrderAckedEventRef, DEFAULT_PARTITION_BAND_WIDTH,
-    TOPIC_ORDERS_ACKED,
+    band_partition, session_band_partition, OrderAckedBatchRef, OrderAckedEventRef,
+    DEFAULT_PARTITION_BAND_WIDTH, ORDER_BAND_UNSET, TOPIC_ORDERS_ACKED,
 };
 use std::collections::BTreeMap;
 use tokio::signal::unix::{signal, Signal, SignalKind};
@@ -69,6 +69,12 @@ struct Config {
     clamp_mtu: usize,
     orders_partitions: i32,
     partition_band_width: i32,
+    // order_band is the session's exclusively-leased orders.acked partition
+    // band (set by sandbox-orchestrator's ORDER_BAND env var, itself sourced
+    // from bot-fleet-controller's per-session lease). ORDER_BAND_UNSET
+    // (u32::MAX) means unassigned — fall back to hash-derived
+    // session_band_partition for back-compat with pre-leasing rollout.
+    order_band: u32,
 }
 
 impl Config {
@@ -116,6 +122,10 @@ impl Config {
                 DEFAULT_PARTITION_BAND_WIDTH as usize,
             )
             .max(1) as i32,
+            order_band: env::var("ORDER_BAND")
+                .ok()
+                .and_then(|v| v.trim().parse::<u32>().ok())
+                .unwrap_or(ORDER_BAND_UNSET),
         })
     }
 
@@ -285,23 +295,27 @@ fn drain_ringbuf(
 // batch_by_partition drains `events` into per-partition chunks (co-partitioned by
 // order_id so each order's acked event lands on the same partition the worker's
 // sent event did), each chunk <= MAX_EVENTS_PER_BATCH. Pure + unit-tested.
+//
+// When `order_band` != ORDER_BAND_UNSET, the session holds an exclusive
+// controller-leased band and partitioning goes through `band_partition`
+// (deterministic within that band, no cross-session collisions possible).
+// Otherwise it falls back to the old hash-derived `session_band_partition`
+// path, kept for back-compat during rollout / unleased sessions.
 fn batch_by_partition(
     events: &mut Vec<MatchedEvent>,
     session_id: &str,
     orders_partitions: i32,
     partition_band_width: i32,
+    order_band: u32,
 ) -> Vec<(i32, Vec<MatchedEvent>)> {
     let mut by_part: BTreeMap<i32, Vec<MatchedEvent>> = BTreeMap::new();
     for e in events.drain(..) {
-        by_part
-            .entry(session_band_partition(
-                session_id,
-                &e.order_id,
-                orders_partitions,
-                partition_band_width,
-            ))
-            .or_default()
-            .push(e);
+        let partition = if order_band != ORDER_BAND_UNSET {
+            band_partition(order_band, &e.order_id, orders_partitions, partition_band_width)
+        } else {
+            session_band_partition(session_id, &e.order_id, orders_partitions, partition_band_width)
+        };
+        by_part.entry(partition).or_default().push(e);
     }
     let mut out = Vec::new();
     for (part, mut group) in by_part {
@@ -329,6 +343,7 @@ fn flush(producer: &KafkaProducer, config: &Config, events: &mut Vec<MatchedEven
         &config.session_id,
         config.orders_partitions,
         config.partition_band_width,
+        config.order_band,
     ) {
         let event_refs = chunk
             .iter()
@@ -655,7 +670,7 @@ mod tests {
         let session_id = "sess-test";
         let mut events: Vec<MatchedEvent> =
             (0..2500).map(|i| mk_event(&format!("ord-{i}"))).collect();
-        let batches = batch_by_partition(&mut events, session_id, n, band_width);
+        let batches = batch_by_partition(&mut events, session_id, n, band_width, ORDER_BAND_UNSET);
 
         assert!(events.is_empty(), "events must be fully drained");
         let total: usize = batches.iter().map(|(_, c)| c.len()).sum();
@@ -690,7 +705,7 @@ mod tests {
         let order_id = "01890dd2-71f3-7abc-9def-0123456789ab_42_7_O";
 
         let mut events = vec![mk_event(order_id)];
-        let batches = batch_by_partition(&mut events, session_id, n, band_width);
+        let batches = batch_by_partition(&mut events, session_id, n, band_width, ORDER_BAND_UNSET);
         let (acked_partition, _) = &batches[0];
 
         let sent_partition = session_band_partition(session_id, order_id, n, band_width);
@@ -703,7 +718,79 @@ mod tests {
     #[test]
     fn batch_by_partition_empty_is_empty() {
         let mut events: Vec<MatchedEvent> = Vec::new();
-        assert!(batch_by_partition(&mut events, "sess", 24, DEFAULT_PARTITION_BAND_WIDTH).is_empty());
+        assert!(batch_by_partition(
+            &mut events,
+            "sess",
+            24,
+            DEFAULT_PARTITION_BAND_WIDTH,
+            ORDER_BAND_UNSET
+        )
+        .is_empty());
+    }
+
+    // When a band is leased (order_band != ORDER_BAND_UNSET), partitioning must go
+    // through band_partition rather than the hash-derived session_band_partition —
+    // this is the whole point of exclusive per-session leasing.
+    #[test]
+    fn batch_by_partition_uses_band_partition_when_band_is_set() {
+        let n = 24i32;
+        let band_width = DEFAULT_PARTITION_BAND_WIDTH;
+        let band = 2u32;
+        let session_id = "sess-band-test";
+        let mut events: Vec<MatchedEvent> = (0..50).map(|i| mk_event(&format!("ord-{i}"))).collect();
+        let expected: Vec<(String, i32)> = events
+            .iter()
+            .map(|e| {
+                (
+                    e.order_id.clone(),
+                    band_partition(band, &e.order_id, n, band_width),
+                )
+            })
+            .collect();
+
+        let batches = batch_by_partition(&mut events, session_id, n, band_width, band);
+
+        assert!(events.is_empty(), "events must be fully drained");
+        let base = band as i32 * band_width;
+        for (part, chunk) in &batches {
+            assert!(
+                *part >= base && *part < base + band_width,
+                "partition {part} must stay within the leased band [{base}, {})",
+                base + band_width
+            );
+            for e in chunk {
+                let want = expected
+                    .iter()
+                    .find(|(id, _)| id == &e.order_id)
+                    .unwrap()
+                    .1;
+                assert_eq!(*part, want, "must match band_partition, not the hash-derived path");
+            }
+        }
+    }
+
+    // Sanity check that band_partition and session_band_partition actually diverge
+    // for at least one order_id in this fixture — otherwise the two branches above
+    // wouldn't be distinguishable and the "uses band_partition" assertion would be
+    // vacuous.
+    #[test]
+    fn band_partition_and_session_band_partition_diverge_for_some_order() {
+        let n = 24i32;
+        let band_width = DEFAULT_PARTITION_BAND_WIDTH;
+        let band = 2u32;
+        // Any session_id whose hash-derived band != `band` will diverge from
+        // band_partition for every order_id (different base offset); try a
+        // handful so the test doesn't depend on one session_id's hash landing
+        // in the "wrong" (coincidentally matching) band.
+        let diverges = (0..20).any(|s| {
+            let session_id = format!("sess-band-test-{s}");
+            (0..10).any(|i| {
+                let order_id = format!("ord-{i}");
+                band_partition(band, &order_id, n, band_width)
+                    != session_band_partition(&session_id, &order_id, n, band_width)
+            })
+        });
+        assert!(diverges, "fixture must exercise a real difference between the two paths");
     }
 
     const ENV_KEYS: &[&str] = &[
@@ -721,6 +808,7 @@ mod tests {
         "EBPF_FLUSH_INTERVAL_MS",
         "EBPF_BATCH_SIZE",
         "CAPTURE_CLAMP_MTU",
+        "ORDER_BAND",
     ];
 
     /// env_lock performs the module-specific operation described by its name.
@@ -792,6 +880,7 @@ mod tests {
             clamp_mtu: DEFAULT_CLAMP_MTU,
             orders_partitions: 24,
             partition_band_width: DEFAULT_PARTITION_BAND_WIDTH,
+            order_band: ORDER_BAND_UNSET,
         };
         let mut events = vec![MatchedEvent {
             order_id: format!("order-{suffix}"),
@@ -878,7 +967,38 @@ mod tests {
         assert_eq!(config.flush_interval, DEFAULT_FLUSH_INTERVAL);
         assert_eq!(config.batch_size, DEFAULT_BATCH_SIZE);
         assert_eq!(config.clamp_mtu, DEFAULT_CLAMP_MTU);
+        assert_eq!(
+            config.order_band, ORDER_BAND_UNSET,
+            "ORDER_BAND unset must default to the sentinel, not 0"
+        );
         config.validate().unwrap();
+        clear_test_env();
+    }
+
+    #[test]
+    /// config_from_env_parses_order_band performs the module-specific operation described by its name.
+    /// It keeps validation, side effects, and returned values within this module's contract.
+    fn config_from_env_parses_order_band() {
+        let _guard = env_lock();
+        let cases: &[(Option<&str>, u32)] = &[
+            (None, ORDER_BAND_UNSET),
+            (Some(""), ORDER_BAND_UNSET),
+            (Some("not-a-number"), ORDER_BAND_UNSET),
+            (Some("0"), 0),
+            (Some("5"), 5),
+        ];
+        for &(value, want) in cases {
+            clear_test_env();
+            set_env("SESSION_ID", "session-a");
+            set_env("CONTESTANT_ID", "contestant-a");
+            set_env("EBPF_IFACE", "eth0");
+            set_env("EBPF_OBJECT_PATH", "/tmp/latency.o");
+            if let Some(v) = value {
+                set_env("ORDER_BAND", v);
+            }
+            let config = Config::from_env().unwrap();
+            assert_eq!(config.order_band, want, "ORDER_BAND={value:?}");
+        }
         clear_test_env();
     }
 

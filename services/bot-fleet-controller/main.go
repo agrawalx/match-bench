@@ -84,10 +84,14 @@ func main() {
 	leases := controller.NewPartitionLeaseAllocator(workloadPartitions)
 
 	maxConcurrentSessions := envOrInt("MAX_CONCURRENT_SESSIONS", 4)
+	// Order bands are leased 1:1 with MAX_CONCURRENT_SESSIONS: 24
+	// orders.sent/orders.acked partitions split into 4 EXCLUSIVE 6-partition
+	// bands (0-5, 6-11, 12-17, 18-23), one per concurrently-running session.
+	bandLeases := controller.NewBandLeaseAllocator(maxConcurrentSessions)
 
 	orchClient := orchestrator.NewClient(orchURL)
 	sessions := controller.NewSessionManager()
-	runner := controller.NewRunner(sessions, st, orchClient, producer, leases, runConfig, log)
+	runner := controller.NewRunner(sessions, st, orchClient, producer, leases, bandLeases, runConfig, log)
 	consumer := controller.NewConsumerWithConcurrency(kafkaBrokers, benchmarkGroup, botReadyGroup, runner, sessions, log, maxConcurrentSessions)
 	defer consumer.Close()
 

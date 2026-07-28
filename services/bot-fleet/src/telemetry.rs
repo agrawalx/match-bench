@@ -22,8 +22,8 @@ use tokio::{
 use tracing::error;
 
 use iicpc_schemas_rust::{
-    partition_for, session_band_partition, OrderSentBatchV2Ref, OrderSentEvent,
-    OrderSentEventFieldsRef, DEFAULT_PARTITION_BAND_WIDTH,
+    band_partition, partition_for, session_band_partition, OrderSentBatchV2Ref, OrderSentEvent,
+    OrderSentEventFieldsRef, DEFAULT_PARTITION_BAND_WIDTH, ORDER_BAND_UNSET,
 };
 
 use crate::{
@@ -92,6 +92,7 @@ impl TelemetrySink {
         flush_interval: Duration,
         batch_size: usize,
         num_partitions: i32,
+        order_band: u32,
     ) -> Self {
         let enabled = !matches!(
             std::env::var("BOT_DISABLE_TELEMETRY").as_deref(),
@@ -130,6 +131,7 @@ impl TelemetrySink {
                 flush_interval,
                 num_partitions,
                 band_width,
+                order_band,
             )));
         }
 
@@ -215,10 +217,11 @@ async fn run_aggregator(
     flush_interval: Duration,
     num_partitions: i32,
     band_width: i32,
+    order_band: u32,
 ) -> Result<()> {
     let _ = shard_id; // reserved for future per-shard metrics/logging
     let mut ticker = time::interval(flush_interval);
-    let mut batcher = PartitionBatcher::new(num_partitions, band_width);
+    let mut batcher = PartitionBatcher::new(num_partitions, band_width, order_band);
     let mut inflight: FuturesUnordered<AckFuture> = FuturesUnordered::new();
     // Drain the channel in bulk (recv_many) rather than one event per wake: at high
     // rates a single aggregator paid the select!/wake overhead per event, which was
@@ -351,35 +354,49 @@ async fn enqueue_chunk(
     }
 }
 
-/// PartitionBatcher buffers events per destination partition (co-partitioned by
-/// session_id+order_id via `session_band_partition`, same contract as the ingester
-/// and the eBPF acked producer) and emits a chunk the instant a partition reaches
-/// MAX_EVENTS_PER_BATCH, so the aggregator can enqueue it without waiting for a
-/// timer. `drain_ready` returns the partial remainder on tick/shutdown. No event is
-/// ever dropped here — everything pushed is either emitted or drained.
+/// PartitionBatcher buffers events per destination partition — co-partitioned by
+/// `order_band` via `band_partition` when the controller has leased one
+/// (exclusive per-session band), falling back to the hash-derived
+/// `session_band_partition` for band-unaware specs (`ORDER_BAND_UNSET`), same
+/// contract as the ingester and the eBPF acked producer — and emits a chunk the
+/// instant a partition reaches MAX_EVENTS_PER_BATCH, so the aggregator can
+/// enqueue it without waiting for a timer. `drain_ready` returns the partial
+/// remainder on tick/shutdown. No event is ever dropped here — everything
+/// pushed is either emitted or drained.
 struct PartitionBatcher {
     num_partitions: i32,
     band_width: i32,
+    order_band: u32,
     by_part: BTreeMap<i32, Vec<OrderSentEvent>>,
 }
 
 impl PartitionBatcher {
-    fn new(num_partitions: i32, band_width: i32) -> Self {
+    fn new(num_partitions: i32, band_width: i32, order_band: u32) -> Self {
         Self {
             num_partitions,
             band_width,
+            order_band,
             by_part: BTreeMap::new(),
         }
     }
 
     /// Buffer one event; return a ready (partition, chunk) if it just filled one.
     fn push(&mut self, event: OrderSentEvent) -> Option<(i32, Vec<OrderSentEvent>)> {
-        let part = session_band_partition(
-            &event.session_id,
-            &event.order_id,
-            self.num_partitions,
-            self.band_width,
-        );
+        let part = if self.order_band != ORDER_BAND_UNSET {
+            band_partition(
+                self.order_band,
+                &event.order_id,
+                self.num_partitions,
+                self.band_width,
+            )
+        } else {
+            session_band_partition(
+                &event.session_id,
+                &event.order_id,
+                self.num_partitions,
+                self.band_width,
+            )
+        };
         let group = self.by_part.entry(part).or_default();
         group.push(event);
         if group.len() >= MAX_EVENTS_PER_BATCH {
@@ -405,6 +422,7 @@ mod tests {
     use super::*;
     use iicpc_schemas_rust::{
         OrdType, OrderSentBatch, OrderSentBatchV2, PayloadType, Side, DEFAULT_PARTITION_BAND_WIDTH,
+        ORDER_BAND_UNSET,
     };
 
     /// test_event performs the module-specific operation described by its name.
@@ -438,7 +456,7 @@ mod tests {
     fn partition_batcher_emits_and_drains_without_loss() {
         let n = 24;
         let total = 50_000usize;
-        let mut b = PartitionBatcher::new(n, DEFAULT_PARTITION_BAND_WIDTH);
+        let mut b = PartitionBatcher::new(n, DEFAULT_PARTITION_BAND_WIDTH, ORDER_BAND_UNSET);
         let mut emitted: Vec<(i32, Vec<OrderSentEvent>)> = Vec::new();
         for i in 0..total {
             if let Some(chunk) = b.push(test_event(i)) {
@@ -481,13 +499,73 @@ mod tests {
     fn partition_batcher_spreads_a_session_across_its_band() {
         let n = 24;
         let band_width = DEFAULT_PARTITION_BAND_WIDTH;
-        let mut b = PartitionBatcher::new(n, band_width);
+        let mut b = PartitionBatcher::new(n, band_width, ORDER_BAND_UNSET);
         for i in 0..2_000 {
             let _ = b.push(test_event(i));
         }
         let used = b.drain_ready().len();
         assert!(used >= 2, "a busy session must use several partitions in its band, used {used}");
         assert!(used as i32 <= band_width, "session must stay within its band, used {used}");
+    }
+
+    /// When `order_band` is leased (set), the batcher must use `band_partition`
+    /// and confine every event to that band's exclusive partition range,
+    /// regardless of session_id (two different sessions sharing a band would be
+    /// a controller bug, but the batcher itself must be band-pure).
+    #[test]
+    fn partition_batcher_uses_leased_band_when_set() {
+        let n = 24;
+        let band_width = 6i32;
+        let band = 2u32; // partitions [12, 18)
+        let mut b = PartitionBatcher::new(n, band_width, band);
+        for i in 0..2_000 {
+            let mut e = test_event(i);
+            e.session_id = format!("session-{}", i % 5); // vary session_id
+            if let Some((part, chunk)) = b.push(e) {
+                for ev in &chunk {
+                    let expected = band_partition(band, &ev.order_id, n, band_width);
+                    assert_eq!(part, expected);
+                }
+                assert!(
+                    (12..18).contains(&part),
+                    "partition {part} outside leased band [12, 18)"
+                );
+            }
+        }
+        for (part, chunk) in b.drain_ready() {
+            assert!((12..18).contains(&part), "partition {part} outside leased band [12, 18)");
+            for ev in &chunk {
+                assert_eq!(part, band_partition(band, &ev.order_id, n, band_width));
+            }
+        }
+    }
+
+    /// Back-compat regression: `ORDER_BAND_UNSET` must keep using the old
+    /// hash-derived `session_band_partition` path, not `band_partition`.
+    #[test]
+    fn partition_batcher_falls_back_to_hash_derived_band_when_unset() {
+        let n = 24;
+        let band_width = DEFAULT_PARTITION_BAND_WIDTH;
+        let mut b = PartitionBatcher::new(n, band_width, ORDER_BAND_UNSET);
+        for i in 0..500 {
+            if let Some((part, chunk)) = b.push(test_event(i)) {
+                for ev in &chunk {
+                    assert_eq!(
+                        part,
+                        session_band_partition(&ev.session_id, &ev.order_id, n, band_width),
+                        "unset order_band must fall back to session_band_partition"
+                    );
+                }
+            }
+        }
+        for (part, chunk) in b.drain_ready() {
+            for ev in &chunk {
+                assert_eq!(
+                    part,
+                    session_band_partition(&ev.session_id, &ev.order_id, n, band_width)
+                );
+            }
+        }
     }
 
     #[test]

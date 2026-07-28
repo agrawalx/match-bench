@@ -59,14 +59,60 @@ type pendingOrder struct {
 	sendTS  uint64 // sent send time; 0 until sent seen
 }
 
+// bandPartitionSet returns the set of partition IDs covered by band (mirroring
+// topics.BandPartition's own base/wrap arithmetic), for numPartitions total
+// partitions and bandWidth partitions per band. Used to restrict readers to
+// only the session's exclusively-leased band instead of scanning every
+// partition (see docs/multi-contestant-audit.md order-band section).
+func bandPartitionSet(band uint32, numPartitions, bandWidth int32) map[int]struct{} {
+	if numPartitions <= 1 {
+		return map[int]struct{}{0: {}}
+	}
+	if bandWidth < 1 {
+		bandWidth = 1
+	}
+	if bandWidth > numPartitions {
+		bandWidth = numPartitions
+	}
+	base := int32(int64(band) * int64(bandWidth))
+	set := make(map[int]struct{}, bandWidth)
+	for i := int32(0); i < bandWidth; i++ {
+		set[int((base+i)%numPartitions)] = struct{}{}
+	}
+	return set
+}
+
+// filterPartitions keeps only the partitions in allowed, preserving order. A
+// nil allowed means "no restriction" (back-compat: OrderBandUnset).
+func filterPartitions(parts []kafka.Partition, allowed map[int]struct{}) []kafka.Partition {
+	if allowed == nil {
+		return parts
+	}
+	out := make([]kafka.Partition, 0, len(allowed))
+	for _, p := range parts {
+		if _, ok := allowed[p.ID]; ok {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
 // StreamSession validates a session with bounded memory. apply is called with each
 // order in EffectiveT3 order; addPhantom with each fill reported for an order_id that
-// was never sent. Returns event counts and the contestant id.
+// was never sent. orderBand/bandWidth restrict the partitions read to that
+// session's exclusively-leased band (4x less broker read amplification than a
+// full-topic scan); pass topics.OrderBandUnset for orderBand to fall back to
+// reading every partition (back-compat with band-unaware sessions). The
+// session-id filter in decodeBatch stays in effect regardless, as a guard
+// against stale-tail cross-band leakage. Returns event counts and the
+// contestant id.
 func StreamSession(
 	ctx context.Context,
 	brokers []string,
 	sessionID string,
 	window int,
+	orderBand uint32,
+	bandWidth int32,
 	apply func(*model.Order),
 	addPhantom func(orderID string, qty uint64, price int64),
 ) (StreamCounts, string, error) {
@@ -91,6 +137,11 @@ func StreamSession(
 	}
 	if errA != nil {
 		return counts, "", fmt.Errorf("read partitions %s: %w", topics.TopicOrdersAcked, errA)
+	}
+
+	if orderBand != topics.OrderBandUnset {
+		sentParts = filterPartitions(sentParts, bandPartitionSet(orderBand, int32(len(sentParts)), bandWidth))
+		ackParts = filterPartitions(ackParts, bandPartitionSet(orderBand, int32(len(ackParts)), bandWidth))
 	}
 
 	mctx, cancel := context.WithCancel(ctx)

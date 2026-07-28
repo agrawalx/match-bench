@@ -190,6 +190,8 @@ async fn async_main() -> Result<()> {
         connect_timeout_ms: 2000,
         write_timeout_ms: 500,
         barrier_epoch_ns,
+        published_at_unix_ns: 0,
+        order_band: iicpc_schemas_rust::ORDER_BAND_UNSET,
         tasks: (1..=task_count())
             .map(|i| TaskSpec {
                 task_id: i,

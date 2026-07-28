@@ -11,12 +11,13 @@ import (
 	"net"
 	"testing"
 
+	"github.com/iicpc/schemas/topics"
 	cerrs "github.com/iicpc/sandbox-orchestrator/internal/errors"
 	corev1 "k8s.io/api/core/v1"
 )
 
 func TestPodSpecDeclaresOneContainerPortPerTarget(t *testing.T) {
-	pod := bugfixManager(false).podSpec("s1", "c1", "img", []int{9898, 8080})
+	pod := bugfixManager(false).podSpec("s1", "c1", "img", []int{9898, 8080}, topics.OrderBandUnset)
 	ports := pod.Spec.Containers[0].Ports
 	if len(ports) != 2 {
 		t.Fatalf("expected 2 container ports, got %d: %+v", len(ports), ports)
@@ -27,7 +28,7 @@ func TestPodSpecDeclaresOneContainerPortPerTarget(t *testing.T) {
 }
 
 func TestPodSpecReadinessProbeGatesPrimaryPort(t *testing.T) {
-	pod := bugfixManager(false).podSpec("s1", "c1", "img", []int{9898, 8080})
+	pod := bugfixManager(false).podSpec("s1", "c1", "img", []int{9898, 8080}, topics.OrderBandUnset)
 	probe := pod.Spec.Containers[0].ReadinessProbe
 	if probe == nil || probe.TCPSocket == nil {
 		t.Fatal("expected a TCP readiness probe")
@@ -50,14 +51,14 @@ func TestServiceSpecDeclaresOneServicePortPerTarget(t *testing.T) {
 }
 
 func TestCreateSlotRejectsEmptyPorts(t *testing.T) {
-	if err := bugfixManager(false).CreateSlot(context.Background(), "s1", "c1", "img", nil); !errors.Is(err, cerrs.ErrInvalidRequest) {
+	if err := bugfixManager(false).CreateSlot(context.Background(), "s1", "c1", "img", nil, topics.OrderBandUnset); !errors.Is(err, cerrs.ErrInvalidRequest) {
 		t.Fatalf("empty ports: got %v, want ErrInvalidRequest", err)
 	}
 }
 
 func TestCreateSlotRejectsAnyUncapturablePortInMultiPortSet(t *testing.T) {
 	m := bugfixManager(true)
-	if err := m.CreateSlot(context.Background(), "s1", "c1", "img", []int{9898, 1234}); !errors.Is(err, cerrs.ErrInvalidRequest) {
+	if err := m.CreateSlot(context.Background(), "s1", "c1", "img", []int{9898, 1234}, topics.OrderBandUnset); !errors.Is(err, cerrs.ErrInvalidRequest) {
 		t.Fatalf("mixed capturable/uncapturable set: got %v, want ErrInvalidRequest", err)
 	}
 }

@@ -48,7 +48,7 @@ func TestBuildWorkloadSpecsSplitsTasksRoundRobinAcrossTargets(t *testing.T) {
 	sub := &store.SubmissionInfo{ContestantID: "team-1", Protocol: protocolAll}
 	scenario := &topics.Scenario{TaskSpecs: taskSpecs(9)}
 
-	specs := r.buildWorkloadSpecs(sess, sub, scenario, 2)
+	specs := r.buildWorkloadSpecs(sess, sub, scenario, 2, 3)
 	if len(specs) != 2 {
 		t.Fatalf("expected 2 worker specs, got %d", len(specs))
 	}
@@ -76,6 +76,24 @@ func TestBuildWorkloadSpecsSplitsTasksRoundRobinAcrossTargets(t *testing.T) {
 	}
 }
 
+func TestBuildWorkloadSpecsStampsOrderBandOnEverySpec(t *testing.T) {
+	r := &Runner{runConfig: RunConfig{}}
+	sess := &Session{
+		SessionID:    "sess-1",
+		SubmissionID: "sub-1",
+		Endpoint:     &orchestrator.Endpoint{Host: "algo.svc", Port: 9898},
+	}
+	sub := &store.SubmissionInfo{Protocol: "FIX"}
+	scenario := &topics.Scenario{TaskSpecs: taskSpecs(6)}
+
+	specs := r.buildWorkloadSpecs(sess, sub, scenario, 3, 2)
+	for i, spec := range specs {
+		if spec.OrderBand != 2 {
+			t.Fatalf("worker %d: expected leased order_band 2, got %d", i, spec.OrderBand)
+		}
+	}
+}
+
 func TestBuildWorkloadSpecsKeepsTaskIDsGloballyUnique(t *testing.T) {
 	r := &Runner{runConfig: RunConfig{}}
 	sess := &Session{
@@ -86,7 +104,7 @@ func TestBuildWorkloadSpecsKeepsTaskIDsGloballyUnique(t *testing.T) {
 	sub := &store.SubmissionInfo{Protocol: protocolAll}
 	scenario := &topics.Scenario{TaskSpecs: taskSpecs(12)}
 
-	specs := r.buildWorkloadSpecs(sess, sub, scenario, 3)
+	specs := r.buildWorkloadSpecs(sess, sub, scenario, 3, 1)
 	ids := map[uint32]bool{}
 	for _, spec := range specs {
 		for _, ts := range spec.Tasks {

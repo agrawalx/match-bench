@@ -322,6 +322,7 @@ async fn run_workload(
         config.telemetry_flush_interval,
         config.telemetry_batch_size,
         config.orders_partitions,
+        spec.order_band,
     );
 
     // 1s send-health snapshot. Logs to the pod's own stdout (survives a dead
@@ -2237,6 +2238,7 @@ mod tests {
             write_timeout_ms: 250,
             barrier_epoch_ns: 0,
             published_at_unix_ns: 0,
+            order_band: iicpc_schemas_rust::ORDER_BAND_UNSET,
             tasks: vec![TaskSpec {
                 task_id: 1,
                 profile: BotProfile::Hft,

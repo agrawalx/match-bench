@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/iicpc/schemas/topics"
 	cerrs "github.com/iicpc/sandbox-orchestrator/internal/errors"
 	"github.com/iicpc/sandbox-orchestrator/internal/store"
 	batchv1 "k8s.io/api/batch/v1"
@@ -36,7 +37,13 @@ const (
 
 	CaptureAppValue             = "ebpf-capture"
 	captureContestantAnnotation = "iicpc.dev/contestant-id"
-	captureObjectPath           = "/opt/iicpc/ebpf/libiicpc_ebpf_latency.so"
+	// captureOrderBandAnnotation carries the slot's leased order band from
+	// CreateSlot time (pod creation) through to ensureCapture, which runs
+	// later during Refresh once the pod is Ready and creates the capture
+	// Job — mirroring how captureContestantAnnotation threads contestantID
+	// across that same gap.
+	captureOrderBandAnnotation = "iicpc.dev/order-band"
+	captureObjectPath          = "/opt/iicpc/ebpf/libiicpc_ebpf_latency.so"
 
 	slotActiveDeadlineSeconds       = int64(3600)
 	captureJobActiveDeadlineSeconds = int64(3600)
@@ -138,7 +145,7 @@ func validateConfig(cfg Config) error {
 
 // CreateSlot applies behavior for its receiver performs the package-specific operation described by its name.
 // It keeps validation, side effects, and returned values within this package's contract.
-func (m *Manager) CreateSlot(ctx context.Context, slotID, contestantID, image string, ports []int) error {
+func (m *Manager) CreateSlot(ctx context.Context, slotID, contestantID, image string, ports []int, orderBand uint32) error {
 	if len(ports) == 0 {
 		return fmt.Errorf("%w: at least one port is required", cerrs.ErrInvalidRequest)
 	}
@@ -152,7 +159,7 @@ func (m *Manager) CreateSlot(ctx context.Context, slotID, contestantID, image st
 
 	resourceName := podName(slotID)
 
-	existing, err := m.ensurePod(ctx, resourceName, slotID, contestantID, image, ports)
+	existing, err := m.ensurePod(ctx, resourceName, slotID, contestantID, image, ports, orderBand)
 	if err != nil {
 		return err
 	}
@@ -178,13 +185,13 @@ func (m *Manager) CreateSlot(ctx context.Context, slotID, contestantID, image st
 
 // ensurePod applies behavior for its receiver performs the package-specific operation described by its name.
 // It keeps validation, side effects, and returned values within this package's contract.
-func (m *Manager) ensurePod(ctx context.Context, resourceName, slotID, contestantID, image string, ports []int) (*corev1.Pod, error) {
+func (m *Manager) ensurePod(ctx context.Context, resourceName, slotID, contestantID, image string, ports []int, orderBand uint32) (*corev1.Pod, error) {
 	existing, err := m.client.CoreV1().Pods(m.namespace).Get(ctx, resourceName, metav1.GetOptions{})
 	switch {
 	case err == nil:
 		return existing, nil
 	case apierrors.IsNotFound(err):
-		created, err := m.client.CoreV1().Pods(m.namespace).Create(ctx, m.podSpec(slotID, contestantID, image, ports), metav1.CreateOptions{})
+		created, err := m.client.CoreV1().Pods(m.namespace).Create(ctx, m.podSpec(slotID, contestantID, image, ports, orderBand), metav1.CreateOptions{})
 		if err != nil {
 			if apierrors.IsAlreadyExists(err) {
 				existing, err := m.client.CoreV1().Pods(m.namespace).Get(ctx, resourceName, metav1.GetOptions{})
@@ -366,7 +373,7 @@ func ServiceFQDN(slotID, namespace string) string {
 
 // podSpec applies behavior for its receiver performs the package-specific operation described by its name.
 // It keeps validation, side effects, and returned values within this package's contract.
-func (m *Manager) podSpec(slotID, contestantID, image string, ports []int) *corev1.Pod {
+func (m *Manager) podSpec(slotID, contestantID, image string, ports []int, orderBand uint32) *corev1.Pod {
 	labels := map[string]string{
 		LabelApp:       AppValue,
 		LabelSlot:      slotID,
@@ -383,6 +390,11 @@ func (m *Manager) podSpec(slotID, contestantID, image string, ports []int) *core
 	if contestantID != "" {
 		annotations[captureContestantAnnotation] = contestantID
 	}
+	// Always stamped (even when unset) so ensureCapture can tell "explicitly
+	// unassigned" apart from "annotation missing" — both currently mean
+	// "fall back to hash-derived banding", but recording it explicitly keeps
+	// the pod's annotation set self-describing for debugging.
+	annotations[captureOrderBandAnnotation] = strconv.FormatUint(uint64(orderBand), 10)
 
 	autoMount := false
 	readOnlyRoot := true
@@ -550,7 +562,13 @@ func (m *Manager) ensureCapture(ctx context.Context, pod *corev1.Pod) error {
 	if len(pod.Status.ContainerStatuses) > 0 {
 		containerID = pod.Status.ContainerStatuses[0].ContainerID
 	}
-	job := m.captureJobSpec(slotID, pod.Annotations[captureContestantAnnotation], nodeName, string(pod.UID), containerID)
+	orderBand := topics.OrderBandUnset
+	if raw, ok := pod.Annotations[captureOrderBandAnnotation]; ok {
+		if parsed, err := strconv.ParseUint(raw, 10, 32); err == nil {
+			orderBand = uint32(parsed)
+		}
+	}
+	job := m.captureJobSpec(slotID, pod.Annotations[captureContestantAnnotation], nodeName, string(pod.UID), containerID, orderBand)
 	if _, err := m.client.BatchV1().Jobs(m.namespace).Create(ctx, job, metav1.CreateOptions{}); err != nil && !apierrors.IsAlreadyExists(err) {
 		return fmt.Errorf("create capture job: %w", err)
 	}
@@ -559,7 +577,7 @@ func (m *Manager) ensureCapture(ctx context.Context, pod *corev1.Pod) error {
 
 // captureJobSpec applies behavior for its receiver performs the package-specific operation described by its name.
 // It keeps validation, side effects, and returned values within this package's contract.
-func (m *Manager) captureJobSpec(slotID, contestantID, nodeName, podUID, containerID string) *batchv1.Job {
+func (m *Manager) captureJobSpec(slotID, contestantID, nodeName, podUID, containerID string, orderBand uint32) *batchv1.Job {
 	labels := map[string]string{
 		LabelApp:       CaptureAppValue,
 		LabelSlot:      slotID,
@@ -592,6 +610,10 @@ func (m *Manager) captureJobSpec(slotID, contestantID, nodeName, podUID, contain
 		{Name: "EBPF_ALGO_CONTAINER_ID", Value: containerID},
 		{Name: "EBPF_OBJECT_PATH", Value: captureObjectPath},
 		{Name: "KAFKA_BROKERS", Value: m.kafkaBrokers},
+		// ORDER_BAND: the session's exclusively-leased orders.acked partition
+		// band. topics.OrderBandUnset (math.MaxUint32) means unassigned —
+		// ebpf-latency falls back to hash-derived partitioning.
+		{Name: "ORDER_BAND", Value: strconv.FormatUint(uint64(orderBand), 10)},
 	}
 
 	ownerRefs := []metav1.OwnerReference{{

@@ -89,7 +89,7 @@ func TestIntegration_StreamEquivalentToBatch(t *testing.T) {
 
 	// streaming path
 	sv := validate.NewStreamValidator()
-	sCounts, sContestant, err := StreamSession(ctx, brokers, sid, 0,
+	sCounts, sContestant, err := StreamSession(ctx, brokers, sid, 0, topics.OrderBandUnset, 0,
 		sv.Apply,
 		func(id string, qty uint64, price int64) { sv.AddPhantom(validate.ReportedFill{OrderID: id, Qty: qty, Price: price}) },
 	)

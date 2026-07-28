@@ -14,6 +14,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/iicpc/libs/metrics"
+	"github.com/iicpc/schemas/topics"
 	cerrs "github.com/iicpc/sandbox-orchestrator/internal/errors"
 	"github.com/iicpc/sandbox-orchestrator/internal/k8s"
 	"github.com/iicpc/sandbox-orchestrator/internal/store"
@@ -27,6 +28,24 @@ type createSlotRequest struct {
 	Image        string `json:"image"`
 	Port         int    `json:"port,omitempty"`  // back-compat single-port slot; ignored if Ports is set
 	Ports        []int  `json:"ports,omitempty"` // one ContainerPort/ServicePort per entry
+
+	// OrderBand is the session's leased exclusive orders.acked partition
+	// band, threaded onto the capture container as ORDER_BAND. A pointer so
+	// the JSON zero value (0) can be told apart from "field omitted" — 0 is
+	// a legitimate band index, so a plain uint32 would silently misread an
+	// absent field as band 0. Callers that don't set it (or send explicit
+	// null) get topics.OrderBandUnset, the same sentinel bot-fleet-controller
+	// and schemas/{go,rust} use for "fall back to hash-derived banding".
+	OrderBand *uint32 `json:"order_band"`
+}
+
+// orderBand resolves the request's order band, defaulting to
+// topics.OrderBandUnset when the field was omitted or explicitly null.
+func (r createSlotRequest) orderBand() uint32 {
+	if r.OrderBand == nil {
+		return topics.OrderBandUnset
+	}
+	return *r.OrderBand
 }
 
 // resolvePorts normalizes a createSlotRequest onto its declared port list:
@@ -101,7 +120,7 @@ func CreateSlot(mgr *k8s.Manager, slots *store.SlotStore, log *slog.Logger) http
 		}
 
 		start := time.Now()
-		if err := mgr.CreateSlot(ctx, req.SlotID, req.ContestantID, req.Image, ports); err != nil {
+		if err := mgr.CreateSlot(ctx, req.SlotID, req.ContestantID, req.Image, ports, req.orderBand()); err != nil {
 			metrics.Histogram("slot_create_duration_seconds", "Sandbox slot create duration in seconds.", metrics.Labels("result", "error"), metrics.SinceSeconds(start))
 			switch {
 			case errors.Is(err, cerrs.ErrSlotImageMismatch):

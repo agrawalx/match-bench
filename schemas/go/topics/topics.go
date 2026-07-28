@@ -5,7 +5,10 @@
 // the service-level design in design.md for broader operational context.
 package topics
 
-import "time"
+import (
+	"math"
+	"time"
+)
 
 const (
 	TopicSubmissionBuildRequested = "submission.build.requested"
@@ -38,6 +41,68 @@ func PortForProtocol(protocol string) uint16 {
 		return PortFIX
 	}
 	return PortHTTPWS
+}
+
+// OrderBandUnset is the sentinel for WorkloadSpec.OrderBand meaning
+// "unassigned — fall back to hash-derived banding via SessionBandPartition".
+// Mirrors Rust's ORDER_BAND_UNSET (u32::MAX): valid bands are always small
+// (< num_partitions), leaving math.MaxUint32 permanently free as a sentinel
+// in both languages.
+const OrderBandUnset = uint32(math.MaxUint32)
+
+func fnv1a64(s string) uint64 {
+	var hash uint64 = 0xcbf29ce484222325
+	for i := 0; i < len(s); i++ {
+		hash ^= uint64(s[i])
+		hash *= 0x100000001b3
+	}
+	return hash
+}
+
+// BandPartition maps (band, orderID) onto a Kafka partition using an
+// EXCLUSIVELY leased band (see bot-fleet-controller's band lease allocator),
+// rather than a hash-derived one. base = band*bandWidth; orderID is hashed
+// only within [base, base+bandWidth). Mirrors Rust's band_partition exactly
+// (same FNV-1a 64-bit hash) so Go readers (correctness-validator) and Rust
+// producers (bot-fleet, ebpf-latency) agree on partition placement.
+func BandPartition(band uint32, orderID string, numPartitions, bandWidth int32) int32 {
+	if numPartitions <= 1 {
+		return 0
+	}
+	if bandWidth < 1 {
+		bandWidth = 1
+	}
+	if bandWidth > numPartitions {
+		bandWidth = numPartitions
+	}
+	base := int32(int64(band) * int64(bandWidth))
+	within := int32(fnv1a64(orderID) % uint64(bandWidth))
+	return (base + within) % numPartitions
+}
+
+// SessionBandPartition mirrors Rust's session_band_partition: hash-derived
+// band selection (band = hash(sessionID) % numBands). DEPRECATED fallback —
+// exclusive per-session bands are now controller-leased (see BandPartition);
+// this remains only so band-unaware messages (WorkloadSpec.OrderBand ==
+// OrderBandUnset) keep working during rollout / back-compat.
+func SessionBandPartition(sessionID, orderID string, numPartitions, bandWidth int32) int32 {
+	if numPartitions <= 1 {
+		return 0
+	}
+	if bandWidth < 1 {
+		bandWidth = 1
+	}
+	if bandWidth > numPartitions {
+		bandWidth = numPartitions
+	}
+	numBands := (numPartitions + bandWidth - 1) / bandWidth
+	if numBands < 1 {
+		numBands = 1
+	}
+	band := int32(fnv1a64(sessionID) % uint64(numBands))
+	base := band * bandWidth
+	within := int32(fnv1a64(orderID) % uint64(bandWidth))
+	return (base + within) % numPartitions
 }
 
 // SubmissionBuildRequested groups the state and dependencies used by this package.
@@ -168,8 +233,18 @@ type WorkloadSpec struct {
 	// skip stale specs left behind by a session that released its
 	// partition lease before a worker attached. Zero value (unset) means
 	// consumers must treat it as NOT stale.
-	PublishedAtUnixNS uint64     `json:"published_at_unix_ns"`
-	Tasks             []TaskSpec `json:"tasks"` // this worker's slice of the scenario's task list
+	PublishedAtUnixNS uint64 `json:"published_at_unix_ns"`
+	// OrderBand is the exclusively-leased partition band index for this
+	// session's orders.sent/orders.acked traffic (band N covers partitions
+	// [N*bandWidth, (N+1)*bandWidth)). OrderBandUnset means unassigned —
+	// fall back to hash-derived SessionBandPartition for back-compat with
+	// band-unaware producers. Zero value would collide with a real band 0,
+	// so callers decoding older payloads MUST default-fill this to
+	// OrderBandUnset themselves (Go's zero value for uint32 is 0, not the
+	// sentinel — unlike Rust's serde default). See controller runner.go
+	// buildWorkloadSpecs, which is the only production constructor.
+	OrderBand uint32     `json:"order_band"`
+	Tasks     []TaskSpec `json:"tasks"` // this worker's slice of the scenario's task list
 }
 
 // TargetSpec names one protocol+port a workload can dispatch tasks to. Ports

@@ -68,6 +68,12 @@ func main() {
 	validatorMode := envOr("VALIDATOR_MODE", "full")
 	crossFlowWindowUs := uint64(envInt("CROSS_FLOW_WINDOW_US", int(validate.DefaultCrossFlowWindowUs)))
 	t7ReorderWindow := envInt("VALIDATOR_T7_REORDER_WINDOW", validate.DefaultT7ReorderWindow)
+	// bandWidth mirrors bot-fleet's BOT_PARTITION_BAND_WIDTH / schemas/rust
+	// DEFAULT_PARTITION_BAND_WIDTH: partitions per exclusively-leased order
+	// band. Must match the producer side or band-restricted reads will miss
+	// partitions the session actually wrote to.
+	bandWidth := int32(envInt("VALIDATOR_ORDER_BAND_WIDTH", 8))
+	workloadGroup := envOr("KAFKA_WORKLOAD_BAND_GROUP", "correctness-validator-band")
 	brokers := parseBrokers(kafkaBrokers)
 	if err := checkTimeoutConfig(validationTimeout, settleDelay); err != nil {
 		log.Error("invalid validation timeout config", "validation_timeout_ms", validationTimeout.Milliseconds(), "settle_ms", settleDelay.Milliseconds(), "error", err)
@@ -97,11 +103,14 @@ func main() {
 		mode:              validatorMode,
 		crossFlowWindowUs: crossFlowWindowUs,
 		t7ReorderWindow:   t7ReorderWindow,
+		bandWidth:         bandWidth,
+		bandCache:         source.NewBandCache(),
 	}
 
 	for i := 0; i < concurrency; i++ {
 		go v.runStatusConsumer(ctx, brokers, statusGroup)
 	}
+	go v.runWorkloadBandConsumer(ctx, brokers, workloadGroup)
 
 	var ready atomic.Bool
 	ready.Store(true)
@@ -148,6 +157,8 @@ type validator struct {
 	mode              string // "full" | "invariants" (VALIDATOR_MODE)
 	crossFlowWindowUs uint64
 	t7ReorderWindow   int
+	bandWidth         int32
+	bandCache         *source.BandCache
 	inflight          atomic.Int64
 }
 
@@ -216,6 +227,8 @@ func (v *validator) validateSession(ctx context.Context, sessionID string) error
 		return ctx.Err()
 	}
 
+	orderBand := v.bandCache.GetAndDelete(sessionID)
+
 	drainStart := time.Now()
 	var (
 		counts     source.StreamCounts
@@ -224,7 +237,7 @@ func (v *validator) validateSession(ctx context.Context, sessionID string) error
 	)
 	if v.mode == "invariants" {
 		iv := validate.NewInvariantsValidatorWithWindow(v.crossFlowWindowUs, v.t7ReorderWindow)
-		counts, contestant, err = source.StreamSession(ctx, v.brokers, sessionID, v.reorderWindow,
+		counts, contestant, err = source.StreamSession(ctx, v.brokers, sessionID, v.reorderWindow, orderBand, v.bandWidth,
 			iv.Apply,
 			iv.AddUnmatched,
 		)
@@ -236,7 +249,7 @@ func (v *validator) validateSession(ctx context.Context, sessionID string) error
 		report = iv.Finish()
 	} else {
 		sv := validate.NewStreamValidator()
-		counts, contestant, err = source.StreamSession(ctx, v.brokers, sessionID, v.reorderWindow,
+		counts, contestant, err = source.StreamSession(ctx, v.brokers, sessionID, v.reorderWindow, orderBand, v.bandWidth,
 			sv.Apply,
 			func(id string, qty uint64, price int64) {
 				sv.AddPhantom(validate.ReportedFill{OrderID: id, Qty: qty, Price: price})
@@ -403,6 +416,58 @@ func (v *validator) runStatusConsumer(ctx context.Context, brokers []string, gro
 		}
 		if err := reader.CommitMessages(ctx, m); err != nil {
 			v.log.Warn("commit benchmark.status.updated", "error", err)
+		}
+	}
+}
+
+// workloadSpecOrderBand mirrors topics.WorkloadSpec but with OrderBand as a
+// pointer, so decode can tell "field absent" (older, band-unaware payload;
+// falls back to topics.OrderBandUnset) apart from "explicit band 0" (Go's
+// zero value for uint32 would otherwise collide with a real band 0 — see
+// topics.WorkloadSpec.OrderBand's doc comment).
+type workloadSpecOrderBand struct {
+	SessionID string  `json:"session_id"`
+	OrderBand *uint32 `json:"order_band"`
+}
+
+// runWorkloadBandConsumer learns each session's exclusively-leased order_band
+// from workload.assignments (already stamped by bot-fleet-controller) into
+// v.bandCache, so validateSession can restrict StreamSession's Kafka readers
+// to that band instead of scanning every orders.sent/orders.acked partition.
+func (v *validator) runWorkloadBandConsumer(ctx context.Context, brokers []string, group string) {
+	reader := kafka.NewReader(kafka.ReaderConfig{
+		Brokers:        brokers,
+		GroupID:        group,
+		Topic:          topics.TopicWorkloadAssignments,
+		MinBytes:       1,
+		MaxBytes:       1 << 20,
+		MaxWait:        200 * time.Millisecond,
+		CommitInterval: 0,
+		StartOffset:    kafka.FirstOffset,
+	})
+	defer reader.Close()
+	v.log.Info("workload.assignments band-learning consumer started", "group", group)
+	for {
+		m, err := reader.FetchMessage(ctx)
+		if err != nil {
+			if ctx.Err() != nil {
+				return
+			}
+			v.log.Error("fetch workload.assignments", "error", err)
+			continue
+		}
+		var spec workloadSpecOrderBand
+		if err := json.Unmarshal(m.Value, &spec); err != nil {
+			v.log.Error("unmarshal workload.assignments", "error", err)
+		} else if spec.SessionID != "" {
+			band := topics.OrderBandUnset
+			if spec.OrderBand != nil {
+				band = *spec.OrderBand
+			}
+			v.bandCache.Set(spec.SessionID, band)
+		}
+		if err := reader.CommitMessages(ctx, m); err != nil {
+			v.log.Warn("commit workload.assignments", "error", err)
 		}
 	}
 }

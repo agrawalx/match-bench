@@ -65,7 +65,7 @@ func main() {
 	// BenchmarkRequested.ScenarioID) is threaded through the store/status-updated path
 	// today, and wiring one up would mean a DB lookup of scenario name by scenario_id
 	// on every session — out of scope here; accepted deviation, see final report.
-	validatorMode := envOr("VALIDATOR_MODE", "full")
+	validatorMode := envOr("VALIDATOR_MODE", "auto")
 	crossFlowWindowUs := uint64(envInt("CROSS_FLOW_WINDOW_US", int(validate.DefaultCrossFlowWindowUs)))
 	t7ReorderWindow := envInt("VALIDATOR_T7_REORDER_WINDOW", validate.DefaultT7ReorderWindow)
 	t7AnomalyCapNs := uint64(envInt("VALIDATOR_T7_ANOMALY_CAP_MS", 15_000)) * 1_000_000
@@ -190,6 +190,22 @@ func recordViolations(report validate.Report) {
 
 // validateSession applies behavior for its receiver performs the package-specific operation described by its name.
 // It keeps validation, side effects, and returned values within this package's contract.
+// sessionMode resolves which validator a session gets. VALIDATOR_MODE=full or
+// =invariants force one globally (debug override); the default "auto" follows
+// the two-pass design (docs/multi-contestant-audit.md §5): the pass-1
+// correctness scenario — every task max-rate — gets the full reference-book
+// replay, everything else gets book-free invariants mode.
+func (v *validator) sessionMode(meta source.SessionMeta) string {
+	switch v.mode {
+	case "full", "invariants":
+		return v.mode
+	}
+	if meta.MaxRate {
+		return "full"
+	}
+	return "invariants"
+}
+
 func (v *validator) validateSession(ctx context.Context, sessionID string) error {
 	log := v.log.With("session_id", sessionID)
 
@@ -233,7 +249,9 @@ func (v *validator) validateSession(ctx context.Context, sessionID string) error
 		return ctx.Err()
 	}
 
-	orderBand := v.bandCache.GetAndDelete(sessionID)
+	meta := v.bandCache.GetAndDelete(sessionID)
+	orderBand := meta.Band
+	mode := v.sessionMode(meta)
 
 	drainStart := time.Now()
 	var (
@@ -241,7 +259,7 @@ func (v *validator) validateSession(ctx context.Context, sessionID string) error
 		contestant string
 		report     validate.Report
 	)
-	if v.mode == "invariants" {
+	if mode == "invariants" {
 		iv := validate.NewInvariantsValidatorWithWindow(v.crossFlowWindowUs, v.t7ReorderWindow)
 		iv.SetT7AnomalyCapNs(v.t7AnomalyCapNs)
 		iv.SetLateTaintRate(v.lateTaintRate)
@@ -440,6 +458,9 @@ func (v *validator) runStatusConsumer(ctx context.Context, brokers []string, gro
 type workloadSpecOrderBand struct {
 	SessionID string  `json:"session_id"`
 	OrderBand *uint32 `json:"order_band"`
+	Tasks     []struct {
+		TargetRPS uint32 `json:"target_rps"`
+	} `json:"tasks"`
 }
 
 // runWorkloadBandConsumer learns each session's exclusively-leased order_band
@@ -476,7 +497,16 @@ func (v *validator) runWorkloadBandConsumer(ctx context.Context, brokers []strin
 			if spec.OrderBand != nil {
 				band = *spec.OrderBand
 			}
-			v.bandCache.Set(spec.SessionID, band)
+			// All-tasks max-rate (target_rps==0) marks the pass-1 correctness
+			// scenario; any positive-rate task means a scale (pass-2) session.
+			maxRate := len(spec.Tasks) > 0
+			for _, t := range spec.Tasks {
+				if t.TargetRPS != 0 {
+					maxRate = false
+					break
+				}
+			}
+			v.bandCache.Set(spec.SessionID, source.SessionMeta{Band: band, MaxRate: maxRate})
 		}
 		if err := reader.CommitMessages(ctx, m); err != nil {
 			v.log.Warn("commit workload.assignments", "error", err)

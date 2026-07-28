@@ -260,3 +260,124 @@ func TestPartitionLeaseAllocatorConcurrentAdmissionRace(t *testing.T) {
 		t.Fatalf("LeasedCount after all releases = %d, want 0", got)
 	}
 }
+
+// TestPartitionLeaseAllocatorFIFOFairness pins the head-of-line guarantee: a
+// large request queued FIRST is served before smaller later arrivals, even
+// when interim releases would satisfy the small one. Unwritable under the old
+// broadcast-wakeup design (scheduler-order lottery); deterministic with
+// in-lock grant hand-off.
+func TestPartitionLeaseAllocatorFIFOFairness(t *testing.T) {
+	a := NewPartitionLeaseAllocator(24)
+	ctx := context.Background()
+
+	// Occupy 20 of 24: five 4-partition sessions.
+	for i := 0; i < 5; i++ {
+		if _, err := a.Acquire(ctx, fmt.Sprintf("small-%d", i), 4); err != nil {
+			t.Fatalf("setup acquire: %v", err)
+		}
+	}
+
+	bigDone := make(chan []int, 1)
+	go func() {
+		parts, err := a.Acquire(ctx, "big", 16)
+		if err != nil {
+			t.Errorf("big acquire: %v", err)
+		}
+		bigDone <- parts
+	}()
+	waitForQueueDepth(t, a, 1)
+
+	// A small request arriving AFTER big must queue behind it even though 4
+	// partitions are free right now.
+	lateDone := make(chan struct{})
+	go func() {
+		if _, err := a.Acquire(ctx, "late-small", 4); err != nil {
+			t.Errorf("late-small acquire: %v", err)
+		}
+		close(lateDone)
+	}()
+	waitForQueueDepth(t, a, 2)
+
+	// Free 12 more (16 total free): enough for big, and along the way enough
+	// for late-small several times over — big must win every intermediate
+	// release.
+	a.Release("small-0")
+	a.Release("small-1")
+	select {
+	case <-bigDone:
+		t.Fatal("big served before enough capacity freed")
+	case <-lateDone:
+		t.Fatal("late-small overtook the queued big request")
+	case <-time.After(50 * time.Millisecond):
+	}
+	a.Release("small-2")
+
+	parts := <-bigDone
+	if len(parts) != 16 {
+		t.Fatalf("big got %d partitions, want 16", len(parts))
+	}
+	// late-small still waits (free = 0 after big took 16 of the 16 free).
+	select {
+	case <-lateDone:
+		t.Fatal("late-small served with zero free partitions")
+	case <-time.After(50 * time.Millisecond):
+	}
+	a.Release("small-3")
+	<-lateDone
+}
+
+// TestPartitionLeaseAllocatorCancelledHeadUnblocksNext proves a head waiter
+// that gives up (ctx cancel) does not wedge the queue behind it.
+func TestPartitionLeaseAllocatorCancelledHeadUnblocksNext(t *testing.T) {
+	a := NewPartitionLeaseAllocator(8)
+	ctx := context.Background()
+	if _, err := a.Acquire(ctx, "holder", 6); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+
+	bigCtx, cancelBig := context.WithCancel(ctx)
+	bigErr := make(chan error, 1)
+	go func() {
+		_, err := a.Acquire(bigCtx, "doomed-big", 8)
+		bigErr <- err
+	}()
+	waitForQueueDepth(t, a, 1)
+
+	smallDone := make(chan struct{})
+	go func() {
+		if _, err := a.Acquire(ctx, "small", 2); err != nil {
+			t.Errorf("small acquire: %v", err)
+		}
+		close(smallDone)
+	}()
+	waitForQueueDepth(t, a, 2)
+
+	// 2 partitions are free the whole time, but small sits behind doomed-big.
+	select {
+	case <-smallDone:
+		t.Fatal("small overtook queued head")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	cancelBig()
+	if err := <-bigErr; err == nil {
+		t.Fatal("cancelled head returned nil error")
+	}
+	// Head removal must re-serve the queue: small now fits from existing free.
+	<-smallDone
+}
+
+func waitForQueueDepth(t *testing.T, a *PartitionLeaseAllocator, depth int) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		a.mu.Lock()
+		n := len(a.queue)
+		a.mu.Unlock()
+		if n >= depth {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("queue never reached depth %d", depth)
+}

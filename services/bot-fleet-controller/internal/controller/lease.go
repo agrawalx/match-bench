@@ -20,9 +20,22 @@ type PartitionLeaseAllocator struct {
 	total      int
 	free       map[int]struct{}
 	leasedBy   map[string][]int
-	waitCh     chan struct{}
+	queue      []*leaseWaiter
 	metricName string
 	reason     string
+}
+
+// leaseWaiter is one blocked Acquire in FIFO order. Release serves the HEAD
+// only — head-of-line blocking is deliberate: freed partitions accumulate for
+// the oldest waiter instead of being skimmed by smaller later arrivals, which
+// under the previous broadcast-wakeup scheme let a large request starve
+// indefinitely behind a stream of small ones. The grant is delivered (leasedBy
+// updated, partitions moved) inside the allocator lock; the waiter never
+// re-races.
+type leaseWaiter struct {
+	sessionID string
+	count     int
+	grant     chan []int // buffered(1); receiving means the lease is already recorded
 }
 
 // NewPartitionLeaseAllocator builds an allocator over workload.assignments
@@ -52,7 +65,6 @@ func newLeaseAllocator(total int, metricName, reason string) *PartitionLeaseAllo
 		total:      total,
 		free:       free,
 		leasedBy:   make(map[string][]int),
-		waitCh:     make(chan struct{}),
 		metricName: metricName,
 		reason:     reason,
 	}
@@ -66,47 +78,91 @@ func (a *PartitionLeaseAllocator) Acquire(ctx context.Context, sessionID string,
 	if count <= 0 {
 		return nil, fmt.Errorf("lease count must be positive, got %d", count)
 	}
-	blocked := false
-	for {
-		a.mu.Lock()
-		if count > a.total {
-			a.mu.Unlock()
-			return nil, fmt.Errorf("requested %d partitions exceeds workload.assignments partition count %d", count, a.total)
-		}
-		if _, already := a.leasedBy[sessionID]; already {
-			a.mu.Unlock()
-			return nil, fmt.Errorf("session %s already holds a partition lease", sessionID)
-		}
-		if len(a.free) >= count {
-			parts := make([]int, 0, count)
-			for p := range a.free {
-				parts = append(parts, p)
-				if len(parts) == count {
-					break
-				}
-			}
-			sort.Ints(parts)
-			for _, p := range parts {
-				delete(a.free, p)
-			}
-			a.leasedBy[sessionID] = parts
-			a.reportLocked()
-			a.mu.Unlock()
-			return parts, nil
-		}
-		ch := a.waitCh
+	a.mu.Lock()
+	if count > a.total {
 		a.mu.Unlock()
+		return nil, fmt.Errorf("requested %d partitions exceeds workload.assignments partition count %d", count, a.total)
+	}
+	if _, already := a.leasedBy[sessionID]; already {
+		a.mu.Unlock()
+		return nil, fmt.Errorf("session %s already holds a partition lease", sessionID)
+	}
+	// Fast path only when nobody is queued: an empty-queue check keeps FIFO
+	// order — a new arrival must not overtake an already-waiting session even
+	// if the free pool happens to cover it.
+	if len(a.queue) == 0 && len(a.free) >= count {
+		parts := a.takeLocked(sessionID, count)
+		a.mu.Unlock()
+		return parts, nil
+	}
+	w := &leaseWaiter{sessionID: sessionID, count: count, grant: make(chan []int, 1)}
+	a.queue = append(a.queue, w)
+	a.mu.Unlock()
+	metrics.Counter("controller_admission_blocked_total", "Session admissions blocked by scarce capacity.", metrics.Labels("reason", a.reason), 1)
 
-		if !blocked {
-			blocked = true
-			metrics.Counter("controller_admission_blocked_total", "Session admissions blocked by scarce capacity.", metrics.Labels("reason", a.reason), 1)
+	select {
+	case parts := <-w.grant:
+		return parts, nil
+	case <-ctx.Done():
+		a.mu.Lock()
+		for i, q := range a.queue {
+			if q == w {
+				a.queue = append(a.queue[:i], a.queue[i+1:]...)
+				// Removing a waiter can unblock the one behind it.
+				a.serveQueueLocked()
+				a.mu.Unlock()
+				return nil, ctx.Err()
+			}
 		}
+		// Not in the queue: Release granted us concurrently with cancellation.
+		// The lease is already recorded — undo it so a failed admission never
+		// leaks partitions.
+		a.mu.Unlock()
+		parts := <-w.grant
+		a.mu.Lock()
+		for _, p := range parts {
+			a.free[p] = struct{}{}
+		}
+		delete(a.leasedBy, sessionID)
+		a.reportLocked()
+		a.serveQueueLocked()
+		a.mu.Unlock()
+		return nil, ctx.Err()
+	}
+}
 
-		select {
-		case <-ch:
-		case <-ctx.Done():
-			return nil, ctx.Err()
+// takeLocked moves count partitions from free to sessionID's lease and returns
+// them sorted. Callers must hold mu and have checked len(free) >= count.
+func (a *PartitionLeaseAllocator) takeLocked(sessionID string, count int) []int {
+	parts := make([]int, 0, count)
+	for p := range a.free {
+		parts = append(parts, p)
+		if len(parts) == count {
+			break
 		}
+	}
+	sort.Ints(parts)
+	for _, p := range parts {
+		delete(a.free, p)
+	}
+	a.leasedBy[sessionID] = parts
+	a.reportLocked()
+	return parts
+}
+
+// serveQueueLocked grants leases to queued waiters strictly from the head:
+// if the head fits, grant and continue with the next head; if it does not,
+// stop — freed partitions accumulate for it (head-of-line blocking is the
+// fairness guarantee). Callers must hold mu.
+func (a *PartitionLeaseAllocator) serveQueueLocked() {
+	for len(a.queue) > 0 {
+		head := a.queue[0]
+		if len(a.free) < head.count {
+			return
+		}
+		parts := a.takeLocked(head.sessionID, head.count)
+		a.queue = a.queue[1:]
+		head.grant <- parts
 	}
 }
 
@@ -124,7 +180,7 @@ func (a *PartitionLeaseAllocator) Release(sessionID string) {
 	}
 	delete(a.leasedBy, sessionID)
 	a.reportLocked()
-	a.notifyLocked()
+	a.serveQueueLocked()
 }
 
 // LeasedCount returns the total number of partitions currently leased across
@@ -143,11 +199,4 @@ func (a *PartitionLeaseAllocator) reportLocked() {
 		nil,
 		float64(a.total-len(a.free)),
 	)
-}
-
-// notifyLocked wakes every Acquire currently blocked in this allocator.
-// Callers must hold mu.
-func (a *PartitionLeaseAllocator) notifyLocked() {
-	close(a.waitCh)
-	a.waitCh = make(chan struct{})
 }

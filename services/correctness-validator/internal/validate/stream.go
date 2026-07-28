@@ -87,6 +87,11 @@ func (v *StreamValidator) Finish() Report {
 	for _, id := range ids {
 		v.finalize(id)
 	}
+	// Stream mode's AddPhantom increments TotalFills and PhantomFills together
+	// (same subset invariant as batch Run), so the scored denominator nets
+	// phantoms out. Without this, ScoredFills stays 0 and CorrectnessScore's
+	// zero-denominator branch returns 1.0 regardless of violations.
+	v.rep.ScoredFills = v.rep.TotalFills - v.rep.PhantomFills
 	return v.rep
 }
 

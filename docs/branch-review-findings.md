@@ -624,7 +624,7 @@ Raw finder output: 58 findings. After dedup: 56 (2 removed as duplicates). Note 
 
 Confirmed findings only (52), bucketed by how much work the fix actually requires.
 
-**Status: 30 fixed / 1 mitigated / 2 open / 1 accepted.**
+**Status: 32 fixed / 1 mitigated / 0 open / 1 accepted.**
 
 ### (a) One-line / mechanical fixes — all FIXED
 
@@ -658,8 +658,8 @@ Confirmed findings only (52), bucketed by how much work the fix actually require
 - `internal/validate/invariants.go:309` / `:356` — cap retained `Violation` examples (counters already exist separately). **FIXED (b83835c)**
 - `internal/validate/validate.go:79` — separate matched-fill denominator per validator mode (invariants vs. full). **FIXED (b83835c)**
 - `internal/validate/invariants.go:287` — compute `minT7Ns` over all responses, not fills-first with ack fallback. **FIXED (b83835c)**
-- `internal/validate/invariants.go:171` — fold `T7ReorderLate` into scoring or fail the session above a threshold. **OPEN**
-- `internal/validate/invariants.go:177` — bound T7 reorder window memory (smaller default and/or heap-based incremental emit). **OPEN**
+- `internal/validate/invariants.go:171` — fold `T7ReorderLate` into scoring or fail the session above a threshold. **FIXED (this change — plus t7<t3 / t7-t3-cap sanity gate found during manual trace)** **OPEN**
+- `internal/validate/invariants.go:177` — bound T7 reorder window memory (smaller default and/or heap-based incremental emit). **FIXED (this change — plus t7<t3 / t7-t3-cap sanity gate found during manual trace)** **OPEN**
 - `internal/score/score.go:282` — handle `TargetRPS==0` max-rate sentinel in the offered-rate/wave-scheduling path. **FIXED (b83835c)**
 - `services/telemetry-ingester/src/redis_sink.rs:55` — compare-and-set (Lua) on the live-pointer wave index instead of unconditional `SET`. **FIXED (b83835c)**
 - `internal/read/store.go:471` / `:477` — time-bound and per-session-terminal-filter the active-session-contestants query. **FIXED (b83835c)**

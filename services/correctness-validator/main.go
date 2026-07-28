@@ -68,6 +68,8 @@ func main() {
 	validatorMode := envOr("VALIDATOR_MODE", "full")
 	crossFlowWindowUs := uint64(envInt("CROSS_FLOW_WINDOW_US", int(validate.DefaultCrossFlowWindowUs)))
 	t7ReorderWindow := envInt("VALIDATOR_T7_REORDER_WINDOW", validate.DefaultT7ReorderWindow)
+	t7AnomalyCapNs := uint64(envInt("VALIDATOR_T7_ANOMALY_CAP_MS", 15_000)) * 1_000_000
+	lateTaintRate := envFloat("VALIDATOR_LATE_TAINT_RATE", validate.DefaultLateTaintRate)
 	// bandWidth mirrors bot-fleet's BOT_PARTITION_BAND_WIDTH / schemas/rust
 	// DEFAULT_PARTITION_BAND_WIDTH: partitions per exclusively-leased order
 	// band. Must match the producer side or band-restricted reads will miss
@@ -103,6 +105,8 @@ func main() {
 		mode:              validatorMode,
 		crossFlowWindowUs: crossFlowWindowUs,
 		t7ReorderWindow:   t7ReorderWindow,
+		t7AnomalyCapNs:    t7AnomalyCapNs,
+		lateTaintRate:     lateTaintRate,
 		bandWidth:         bandWidth,
 		bandCache:         source.NewBandCache(),
 	}
@@ -157,6 +161,8 @@ type validator struct {
 	mode              string // "full" | "invariants" (VALIDATOR_MODE)
 	crossFlowWindowUs uint64
 	t7ReorderWindow   int
+	t7AnomalyCapNs    uint64
+	lateTaintRate     float64
 	bandWidth         int32
 	bandCache         *source.BandCache
 	inflight          atomic.Int64
@@ -237,6 +243,8 @@ func (v *validator) validateSession(ctx context.Context, sessionID string) error
 	)
 	if v.mode == "invariants" {
 		iv := validate.NewInvariantsValidatorWithWindow(v.crossFlowWindowUs, v.t7ReorderWindow)
+		iv.SetT7AnomalyCapNs(v.t7AnomalyCapNs)
+		iv.SetLateTaintRate(v.lateTaintRate)
 		counts, contestant, err = source.StreamSession(ctx, v.brokers, sessionID, v.reorderWindow, orderBand, v.bandWidth,
 			iv.Apply,
 			iv.AddUnmatched,
@@ -303,6 +311,10 @@ func (v *validator) validateSession(ctx context.Context, sessionID string) error
 		JitterP99US:      report.Jitter.P99Us,
 		JitterP999US:     report.Jitter.P999Us,
 		JitterMaxUS:      report.Jitter.MaxUs,
+		T7ReorderLate:    report.T7ReorderLate,
+		T7Anomalies:      report.T7Anomalies,
+		ResultTainted:    report.Tainted,
+		TaintReason:      report.TaintReason,
 		JitterInvRate:    report.Jitter.InversionRate,
 	}); err != nil {
 		metrics.Counter("validator_validation_errors_total", "Correctness-validator validation errors by stage.", metrics.Labels("stage", "publish"), 1)
@@ -506,6 +518,15 @@ func mustEnv(key string, log *slog.Logger) string {
 
 // envInt performs the package-specific operation described by its name.
 // It keeps validation, side effects, and returned values within this package's contract.
+func envFloat(key string, def float64) float64 {
+	if v := os.Getenv(key); v != "" {
+		if f, err := strconv.ParseFloat(v, 64); err == nil {
+			return f
+		}
+	}
+	return def
+}
+
 func envInt(key string, def int) int {
 	if v := strings.TrimSpace(os.Getenv(key)); v != "" {
 		if n, err := strconv.Atoi(v); err == nil {

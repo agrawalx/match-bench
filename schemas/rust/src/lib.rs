@@ -534,6 +534,14 @@ pub struct CorrectnessScoreEvent {
     pub jitter_max_us: f64,
     #[serde(default)]
     pub jitter_inversion_rate: f64,
+    #[serde(default)]
+    pub t7_reorder_late: u64,
+    #[serde(default)]
+    pub t7_anomalies: u64,
+    #[serde(default)]
+    pub result_tainted: bool,
+    #[serde(default)]
+    pub taint_reason: String,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]

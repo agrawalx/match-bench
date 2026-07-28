@@ -184,6 +184,12 @@ type CorrectnessScoreEvent struct {
 	JitterP999US  float64 `json:"jitter_p999_us"`
 	JitterMaxUS   float64 `json:"jitter_max_us"`
 	JitterInvRate float64 `json:"jitter_inversion_rate"` // inversions / total processed orders
+	// T7-stream health (pass-2 invariants mode): orders that escaped
+	// processing-order grading, and whether the result is flagged unreliable.
+	T7ReorderLate uint64 `json:"t7_reorder_late"`
+	T7Anomalies   uint64 `json:"t7_anomalies"`
+	ResultTainted bool   `json:"result_tainted"`
+	TaintReason   string `json:"taint_reason,omitempty"`
 }
 
 // LeaderboardUpdateEvent groups the state and dependencies used by this package.

@@ -81,6 +81,14 @@ type Report struct {
 	// are excluded from the incremental FIFO/cross-flow checks (their ordering
 	// slot is gone) but must not crash or silently vanish.
 	T7ReorderLate uint64
+	// T7Anomalies counts responses rejected from processing-order grading by
+	// the sanity gate (t7 < t3, or t7-t3 beyond the anomaly cap).
+	T7Anomalies uint64
+	// Tainted marks the invariants result unreliable: too many orders escaped
+	// T7-ordered grading (late + anomalous above the taint rate). The score is
+	// still published, flagged.
+	Tainted     bool
+	TaintReason string
 
 	// ScoredFills is the denominator for CorrectnessScore. Full mode's Run counts
 	// phantom fills into TotalFills (its phantom loop increments both TotalFills and

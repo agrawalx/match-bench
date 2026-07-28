@@ -1,6 +1,7 @@
 package validate
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/iicpc/correctness-validator/internal/model"
@@ -245,5 +246,103 @@ func TestInvariants_LateArrivalCountedNotCrash(t *testing.T) {
 	r := v.Finish()
 	if r.T7ReorderLate != 1 {
 		t.Fatalf("expected 1 late arrival counted, got %+v", r)
+	}
+}
+
+// TestInvariants_T7AnomalyGate pins the sanity gate: a response with t7 < t3
+// (impossible on one clock — stream corruption) or t7-t3 beyond the cap must
+// not position the order's processing time, and each rejection is counted.
+func TestInvariants_T7AnomalyGate(t *testing.T) {
+	v := NewInvariantsValidatorWithWindow(500, 4)
+	// Order whose ONLY response is corrupt (t7 < t3): rejected -> order has no
+	// usable response -> counted lost, one anomaly.
+	v.Apply(&model.Order{
+		OrderID: "bad", Flow: model.Flow{SrcPort: 1}, TCPSeq: 1, T3Ns: 1_000_000, Qty: 1,
+		Responses: []model.Response{{T7Ns: 999_999, ExecType: "0"}},
+	})
+	// Order with one corrupt and one sane response: sane one positions it.
+	v.Apply(&model.Order{
+		OrderID: "mixed", Flow: model.Flow{SrcPort: 1}, TCPSeq: 2, T3Ns: 2_000_000, Qty: 1,
+		Responses: []model.Response{
+			{T7Ns: 1_000_000, ExecType: "0"},           // t7 < t3: anomaly
+			{T7Ns: 2_500_000, ExecType: "0"},           // sane
+		},
+	})
+	// Straggler beyond the cap.
+	v.SetT7AnomalyCapNs(1_000_000) // 1ms cap for the test
+	v.Apply(&model.Order{
+		OrderID: "late", Flow: model.Flow{SrcPort: 1}, TCPSeq: 3, T3Ns: 3_000_000, Qty: 1,
+		Responses: []model.Response{{T7Ns: 3_000_000 + 2_000_000, ExecType: "0"}},
+	})
+	rep := v.Finish()
+	if rep.T7Anomalies != 3 {
+		t.Fatalf("T7Anomalies = %d, want 3", rep.T7Anomalies)
+	}
+	if rep.LostOrders != 2 {
+		t.Fatalf("LostOrders = %d, want 2 (bad + late have no usable response)", rep.LostOrders)
+	}
+}
+
+// TestInvariants_TaintWhenLateRateExceeded pins the taint flag: too many
+// orders escaping T7-ordered grading marks the result unreliable instead of
+// silently partial.
+func TestInvariants_TaintWhenLateRateExceeded(t *testing.T) {
+	v := NewInvariantsValidatorWithWindow(500, 4)
+	v.SetLateTaintRate(0.20)
+	// 2 anomalous of 4 applied = 50% > 20% -> tainted.
+	for i, t3 := range []uint64{1_000_000, 2_000_000} {
+		v.Apply(&model.Order{
+			OrderID: fmt.Sprintf("ok-%d", i), Flow: model.Flow{SrcPort: 1}, TCPSeq: uint32(i + 1),
+			T3Ns: t3, Qty: 1,
+			Responses: []model.Response{{T7Ns: t3 + 1000, ExecType: "0"}},
+		})
+	}
+	for i, t3 := range []uint64{3_000_000, 4_000_000} {
+		v.Apply(&model.Order{
+			OrderID: fmt.Sprintf("bad-%d", i), Flow: model.Flow{SrcPort: 1}, TCPSeq: uint32(i + 3),
+			T3Ns: t3, Qty: 1,
+			Responses: []model.Response{{T7Ns: t3 - 1, ExecType: "0"}},
+		})
+	}
+	rep := v.Finish()
+	if !rep.Tainted {
+		t.Fatal("expected Tainted at 50% anomaly rate with 20% threshold")
+	}
+	if rep.TaintReason == "" {
+		t.Fatal("TaintReason empty")
+	}
+	clean := NewInvariantsValidatorWithWindow(500, 4)
+	clean.Apply(&model.Order{
+		OrderID: "ok", Flow: model.Flow{SrcPort: 1}, TCPSeq: 1, T3Ns: 1_000_000, Qty: 1,
+		Responses: []model.Response{{T7Ns: 1_001_000, ExecType: "0"}},
+	})
+	if rep2 := clean.Finish(); rep2.Tainted {
+		t.Fatal("clean stream must not taint")
+	}
+}
+
+// TestInvariants_SmallWindowEquivalentOnCleanStream pins the window-shrink
+// safety argument: on a stream whose T7 disorder fits the window, a tiny
+// window produces the identical report to a huge one (zero late drops).
+func TestInvariants_SmallWindowEquivalentOnCleanStream(t *testing.T) {
+	build := func(window int) Report {
+		v := NewInvariantsValidatorWithWindow(500, window)
+		for i := 0; i < 100; i++ {
+			t3 := uint64(1_000_000 + i*10_000)
+			v.Apply(&model.Order{
+				OrderID: fmt.Sprintf("o-%d", i), Flow: model.Flow{SrcPort: uint16(1 + i%3)},
+				TCPSeq: uint32(i + 1), T3Ns: t3, Qty: 1,
+				Responses: []model.Response{{T7Ns: t3 + 5_000, ExecType: "0"}},
+			})
+		}
+		return v.Finish()
+	}
+	small, big := build(4), build(1<<16)
+	if small.T7ReorderLate != 0 {
+		t.Fatalf("clean stream lated %d records in small window", small.T7ReorderLate)
+	}
+	if small.TimeViolations != big.TimeViolations || small.Jitter.Count != big.Jitter.Count ||
+		small.LostOrders != big.LostOrders || small.Tainted != big.Tainted {
+		t.Fatalf("small/big window reports diverge: %+v vs %+v", small, big)
 	}
 }

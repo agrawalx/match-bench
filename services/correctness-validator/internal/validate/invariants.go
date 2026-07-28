@@ -14,6 +14,7 @@
 package validate
 
 import (
+	"fmt"
 	"math/bits"
 	"sort"
 
@@ -25,8 +26,11 @@ import (
 const DefaultCrossFlowWindowUs = 500
 
 // DefaultT7ReorderWindow caps the in-flight T7 reorder buffer (orders). Same
-// magnitude as source.DefaultReorderWindow (env VALIDATOR_T7_REORDER_WINDOW).
-const DefaultT7ReorderWindow = 1 << 20
+// magnitude as source.DefaultReorderWindow (env VALIDATOR_T7_REORDER_WINDOW). Shrunk from 1<<20 once T7-stream anomalies
+// became observable (T7ReorderLate + T7Anomalies on the score event): real T7
+// disorder is join/partition skew — ms-scale, thousands of records — and any
+// window miss now taints the result instead of silently dropping orders.
+const DefaultT7ReorderWindow = 1 << 16
 
 // CrossFlowPredicate is the P-F/P-G W-window predicate, pinned down precisely:
 //
@@ -131,6 +135,17 @@ func (h *jitterHistogram) stats(totalProcessed uint64) JitterStats {
 	}
 }
 
+// DefaultT7AnomalyCapNs bounds t7-t3 for a response to participate in
+// processing-order grading (env VALIDATOR_T7_ANOMALY_CAP_MS): a pathologically
+// late ack (stale socket flushing minutes later) would otherwise drag the T7
+// watermark forward and mass-late everything behind it. Matches the ingester's
+// 15s timed-out convention.
+const DefaultT7AnomalyCapNs = 15_000_000_000
+
+// DefaultLateTaintRate is the (T7ReorderLate+T7Anomalies)/orders ratio above
+// which the session result is marked Tainted (env VALIDATOR_LATE_TAINT_RATE).
+const DefaultLateTaintRate = 0.001
+
 // invRec is the lightweight record carried through the T7 reorder window — just what
 // the incremental checks need. It is dropped as soon as the incremental checks for it
 // have run; nothing keyed by order ID is retained across orders.
@@ -233,6 +248,9 @@ type InvariantsValidator struct {
 
 	jitter    *jitterHistogram
 	processed uint64
+	anomalyCapNs  uint64
+	lateTaintRate float64
+	applied       uint64
 }
 
 // NewInvariantsValidator constructs an invariants-mode validator with cross-flow
@@ -260,7 +278,23 @@ func NewInvariantsValidatorWithWindow(windowUs uint64, t7Window int) *Invariants
 		jitter:     &jitterHistogram{},
 	}
 	v.window = newT7Reorderer(t7Window, v.onEmit, v.onLate)
+	v.anomalyCapNs = DefaultT7AnomalyCapNs
+	v.lateTaintRate = DefaultLateTaintRate
 	return v
+}
+
+// SetT7AnomalyCapNs overrides the t7-t3 participation cap (0 keeps the default).
+func (v *InvariantsValidator) SetT7AnomalyCapNs(capNs uint64) {
+	if capNs > 0 {
+		v.anomalyCapNs = capNs
+	}
+}
+
+// SetLateTaintRate overrides the taint threshold (0 keeps the default).
+func (v *InvariantsValidator) SetLateTaintRate(rate float64) {
+	if rate > 0 {
+		v.lateTaintRate = rate
+	}
 }
 
 // Apply registers one order's accounting: overfill (own qty only — book-free) is
@@ -295,10 +329,21 @@ func (v *InvariantsValidator) Apply(o *model.Order) {
 	// early but fills late must still be positioned by its earliest response, or the
 	// FIFO/cross-flow checks below see a spuriously late processing time for it and
 	// flag violations that aren't real.
+	v.applied++
 	var hasResp bool
 	var minT7Ns uint64
 	for _, resp := range o.Responses {
 		if resp.T7Ns == 0 {
+			continue
+		}
+		// Sanity gate: t7 < t3 is impossible on the capture pod's single
+		// monotonic clock — its presence means the t7 stream is corrupt
+		// (matcher pairing bug, capture restart), and t7-t3 beyond the cap is
+		// a pathological straggler that would drag the reorder watermark.
+		// Either way the response must not position this order's processing
+		// time; count it so corruption taints instead of silently poisoning.
+		if resp.T7Ns < o.T3Ns || resp.T7Ns-o.T3Ns > v.anomalyCapNs {
+			v.rep.T7Anomalies++
 			continue
 		}
 		if !hasResp || resp.T7Ns < minT7Ns {
@@ -394,6 +439,13 @@ func (v *InvariantsValidator) Finish() Report {
 	// See the ScoredFills doc comment on Report: invariants mode's TotalFills is
 	// real fills only (phantoms never touch it), so it is the denominator directly.
 	v.rep.ScoredFills = v.rep.TotalFills
+	suspect := v.rep.T7ReorderLate + v.rep.T7Anomalies
+	if v.applied > 0 && float64(suspect)/float64(v.applied) > v.lateTaintRate {
+		v.rep.Tainted = true
+		v.rep.TaintReason = fmt.Sprintf(
+			"t7 stream unreliable: %d late + %d anomalous of %d orders exceeds rate %.4f",
+			v.rep.T7ReorderLate, v.rep.T7Anomalies, v.applied, v.lateTaintRate)
+	}
 	return v.rep
 }
 

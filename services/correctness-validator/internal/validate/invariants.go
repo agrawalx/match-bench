@@ -276,18 +276,12 @@ func NewInvariantsValidatorWithWindow(windowUs uint64, t7Window int) *Invariants
 // dropped immediately after.
 func (v *InvariantsValidator) Apply(o *model.Order) {
 	var cumFilled uint64
-	var hasResp bool
-	var minT7Ns uint64
 	for _, resp := range o.Responses {
 		if !isFill(resp.ExecType, resp.FillQty) {
 			continue
 		}
 		v.rep.TotalFills++
 		cumFilled += resp.FillQty
-		if !hasResp || resp.T7Ns < minT7Ns {
-			minT7Ns = resp.T7Ns
-			hasResp = true
-		}
 		if cumFilled > o.Qty {
 			v.rep.Overfills++
 			v.rep.add(Overfill, o.OrderID, resp.FillQty, int64(resp.FillPrice),
@@ -296,13 +290,20 @@ func (v *InvariantsValidator) Apply(o *model.Order) {
 			v.rep.ValidFills++
 		}
 	}
-	if !hasResp {
-		for _, resp := range o.Responses {
-			if resp.T7Ns != 0 {
-				hasResp = true
-				minT7Ns = resp.T7Ns
-				break
-			}
+	// minT7Ns is the first response (min T7) across ALL responses — fills AND acks —
+	// per the documented spec, not fills-first-then-fallback: an order that acks
+	// early but fills late must still be positioned by its earliest response, or the
+	// FIFO/cross-flow checks below see a spuriously late processing time for it and
+	// flag violations that aren't real.
+	var hasResp bool
+	var minT7Ns uint64
+	for _, resp := range o.Responses {
+		if resp.T7Ns == 0 {
+			continue
+		}
+		if !hasResp || resp.T7Ns < minT7Ns {
+			minT7Ns = resp.T7Ns
+			hasResp = true
 		}
 	}
 	if !hasResp {
@@ -390,6 +391,9 @@ func (v *InvariantsValidator) AddUnmatched(_ string, _ uint64, _ int64) {
 func (v *InvariantsValidator) Finish() Report {
 	v.window.flush()
 	v.rep.Jitter = v.jitter.stats(v.processed)
+	// See the ScoredFills doc comment on Report: invariants mode's TotalFills is
+	// real fills only (phantoms never touch it), so it is the denominator directly.
+	v.rep.ScoredFills = v.rep.TotalFills
 	return v.rep
 }
 

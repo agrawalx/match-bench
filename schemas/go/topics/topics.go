@@ -105,7 +105,7 @@ type CorrectnessScoreEvent struct {
 	ValidFills       uint64  `json:"valid_fills"`
 	TotalFills       uint64  `json:"total_fills"`
 	CorrectnessScore float64 `json:"correctness_score"` // valid_fills / total_fills
-	ViolationCount   uint32  `json:"violation_count"`
+	ViolationCount   uint64  `json:"violation_count"`
 	ComputedAtNS     uint64  `json:"computed_at_ns"`
 	SentCount        uint64  `json:"sent_count"`    // orders.sent events drained for the session
 	AckedCount       uint64  `json:"acked_count"`   // orders.acked events drained (post-dedup)
@@ -163,7 +163,13 @@ type WorkloadSpec struct {
 	FIXVersion       string       `json:"fix_version"`
 	ConnectTimeoutMS uint64       `json:"connect_timeout_ms"`
 	WriteTimeoutMS   uint64       `json:"write_timeout_ms"`
-	Tasks            []TaskSpec   `json:"tasks"` // this worker's slice of the scenario's task list
+	// PublishedAtUnixNS is the unix-nanosecond timestamp stamped by the
+	// controller at publish time, used by bot-fleet workers to detect and
+	// skip stale specs left behind by a session that released its
+	// partition lease before a worker attached. Zero value (unset) means
+	// consumers must treat it as NOT stale.
+	PublishedAtUnixNS uint64     `json:"published_at_unix_ns"`
+	Tasks             []TaskSpec `json:"tasks"` // this worker's slice of the scenario's task list
 }
 
 // TargetSpec names one protocol+port a workload can dispatch tasks to. Ports

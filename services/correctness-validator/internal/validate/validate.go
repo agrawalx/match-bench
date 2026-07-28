@@ -58,6 +58,20 @@ type Report struct {
 	SelfTrades      uint64
 	Violations      []Violation
 
+	// totalViolations is the exact count of every add() call, independent of how
+	// many example Violation structs got retained in Violations (see add,
+	// maxViolationExamplesPerType). ViolationCount() reports this, not
+	// len(Violations), so capping the example slice for memory never makes the
+	// reported/stored violation_count metric lie.
+	totalViolations uint64
+	// violationExamplesByType caps how many example Violation structs are retained
+	// per ViolationType in Violations (N=100 each, maxViolationExamplesPerType). The
+	// exact counters (Overfills, PriceViolations, TimeViolations, SelfTrades,
+	// PhantomFills, LostOrders, LostCancels, and totalViolations above) are never
+	// capped and stay authoritative; this map only bounds the O(violations) memory
+	// the example slice would otherwise grow to on a long adversarial run.
+	violationExamplesByType map[ViolationType]int
+
 	// Invariants-mode-only fields (zero in full-replay mode).
 	LostOrders  uint64
 	LostCancels uint64
@@ -67,6 +81,16 @@ type Report struct {
 	// are excluded from the incremental FIFO/cross-flow checks (their ordering
 	// slot is gone) but must not crash or silently vanish.
 	T7ReorderLate uint64
+
+	// ScoredFills is the denominator for CorrectnessScore. Full mode's Run counts
+	// phantom fills into TotalFills (its phantom loop increments both TotalFills and
+	// PhantomFills together), so ScoredFills there is TotalFills-PhantomFills.
+	// Invariants mode's TotalFills counts real fill responses only — AddUnmatched
+	// increments PhantomFills separately as an unmatched_responses metric and never
+	// touches TotalFills — so ScoredFills there is just TotalFills. Both modes set
+	// this field directly so CorrectnessScore never has to guess which subtraction
+	// applies (and never underflows the uint64 subtraction that used to live here).
+	ScoredFills uint64
 }
 
 // CorrectnessScore applies behavior for its receiver performs the package-specific operation described by its name.
@@ -75,19 +99,27 @@ func (r Report) CorrectnessScore() float64 {
 	// Phantom-fill is removed as a scored violation class (docs/multi-contestant-audit.md
 	// §5, decision 2026-07-16): a fabricated fill is already excluded from the assembled
 	// order set upstream (it fails the orders.sent join), so PhantomFills is kept as the
-	// unmatched_responses metric only and is not counted against the score.
-	scored := r.TotalFills - r.PhantomFills
-	if scored == 0 {
+	// unmatched_responses metric only and is not counted against the score. ScoredFills
+	// is set by the caller (Run for full mode, InvariantsValidator.Finish for
+	// invariants mode) because the two modes disagree on whether TotalFills already
+	// includes phantom fills (see the field doc comment).
+	if r.ScoredFills == 0 {
 		return 1.0
 	}
-	return float64(r.ValidFills) / float64(scored)
+	return float64(r.ValidFills) / float64(r.ScoredFills)
 }
 
 // ViolationCount applies behavior for its receiver performs the package-specific operation described by its name.
 // It keeps validation, side effects, and returned values within this package's contract.
-func (r Report) ViolationCount() uint32 {
-	return uint32(len(r.Violations))
+func (r Report) ViolationCount() uint64 {
+	return r.totalViolations
 }
+
+// maxViolationExamplesPerType caps how many Violation example structs are retained
+// per ViolationType in Report.Violations, so the example slice stays O(1) per type
+// (O(#types) overall) instead of growing unbounded with session length. The exact
+// per-type counters (and totalViolations/ViolationCount) are unaffected by this cap.
+const maxViolationExamplesPerType = 100
 
 // isFill performs the package-specific operation described by its name.
 // It keeps validation, side effects, and returned values within this package's contract.
@@ -222,12 +254,22 @@ func Run(ordered []*model.Order, phantoms []ReportedFill) Report {
 			"fill reported for an order_id that was never sent")
 	}
 
+	rep.ScoredFills = rep.TotalFills - rep.PhantomFills
+
 	return rep
 }
 
 // add applies behavior for its receiver performs the package-specific operation described by its name.
 // It keeps validation, side effects, and returned values within this package's contract.
 func (r *Report) add(t ViolationType, id string, qty uint64, price int64, detail string) {
+	r.totalViolations++
+	if r.violationExamplesByType == nil {
+		r.violationExamplesByType = make(map[ViolationType]int)
+	}
+	if r.violationExamplesByType[t] >= maxViolationExamplesPerType {
+		return
+	}
+	r.violationExamplesByType[t]++
 	r.Violations = append(r.Violations, Violation{
 		Type: t, OrderID: id, ReportedQty: qty, ReportedPrice: price, Detail: detail,
 	})

@@ -85,7 +85,9 @@ pub fn session_band_partition(
         return 0;
     }
     let band_width = band_width.clamp(1, num_partitions);
-    let num_bands = (num_partitions / band_width).max(1);
+    // Ceiling division so a trailing partial band (num_partitions % band_width != 0)
+    // still gets a band index and its partitions remain reachable.
+    let num_bands = (num_partitions as u32).div_ceil(band_width as u32).max(1) as i32;
     let band = (fnv1a_64(session_id.as_bytes()) % num_bands as u64) as i32;
     let base = band * band_width;
     let within = (fnv1a_64(order_id.as_bytes()) % band_width as u64) as i32;
@@ -163,6 +165,11 @@ pub struct WorkloadSpec {
     pub write_timeout_ms: u64,
     #[serde(default)]
     pub barrier_epoch_ns: u64,
+    /// published_at_unix_ns is the unix-nanosecond timestamp the controller
+    /// stamped at publish time. Zero means "unset" (older/other producers
+    /// that don't set it) and must be treated as NOT stale by consumers.
+    #[serde(default)]
+    pub published_at_unix_ns: u64,
     pub tasks: Vec<TaskSpec>,
 }
 
@@ -461,7 +468,7 @@ pub struct CorrectnessScoreEvent {
     pub valid_fills: u64,
     pub total_fills: u64,
     pub correctness_score: f64,
-    pub violation_count: u32,
+    pub violation_count: u64,
     pub computed_at_ns: u64,
     #[serde(default)]
     pub sent_count: u64,
@@ -805,6 +812,51 @@ mod tests {
             seen.insert(base / band_width);
         }
         assert!(seen.len() > 1, "sessions must spread across more than one band");
+    }
+
+    /// session_band_partition_reaches_all_partitions_with_uneven_band_width is a
+    /// property test pinning the div_ceil fix: when num_partitions is not a
+    /// multiple of band_width, integer-division band counting silently drops the
+    /// trailing `num_partitions % band_width` partitions (they're never selected
+    /// for any session/order id). With ceiling division every partition in
+    /// 0..num_partitions must be reachable across a large sample of session ids.
+    #[test]
+    fn session_band_partition_reaches_all_partitions_with_uneven_band_width() {
+        // A small xorshift PRNG so this test has no external rand dependency.
+        fn xorshift(mut x: u64) -> u64 {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x
+        }
+
+        let cases: &[(i32, i32)] = &[(24, 5), (17, 4), (100, 7), (13, 3), (50, 6), (7, 4)];
+        for &(num_partitions, band_width) in cases {
+            assert_ne!(
+                num_partitions % band_width,
+                0,
+                "test case {num_partitions}/{band_width} must be uneven to exercise the fix"
+            );
+            let mut seen = std::collections::HashSet::new();
+            let mut seed: u64 = 0x9e3779b97f4a7c15 ^ (num_partitions as u64) ^ ((band_width as u64) << 32);
+            for _ in 0..5000 {
+                seed = xorshift(seed);
+                let session = format!("sess-{seed}");
+                let order = format!("order-{}", xorshift(seed));
+                let p = session_band_partition(&session, &order, num_partitions, band_width);
+                assert!(
+                    (0..num_partitions).contains(&p),
+                    "partition {p} out of range for num_partitions={num_partitions}"
+                );
+                seen.insert(p);
+            }
+            assert_eq!(
+                seen.len(),
+                num_partitions as usize,
+                "num_partitions={num_partitions} band_width={band_width}: expected all partitions \
+                 reachable, only hit {seen:?}"
+            );
+        }
     }
 
     /// order_sent_batch_v2_positional_round_trips_field_order pins the wire contract

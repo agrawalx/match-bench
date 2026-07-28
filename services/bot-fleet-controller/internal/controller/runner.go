@@ -426,20 +426,21 @@ func (r *Runner) buildWorkloadSpecs(
 	specs := make([]topics.WorkloadSpec, 0, workerCount)
 	for i := uint32(0); i < workerCount; i++ {
 		specs = append(specs, topics.WorkloadSpec{
-			SessionID:        sess.SessionID,
-			SubmissionID:     sess.SubmissionID,
-			ContestantID:     sub.ContestantID,
-			TargetHost:       sess.Endpoint.Host,
-			TargetPort:       legacyTarget.Port,
-			Protocol:         legacyTarget.Protocol,
-			Targets:          targets,
-			WorkerIndex:      i,
-			WorkerCount:      workerCount,
-			GlobalSeed:       r.runConfig.GlobalSeed,
-			FIXVersion:       r.runConfig.FIXVersion,
-			ConnectTimeoutMS: r.runConfig.ConnectTimeoutMS,
-			WriteTimeoutMS:   r.runConfig.WriteTimeoutMS,
-			Tasks:            tasksByWorker[i],
+			SessionID:         sess.SessionID,
+			SubmissionID:      sess.SubmissionID,
+			ContestantID:      sub.ContestantID,
+			TargetHost:        sess.Endpoint.Host,
+			TargetPort:        legacyTarget.Port,
+			Protocol:          legacyTarget.Protocol,
+			Targets:           targets,
+			WorkerIndex:       i,
+			WorkerCount:       workerCount,
+			GlobalSeed:        r.runConfig.GlobalSeed,
+			FIXVersion:        r.runConfig.FIXVersion,
+			ConnectTimeoutMS:  r.runConfig.ConnectTimeoutMS,
+			WriteTimeoutMS:    r.runConfig.WriteTimeoutMS,
+			PublishedAtUnixNS: uint64(time.Now().UnixNano()),
+			Tasks:             tasksByWorker[i],
 		})
 	}
 	return specs

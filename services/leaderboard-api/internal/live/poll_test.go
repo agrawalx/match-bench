@@ -147,6 +147,74 @@ func TestPoller_StoreError_SkipsTickWithoutPanic(t *testing.T) {
 	}
 }
 
+func TestPoller_UnchangedUpdatedAt_SkipsSecondBroadcast(t *testing.T) {
+	store := &fakeStore{sessions: []ActiveSessionContestant{{SessionID: "s1", ContestantID: "c1"}}}
+	redis := newFakeRedis()
+	redis.values["live:s1:latest"] = []byte("3")
+	redis.hashes["contestant:c1:s1:3"] = map[string]string{
+		"p50_ns": "100", "p99_ns": "200", "p999_ns": "300",
+		"tps_1s": "1234.5", "error_rate": "0.01", "updated_at_ns": "999",
+		"wave_index": "3", "session_id": "s1",
+	}
+	broker := &fakeBroker{}
+	p := New(store, redis, broker, 10*time.Millisecond, testLogger())
+
+	p.tick(context.Background())
+	p.tick(context.Background())
+
+	if broker.count() != 1 {
+		t.Fatalf("expected 1 broadcast after two ticks with unchanged updated_at_ns, got %d", broker.count())
+	}
+}
+
+func TestPoller_ChangedUpdatedAt_BroadcastsAgain(t *testing.T) {
+	store := &fakeStore{sessions: []ActiveSessionContestant{{SessionID: "s1", ContestantID: "c1"}}}
+	redis := newFakeRedis()
+	redis.values["live:s1:latest"] = []byte("3")
+	redis.hashes["contestant:c1:s1:3"] = map[string]string{
+		"p50_ns": "100", "p99_ns": "200", "p999_ns": "300",
+		"tps_1s": "1234.5", "error_rate": "0.01", "updated_at_ns": "999",
+		"wave_index": "3", "session_id": "s1",
+	}
+	broker := &fakeBroker{}
+	p := New(store, redis, broker, 10*time.Millisecond, testLogger())
+
+	p.tick(context.Background())
+
+	redis.hashes["contestant:c1:s1:3"]["updated_at_ns"] = "1000"
+	p.tick(context.Background())
+
+	if broker.count() != 2 {
+		t.Fatalf("expected 2 broadcasts after updated_at_ns changed, got %d", broker.count())
+	}
+}
+
+func TestPoller_PersistentParseFailure_RateLimitsWarnings(t *testing.T) {
+	store := &fakeStore{sessions: []ActiveSessionContestant{{SessionID: "s1", ContestantID: "c1"}}}
+	redis := newFakeRedis()
+	broker := &fakeBroker{}
+	p := New(store, redis, broker, 10*time.Millisecond, testLogger())
+
+	// live pointer present but not parseable as an int -> parse-warn path,
+	// on every tick, for a persistently-failing session.
+	redis.values["live:s1:latest"] = []byte("not-a-number")
+
+	for i := 0; i < parseWarnEveryNTicks+5; i++ {
+		p.tick(context.Background())
+	}
+
+	entry := p.parseWarnState["s1"]
+	if entry == nil {
+		t.Fatal("expected parse-warn state to be tracked for session s1")
+	}
+	// After parseWarnEveryNTicks+5 ticks with an unchanged failure, exactly
+	// two warnings should have been logged (tick 1, and tick parseWarnEveryNTicks+1),
+	// so ticksSinceLog should be 4 (5 ticks past the second log).
+	if entry.ticksSinceLog != 4 {
+		t.Fatalf("expected ticksSinceLog to be 4 after rate-limited relogging, got %d", entry.ticksSinceLog)
+	}
+}
+
 func TestPoller_Run_StopsPromptlyOnCancel(t *testing.T) {
 	store := &fakeStore{}
 	redis := newFakeRedis()

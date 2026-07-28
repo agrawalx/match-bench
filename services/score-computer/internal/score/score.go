@@ -129,6 +129,12 @@ type Result struct {
 	IncompleteTelemetry       bool         `json:"incomplete_telemetry"`
 	IncompleteTelemetryReason string       `json:"incomplete_telemetry_reason,omitempty"`
 	Waves                     []WaveResult `json:"waves,omitempty"`
+	// MaxRateOnly is true when every ramp task has TargetRPS==0 (the uncapped
+	// max-rate sentinel used by correctness-pass-1 scenarios, which are not
+	// throughput-graded). PeakSustainedTPS is then derived from measured TPS1S
+	// samples rather than an offered rate, and downstream scoring must not
+	// penalize a resulting zero/low peak as a failed throughput gate.
+	MaxRateOnly bool `json:"max_rate_only,omitempty"`
 }
 
 var ErrMissingRampSession = errors.New("missing ramp session")
@@ -189,34 +195,58 @@ func Compute(in Input) (Result, error) {
 
 	res.SpikeRecoveryNS = spikeRecoveryNS(in.Sessions, cfg.WaveDurationNS)
 
-	schedule := WaveSchedule(ramp.TaskSpecs, cfg.WaveDurationNS)
-	metrics := summarizeMetrics(ramp.Metrics)
-	for _, wave := range schedule {
-		if wave.WaveIndex == 0 {
-			continue
+	// TargetRPS==0 is the uncapped max-rate sentinel for correctness-pass-1
+	// scenarios, which are not throughput-graded. If every ramp task uses it,
+	// there's no offered rate to gate on, so fall back to measured TPS1S
+	// samples (already collected per-wave) rather than zero-failing the whole
+	// scenario for having no throughput-graded waves at all.
+	maxRateOnly := len(ramp.TaskSpecs) > 0
+	for _, t := range ramp.TaskSpecs {
+		if t.TargetRPS != 0 {
+			maxRateOnly = false
+			break
 		}
-		wr := WaveResult{WaveIndex: wave.WaveIndex, OfferedRPS: wave.OfferedRPS}
-		m, ok := metrics[wave.WaveIndex]
-		if !ok || m.Count == 0 {
-			wr.Passed = false
-			wr.Reason = "missing_metrics"
+	}
+
+	if maxRateOnly {
+		res.MaxRateOnly = true
+		var peak float64
+		for _, m := range ramp.Metrics {
+			if m.TPS1S > peak {
+				peak = m.TPS1S
+			}
+		}
+		res.PeakSustainedTPS = uint64(math.Round(peak))
+	} else {
+		schedule := WaveSchedule(ramp.TaskSpecs, cfg.WaveDurationNS)
+		metrics := summarizeMetrics(ramp.Metrics)
+		for _, wave := range schedule {
+			if wave.WaveIndex == 0 {
+				continue
+			}
+			wr := WaveResult{WaveIndex: wave.WaveIndex, OfferedRPS: wave.OfferedRPS}
+			m, ok := metrics[wave.WaveIndex]
+			if !ok || m.Count == 0 {
+				wr.Passed = false
+				wr.Reason = "missing_metrics"
+				res.Waves = append(res.Waves, wr)
+				break
+			}
+			wr.P99NS = m.StableP99NS
+			switch {
+			case m.MaxErrorRate > cfg.MaxErrorRate:
+				wr.Reason = "error_rate"
+			case m.StableP99NS > cfg.MaxP99NS:
+				wr.Reason = "p99_latency"
+			default:
+				wr.Passed = true
+				res.PeakSustainedTPS = wave.OfferedRPS
+				res.P99AtPeakNS = m.MaxP99NS
+			}
 			res.Waves = append(res.Waves, wr)
-			break
-		}
-		wr.P99NS = m.StableP99NS
-		switch {
-		case m.MaxErrorRate > cfg.MaxErrorRate:
-			wr.Reason = "error_rate"
-		case m.StableP99NS > cfg.MaxP99NS:
-			wr.Reason = "p99_latency"
-		default:
-			wr.Passed = true
-			res.PeakSustainedTPS = wave.OfferedRPS
-			res.P99AtPeakNS = m.MaxP99NS
-		}
-		res.Waves = append(res.Waves, wr)
-		if !wr.Passed {
-			break
+			if !wr.Passed {
+				break
+			}
 		}
 	}
 	if disqualificationCode != "" {
@@ -273,6 +303,11 @@ func WaveSchedule(tasks []topics.TaskSpec, waveDurationNS uint64) []WaveOffer {
 		end := saturatingAdd(start, waveDurationNS)
 		var offered float64
 		for _, t := range tasks {
+			if t.TargetRPS == 0 {
+				// Uncapped max-rate sentinel (correctness-pass-1): not throughput-graded,
+				// excluded from the offered-rate gate rather than treated as offered=0.
+				continue
+			}
 			taskStart := t.StartOffsetNs
 			taskEnd := saturatingAdd(t.StartOffsetNs, t.DurationNs)
 			overlap := overlapNS(start, end, taskStart, taskEnd)

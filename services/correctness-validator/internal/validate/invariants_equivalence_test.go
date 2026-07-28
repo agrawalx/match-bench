@@ -42,10 +42,6 @@ func (v *oldBatchValidator) Apply(o *model.Order) {
 		}
 		v.rep.TotalFills++
 		cumFilled += resp.FillQty
-		if !rec.hasResp || resp.T7Ns < rec.minT7Ns {
-			rec.minT7Ns = resp.T7Ns
-			rec.hasResp = true
-		}
 		if cumFilled > o.Qty {
 			v.rep.Overfills++
 			v.rep.add(Overfill, o.OrderID, resp.FillQty, int64(resp.FillPrice), "overfill")
@@ -53,13 +49,17 @@ func (v *oldBatchValidator) Apply(o *model.Order) {
 			v.rep.ValidFills++
 		}
 	}
-	if !rec.hasResp {
-		for _, resp := range o.Responses {
-			if resp.T7Ns != 0 {
-				rec.hasResp = true
-				rec.minT7Ns = resp.T7Ns
-				break
-			}
+	// minT7Ns is the first response (min T7) across ALL responses — fills AND acks —
+	// matching the corrected production spec (invariants.go's Apply): an order that
+	// acks early but fills late is positioned by its earliest response, not its
+	// earliest fill.
+	for _, resp := range o.Responses {
+		if resp.T7Ns == 0 {
+			continue
+		}
+		if !rec.hasResp || resp.T7Ns < rec.minT7Ns {
+			rec.minT7Ns = resp.T7Ns
+			rec.hasResp = true
 		}
 	}
 	v.orders[o.OrderID] = rec

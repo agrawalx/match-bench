@@ -216,7 +216,7 @@ SELECT contestant_id, valid_fills, total_fills, correctness_score, violation_cou
 	if err != nil {
 		return ev, false, fmt.Errorf("load score: %w", err)
 	}
-	ev.ValidFills, ev.TotalFills, ev.ViolationCount, ev.ComputedAtNS = uint64(valid), uint64(total), uint32(vcount), uint64(computed)
+	ev.ValidFills, ev.TotalFills, ev.ViolationCount, ev.ComputedAtNS = uint64(valid), uint64(total), uint64(vcount), uint64(computed)
 	ev.SentCount, ev.AckedCount, ev.MatchedCount = uint64(sent), uint64(acked), uint64(matched)
 	return ev, true, nil
 }

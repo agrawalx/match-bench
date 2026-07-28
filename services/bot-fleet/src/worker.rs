@@ -111,6 +111,35 @@ fn should_stop_sending(cancel: &CancelToken, task_end_ns: u64) -> bool {
     cancel.is_cancelled() || unix_nanos() >= task_end_ns
 }
 
+/// Default WORKLOAD_SPEC_MAX_AGE_S: a workload spec older than this at consume
+/// time is a stale leftover from a session whose controller-side partition
+/// lease was already released and reused by a newer session (runner.go
+/// releases the lease the instant Run() returns, regardless of whether the
+/// published spec was ever consumed) — so it's skipped rather than run.
+const DEFAULT_WORKLOAD_SPEC_MAX_AGE_S: u64 = 300;
+
+/// workload_spec_max_age_s reads WORKLOAD_SPEC_MAX_AGE_S from the environment,
+/// following this codebase's inline env-var parsing convention (see
+/// kafka.rs::telemetry_producer's KAFKA_TELEMETRY_COMPRESSION_LEVEL).
+fn workload_spec_max_age_s() -> u64 {
+    std::env::var("WORKLOAD_SPEC_MAX_AGE_S")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(DEFAULT_WORKLOAD_SPEC_MAX_AGE_S)
+}
+
+/// is_spec_stale reports whether a workload spec published at
+/// `published_at_unix_ns` is older than `max_age_s` as of `now_unix_ns`.
+/// `published_at_unix_ns == 0` (unset — older/other producers that don't
+/// stamp this field) is treated as NOT stale, for backward compatibility.
+fn is_spec_stale(published_at_unix_ns: u64, now_unix_ns: u64, max_age_s: u64) -> bool {
+    if published_at_unix_ns == 0 {
+        return false;
+    }
+    let max_age_ns = max_age_s.saturating_mul(1_000_000_000);
+    now_unix_ns.saturating_sub(published_at_unix_ns) > max_age_ns
+}
+
 /// run starts the bot-fleet worker loop.
 /// It consumes workload assignments, executes each one, and exits on a
 /// shutdown signal (SIGINT/Ctrl-C or SIGTERM from kubelet).
@@ -193,6 +222,19 @@ pub async fn run(mut config: Config) -> Result<()> {
                         continue;
                     }
                 };
+
+                if is_spec_stale(spec.published_at_unix_ns, unix_nanos(), workload_spec_max_age_s()) {
+                    let age_s = unix_nanos().saturating_sub(spec.published_at_unix_ns) / 1_000_000_000;
+                    warn!(
+                        session_id = %spec.session_id,
+                        age_s,
+                        "skipping stale workload assignment (published_at_unix_ns beyond WORKLOAD_SPEC_MAX_AGE_S)"
+                    );
+                    metrics::stale_workload_skipped();
+                    kafka::commit_message(&workload_consumer, &message)
+                        .context("commit stale workload assignment")?;
+                    continue;
+                }
 
                 if let Err(err) = run_workload(
                     &config,
@@ -592,6 +634,24 @@ type PendingMap = Arc<Mutex<HashMap<String, PendingOrder>>>;
 // an error, it's just skipped.
 type ExpiryQueue = Arc<Mutex<VecDeque<(u64, String)>>>;
 
+/// Removes each of `order_ids` from `pending` (if still present) under a single
+/// lock and returns how many were actually removed. Used on the write-error
+/// cleanup paths (FIX and REST/WS): a batch write can fail after the read/ack
+/// loop has already removed (and `inflight_sub`'d) some of the same batch's
+/// orders concurrently, so the caller must sub the gauge by this actual-removal
+/// count, not the original batch size — otherwise already-acked entries get
+/// subtracted twice and the shared inflight gauge drifts negative.
+fn remove_batch_from_pending<'a, I>(pending: &PendingMap, order_ids: I) -> usize
+where
+    I: IntoIterator<Item = &'a str>,
+{
+    let mut map = pending.lock().expect("pending map poisoned");
+    order_ids
+        .into_iter()
+        .filter(|id| map.remove(*id).is_some())
+        .count()
+}
+
 /// Pops every queue entry that is due (`deadline_ns <= now_ns`), or all of them if
 /// `last_tick`, preserving FIFO order. Pure and unit-testable independent of the
 /// pending map / telemetry plumbing around it.
@@ -965,13 +1025,9 @@ async fn fix_write_loop(
                 sent += count as u64;
             }
             Err(err) => {
-                {
-                    let mut map = pending.lock().expect("pending map poisoned");
-                    for frame in frames.iter() {
-                        map.remove(&frame.order_id);
-                    }
-                }
-                metrics::inflight_sub(count);
+                let removed =
+                    remove_batch_from_pending(&pending, frames.iter().map(|f| f.order_id.as_str()));
+                metrics::inflight_sub(removed);
                 metrics::order_write_error(metrics::protocol_label(Protocol::Fix));
                 warn!(
                     task_id = task.task_id,
@@ -1172,15 +1228,15 @@ impl RwWriter {
     /// `feed` queues each frame without a syscall, and the trailing `flush` issues
     /// one write for the whole batch — same syscall-amortization shape as REST
     /// without bypassing tungstenite's framing/masking.
-    async fn write_batch(&mut self, frames: &[OrderFrame], scratch: &mut Vec<u8>) -> Result<()> {
+    async fn write_batch(&mut self, frames: &mut [OrderFrame], scratch: &mut Vec<u8>) -> Result<()> {
         match self {
             Self::Rest(w) => {
                 concat_frames(frames, scratch);
                 w.write_all(scratch).await.context("write REST batch")
             }
             Self::Ws(s) => {
-                for frame in frames {
-                    s.feed(WsMessage::Binary(frame.bytes.clone()))
+                for frame in frames.iter_mut() {
+                    s.feed(WsMessage::Binary(std::mem::take(&mut frame.bytes)))
                         .await
                         .context("feed WS order")?;
                 }
@@ -1434,6 +1490,7 @@ async fn rw_write_loop(
                 );
             }
         }
+        metrics::inflight_add(count);
 
         let write_start_ns = unix_nanos();
         // Block on the write rather than imposing a per-write timeout (same as the FIX path).
@@ -1445,7 +1502,7 @@ async fn rw_write_loop(
         // (the ramp-collapse symptom). Cancellation still tears the loop down promptly at session
         // end, and a genuinely dead peer surfaces as a write error below.
         let write_res = tokio::select! {
-            res = writer.write_batch(&frames, &mut scratch) => res,
+            res = writer.write_batch(&mut frames, &mut scratch) => res,
             _ = cancel.cancelled() => break,
         };
         let protocol_label = metrics::protocol_label(writer.protocol());
@@ -1482,12 +1539,9 @@ async fn rw_write_loop(
                 sent += count as u64;
             }
             Err(err) => {
-                {
-                    let mut map = pending.lock().expect("pending map poisoned");
-                    for frame in frames.iter() {
-                        map.remove(&frame.order_id);
-                    }
-                }
+                let removed =
+                    remove_batch_from_pending(&pending, frames.iter().map(|f| f.order_id.as_str()));
+                metrics::inflight_sub(removed);
                 metrics::order_write_error(protocol_label);
                 warn!(
                     task_id = task.task_id,
@@ -1519,6 +1573,7 @@ async fn emit_response(
         map.remove(clord_id)
     };
     let Some(p) = pending_order else { return };
+    metrics::inflight_sub(1);
     notify.notify_one();
     let recv_done_ts_ns = unix_nanos();
     telemetry
@@ -2081,6 +2136,40 @@ mod tests {
     }
 
     #[test]
+    /// stale_spec_is_skipped verifies a workload spec published far enough in
+    /// the past (beyond max_age_s) is flagged stale — the regression case for
+    /// the lease-reuse race in runner.go, where a controller's next session
+    /// re-leases the same partition before a worker consumed the previous
+    /// session's spec.
+    fn stale_spec_is_skipped() {
+        let max_age_s = DEFAULT_WORKLOAD_SPEC_MAX_AGE_S;
+        let now_ns = 1_000_000_000_000u64;
+        let published_at_ns = now_ns - (max_age_s + 60) * 1_000_000_000;
+        assert!(is_spec_stale(published_at_ns, now_ns, max_age_s));
+    }
+
+    #[test]
+    /// fresh_spec_is_not_stale verifies a recently-published spec (well under
+    /// max_age_s) is not skipped.
+    fn fresh_spec_is_not_stale() {
+        let max_age_s = DEFAULT_WORKLOAD_SPEC_MAX_AGE_S;
+        let now_ns = 1_000_000_000_000u64;
+        let published_at_ns = now_ns - 5 * 1_000_000_000;
+        assert!(!is_spec_stale(published_at_ns, now_ns, max_age_s));
+    }
+
+    #[test]
+    /// unset_published_at_is_not_stale verifies published_at_unix_ns == 0
+    /// (older/other producers that don't stamp this field) is NOT treated as
+    /// stale — backward-compat requirement from the design, since "unset"
+    /// must not mean "infinitely old".
+    fn unset_published_at_is_not_stale() {
+        let max_age_s = DEFAULT_WORKLOAD_SPEC_MAX_AGE_S;
+        let now_ns = 1_000_000_000_000u64;
+        assert!(!is_spec_stale(0, now_ns, max_age_s));
+    }
+
+    #[test]
     /// legacy_spec_resolves_single_target_from_protocol_and_port verifies a
     /// spec with an empty targets table (pre-Shape-A message) still resolves
     /// a valid single target for connect_tasks/TargetClient::connect.
@@ -2147,6 +2236,7 @@ mod tests {
             connect_timeout_ms: 1500,
             write_timeout_ms: 250,
             barrier_epoch_ns: 0,
+            published_at_unix_ns: 0,
             tasks: vec![TaskSpec {
                 task_id: 1,
                 profile: BotProfile::Hft,
@@ -2312,5 +2402,171 @@ mod tests {
         };
 
         assert_eq!(kafka::ready_key(&signal), "sess-1:worker-1");
+    }
+
+    fn mk_pending_order(id: &str) -> PendingOrder {
+        PendingOrder {
+            order_id: id.to_string(),
+            orig_order_id: String::new(),
+            target_send_ts_ns: 0,
+            send_ts_ns: 0,
+            barrier_epoch_ns: 0,
+            price: 0,
+            qty: 0,
+            side: Side::Buy,
+            payload_type: PayloadType::New,
+            ord_type: OrdType::Limit,
+        }
+    }
+
+    fn new_pending_map() -> PendingMap {
+        Arc::new(Mutex::new(HashMap::new()))
+    }
+
+    #[test]
+    /// remove_batch_from_pending_counts_only_actual_removals is the direct
+    /// regression test for the FIX/REST/WS write-error double-subtraction bug
+    /// (worker.rs write-error cleanup paths): when some ids in the batch have
+    /// already been removed by a concurrent ack, the returned count must
+    /// reflect only what THIS call actually removed, not the batch size.
+    fn remove_batch_from_pending_counts_only_actual_removals() {
+        let pending = new_pending_map();
+        for id in ["a", "b", "c", "d"] {
+            pending
+                .lock()
+                .unwrap()
+                .insert(id.to_string(), mk_pending_order(id));
+        }
+        // Simulate the read/ack loop already having removed "b" and "d" before
+        // the write-error cleanup path runs over the whole original batch.
+        pending.lock().unwrap().remove("b");
+        pending.lock().unwrap().remove("d");
+
+        let removed = remove_batch_from_pending(&pending, ["a", "b", "c", "d"].into_iter());
+
+        assert_eq!(removed, 2, "only a and c were still present to remove");
+        assert!(pending.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    /// inflight_gauge_fix_error_path_no_double_subtract_when_partial_acks_race
+    /// reproduces the exact failure scenario: a batch is inserted (inflight_add),
+    /// some entries are acked concurrently (each doing its own inflight_sub(1),
+    /// mirroring fix_read_loop), and then the write-error cleanup path fires
+    /// over the ORIGINAL batch ids. Using the actual-removed count (the fix)
+    /// must land the gauge back at exactly the pre-insert baseline; using the
+    /// original batch size (the bug) would double-subtract the already-acked
+    /// entries and drift the gauge negative.
+    fn inflight_gauge_fix_error_path_no_double_subtract_when_partial_acks_race() {
+        let pending = new_pending_map();
+        let batch = ["o1", "o2", "o3", "o4"];
+        let start = metrics::inflight_value();
+
+        // Writer inserts the whole batch and adds to the gauge (mirrors
+        // fix_write_loop's insert + inflight_add(count)).
+        {
+            let mut map = pending.lock().unwrap();
+            for id in batch {
+                map.insert(id.to_string(), mk_pending_order(id));
+            }
+        }
+        metrics::inflight_add(batch.len());
+        assert_eq!(metrics::inflight_value(), start + batch.len() as i64);
+
+        // Read loop acks o1 and o3 before the write error fires (mirrors
+        // fix_read_loop: remove + inflight_sub(1) per ack).
+        for id in ["o1", "o3"] {
+            let acked = pending.lock().unwrap().remove(id).is_some();
+            assert!(acked);
+            metrics::inflight_sub(1);
+        }
+        assert_eq!(metrics::inflight_value(), start + 2);
+
+        // Write error cleanup now runs over the ORIGINAL batch ids. Only o2
+        // and o4 are still present; the fix subs by that actual count.
+        let removed = remove_batch_from_pending(&pending, batch.into_iter());
+        assert_eq!(removed, 2, "o1 and o3 were already gone");
+        metrics::inflight_sub(removed);
+
+        assert_eq!(
+            metrics::inflight_value(),
+            start,
+            "gauge must return to baseline, not drift negative from double-subtracting o1/o3"
+        );
+        assert!(pending.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    /// inflight_gauge_rest_ws_insert_then_ack_nets_to_baseline covers the
+    /// REST/WS send+ack flow: rw_write_loop's insert pairs with
+    /// inflight_add(count), and emit_response's ack pairs with
+    /// inflight_sub(1) per order. Before this fix, rw_write_loop never called
+    /// inflight_add and emit_response never called inflight_sub, so the
+    /// shared gauge only ever decreased for REST/WS traffic.
+    fn inflight_gauge_rest_ws_insert_then_ack_nets_to_baseline() {
+        let pending = new_pending_map();
+        let batch = ["r1", "r2", "r3"];
+        let start = metrics::inflight_value();
+
+        // Mirrors rw_write_loop: insert batch, then inflight_add(count).
+        {
+            let mut map = pending.lock().unwrap();
+            for id in batch {
+                map.insert(id.to_string(), mk_pending_order(id));
+            }
+        }
+        metrics::inflight_add(batch.len());
+        assert_eq!(metrics::inflight_value(), start + batch.len() as i64);
+
+        // Mirrors emit_response: remove + inflight_sub(1) per ack.
+        for id in batch {
+            let acked = pending.lock().unwrap().remove(id).is_some();
+            assert!(acked);
+            metrics::inflight_sub(1);
+        }
+
+        assert_eq!(
+            metrics::inflight_value(),
+            start,
+            "REST/WS send+ack must return the gauge to its pre-insert value"
+        );
+        assert!(pending.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    /// inflight_gauge_rest_ws_insert_then_timeout_eviction_nets_to_baseline
+    /// covers the REST/WS send+timeout flow: rw_write_loop's insert pairs
+    /// with inflight_add(count), and watchdog_loop's eviction (shared across
+    /// all protocols) pairs with inflight_sub(evicted.len()). Confirms the
+    /// gauge never goes negative for a REST/WS task whose orders time out
+    /// instead of being acked.
+    fn inflight_gauge_rest_ws_insert_then_timeout_eviction_nets_to_baseline() {
+        let pending = new_pending_map();
+        let batch = ["w1", "w2"];
+        let start = metrics::inflight_value();
+
+        {
+            let mut map = pending.lock().unwrap();
+            for id in batch {
+                map.insert(id.to_string(), mk_pending_order(id));
+            }
+        }
+        metrics::inflight_add(batch.len());
+        assert_eq!(metrics::inflight_value(), start + batch.len() as i64);
+
+        // Mirrors watchdog_loop: due ids removed from pending, then
+        // inflight_sub(to_evict.len()) once for the whole evicted set.
+        let evicted: Vec<PendingOrder> = {
+            let mut map = pending.lock().unwrap();
+            batch.iter().filter_map(|id| map.remove(*id)).collect()
+        };
+        metrics::inflight_sub(evicted.len());
+
+        assert_eq!(
+            metrics::inflight_value(),
+            start,
+            "REST/WS send+timeout must return the gauge to its pre-insert value"
+        );
+        assert!(pending.lock().unwrap().is_empty());
     }
 }

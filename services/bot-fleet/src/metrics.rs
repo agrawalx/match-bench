@@ -74,6 +74,10 @@ struct Metrics {
     telemetry_dropped: Counter,
     telemetry_batches: Counter,
     telemetry_events_flushed: Counter,
+    // stale_workloads: workload specs skipped because published_at_unix_ns was
+    // older than WORKLOAD_SPEC_MAX_AGE_S — leftovers from a session whose
+    // controller-side partition lease was already released and reused.
+    stale_workloads: Counter,
     // write_seconds: wall time spent inside write_all per order. This is the direct
     // backpressure probe — if the drain stops reading, its TCP window closes and this
     // grows. schedule_slip_seconds: send_ts - target_send_ts, i.e. how far behind the
@@ -120,6 +124,7 @@ static METRICS: LazyLock<Metrics> = LazyLock::new(|| {
     let telemetry_dropped = Counter::default();
     let telemetry_batches = Counter::default();
     let telemetry_events_flushed = Counter::default();
+    let stale_workloads = Counter::default();
     let write_seconds: ProtocolHistogramFamily =
         Family::new_with_constructor(|| Histogram::new(send_buckets()));
     let schedule_slip_seconds: ProtocolHistogramFamily =
@@ -177,6 +182,11 @@ static METRICS: LazyLock<Metrics> = LazyLock::new(|| {
         telemetry_events_flushed.clone(),
     );
     registry.register(
+        "iicpc_bot_stale_workloads",
+        "Workload specs skipped for being older than WORKLOAD_SPEC_MAX_AGE_S.",
+        stale_workloads.clone(),
+    );
+    registry.register(
         "iicpc_bot_write_seconds",
         "Wall time spent inside write_all per order (direct drain backpressure probe).",
         write_seconds.clone(),
@@ -206,6 +216,7 @@ static METRICS: LazyLock<Metrics> = LazyLock::new(|| {
         telemetry_dropped,
         telemetry_batches,
         telemetry_events_flushed,
+        stale_workloads,
         write_seconds,
         schedule_slip_seconds,
         write_batch_size,
@@ -264,6 +275,11 @@ pub fn tasks_connected(n: usize) {
 /// It keeps validation, side effects, and returned values within this module's contract.
 pub fn connect_failure() {
     METRICS.connect_failures.inc();
+}
+
+/// stale_workload_skipped records a workload spec skipped for staleness.
+pub fn stale_workload_skipped() {
+    METRICS.stale_workloads.inc();
 }
 
 /// order_sent records one order sent over `protocol` ("fix"|"rest"|"ws").

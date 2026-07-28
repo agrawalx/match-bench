@@ -63,6 +63,57 @@ func TestComputePassingClimbStopsAtFirstFail(t *testing.T) {
 	}
 }
 
+// TestComputeMixedZeroAndPositiveTargetRPSUsesOnlyGradedWaves checks that
+// TargetRPS==0 tasks (the uncapped max-rate sentinel) overlapping the same
+// ramp as throughput-graded (TargetRPS>0) tasks don't suppress the graded
+// waves' PeakSustainedTPS computation.
+func TestComputeMixedZeroAndPositiveTargetRPSUsesOnlyGradedWaves(t *testing.T) {
+	in := baseInput()
+	in.Sessions[2].TaskSpecs = append(in.Sessions[2].TaskSpecs,
+		topics.TaskSpec{TargetRPS: 0, StartOffsetNs: 0, DurationNs: 3 * wave})
+	res, err := Compute(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.MaxRateOnly {
+		t.Fatalf("mixed scenario must not be flagged MaxRateOnly: %#v", res)
+	}
+	if res.PeakSustainedTPS != 30_000 {
+		t.Fatalf("peak=%d, want 30000 (unaffected by zero-target task)", res.PeakSustainedTPS)
+	}
+}
+
+// TestComputeAllZeroTargetRPSIsMaxRateOnly checks that a ramp session made
+// entirely of TargetRPS==0 tasks (correctness-pass-1, not throughput-graded)
+// doesn't zero-fail the scenario: MaxRateOnly must be set and PeakSustainedTPS
+// derived from measured TPS1S rather than the (nonexistent) offered rate.
+func TestComputeAllZeroTargetRPSIsMaxRateOnly(t *testing.T) {
+	in := baseInput()
+	in.Sessions[2].TaskSpecs = []topics.TaskSpec{
+		{TargetRPS: 0, StartOffsetNs: 0, DurationNs: 3 * wave},
+	}
+	in.Sessions[2].Metrics = []MetricRow{
+		{WaveIndex: 0, P99NS: 500_000, ErrorRate: 0, TPS1S: 12_345},
+		{WaveIndex: 1, P99NS: 500_000, ErrorRate: 0, TPS1S: 54_321},
+	}
+	res, err := Compute(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Disqualified {
+		t.Fatalf("all-max-rate scenario must not be disqualified by the peak gate: %#v", res)
+	}
+	if !res.MaxRateOnly {
+		t.Fatalf("want MaxRateOnly=true, got %#v", res)
+	}
+	if res.PeakSustainedTPS != 54_321 {
+		t.Fatalf("peak=%d, want 54321 (max observed TPS1S)", res.PeakSustainedTPS)
+	}
+	if len(res.Waves) != 0 {
+		t.Fatalf("want no throughput-gated waves recorded, got %#v", res.Waves)
+	}
+}
+
 // TestComputeCorrectnessDQ performs the package-specific operation described by its name.
 // It keeps validation, side effects, and returned values within this package's contract.
 func TestComputeCorrectnessDQ(t *testing.T) {

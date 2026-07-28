@@ -122,6 +122,16 @@ pub fn control_producer(brokers: &str) -> Result<KafkaProducer> {
     Ok(KafkaProducer { inner })
 }
 
+/// filter_compression_level keeps `n` only if it falls within librdkafka's
+/// `compression.level` config-property range (-1..=12). Note this is narrower than
+/// zstd's own native library range (roughly -131072..=22); values outside -1..=12
+/// but inside zstd's native range still make `ClientConfig::create()` fail at
+/// producer construction time, so they must be filtered here rather than passed
+/// through to librdkafka.
+fn filter_compression_level(n: i32) -> Option<i32> {
+    (-1..=12).contains(&n).then_some(n)
+}
+
 /// telemetry_producer performs the module-specific operation described by its name.
 /// It keeps validation, side effects, and returned values within this module's contract.
 pub fn telemetry_producer(brokers: &str) -> Result<KafkaProducer> {
@@ -137,7 +147,7 @@ pub fn telemetry_producer(brokers: &str) -> Result<KafkaProducer> {
     let compression_level = std::env::var("KAFKA_TELEMETRY_COMPRESSION_LEVEL")
         .ok()
         .and_then(|v| v.parse::<i32>().ok())
-        .filter(|n| (-131_072..=22).contains(n))
+        .and_then(filter_compression_level)
         .unwrap_or(3); // zstd level 3: fast, good ratio; matches librdkafka's own default
     let inner: FutureProducer = ClientConfig::new()
         .set("bootstrap.servers", brokers)
@@ -425,5 +435,19 @@ mod tests {
         assert_eq!(config.get("max.poll.interval.ms"), Some("1800000"));
         assert_eq!(config.get("enable.auto.commit"), Some("false"));
         assert_eq!(config.get("auto.offset.reset"), Some("earliest"));
+    }
+
+    #[test]
+    /// filter_compression_level_matches_librdkafka_range verifies the filter narrows
+    /// to librdkafka's compression.level range (-1..=12), not zstd's native library
+    /// range (-131072..=22) — values in the latter but outside the former crash
+    /// ClientConfig::create() at producer construction time.
+    fn filter_compression_level_matches_librdkafka_range() {
+        for n in [-1, 0, 12] {
+            assert_eq!(filter_compression_level(n), Some(n), "expected {n} to pass");
+        }
+        for n in [15, 19, 22, -5, -131_072, 13, -2] {
+            assert_eq!(filter_compression_level(n), None, "expected {n} to be rejected");
+        }
     }
 }

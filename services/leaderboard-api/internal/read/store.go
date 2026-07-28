@@ -474,9 +474,7 @@ SELECT r.session_id, COALESCE(sub.contestant_id,'')
   FROM run_groups rg
   JOIN runs r ON r.run_group_id = rg.run_group_id
   LEFT JOIN submissions sub ON sub.submission_id = rg.submission_id
- WHERE rg.run_group_id IN (
-   SELECT run_group_id FROM runs WHERE status NOT IN ('completed','failed')
- )`)
+ WHERE r.status NOT IN ('completed','failed')`)
 	if err != nil {
 		return nil, err
 	}

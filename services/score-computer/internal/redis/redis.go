@@ -7,10 +7,16 @@ package redis
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	goredis "github.com/redis/go-redis/v9"
 )
+
+// legacyGlobalLeaderboardKey is the orphaned `leaderboard:global` ZSET key.
+// Its writer/reader code was removed in a prior commit, but the key itself
+// was never cleaned up out of live Redis instances.
+const legacyGlobalLeaderboardKey = "leaderboard:global"
 
 // Client groups the state and dependencies used by this package.
 // Keep this type aligned with the runtime contract around it.
@@ -41,4 +47,17 @@ func (c *Client) Close() error {
 // It keeps validation, side effects, and returned values within this package's contract.
 func (c *Client) Ping(ctx context.Context) error {
 	return c.client.Ping(ctx).Err()
+}
+
+// DeleteLegacyGlobalLeaderboard removes the orphaned `leaderboard:global`
+// ZSET key left behind after its writer/reader code was removed. It returns
+// (deleted, err): deleted is true only if the key actually existed and was
+// removed; a key that is already absent is reported as deleted=false with a
+// nil error, not an error.
+func (c *Client) DeleteLegacyGlobalLeaderboard(ctx context.Context) (bool, error) {
+	n, err := c.client.Del(ctx, legacyGlobalLeaderboardKey).Result()
+	if err != nil && !errors.Is(err, goredis.Nil) {
+		return false, err
+	}
+	return n > 0, nil
 }

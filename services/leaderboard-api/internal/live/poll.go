@@ -3,6 +3,7 @@ package live
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"strconv"
 	"time"
@@ -45,6 +46,8 @@ type LiveMetrics struct {
 	UpdatedAtNS  int64   `json:"updated_at_ns"`
 }
 
+const parseWarnEveryNTicks = 30
+
 // Poller periodically discovers active sessions and rebroadcasts their latest live metrics.
 type Poller struct {
 	store    SessionSource
@@ -52,6 +55,21 @@ type Poller struct {
 	broker   LiveBroadcaster
 	interval time.Duration
 	log      *slog.Logger
+
+	// lastBroadcastAtNS memoizes the updated_at_ns last broadcast for each
+	// session, so unchanged snapshots are skipped instead of rebroadcast on
+	// every tick. tick() runs sequentially from a single goroutine (Run's
+	// loop), so no locking is needed here.
+	lastBroadcastAtNS map[string]int64
+	// parseWarnState tracks per-session parse-warning spam suppression:
+	// how many ticks have elapsed since the last logged warning, and the
+	// text of that warning (so a changed error is logged immediately).
+	parseWarnState map[string]*parseWarnEntry
+}
+
+type parseWarnEntry struct {
+	ticksSinceLog int
+	lastMessage   string
 }
 
 // New constructs a Poller. If interval is zero, defaultPollInterval is used.
@@ -62,7 +80,15 @@ func New(store SessionSource, redis RedisReader, broker LiveBroadcaster, interva
 	if log == nil {
 		log = slog.Default()
 	}
-	return &Poller{store: store, redis: redis, broker: broker, interval: interval, log: log}
+	return &Poller{
+		store:             store,
+		redis:             redis,
+		broker:            broker,
+		interval:          interval,
+		log:               log,
+		lastBroadcastAtNS: make(map[string]int64),
+		parseWarnState:    make(map[string]*parseWarnEntry),
+	}
 }
 
 // Run ticks on the configured interval, polling active sessions until ctx is cancelled.
@@ -100,7 +126,7 @@ func (p *Poller) pollSession(ctx context.Context, sc ActiveSessionContestant) {
 	}
 	waveIndex, err := strconv.ParseInt(string(waveRaw), 10, 64)
 	if err != nil {
-		p.log.Warn("live poller: parse wave index failed", "session_id", sc.SessionID, "error", err)
+		p.warnRateLimited(sc.SessionID, "live poller: parse wave index failed", "session_id", sc.SessionID, "error", err)
 		return
 	}
 
@@ -116,10 +142,47 @@ func (p *Poller) pollSession(ctx context.Context, sc ActiveSessionContestant) {
 
 	metrics, err := parseLiveMetrics(sc.ContestantID, sc.SessionID, waveIndex, fields)
 	if err != nil {
-		p.log.Warn("live poller: parse metrics failed", "key", key, "error", err)
+		p.warnRateLimited(sc.SessionID, "live poller: parse metrics failed", "key", key, "error", err)
 		return
 	}
+
+	if last, ok := p.lastBroadcastAtNS[sc.SessionID]; ok && last == metrics.UpdatedAtNS {
+		// Nothing new since the last tick for this session; skip the broadcast.
+		return
+	}
+	p.lastBroadcastAtNS[sc.SessionID] = metrics.UpdatedAtNS
 	p.broker.BroadcastLive(metrics)
+}
+
+// warnRateLimited logs a per-session parse warning at most once every
+// parseWarnEveryNTicks ticks, unless the warning message changed since the
+// last time it was logged for this session, in which case it logs
+// immediately so a new failure mode isn't hidden behind the rate limit.
+func (p *Poller) warnRateLimited(sessionID, msg string, args ...any) {
+	entry, ok := p.parseWarnState[sessionID]
+	if !ok {
+		entry = &parseWarnEntry{}
+		p.parseWarnState[sessionID] = entry
+	}
+
+	current := msg
+	for i := 0; i+1 < len(args); i += 2 {
+		current += " " + toString(args[i]) + "=" + toString(args[i+1])
+	}
+
+	entry.ticksSinceLog++
+	if entry.lastMessage != current || entry.ticksSinceLog >= parseWarnEveryNTicks {
+		p.log.Warn(msg, args...)
+		entry.lastMessage = current
+		entry.ticksSinceLog = 0
+	}
+}
+
+func toString(v any) string {
+	if s, ok := v.(string); ok {
+		return s
+	}
+	return fmt.Sprintf("%v", v)
 }
 
 func parseLiveMetrics(contestantID, sessionID string, waveIndex int64, fields map[string]string) (LiveMetrics, error) {

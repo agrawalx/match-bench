@@ -624,7 +624,7 @@ Raw finder output: 58 findings. After dedup: 56 (2 removed as duplicates). Note 
 
 Confirmed findings only (52), bucketed by how much work the fix actually requires.
 
-**Status: 20 fixed / 1 mitigated / 12 open / 1 accepted.**
+**Status: 25 fixed / 1 mitigated / 7 open / 1 accepted.**
 
 ### (a) One-line / mechanical fixes — all FIXED
 
@@ -645,11 +645,11 @@ Confirmed findings only (52), bucketed by how much work the fix actually require
 ### (b) Real design work
 
 - `internal/controller/runner.go:131` — pair lease release with spec-consumption ack/tombstone (lease lifecycle vs. Kafka message lifecycle currently uncoupled). **MITIGATED (this change)** — worker.rs now skips stale specs via a `published_at` stamp + max-age check, so a stale spec left behind by a fast-failed session no longer gets executed against a dead endpoint by the next lessee. The lease lifecycle and the Kafka message lifecycle on the partition are still uncoupled — full fix (release only after spec consumed/acked or tombstoned) remains open.
-- `internal/controller/lease.go:44`, `:85` (major), `:85` (minor) — FIFO fairness queue in `Acquire` to fix broadcast-wakeup starvation. **OPEN**
-- `internal/controller/consumer.go:127` — WaitGroup + bounded join for dispatch goroutines on shutdown. **OPEN**
-- `internal/controller/consumer.go:156` — panic-recovery path needs a fail+releaseSlot backstop. **OPEN**
-- `internal/controller/producer.go:84` — verify leased partition against writer metadata before publish instead of silent hash-fallback. **OPEN**
-- `internal/controller/consumer.go:114` — fail-closed RunStatus precheck (or persistent dispatch-accepted marker) to prevent duplicate re-dispatch. **OPEN**
+- `internal/controller/lease.go:44`, `:85` (major), `:85` (minor) — FIFO fairness queue in `Acquire` to fix broadcast-wakeup starvation. **FIXED (57f6baa)** **OPEN**
+- `internal/controller/consumer.go:127` — WaitGroup + bounded join for dispatch goroutines on shutdown. **FIXED (e9e703c)** **OPEN**
+- `internal/controller/consumer.go:156` — panic-recovery path needs a fail+releaseSlot backstop. **FIXED (e9e703c)** **OPEN**
+- `internal/controller/producer.go:84` — verify leased partition against writer metadata before publish instead of silent hash-fallback. **FIXED (e9e703c)** **OPEN**
+- `internal/controller/consumer.go:114` — fail-closed RunStatus precheck (or persistent dispatch-accepted marker) to prevent duplicate re-dispatch. **FIXED (e9e703c)** **OPEN**
 - `src/worker.rs:924` (critical + major) — bound the write `select` on `drain_end_ns`, not just process-level cancel. **OPEN**
 - `src/worker.rs:1141` / `:1105` — `last_tick` must drain remaining `pending` map entries directly, not just the expiry queue. **OPEN**
 - `src/worker.rs:941` — per-frame `send_ts_ns` patch (or guard acks before batch stamp) for batched writes. **OPEN**

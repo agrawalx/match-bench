@@ -9,6 +9,25 @@ const FIX_TIMESTAMP_PLACEHOLDER: &[u8; FIX_TIMESTAMP_LEN] = b"19700101-00:00:00.
 
 const SOH: u8 = 0x01;
 
+/// split_order_id extracts the task-local (seq, kind letter) from a
+/// `{session}_{task}_{seq}_{K}` order id, so hot-path bookkeeping (the expiry
+/// queue) can store 5 bytes instead of the whole heap string; `join_order_id`
+/// rebuilds the exact id on the rare eviction path.
+pub fn split_order_id(order_id: &str) -> Option<(u32, u8)> {
+    let mut it = order_id.rsplitn(3, '_');
+    let kind = it.next()?.as_bytes();
+    let seq: u32 = it.next()?.parse().ok()?;
+    if kind.len() != 1 {
+        return None;
+    }
+    Some((seq, kind[0]))
+}
+
+/// join_order_id is split_order_id's inverse given the task's identity.
+pub fn join_order_id(session_id: &str, bot_id: u64, seq: u32, kind: u8) -> String {
+    format!("{session_id}_{bot_id}_{seq}_{}", kind as char)
+}
+
 pub fn new_limit_order_id(session_id: &str, bot_id: u64, seq: u64) -> String {
     format!("{session_id}_{bot_id}_{seq}_O")
 }

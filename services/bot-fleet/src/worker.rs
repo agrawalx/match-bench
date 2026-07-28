@@ -633,7 +633,21 @@ type PendingMap = Arc<Mutex<HashMap<String, PendingOrder>>>;
 // forced eviction of every remaining entry. An id may already be gone from the
 // map (acked, or evicted by a previous pass) by the time it's popped; that's not
 // an error, it's just skipped.
-type ExpiryQueue = Arc<Mutex<VecDeque<(u64, String)>>>;
+/// ExpiryEntry is the compact per-order record on the watchdog's timeout queue:
+/// (deadline, task-local seq, order-kind letter) — 16 bytes vs ~50-60 for the
+/// old (deadline, String order_id) tuple. The queue deliberately keeps entries
+/// until their deadline even after an early ack (middle-removal from a VecDeque
+/// would cost the O(due)-per-tick watchdog win), so it holds every order sent in
+/// the last RESPONSE_TIMEOUT window — compactness is what makes that acceptable.
+/// The full order id is rebuilt via fix::join_order_id only on eviction.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ExpiryEntry {
+    deadline_ns: u64,
+    seq: u32,
+    kind: u8,
+}
+
+type ExpiryQueue = Arc<Mutex<VecDeque<ExpiryEntry>>>;
 
 /// Removes each of `order_ids` from `pending` (if still present) under a single
 /// lock and returns how many were actually removed. Used on the write-error
@@ -656,14 +670,14 @@ where
 /// Pops every queue entry that is due (`deadline_ns <= now_ns`), or all of them if
 /// `last_tick`, preserving FIFO order. Pure and unit-testable independent of the
 /// pending map / telemetry plumbing around it.
-fn pop_due_expirations(queue: &mut VecDeque<(u64, String)>, now_ns: u64, last_tick: bool) -> Vec<String> {
+fn pop_due_expirations(queue: &mut VecDeque<ExpiryEntry>, now_ns: u64, last_tick: bool) -> Vec<ExpiryEntry> {
     let mut ids = Vec::new();
-    while let Some(&(deadline_ns, _)) = queue.front() {
-        if !last_tick && deadline_ns > now_ns {
+    while let Some(&entry) = queue.front() {
+        if !last_tick && entry.deadline_ns > now_ns {
             break;
         }
-        let (_, id) = queue.pop_front().expect("front just peeked");
-        ids.push(id);
+        queue.pop_front();
+        ids.push(entry);
     }
     ids
 }
@@ -949,7 +963,13 @@ async fn fix_write_loop(
         }
         let count = frames.len();
 
-        // Insert the whole batch under a single lock.
+        // Insert the whole batch under a single lock. send_ts is provisionally the
+        // batch's write-start time, not 0: TCP can deliver the batch's first frames
+        // (and the peer can ack them) while write_all is still blocked on the rest —
+        // an ack racing the write must not emit telemetry with send_ts=0. The
+        // post-write patch below overwrites with the accurate timestamp for
+        // everything still pending.
+        let write_start_ns = unix_nanos();
         {
             let mut map = pending.lock().expect("pending map poisoned");
             for (frame, &target) in frames.iter().zip(targets.iter()) {
@@ -959,7 +979,7 @@ async fn fix_write_loop(
                         order_id: frame.order_id.clone(),
                         orig_order_id: frame.orig_order_id.clone(),
                         target_send_ts_ns: target,
-                        send_ts_ns: 0, // patched on successful write
+                        send_ts_ns: write_start_ns, // refined after write_all returns
                         barrier_epoch_ns,
                         price: frame.price,
                         qty: frame.qty,
@@ -972,7 +992,6 @@ async fn fix_write_loop(
         }
         metrics::inflight_add(count);
 
-        let write_start_ns = unix_nanos();
         // Block on the write rather than imposing a per-write timeout. When the contestant
         // can't drain fast enough its TCP receive window fills and write_all stalls; TCP flow
         // control then paces THIS task down to the contestant's real service rate, so aggregate
@@ -1012,7 +1031,12 @@ async fn fix_write_loop(
                     let deadline_ns = send_ts_ns.saturating_add(RESPONSE_TIMEOUT_NS);
                     let mut queue = expiry.lock().expect("expiry queue poisoned");
                     for frame in frames.iter() {
-                        queue.push_back((deadline_ns, frame.order_id.clone()));
+                        if let Some((seq, kind)) = fix::split_order_id(&frame.order_id) {
+                            queue.push_back(ExpiryEntry { deadline_ns, seq, kind });
+                        }
+                        // A non-splitting id (impossible for generator output) simply
+                        // gets no queue entry; the watchdog's last-tick pending sweep
+                        // still accounts for it.
                     }
                 }
                 if !max_rate {
@@ -1159,13 +1183,30 @@ async fn watchdog_loop(
         let now_ns = unix_nanos();
         let last_tick = now_ns >= drain_end_ns;
 
-        let due_ids = {
+        let due = {
             let mut queue = expiry.lock().expect("expiry queue poisoned");
             pop_due_expirations(&mut queue, now_ns, last_tick)
         };
         let to_evict: Vec<PendingOrder> = {
             let mut map = pending.lock().expect("pending map poisoned");
-            due_ids.into_iter().filter_map(|id| map.remove(&id)).collect()
+            let mut evicted: Vec<PendingOrder> = due
+                .into_iter()
+                .filter_map(|e| {
+                    let id = fix::join_order_id(&session_id, u64::from(task_id), e.seq, e.kind);
+                    map.remove(&id)
+                })
+                .collect();
+            if last_tick {
+                // Close the books (#2): orders inserted before a write that never
+                // completed have no expiry entry and are invisible to the queue
+                // drain above. Anything still in the map at the final tick is by
+                // definition unaccounted — sweep it so every offered order ends
+                // matched or timed-out and the inflight gauge returns to zero.
+                // A full-map scan is exactly what the per-tick watchdog avoids;
+                // once, at shutdown, it is free.
+                evicted.extend(map.drain().map(|(_, p)| p));
+            }
+            evicted
         };
 
         metrics::inflight_sub(to_evict.len());
@@ -1471,6 +1512,9 @@ async fn rw_write_loop(
         }
         let count = frames.len();
 
+        // Same provisional write-start stamp as the FIX loop: acks can race a
+        // blocked batch write, and telemetry must never carry send_ts=0.
+        let write_start_ns = unix_nanos();
         {
             let mut map = pending.lock().expect("pending map poisoned");
             for (frame, &target) in frames.iter().zip(targets.iter()) {
@@ -1480,7 +1524,7 @@ async fn rw_write_loop(
                         order_id: frame.order_id.clone(),
                         orig_order_id: frame.orig_order_id.clone(),
                         target_send_ts_ns: target,
-                        send_ts_ns: 0,
+                        send_ts_ns: write_start_ns, // refined after the batch write returns
                         barrier_epoch_ns,
                         price: frame.price,
                         qty: frame.qty,
@@ -1493,7 +1537,6 @@ async fn rw_write_loop(
         }
         metrics::inflight_add(count);
 
-        let write_start_ns = unix_nanos();
         // Block on the write rather than imposing a per-write timeout (same as the FIX path).
         // When the contestant can't drain fast enough its TCP receive window fills and the write
         // stalls; TCP flow control then paces THIS task down to the contestant's real service
@@ -1529,7 +1572,12 @@ async fn rw_write_loop(
                     let deadline_ns = send_ts_ns.saturating_add(RESPONSE_TIMEOUT_NS);
                     let mut queue = expiry.lock().expect("expiry queue poisoned");
                     for frame in frames.iter() {
-                        queue.push_back((deadline_ns, frame.order_id.clone()));
+                        if let Some((seq, kind)) = fix::split_order_id(&frame.order_id) {
+                            queue.push_back(ExpiryEntry { deadline_ns, seq, kind });
+                        }
+                        // A non-splitting id (impossible for generator output) simply
+                        // gets no queue entry; the watchdog's last-tick pending sweep
+                        // still accounts for it.
                     }
                 }
                 if !max_rate {
@@ -2032,15 +2080,18 @@ mod tests {
     /// stay queued, and `last_tick` forces every remaining entry out regardless of
     /// deadline (matching the prior `HashMap::retain(... || last_tick)` semantics).
     fn pop_due_expirations_evicts_only_due_entries_in_fifo_order() {
-        let mut queue: VecDeque<(u64, String)> = VecDeque::new();
-        queue.push_back((100, "a".to_string()));
-        queue.push_back((200, "b".to_string()));
-        queue.push_back((300, "c".to_string()));
+        fn e(deadline_ns: u64, seq: u32) -> ExpiryEntry {
+            ExpiryEntry { deadline_ns, seq, kind: b'O' }
+        }
+        let mut queue: VecDeque<ExpiryEntry> = VecDeque::new();
+        queue.push_back(e(100, 1));
+        queue.push_back(e(200, 2));
+        queue.push_back(e(300, 3));
 
         let due = pop_due_expirations(&mut queue, 200, false);
-        assert_eq!(due, vec!["a".to_string(), "b".to_string()]);
+        assert_eq!(due, vec![e(100, 1), e(200, 2)]);
         assert_eq!(queue.len(), 1);
-        assert_eq!(queue.front().unwrap().1, "c");
+        assert_eq!(queue.front().unwrap().seq, 3);
 
         let due = pop_due_expirations(&mut queue, 0, false);
         assert!(due.is_empty(), "nothing due yet before last_tick");
@@ -2050,12 +2101,14 @@ mod tests {
     #[test]
     /// pop_due_expirations_last_tick_drains_everything covers the final-tick flush.
     fn pop_due_expirations_last_tick_drains_everything() {
-        let mut queue: VecDeque<(u64, String)> = VecDeque::new();
-        queue.push_back((u64::MAX, "a".to_string()));
-        queue.push_back((u64::MAX, "b".to_string()));
+        let a = ExpiryEntry { deadline_ns: u64::MAX, seq: 1, kind: b'O' };
+        let b = ExpiryEntry { deadline_ns: u64::MAX, seq: 2, kind: b'C' };
+        let mut queue: VecDeque<ExpiryEntry> = VecDeque::new();
+        queue.push_back(a);
+        queue.push_back(b);
 
         let due = pop_due_expirations(&mut queue, 0, true);
-        assert_eq!(due, vec!["a".to_string(), "b".to_string()]);
+        assert_eq!(due, vec![a, b]);
         assert!(queue.is_empty());
     }
 
@@ -2063,7 +2116,7 @@ mod tests {
     /// pop_due_expirations_skips_nothing_and_is_empty_on_empty_queue is the trivial
     /// boundary case.
     fn pop_due_expirations_on_empty_queue_returns_empty() {
-        let mut queue: VecDeque<(u64, String)> = VecDeque::new();
+        let mut queue: VecDeque<ExpiryEntry> = VecDeque::new();
         assert!(pop_due_expirations(&mut queue, u64::MAX, true).is_empty());
     }
 
@@ -2460,6 +2513,7 @@ mod tests {
     /// original batch size (the bug) would double-subtract the already-acked
     /// entries and drift the gauge negative.
     fn inflight_gauge_fix_error_path_no_double_subtract_when_partial_acks_race() {
+        let _g = metrics::INFLIGHT_GAUGE_TEST_LOCK.lock().unwrap();
         let pending = new_pending_map();
         let batch = ["o1", "o2", "o3", "o4"];
         let start = metrics::inflight_value();
@@ -2506,6 +2560,7 @@ mod tests {
     /// inflight_add and emit_response never called inflight_sub, so the
     /// shared gauge only ever decreased for REST/WS traffic.
     fn inflight_gauge_rest_ws_insert_then_ack_nets_to_baseline() {
+        let _g = metrics::INFLIGHT_GAUGE_TEST_LOCK.lock().unwrap();
         let pending = new_pending_map();
         let batch = ["r1", "r2", "r3"];
         let start = metrics::inflight_value();
@@ -2543,6 +2598,7 @@ mod tests {
     /// gauge never goes negative for a REST/WS task whose orders time out
     /// instead of being acked.
     fn inflight_gauge_rest_ws_insert_then_timeout_eviction_nets_to_baseline() {
+        let _g = metrics::INFLIGHT_GAUGE_TEST_LOCK.lock().unwrap();
         let pending = new_pending_map();
         let batch = ["w1", "w2"];
         let start = metrics::inflight_value();

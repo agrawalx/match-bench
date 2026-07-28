@@ -353,6 +353,13 @@ pub fn observe_slip(protocol: &'static str, slip_ns: u64) {
 }
 
 /// inflight_add increments the global sent-but-unacked gauge by `n` (one write batch).
+
+/// Serializes every test (across this crate's test binary) that snapshots and
+/// asserts the process-global inflight gauge — parallel interleaving of those
+/// tests was a recurring flake. Test-only.
+#[cfg(test)]
+pub(crate) static INFLIGHT_GAUGE_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 pub fn inflight_add(n: usize) {
     METRICS.inflight.inc_by(n as i64);
 }
@@ -446,6 +453,7 @@ mod tests {
 
     #[test]
     fn inflight_gauge_round_trips() {
+        let _g = INFLIGHT_GAUGE_TEST_LOCK.lock().unwrap();
         let start = inflight_value();
         inflight_add(64);
         inflight_add(64);

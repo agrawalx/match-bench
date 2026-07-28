@@ -11,7 +11,7 @@ physically impossible locally.
 
 ## A. Code prerequisites (small; unblock the e2e track)
 
-1. **Per-session validator mode selection.** `VALIDATOR_MODE` is a global env var;
+1. ~~**Per-session validator mode selection.**~~ **DONE (72cb924)** — `VALIDATOR_MODE` is a global env var;
    the two-pass design needs the validator to choose full-replay (pass-1
    `correctness` scenario) vs invariants (pass-2 scale scenarios) per session.
    Cleanest source: learn scenario kind from `workload.assignments` the same way the

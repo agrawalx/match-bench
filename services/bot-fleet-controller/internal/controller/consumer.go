@@ -9,6 +9,7 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
+	"sync"
 	"time"
 
 	"github.com/iicpc/libs/metrics"
@@ -34,6 +35,7 @@ type Consumer struct {
 	sessions        *SessionManager
 	log             *slog.Logger
 	sem             chan struct{}
+	wg              sync.WaitGroup
 }
 
 // NewConsumer performs the package-specific operation described by its name.
@@ -124,7 +126,26 @@ func (c *Consumer) StartBenchmarkRequested(ctx context.Context) {
 			recordControllerCommit(topics.TopicBenchmarkRequested, nil)
 		}
 
-		go c.dispatch(ctx, req)
+		c.startSession(ctx, req)
+	}
+}
+
+// WaitSessions blocks until every dispatched session goroutine has returned
+// or timeout elapses, and reports whether the join completed. Called during
+// shutdown between stopping the fetch loop and closing the Kafka producer, so
+// in-flight sessions get a real window to publish their failure status and
+// delete their sandbox slots instead of racing process exit.
+func (c *Consumer) WaitSessions(timeout time.Duration) bool {
+	done := make(chan struct{})
+	go func() {
+		c.wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return true
+	case <-time.After(timeout):
+		return false
 	}
 }
 
@@ -145,6 +166,14 @@ func (c *Consumer) acquireDispatchSlot(ctx context.Context) bool {
 	}
 }
 
+// startSession launches dispatch in its own tracked goroutine. The wg.Add
+// happens on the caller's side of the go statement so WaitSessions can never
+// observe a zero counter while a launched session hasn't started yet.
+func (c *Consumer) startSession(ctx context.Context, req topics.BenchmarkRequested) {
+	c.wg.Add(1)
+	go c.dispatch(ctx, req)
+}
+
 // dispatch runs one session's full lifecycle in its own goroutine, isolated
 // from every other in-flight session: a panic or slow run here neither
 // blocks the fetch/commit loop nor any other session's dispatch goroutine.
@@ -152,6 +181,7 @@ func (c *Consumer) dispatch(ctx context.Context, req topics.BenchmarkRequested) 
 	start := time.Now()
 	log := c.log.With("session_id", req.SessionID, "submission_id", req.SubmissionID)
 	defer func() {
+		c.wg.Done()
 		<-c.sem
 		if p := recover(); p != nil {
 			recordConsumer(topics.TopicBenchmarkRequested, "panic", metrics.SinceSeconds(start))

@@ -77,7 +77,7 @@ func TestConsumerDispatchesSessionsConcurrently(t *testing.T) {
 		if !c.acquireDispatchSlot(ctx) {
 			t.Fatalf("acquireDispatchSlot failed for %s", id)
 		}
-		go c.dispatch(ctx, topics.BenchmarkRequested{SessionID: id})
+		c.startSession(ctx, topics.BenchmarkRequested{SessionID: id})
 	}
 
 	seen := map[string]bool{}

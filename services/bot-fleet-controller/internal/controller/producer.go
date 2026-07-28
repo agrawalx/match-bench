@@ -81,7 +81,15 @@ func (b *leasedPartitionBalancer) Balance(msg kafka.Message, partitions ...int) 
 			return p
 		}
 	}
-	return b.fallback.Balance(msg, partitions...)
+	// Leased partition absent from the writer's current metadata view (stale
+	// metadata / broker blip). Return the leased partition anyway: the lease
+	// is the routing authority, and a genuinely nonexistent partition surfaces
+	// as a loud write error that fails this session's publish. Hash-falling
+	// back here would silently land the spec on another session's leased
+	// partition — the exact collision leasing exists to prevent.
+	metrics.Counter("controller_leased_partition_not_in_metadata_total",
+		"Workload publishes whose leased partition was missing from writer metadata.", nil, 1)
+	return leased
 }
 
 // Close applies behavior for its receiver performs the package-specific operation described by its name.

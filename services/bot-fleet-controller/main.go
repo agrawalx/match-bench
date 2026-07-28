@@ -135,6 +135,15 @@ func main() {
 
 	<-ctx.Done()
 	log.Info("shutting down")
+	// Join in-flight session goroutines before the deferred producer/consumer
+	// Close runs: each session's ctx.Done path publishes a failure status and
+	// deletes its sandbox slot on detached contexts — without this join those
+	// calls race process exit and lose (orphaned contestant pods, runs stuck
+	// non-terminal with no redelivery). 15s stays inside the default 30s k8s
+	// termination grace period.
+	if !consumer.WaitSessions(15 * time.Second) {
+		log.Error("shutdown: in-flight sessions did not finish within 15s; their cleanup may be incomplete")
+	}
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if err := srv.Shutdown(shutdownCtx); err != nil {

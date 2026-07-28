@@ -80,8 +80,29 @@ func (r *Runner) Run(parent context.Context, req topics.BenchmarkRequested) {
 		"scenario_id", req.ScenarioID,
 	)
 
+	// Panic backstop: registered before any resource acquisition so it runs
+	// LAST during unwind — after runSession's defers have already released the
+	// slot, both leases, and the session entry. Without this, a recovered
+	// panic (consumer.dispatch swallows it to protect other sessions) leaves
+	// the run permanently non-terminal: the offset was committed at accept, so
+	// nothing ever redelivers it. publishFailure uses a detached context
+	// internally, so it works even when parent is already cancelled.
+	defer func() {
+		if p := recover(); p != nil {
+			metrics.Counter("controller_session_panics_total", "Session goroutines recovered from a panic.", nil, 1)
+			log.Error("session panicked", "panic", p)
+			r.publishFailure(parent, req, fmt.Sprintf("session panicked: %v", p), log)
+		}
+	}()
+
+	// Fail closed: the offset was committed at dispatch acceptance, so there
+	// is no redelivery to fall back on — proceeding on a store error risks
+	// double-running a session whose prior completion we simply couldn't see
+	// (transient Postgres blip during a rebalance redelivery window). Failing
+	// the run is user-retryable; a duplicate run is not recoverable.
 	if status, serr := r.store.RunStatus(parent, req.SessionID); serr != nil {
-		log.Warn("run-status precheck failed; proceeding", "error", serr)
+		r.publishFailure(parent, req, "run-status precheck failed: "+serr.Error(), log)
+		return
 	} else if status == topics.RunStatusCompleted || status == topics.RunStatusFailed {
 		log.Info("benchmark.requested for an already-terminal run; skipping redelivery", "status", status)
 		return

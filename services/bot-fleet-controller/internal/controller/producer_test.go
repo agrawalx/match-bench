@@ -61,10 +61,13 @@ func TestLeasedPartitionBalancerRoutesToLeasedPartition(t *testing.T) {
 		t.Errorf("fallback partition %d out of range [0,%d)", first, len(parts))
 	}
 
-	outOfRange := kafka.Message{Key: []byte("sess-1:9"), WriterData: 99}
-	fallback := b.Balance(outOfRange, parts...)
-	if fallback < 0 || fallback >= len(parts) {
-		t.Errorf("out-of-range lease fallback partition %d out of range [0,%d)", fallback, len(parts))
+	// A leased partition missing from the metadata view must be returned
+	// as-is, NOT hash-rerouted: the lease is the routing authority, and a
+	// genuinely nonexistent partition should fail the write loudly rather
+	// than silently landing on another session's leased partition.
+	staleView := kafka.Message{Key: []byte("sess-1:9"), WriterData: 99}
+	if got := b.Balance(staleView, parts...); got != 99 {
+		t.Errorf("stale-metadata Balance = %d, want the leased partition 99 (loud failure over silent reroute)", got)
 	}
 }
 

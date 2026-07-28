@@ -31,6 +31,7 @@ export interface LeaderboardEntry {
   disqualification_code?: string;
   rank_delta: number;
   computed_at_ns: number;
+  jitter_p99_us?: number;
 }
 
 /**

@@ -110,6 +110,7 @@ func TestConsumerIntegrationDispatchesBotReady(t *testing.T) {
 		"itest-controller-benchmark-unused-"+suffix,
 		"itest-controller-ready-"+suffix,
 		nil,
+		nil,
 		sessions,
 		slog.New(slog.NewTextHandler(os.Stderr, nil)),
 	)

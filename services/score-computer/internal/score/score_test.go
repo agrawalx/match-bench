@@ -342,6 +342,49 @@ func TestAggregateCorrectnessDoesNotOverflow(t *testing.T) {
 	}
 }
 
+// TestAggregateJitterTakesWorstSessionPerPercentile verifies aggregateJitter
+// reduces per-session jitter to the max across sessions, independently per
+// field (not the totals from whichever session has the single worst p99).
+func TestAggregateJitterTakesWorstSessionPerPercentile(t *testing.T) {
+	p50, p99, p999, maxUS, invRate := aggregateJitter([]Session{
+		{Correct: Correctness{JitterP50US: 5, JitterP99US: 40, JitterP999US: 80, JitterMaxUS: 100, JitterInvRate: 0.01}},
+		{Correct: Correctness{JitterP50US: 10, JitterP99US: 20, JitterP999US: 90, JitterMaxUS: 50, JitterInvRate: 0.05}},
+	})
+	if p50 != 10 || p99 != 40 || p999 != 90 || maxUS != 100 || invRate != 0.05 {
+		t.Fatalf("aggregateJitter = (%v,%v,%v,%v,%v), want (10,40,90,100,0.05)", p50, p99, p999, maxUS, invRate)
+	}
+}
+
+// TestAggregateJitterZeroWhenNoSessions verifies the zero-inversions default
+// (no recorded jitter anywhere) round-trips as all-zero, matching the
+// CorrectnessScoreEvent convention.
+func TestAggregateJitterZeroWhenNoSessions(t *testing.T) {
+	p50, p99, p999, maxUS, invRate := aggregateJitter(nil)
+	if p50 != 0 || p99 != 0 || p999 != 0 || maxUS != 0 || invRate != 0 {
+		t.Fatalf("aggregateJitter(nil) = (%v,%v,%v,%v,%v), want all zero", p50, p99, p999, maxUS, invRate)
+	}
+}
+
+// TestComputePropagatesJitterIntoResult verifies Compute() surfaces the
+// aggregated jitter fields onto Result, so score-computer's SaveScore has
+// them available to persist alongside the rest of the run-group score row.
+func TestComputePropagatesJitterIntoResult(t *testing.T) {
+	in := baseInput()
+	in.Sessions[2].Correct.JitterP50US = 12.5
+	in.Sessions[2].Correct.JitterP99US = 88.25
+	in.Sessions[2].Correct.JitterP999US = 150
+	in.Sessions[2].Correct.JitterMaxUS = 300
+	in.Sessions[2].Correct.JitterInvRate = 0.002
+	res, err := Compute(in)
+	if err != nil {
+		t.Fatalf("Compute: %v", err)
+	}
+	if res.JitterP50US != 12.5 || res.JitterP99US != 88.25 || res.JitterP999US != 150 ||
+		res.JitterMaxUS != 300 || res.JitterInvRate != 0.002 {
+		t.Fatalf("Result jitter fields not propagated: %+v", res)
+	}
+}
+
 // TestWaveScheduleBoundsOverflowedTaskEnd performs the package-specific operation described by its name.
 // It keeps validation, side effects, and returned values within this package's contract.
 func TestWaveScheduleBoundsOverflowedTaskEnd(t *testing.T) {

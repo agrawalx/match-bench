@@ -132,6 +132,7 @@ const (
 
 const (
 	RunStatusRequested    = "requested"     // submission-api accepted the click
+	RunStatusQueued       = "queued"        // controller decoded benchmark.requested, awaiting a dispatch slot
 	RunStatusDeploying    = "deploying"     // controller is allocating a sandbox slot
 	RunStatusWaitingReady = "waiting_ready" // workload published, fanning in bot.ready
 	RunStatusBarrierFired = "barrier_fired" // barrier event published

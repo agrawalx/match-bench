@@ -92,7 +92,7 @@ func main() {
 	orchClient := orchestrator.NewClient(orchURL)
 	sessions := controller.NewSessionManager()
 	runner := controller.NewRunner(sessions, st, orchClient, producer, leases, bandLeases, runConfig, log)
-	consumer := controller.NewConsumerWithConcurrency(kafkaBrokers, benchmarkGroup, botReadyGroup, runner, sessions, log, maxConcurrentSessions)
+	consumer := controller.NewConsumerWithConcurrency(kafkaBrokers, benchmarkGroup, botReadyGroup, runner, producer, sessions, log, maxConcurrentSessions)
 	defer consumer.Close()
 
 	go consumer.StartBenchmarkRequested(ctx)

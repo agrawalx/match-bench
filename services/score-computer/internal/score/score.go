@@ -70,6 +70,13 @@ type Correctness struct {
 	SentCount      uint64
 	AckedCount     uint64
 	MatchedCount   uint64
+	// P-G jitter (docs/multi-contestant-audit.md §5), mirrored from
+	// CorrectnessScoreEvent. Zero means no recorded inversions.
+	JitterP50US   float64
+	JitterP99US   float64
+	JitterP999US  float64
+	JitterMaxUS   float64
+	JitterInvRate float64
 }
 
 // MetricRow groups the state and dependencies used by this package.
@@ -116,19 +123,26 @@ type WaveResult struct {
 // Result groups the state and dependencies used by this package.
 // Keep this type aligned with the runtime contract around it.
 type Result struct {
-	RunGroupID                string       `json:"run_group_id"`
-	SubmissionID              string       `json:"submission_id"`
-	ContestantID              string       `json:"contestant_id"`
-	TeamName                  string       `json:"team_name"`
-	PeakSustainedTPS          uint64       `json:"peak_sustained_tps"`
-	P99AtPeakNS               uint64       `json:"p99_at_peak_ns"`
-	SpikeRecoveryNS           uint64       `json:"spike_recovery_ns"`
-	TotalCorrectness          float64      `json:"total_correctness"`
-	Disqualified              bool         `json:"disqualified"`
-	DisqualificationCode      string       `json:"disqualification_code,omitempty"`
-	IncompleteTelemetry       bool         `json:"incomplete_telemetry"`
-	IncompleteTelemetryReason string       `json:"incomplete_telemetry_reason,omitempty"`
-	Waves                     []WaveResult `json:"waves,omitempty"`
+	RunGroupID                string  `json:"run_group_id"`
+	SubmissionID              string  `json:"submission_id"`
+	ContestantID              string  `json:"contestant_id"`
+	TeamName                  string  `json:"team_name"`
+	PeakSustainedTPS          uint64  `json:"peak_sustained_tps"`
+	P99AtPeakNS               uint64  `json:"p99_at_peak_ns"`
+	SpikeRecoveryNS           uint64  `json:"spike_recovery_ns"`
+	TotalCorrectness          float64 `json:"total_correctness"`
+	Disqualified              bool    `json:"disqualified"`
+	DisqualificationCode      string  `json:"disqualification_code,omitempty"`
+	IncompleteTelemetry       bool    `json:"incomplete_telemetry"`
+	IncompleteTelemetryReason string  `json:"incomplete_telemetry_reason,omitempty"`
+	// Jitter* is the worst-case (max across sessions) P-G jitter for the
+	// run-group. Zero means no recorded inversions in any session.
+	JitterP50US   float64      `json:"jitter_p50_us"`
+	JitterP99US   float64      `json:"jitter_p99_us"`
+	JitterP999US  float64      `json:"jitter_p999_us"`
+	JitterMaxUS   float64      `json:"jitter_max_us"`
+	JitterInvRate float64      `json:"jitter_inversion_rate"`
+	Waves         []WaveResult `json:"waves,omitempty"`
 	// MaxRateOnly is true when every ramp task has TargetRPS==0 (the uncapped
 	// max-rate sentinel used by correctness-pass-1 scenarios, which are not
 	// throughput-graded). PeakSustainedTPS is then derived from measured TPS1S
@@ -150,6 +164,7 @@ func Compute(in Input) (Result, error) {
 		TeamName:         in.TeamName,
 		TotalCorrectness: aggregateCorrectness(in.Sessions),
 	}
+	res.JitterP50US, res.JitterP99US, res.JitterP999US, res.JitterMaxUS, res.JitterInvRate = aggregateJitter(in.Sessions)
 
 	for i := range in.Sessions {
 		c := in.Sessions[i].Correct
@@ -268,6 +283,20 @@ func aggregateCorrectness(sessions []Session) float64 {
 		return 0
 	}
 	return min(valid/total, 1.0)
+}
+
+// aggregateJitter reduces per-session P-G jitter to the worst-case value
+// across the run-group's sessions (max of each percentile independently).
+func aggregateJitter(sessions []Session) (p50, p99, p999, maxUS, invRate float64) {
+	for _, s := range sessions {
+		c := s.Correct
+		p50 = math.Max(p50, c.JitterP50US)
+		p99 = math.Max(p99, c.JitterP99US)
+		p999 = math.Max(p999, c.JitterP999US)
+		maxUS = math.Max(maxUS, c.JitterMaxUS)
+		invRate = math.Max(invRate, c.JitterInvRate)
+	}
+	return p50, p99, p999, maxUS, invRate
 }
 
 // WaveOffer groups the state and dependencies used by this package.

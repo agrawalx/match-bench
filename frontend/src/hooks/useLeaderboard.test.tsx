@@ -155,6 +155,19 @@ describe("applyLeaderboardUpdate", () => {
     expect(next.next_cursor).toBe("cursor-1");
   });
 
+  it("preserves jitter_p99_us from the existing row (not present on update events)", () => {
+    const withJitter: LeaderboardResponse = {
+      ...current,
+      rows: current.rows.map((row) =>
+        row.run_group_id === "rg-1" ? { ...row, jitter_p99_us: 42.5 } : row,
+      ),
+    };
+    const next = applyLeaderboardUpdate(withJitter, update());
+    const merged = next.rows.find((row) => row.run_group_id === "rg-1");
+    expect(merged?.jitter_p99_us).toBe(42.5);
+    expect(merged?.rank).toBe(2);
+  });
+
   it("carries the disqualification fields through", () => {
     const next = applyLeaderboardUpdate(
       current,

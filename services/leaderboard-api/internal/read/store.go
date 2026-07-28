@@ -28,6 +28,49 @@ const (
 
 const rankedOrder = `disqualified ASC, peak_sustained_tps DESC, p99_at_peak_ns ASC, spike_recovery_ns ASC, total_correctness DESC, run_group_id ASC`
 
+// leaderboardQuerySQL is the static (order-by-independent) body of the paged
+// Leaderboard() query. Kept as a named const so tests can pin the selected
+// column list without a live Postgres connection.
+const leaderboardQuerySQL = `
+SELECT rank, run_group_id, submission_id, contestant_id, team_name, peak_sustained_tps,
+       p99_at_peak_ns, spike_recovery_ns, total_correctness, disqualified,
+       disqualification_code, COALESCE(rank_delta,0), computed_at,
+       jitter_p50_us, jitter_p99_us, jitter_p999_us, jitter_max_us, jitter_inversion_rate
+  FROM (
+	SELECT ROW_NUMBER() OVER (ORDER BY ` + rankedOrder + `) AS rank,
+	       run_group_id, submission_id, contestant_id, team_name, peak_sustained_tps,
+	       p99_at_peak_ns, spike_recovery_ns, total_correctness, disqualified,
+	       disqualification_code, rank_delta, computed_at,
+	       jitter_p50_us, jitter_p99_us, jitter_p999_us, jitter_max_us, jitter_inversion_rate
+	  FROM scores
+  ) ranked
+ WHERE ($1='' OR run_group_id=$1)
+   AND ($2='' OR submission_id=$2)
+   AND ($3='' OR contestant_id=$3)
+   AND ($4='' OR team_name ILIKE '%' || $4 || '%')
+   AND ($7='' OR EXISTS (
+         SELECT 1 FROM runs r2
+           JOIN scenarios sc2 ON sc2.scenario_id = r2.scenario_id
+          WHERE r2.run_group_id = ranked.run_group_id AND sc2.name = $7))
+`
+
+// scoreForRunGroupQuerySQL is the static body of the single-row
+// scoreForRunGroup() query, named for the same reason as leaderboardQuerySQL.
+const scoreForRunGroupQuerySQL = `
+SELECT rank, run_group_id, submission_id, contestant_id, team_name, peak_sustained_tps,
+       p99_at_peak_ns, spike_recovery_ns, total_correctness, disqualified,
+       disqualification_code, COALESCE(rank_delta,0), computed_at,
+       jitter_p50_us, jitter_p99_us, jitter_p999_us, jitter_max_us, jitter_inversion_rate
+  FROM (
+	SELECT ROW_NUMBER() OVER (ORDER BY ` + rankedOrder + `) AS rank,
+	       run_group_id, submission_id, contestant_id, team_name, peak_sustained_tps,
+	       p99_at_peak_ns, spike_recovery_ns, total_correctness, disqualified,
+	       disqualification_code, rank_delta, computed_at,
+	       jitter_p50_us, jitter_p99_us, jitter_p999_us, jitter_max_us, jitter_inversion_rate
+	  FROM scores
+  ) ranked
+ WHERE run_group_id=$1`
+
 // Store groups the state and dependencies used by this package.
 // Keep this type aligned with the runtime contract around it.
 type Store struct {
@@ -108,6 +151,14 @@ type LeaderboardRow struct {
 	DisqualificationCode string  `json:"disqualification_code,omitempty"`
 	RankDelta            int64   `json:"rank_delta"`
 	ComputedAtUnixNS     int64   `json:"computed_at_ns"`
+	// Jitter* is the P-G jitter (cross-flow processing-order inversion
+	// magnitude, microseconds) worst-case across the run-group's sessions,
+	// mirrored from CorrectnessScoreEvent. Zero means no recorded inversions.
+	JitterP50US   float64 `json:"jitter_p50_us"`
+	JitterP99US   float64 `json:"jitter_p99_us"`
+	JitterP999US  float64 `json:"jitter_p999_us"`
+	JitterMaxUS   float64 `json:"jitter_max_us"`
+	JitterInvRate float64 `json:"jitter_inversion_rate"`
 }
 
 // Leaderboard applies behavior for its receiver performs the package-specific operation described by its name.
@@ -126,25 +177,7 @@ func (s *Store) Leaderboard(ctx context.Context, q LeaderboardQuery) (Leaderboar
 		contestantFilter = q.TeamID
 	}
 	orderBy := leaderboardOrderBy(q.Sort, q.Order)
-	rows, err := s.meta.Query(ctx, `
-SELECT rank, run_group_id, submission_id, contestant_id, team_name, peak_sustained_tps,
-       p99_at_peak_ns, spike_recovery_ns, total_correctness, disqualified,
-       disqualification_code, COALESCE(rank_delta,0), computed_at
-  FROM (
-	SELECT ROW_NUMBER() OVER (ORDER BY `+rankedOrder+`) AS rank,
-	       run_group_id, submission_id, contestant_id, team_name, peak_sustained_tps,
-	       p99_at_peak_ns, spike_recovery_ns, total_correctness, disqualified,
-	       disqualification_code, rank_delta, computed_at
-	  FROM scores
-  ) ranked
- WHERE ($1='' OR run_group_id=$1)
-   AND ($2='' OR submission_id=$2)
-   AND ($3='' OR contestant_id=$3)
-   AND ($4='' OR team_name ILIKE '%' || $4 || '%')
-   AND ($7='' OR EXISTS (
-         SELECT 1 FROM runs r2
-           JOIN scenarios sc2 ON sc2.scenario_id = r2.scenario_id
-          WHERE r2.run_group_id = ranked.run_group_id AND sc2.name = $7))
+	rows, err := s.meta.Query(ctx, leaderboardQuerySQL+`
  ORDER BY `+orderBy+`
  LIMIT $5 OFFSET $6`, q.RunGroupID, q.SubmissionID, contestantFilter, q.TeamName, limit+1, offset, q.Scenario)
 	if err != nil {
@@ -161,7 +194,8 @@ SELECT rank, run_group_id, submission_id, contestant_id, team_name, peak_sustain
 		var peak, p99, recovery int64
 		var computed time.Time
 		if err := rows.Scan(&r.Rank, &r.RunGroupID, &r.SubmissionID, &r.ContestantID, &r.TeamName, &peak, &p99,
-			&recovery, &r.TotalCorrectness, &r.Disqualified, &r.DisqualificationCode, &r.RankDelta, &computed); err != nil {
+			&recovery, &r.TotalCorrectness, &r.Disqualified, &r.DisqualificationCode, &r.RankDelta, &computed,
+			&r.JitterP50US, &r.JitterP99US, &r.JitterP999US, &r.JitterMaxUS, &r.JitterInvRate); err != nil {
 			return resp, err
 		}
 		r.PeakSustainedTPS = nonNegativeUint64(peak)
@@ -499,18 +533,7 @@ func (s *Store) String() string { return fmt.Sprintf("read.Store(%p)", s) }
 // scoreForRunGroup applies behavior for its receiver performs the package-specific operation described by its name.
 // It keeps validation, side effects, and returned values within this package's contract.
 func (s *Store) scoreForRunGroup(ctx context.Context, runGroupID string) (LeaderboardRow, bool, error) {
-	rows, err := s.meta.Query(ctx, `
-SELECT rank, run_group_id, submission_id, contestant_id, team_name, peak_sustained_tps,
-       p99_at_peak_ns, spike_recovery_ns, total_correctness, disqualified,
-       disqualification_code, COALESCE(rank_delta,0), computed_at
-  FROM (
-	SELECT ROW_NUMBER() OVER (ORDER BY `+rankedOrder+`) AS rank,
-	       run_group_id, submission_id, contestant_id, team_name, peak_sustained_tps,
-	       p99_at_peak_ns, spike_recovery_ns, total_correctness, disqualified,
-	       disqualification_code, rank_delta, computed_at
-	  FROM scores
-  ) ranked
- WHERE run_group_id=$1`, runGroupID)
+	rows, err := s.meta.Query(ctx, scoreForRunGroupQuerySQL, runGroupID)
 	if err != nil {
 		return LeaderboardRow{}, false, err
 	}
@@ -522,7 +545,8 @@ SELECT rank, run_group_id, submission_id, contestant_id, team_name, peak_sustain
 	var peak, p99, recovery int64
 	var computed time.Time
 	if err := rows.Scan(&r.Rank, &r.RunGroupID, &r.SubmissionID, &r.ContestantID, &r.TeamName, &peak, &p99,
-		&recovery, &r.TotalCorrectness, &r.Disqualified, &r.DisqualificationCode, &r.RankDelta, &computed); err != nil {
+		&recovery, &r.TotalCorrectness, &r.Disqualified, &r.DisqualificationCode, &r.RankDelta, &computed,
+		&r.JitterP50US, &r.JitterP99US, &r.JitterP999US, &r.JitterMaxUS, &r.JitterInvRate); err != nil {
 		return LeaderboardRow{}, false, err
 	}
 	r.PeakSustainedTPS = nonNegativeUint64(peak)

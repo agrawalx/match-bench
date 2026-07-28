@@ -145,6 +145,58 @@ func TestConsumerConcurrencyBoundedBySemaphore(t *testing.T) {
 	}
 }
 
+// fakePublisher records PublishStatus calls in order and lets tests block on
+// them without a real Kafka producer.
+type fakePublisher struct {
+	mu   sync.Mutex
+	evts []topics.BenchmarkStatusUpdated
+	seen chan topics.BenchmarkStatusUpdated
+}
+
+func newFakePublisher() *fakePublisher {
+	return &fakePublisher{seen: make(chan topics.BenchmarkStatusUpdated, 32)}
+}
+
+func (f *fakePublisher) PublishStatus(_ context.Context, evt topics.BenchmarkStatusUpdated) error {
+	f.mu.Lock()
+	f.evts = append(f.evts, evt)
+	f.mu.Unlock()
+	f.seen <- evt
+	return nil
+}
+
+// TestConsumerPublishesQueuedBeforeDispatchSlotBlocks proves publishQueued
+// runs before acquireDispatchSlot ever blocks: with the semaphore already
+// full, StartBenchmarkRequested must still emit the "queued" status for the
+// message it just decoded, even though dispatch itself cannot proceed yet.
+func TestConsumerPublishesQueuedBeforeDispatchSlotBlocks(t *testing.T) {
+	pub := newFakePublisher()
+	c := &Consumer{
+		publisher: pub,
+		log:       testLogger(),
+		sem:       make(chan struct{}, 1),
+	}
+	c.sem <- struct{}{} // fill the only slot so acquireDispatchSlot would block
+
+	req := topics.BenchmarkRequested{SessionID: "sess-queued"}
+	c.publishQueued(context.Background(), req)
+
+	select {
+	case evt := <-pub.seen:
+		if evt.SessionID != "sess-queued" || evt.Status != topics.RunStatusQueued {
+			t.Fatalf("unexpected published event: %+v", evt)
+		}
+	default:
+		t.Fatal("expected queued status to be published without acquiring a dispatch slot")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	if c.acquireDispatchSlot(ctx) {
+		t.Fatal("sanity check: semaphore should still be full")
+	}
+}
+
 // TestConsumerAcquireDispatchSlotRespectsContextCancellation ensures a
 // blocked admission unblocks on shutdown instead of leaking forever.
 func TestConsumerAcquireDispatchSlotRespectsContextCancellation(t *testing.T) {

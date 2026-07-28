@@ -26,12 +26,19 @@ type sessionRunner interface {
 	Run(ctx context.Context, req topics.BenchmarkRequested)
 }
 
+// statusPublisher is the subset of *Producer the consumer needs to announce
+// a session as queued; narrowed to an interface so tests can inject a fake.
+type statusPublisher interface {
+	PublishStatus(ctx context.Context, evt topics.BenchmarkStatusUpdated) error
+}
+
 // Consumer groups the state and dependencies used by this package.
 // Keep this type aligned with the runtime contract around it.
 type Consumer struct {
 	benchmarkReader *kafka.Reader
 	botReadyReader  *kafka.Reader
 	runner          sessionRunner
+	publisher       statusPublisher
 	sessions        *SessionManager
 	log             *slog.Logger
 	sem             chan struct{}
@@ -40,13 +47,13 @@ type Consumer struct {
 
 // NewConsumer performs the package-specific operation described by its name.
 // It keeps validation, side effects, and returned values within this package's contract.
-func NewConsumer(brokers, benchmarkGroup, botReadyGroup string, runner sessionRunner, sessions *SessionManager, log *slog.Logger) *Consumer {
-	return NewConsumerWithConcurrency(brokers, benchmarkGroup, botReadyGroup, runner, sessions, log, defaultMaxConcurrentSessions)
+func NewConsumer(brokers, benchmarkGroup, botReadyGroup string, runner sessionRunner, publisher statusPublisher, sessions *SessionManager, log *slog.Logger) *Consumer {
+	return NewConsumerWithConcurrency(brokers, benchmarkGroup, botReadyGroup, runner, publisher, sessions, log, defaultMaxConcurrentSessions)
 }
 
 // NewConsumerWithConcurrency is NewConsumer with an explicit bound on
 // simultaneously-dispatched sessions (MAX_CONCURRENT_SESSIONS).
-func NewConsumerWithConcurrency(brokers, benchmarkGroup, botReadyGroup string, runner sessionRunner, sessions *SessionManager, log *slog.Logger, maxConcurrentSessions int) *Consumer {
+func NewConsumerWithConcurrency(brokers, benchmarkGroup, botReadyGroup string, runner sessionRunner, publisher statusPublisher, sessions *SessionManager, log *slog.Logger, maxConcurrentSessions int) *Consumer {
 	if maxConcurrentSessions <= 0 {
 		maxConcurrentSessions = defaultMaxConcurrentSessions
 	}
@@ -70,10 +77,11 @@ func NewConsumerWithConcurrency(brokers, benchmarkGroup, botReadyGroup string, r
 			MaxWait:        100 * time.Millisecond,
 			CommitInterval: 0,
 		}),
-		runner:   runner,
-		sessions: sessions,
-		log:      log,
-		sem:      make(chan struct{}, maxConcurrentSessions),
+		runner:    runner,
+		publisher: publisher,
+		sessions:  sessions,
+		log:       log,
+		sem:       make(chan struct{}, maxConcurrentSessions),
 	}
 }
 
@@ -105,6 +113,8 @@ func (c *Consumer) StartBenchmarkRequested(ctx context.Context) {
 			recordControllerCommit(topics.TopicBenchmarkRequested, c.benchmarkReader.CommitMessages(ctx, m))
 			continue
 		}
+
+		c.publishQueued(ctx, req)
 
 		if !c.acquireDispatchSlot(ctx) {
 			return
@@ -146,6 +156,27 @@ func (c *Consumer) WaitSessions(timeout time.Duration) bool {
 		return true
 	case <-time.After(timeout):
 		return false
+	}
+}
+
+// publishQueued announces a decoded benchmark.requested as queued, before
+// dispatch may block on acquireDispatchSlot's semaphore, so a session sitting
+// behind a full MAX_CONCURRENT_SESSIONS gate is visible instead of silently
+// absent between "requested" and whatever status the run eventually reaches.
+func (c *Consumer) publishQueued(ctx context.Context, req topics.BenchmarkRequested) {
+	if c.publisher == nil {
+		return
+	}
+	evt := topics.BenchmarkStatusUpdated{
+		SessionID:    req.SessionID,
+		SubmissionID: req.SubmissionID,
+		RunGroupID:   req.RunGroupID,
+		Status:       topics.RunStatusQueued,
+		Message:      "awaiting dispatch slot",
+		UpdatedAt:    time.Now().UTC(),
+	}
+	if err := c.publisher.PublishStatus(ctx, evt); err != nil {
+		c.log.Error("publish queued status failed", "session_id", req.SessionID, "error", err)
 	}
 }
 

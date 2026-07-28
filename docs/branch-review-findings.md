@@ -624,7 +624,7 @@ Raw finder output: 58 findings. After dedup: 56 (2 removed as duplicates). Note 
 
 Confirmed findings only (52), bucketed by how much work the fix actually requires.
 
-**Status: 28 fixed / 1 mitigated / 4 open / 1 accepted.**
+**Status: 30 fixed / 1 mitigated / 2 open / 1 accepted.**
 
 ### (a) One-line / mechanical fixes — all FIXED
 
@@ -650,11 +650,11 @@ Confirmed findings only (52), bucketed by how much work the fix actually require
 - `internal/controller/consumer.go:156` — panic-recovery path needs a fail+releaseSlot backstop. **FIXED (e9e703c)** **OPEN**
 - `internal/controller/producer.go:84` — verify leased partition against writer metadata before publish instead of silent hash-fallback. **FIXED (e9e703c)** **OPEN**
 - `internal/controller/consumer.go:114` — fail-closed RunStatus precheck (or persistent dispatch-accepted marker) to prevent duplicate re-dispatch. **FIXED (e9e703c)** **OPEN**
-- `src/worker.rs:924` (critical + major) — bound the write `select` on `drain_end_ns`, not just process-level cancel. **OPEN**
+- `src/worker.rs:924` (critical + major) — bound the write `select` on `drain_end_ns`, not just process-level cancel. **FIXED (this change)** **OPEN**
 - `src/worker.rs:1141` / `:1105` — `last_tick` must drain remaining `pending` map entries directly, not just the expiry queue. **FIXED (this change)** **OPEN**
 - `src/worker.rs:941` — per-frame `send_ts_ns` patch (or guard acks before batch stamp) for batched writes. **FIXED (this change)** **OPEN**
 - `src/worker.rs:593` / `:952` — prune expiry-queue entries on ack so queue depth is bounded by inflight, not `rate x RESPONSE_TIMEOUT`. **FIXED (this change — compact 16B entries (deadline,seq,kind), id rebuilt on eviction; entries still live to deadline but at ~4-5x less memory; wheel design reserved if residual matters)** **OPEN**
-- `src/telemetry.rs:177` — `join_all` + aggregate shard-shutdown errors instead of early-return `??` mid-drain. **OPEN**
+- `src/telemetry.rs:177` — `join_all` + aggregate shard-shutdown errors instead of early-return `??` mid-drain. **FIXED (this change)** **OPEN**
 - `internal/validate/invariants.go:309` / `:356` — cap retained `Violation` examples (counters already exist separately). **FIXED (b83835c)**
 - `internal/validate/validate.go:79` — separate matched-fill denominator per validator mode (invariants vs. full). **FIXED (b83835c)**
 - `internal/validate/invariants.go:287` — compute `minT7Ns` over all responses, not fills-first with ack fallback. **FIXED (b83835c)**

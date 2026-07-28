@@ -1001,9 +1001,20 @@ async fn fix_write_loop(
         // offered load collapsed to zero (the symptom we saw on ramp; a drain sink never fills the
         // window so it never tripped). Cancellation still tears the loop down promptly at session
         // end, and a genuinely dead peer surfaces as a write error below.
+        // Third arm: the run's drain deadline. Backpressure from a slow-but-
+        // draining peer is handled by blocking (see above); a peer that never
+        // reads again must not wedge this task past the point where the run is
+        // over regardless. Abandoning the write here pairs with the watchdog's
+        // last-tick pending sweep, which accounts the batch as timed_out.
+        let drain_end_ns = task_end_ns.saturating_add(RESPONSE_TIMEOUT_NS);
         let write_res = tokio::select! {
             res = write_half.write_all(&batch_buf) => res,
             _ = cancel.cancelled() => break,
+            _ = time::sleep_until(instant_from_unix_nanos(drain_end_ns)) => {
+                metrics::order_write_error(metrics::protocol_label(Protocol::Fix));
+                warn!(task_id = task.task_id, "write still blocked at drain deadline; abandoning stalled peer");
+                break;
+            }
         };
         match write_res {
             Ok(()) => {
@@ -1545,11 +1556,20 @@ async fn rw_write_loop(
         // backpressure every loaded task exited at once and the offered load collapsed to zero
         // (the ramp-collapse symptom). Cancellation still tears the loop down promptly at session
         // end, and a genuinely dead peer surfaces as a write error below.
+        let protocol_label = metrics::protocol_label(writer.protocol());
+        // Same drain-deadline bound as the FIX loop: a never-draining peer must
+        // not wedge the task past run end; the watchdog's last-tick pending
+        // sweep accounts the abandoned batch as timed_out.
+        let drain_end_ns = task_end_ns.saturating_add(RESPONSE_TIMEOUT_NS);
         let write_res = tokio::select! {
             res = writer.write_batch(&mut frames, &mut scratch) => res,
             _ = cancel.cancelled() => break,
+            _ = time::sleep_until(instant_from_unix_nanos(drain_end_ns)) => {
+                metrics::order_write_error(protocol_label);
+                warn!(task_id = task.task_id, "write still blocked at drain deadline; abandoning stalled peer");
+                break;
+            }
         };
-        let protocol_label = metrics::protocol_label(writer.protocol());
         match write_res {
             Ok(()) => {
                 let send_ts_ns = unix_nanos();

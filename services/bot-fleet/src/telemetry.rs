@@ -175,11 +175,25 @@ impl TelemetrySink {
             .drain(..)
             .collect::<Vec<_>>();
 
-        for handle in handles {
-            handle.await.context("join telemetry aggregator")??;
+        // Await EVERY shard before reporting: an early-return `?` here dropped
+        // the remaining JoinHandles, detaching (not cancelling) those shards and
+        // leaving their shutdown flush unobserved — a run's telemetry tail could
+        // silently vanish on an unlucky shutdown. Join all, then surface the
+        // first error.
+        let results = futures::future::join_all(handles).await;
+        let mut first_err = None;
+        for joined in results {
+            match joined.context("join telemetry aggregator") {
+                Ok(Ok(())) => {}
+                Ok(Err(err)) if first_err.is_none() => first_err = Some(err),
+                Err(err) if first_err.is_none() => first_err = Some(err),
+                _ => {}
+            }
         }
-
-        Ok(())
+        match first_err {
+            Some(err) => Err(err),
+            None => Ok(())
+        }
     }
 }
 

@@ -16,7 +16,7 @@ use tracing::{info, warn};
 
 use std::time::Instant;
 
-use crate::aggregate::Aggregator;
+use crate::aggregate::{Aggregator, SentEventRef};
 use crate::config::Config;
 use crate::kafka::build_consumer;
 use crate::metrics;
@@ -85,8 +85,21 @@ fn ingest(agg: &mut Aggregator, topic: &str, payload: &[u8]) {
             Ok(b) => {
                 let count = b.events.len() as u64;
                 metrics::events_consumed(TOPIC_ORDERS_SENT, count);
-                for e in b.into_events() {
-                    agg.observe_sent(&e);
+                // Iterate the batch's per-event fields borrowing the hoisted
+                // envelope (session_id) instead of b.into_events(), which cloned
+                // session_id/submission_id/worker_id Strings for every event just
+                // to reconstitute full OrderSentEvents — observe_sent only ever
+                // read session_id and the per-event fields.
+                for f in &b.events {
+                    agg.observe_sent(SentEventRef {
+                        session_id: &b.session_id,
+                        order_id: &f.order_id,
+                        target_send_ts_ns: f.target_send_ts_ns,
+                        send_ts_ns: f.send_ts_ns,
+                        recv_done_ts_ns: f.recv_done_ts_ns,
+                        timed_out: f.timed_out,
+                        barrier_epoch_ns: f.barrier_epoch_ns,
+                    });
                 }
             }
             Err(e) => {

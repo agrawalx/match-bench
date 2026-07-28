@@ -332,7 +332,14 @@ async fn enqueue_chunk(
             }
             Ok(None) => {
                 // Producer queue full — drain it and retry (lossless backpressure).
-                kafka::poll_producer(producer, Duration::from_millis(10));
+                // poll_producer is a synchronous librdkafka FFI call that can block
+                // for the full timeout; run it on the blocking pool so it never
+                // stalls a tokio worker thread (KafkaProducer is Arc-backed/Clone).
+                let producer = producer.clone();
+                let _ = tokio::task::spawn_blocking(move || {
+                    kafka::poll_producer(&producer, Duration::from_millis(10));
+                })
+                .await;
                 time::sleep(Duration::from_millis(1)).await;
             }
             Err(err) => {

@@ -176,6 +176,12 @@ func (r *Runner) runSession(
 	}
 	recordSessionStage("create_slot", stageStart, nil)
 	sess.SlotID = sess.SessionID
+	// Guard the slot from here on: every return path below (fail, panic, or
+	// normal completion) releases it exactly once. Manual releaseSlot calls
+	// at each early-return site used to be required and were easy to miss —
+	// e.g. a panic between here and the end of runSession would leak the
+	// sandbox slot with no cleanup. This defer covers all of them.
+	defer r.releaseSlot(sess, log)
 
 	stageStart = time.Now()
 	slot, err := r.orch.WaitForReady(ctx, sess.SessionID, r.runConfig.DeployDeadline, 500*time.Millisecond)
@@ -188,7 +194,6 @@ func (r *Runner) runSession(
 			msg = msg + ": " + slot.Message
 		}
 		r.fail(ctx, sess, msg, log)
-		r.releaseSlot(sess, log)
 		return
 	}
 	sess.Endpoint = &slot.Endpoint
@@ -213,7 +218,6 @@ func (r *Runner) runSession(
 	if err := r.producer.PublishWorkloadSpec(ctx, specs, leases); err != nil {
 		recordSessionStage("publish_workload", stageStart, err)
 		r.fail(ctx, sess, "publish workload specs: "+err.Error(), log)
-		r.releaseSlot(sess, log)
 		return
 	}
 	recordSessionStage("publish_workload", stageStart, nil)
@@ -223,7 +227,6 @@ func (r *Runner) runSession(
 	if err := r.awaitReady(ctx, sess, log); err != nil {
 		recordSessionStage("await_ready", stageStart, err)
 		r.fail(ctx, sess, err.Error(), log)
-		r.releaseSlot(sess, log)
 		return
 	}
 	recordSessionStage("await_ready", stageStart, nil)
@@ -233,7 +236,6 @@ func (r *Runner) runSession(
 	if err := r.producer.PublishBarrier(ctx, sess.SessionID, barrierEpochNs); err != nil {
 		recordSessionStage("publish_barrier", stageStart, err)
 		r.fail(ctx, sess, "publish barrier: "+err.Error(), log)
-		r.releaseSlot(sess, log)
 		return
 	}
 	recordSessionStage("publish_barrier", stageStart, nil)
@@ -245,16 +247,12 @@ func (r *Runner) runSession(
 	case <-time.After(totalDuration):
 	case <-ctx.Done():
 		log.Info("context cancelled during run; marking failed and cleaning up")
-		r.releaseSlot(sess, log)
 		failCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		r.fail(failCtx, sess, "controller shutdown during run", log)
 		return
 	}
 
-	stageStart = time.Now()
-	r.releaseSlot(sess, log)
-	recordSessionStage("release_slot", stageStart, nil)
 	r.transition(ctx, sess, topics.RunStatusCompleted, "run completed", log)
 	result = "completed"
 }

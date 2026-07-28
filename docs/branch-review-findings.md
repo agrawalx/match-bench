@@ -624,46 +624,48 @@ Raw finder output: 58 findings. After dedup: 56 (2 removed as duplicates). Note 
 
 Confirmed findings only (52), bucketed by how much work the fix actually requires.
 
-### (a) One-line / mechanical fixes
+**Status: 20 fixed / 1 mitigated / 12 open / 1 accepted.**
 
-- `src/kafka.rs:140` (all 3 variants, incl. ebpf-latency) — clamp compression-level filter to librdkafka's `-1..=12`.
-- `src/worker.rs:974` — sub only actual removals in the FIX batch-write error path, not the whole batch count.
-- `src/worker.rs:1183` — move `frame.bytes` out instead of cloning per WS frame.
-- `internal/validate/validate.go:89` — widen `ViolationCount` to uint64 (or saturate).
-- `internal/redis/redis.go:46`, `internal/worker/worker.go:24` — one-shot `DEL` of the orphaned `leaderboard:global` ZSET.
-- `internal/live/poll.go:118` — skip broadcast when `updated_at_ns` is unchanged.
-- `internal/live/poll.go:100` — rate-limit the per-tick parse-error warn log.
-- `services/telemetry-ingester/Cargo.toml:12` — add the `zstd` feature to the ingester's own `rdkafka` dep.
-- `schemas/rust/src/lib.rs:88` — `div_ceil` (or remainder distribution) for `num_bands`.
-- `src/telemetry.rs:335` — wrap `poll_producer` in `spawn_blocking`.
-- `internal/controller/runner.go:172` — `defer releaseSlot` guarded after `CreateSlot` instead of 6 manual call sites.
-- `src/worker.rs:1436` (major + dup) / `:1114` — add the missing `inflight_add` call in `rw_write_loop` to mirror the FIX path.
-- `services/telemetry-ingester/src/ingester.rs:88` (both entries) — iterate borrowed envelope fields instead of cloning 3 Strings per event.
+### (a) One-line / mechanical fixes — all FIXED
+
+- `src/kafka.rs:140` (all 3 variants, incl. ebpf-latency) — clamp compression-level filter to librdkafka's `-1..=12`. **FIXED (b83835c)**
+- `src/worker.rs:974` — sub only actual removals in the FIX batch-write error path, not the whole batch count. **FIXED (b83835c)**
+- `src/worker.rs:1183` — move `frame.bytes` out instead of cloning per WS frame. **FIXED (b83835c)**
+- `internal/validate/validate.go:89` — widen `ViolationCount` to uint64 (or saturate). **FIXED (b83835c)**
+- `internal/redis/redis.go:46`, `internal/worker/worker.go:24` — one-shot `DEL` of the orphaned `leaderboard:global` ZSET. **FIXED (b83835c)**
+- `internal/live/poll.go:118` — skip broadcast when `updated_at_ns` is unchanged. **FIXED (b83835c)**
+- `internal/live/poll.go:100` — rate-limit the per-tick parse-error warn log. **FIXED (b83835c)**
+- `services/telemetry-ingester/Cargo.toml:12` — add the `zstd` feature to the ingester's own `rdkafka` dep. **FIXED (b83835c)**
+- `schemas/rust/src/lib.rs:88` — `div_ceil` (or remainder distribution) for `num_bands`. **FIXED (b83835c)**
+- `src/telemetry.rs:335` — wrap `poll_producer` in `spawn_blocking`. **FIXED (this change)**
+- `internal/controller/runner.go:172` — `defer releaseSlot` guarded after `CreateSlot` instead of 6 manual call sites. **FIXED (this change)**
+- `src/worker.rs:1436` (major + dup) / `:1114` — add the missing `inflight_add` call in `rw_write_loop` to mirror the FIX path. **FIXED (b83835c)**
+- `services/telemetry-ingester/src/ingester.rs:88` (both entries) — iterate borrowed envelope fields instead of cloning 3 Strings per event. **FIXED (this change)**
 
 ### (b) Real design work
 
-- `internal/controller/runner.go:131` — pair lease release with spec-consumption ack/tombstone (lease lifecycle vs. Kafka message lifecycle currently uncoupled).
-- `internal/controller/lease.go:44`, `:85` (major), `:85` (minor) — FIFO fairness queue in `Acquire` to fix broadcast-wakeup starvation.
-- `internal/controller/consumer.go:127` — WaitGroup + bounded join for dispatch goroutines on shutdown.
-- `internal/controller/consumer.go:156` — panic-recovery path needs a fail+releaseSlot backstop.
-- `internal/controller/producer.go:84` — verify leased partition against writer metadata before publish instead of silent hash-fallback.
-- `internal/controller/consumer.go:114` — fail-closed RunStatus precheck (or persistent dispatch-accepted marker) to prevent duplicate re-dispatch.
-- `src/worker.rs:924` (critical + major) — bound the write `select` on `drain_end_ns`, not just process-level cancel.
-- `src/worker.rs:1141` / `:1105` — `last_tick` must drain remaining `pending` map entries directly, not just the expiry queue.
-- `src/worker.rs:941` — per-frame `send_ts_ns` patch (or guard acks before batch stamp) for batched writes.
-- `src/worker.rs:593` / `:952` — prune expiry-queue entries on ack so queue depth is bounded by inflight, not `rate x RESPONSE_TIMEOUT`.
-- `src/telemetry.rs:177` — `join_all` + aggregate shard-shutdown errors instead of early-return `??` mid-drain.
-- `internal/validate/invariants.go:309` / `:356` — cap retained `Violation` examples (counters already exist separately).
-- `internal/validate/validate.go:79` — separate matched-fill denominator per validator mode (invariants vs. full).
-- `internal/validate/invariants.go:287` — compute `minT7Ns` over all responses, not fills-first with ack fallback.
-- `internal/validate/invariants.go:171` — fold `T7ReorderLate` into scoring or fail the session above a threshold.
-- `internal/validate/invariants.go:177` — bound T7 reorder window memory (smaller default and/or heap-based incremental emit).
-- `internal/score/score.go:282` — handle `TargetRPS==0` max-rate sentinel in the offered-rate/wave-scheduling path.
-- `services/telemetry-ingester/src/redis_sink.rs:55` — compare-and-set (Lua) on the live-pointer wave index instead of unconditional `SET`.
-- `internal/read/store.go:471` / `:477` — time-bound and per-session-terminal-filter the active-session-contestants query.
-- `internal/sse/broker.go:68` — coalesce per-tick `live_metrics` into one batch message and/or grow the client buffer.
-- `internal/live/poll.go:86` — pipeline/batch Redis reads across sessions instead of sequential per-session round trips.
-- `frontend/src/hooks/useLeaderboard.ts:99` / `:101` (both entries) — evict completed/stale sessions from `liveMetrics` instead of insert-only growth.
+- `internal/controller/runner.go:131` — pair lease release with spec-consumption ack/tombstone (lease lifecycle vs. Kafka message lifecycle currently uncoupled). **MITIGATED (this change)** — worker.rs now skips stale specs via a `published_at` stamp + max-age check, so a stale spec left behind by a fast-failed session no longer gets executed against a dead endpoint by the next lessee. The lease lifecycle and the Kafka message lifecycle on the partition are still uncoupled — full fix (release only after spec consumed/acked or tombstoned) remains open.
+- `internal/controller/lease.go:44`, `:85` (major), `:85` (minor) — FIFO fairness queue in `Acquire` to fix broadcast-wakeup starvation. **OPEN**
+- `internal/controller/consumer.go:127` — WaitGroup + bounded join for dispatch goroutines on shutdown. **OPEN**
+- `internal/controller/consumer.go:156` — panic-recovery path needs a fail+releaseSlot backstop. **OPEN**
+- `internal/controller/producer.go:84` — verify leased partition against writer metadata before publish instead of silent hash-fallback. **OPEN**
+- `internal/controller/consumer.go:114` — fail-closed RunStatus precheck (or persistent dispatch-accepted marker) to prevent duplicate re-dispatch. **OPEN**
+- `src/worker.rs:924` (critical + major) — bound the write `select` on `drain_end_ns`, not just process-level cancel. **OPEN**
+- `src/worker.rs:1141` / `:1105` — `last_tick` must drain remaining `pending` map entries directly, not just the expiry queue. **OPEN**
+- `src/worker.rs:941` — per-frame `send_ts_ns` patch (or guard acks before batch stamp) for batched writes. **OPEN**
+- `src/worker.rs:593` / `:952` — prune expiry-queue entries on ack so queue depth is bounded by inflight, not `rate x RESPONSE_TIMEOUT`. **OPEN**
+- `src/telemetry.rs:177` — `join_all` + aggregate shard-shutdown errors instead of early-return `??` mid-drain. **OPEN**
+- `internal/validate/invariants.go:309` / `:356` — cap retained `Violation` examples (counters already exist separately). **FIXED (b83835c)**
+- `internal/validate/validate.go:79` — separate matched-fill denominator per validator mode (invariants vs. full). **FIXED (b83835c)**
+- `internal/validate/invariants.go:287` — compute `minT7Ns` over all responses, not fills-first with ack fallback. **FIXED (b83835c)**
+- `internal/validate/invariants.go:171` — fold `T7ReorderLate` into scoring or fail the session above a threshold. **OPEN**
+- `internal/validate/invariants.go:177` — bound T7 reorder window memory (smaller default and/or heap-based incremental emit). **OPEN**
+- `internal/score/score.go:282` — handle `TargetRPS==0` max-rate sentinel in the offered-rate/wave-scheduling path. **FIXED (b83835c)**
+- `services/telemetry-ingester/src/redis_sink.rs:55` — compare-and-set (Lua) on the live-pointer wave index instead of unconditional `SET`. **FIXED (b83835c)**
+- `internal/read/store.go:471` / `:477` — time-bound and per-session-terminal-filter the active-session-contestants query. **FIXED (b83835c)**
+- `internal/sse/broker.go:68` — coalesce per-tick `live_metrics` into one batch message and/or grow the client buffer. **OPEN**
+- `internal/live/poll.go:86` — pipeline/batch Redis reads across sessions instead of sequential per-session round trips. **OPEN**
+- `frontend/src/hooks/useLeaderboard.ts:99` / `:101` (both entries) — evict completed/stale sessions from `liveMetrics` instead of insert-only growth. **FIXED (b83835c)**
 
 ### (c) Accept-as-known-limitation candidates (minor + bounded)
 

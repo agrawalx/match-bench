@@ -220,8 +220,12 @@ async fn run(config: Config, producer: KafkaProducer) -> Result<()> {
                     );
                     last_decoded = decoded_total;
                 }
-                report_counter(&dropped_events, &mut last_dropped, "eBPF ring buffer dropped events");
-                report_counter(&truncated_captures, &mut last_truncated, "eBPF truncated oversized captures (check GSO/TSO off)");
+                report_counter(&dropped_events, &mut last_dropped, "eBPF ring buffer dropped events", metrics::ringbuf_dropped);
+                // Not "check GSO/TSO off": ethtool feature flags govern on-wire framing,
+                // while the tc egress hook runs before segmentation and sees the whole
+                // pre-segmentation skb regardless. A non-zero total here means orders are
+                // losing their responses wholesale — see clamp_gso.
+                report_counter(&truncated_captures, &mut last_truncated, "eBPF truncated oversized captures; responses past the capture cap are LOST (check gso_max_size clamp)", metrics::truncated_captures);
             }
             _ = evict_ticker.tick() => {
                 pipeline.evict_idle();
@@ -432,13 +436,24 @@ fn read_counter(map: &PerCpuArray<MapData, u64>) -> u64 {
         .unwrap_or(0)
 }
 
-/// report_counter performs the module-specific operation described by its name.
-/// It keeps validation, side effects, and returned values within this module's contract.
-fn report_counter(map: &Option<PerCpuArray<MapData, u64>>, last: &mut u64, msg: &str) {
+/// report_counter mirrors one kernel-side PerCpuArray counter into its OWN Prometheus
+/// counter and warns on each increase.
+///
+/// `sink` is a parameter because it used to be hardcoded to metrics::ringbuf_dropped for
+/// every caller: truncated captures were published as ring-buffer drops, and since each
+/// sink keeps a single "last total seen" cell, two different absolute totals swapping
+/// through the same cell corrupted both. That is why a run with 894 truncations reported
+/// 759 ring-buffer drops and no truncation metric at all.
+fn report_counter(
+    map: &Option<PerCpuArray<MapData, u64>>,
+    last: &mut u64,
+    msg: &str,
+    sink: fn(u64),
+) {
     if let Some(map) = map {
         let total = read_counter(map);
         if total > *last {
-            metrics::ringbuf_dropped(total);
+            sink(total);
             warn!(total, delta = total - *last, "{msg}");
         }
         *last = total;
@@ -450,6 +465,7 @@ fn report_counter(map: &Option<PerCpuArray<MapData, u64>>, last: &mut u64, msg: 
 fn attach_programs(bpf: &mut Ebpf, config: &Config) -> Result<()> {
     let mut attach = || -> Result<()> {
         disable_offloads(&config.iface);
+        clamp_gso(&config.iface, config.clamp_mtu);
         mtu::clamp_to(&config.iface, config.clamp_mtu);
         attach_xdp_ingress(bpf, &config.xdp_ingress_program, &config.iface)?;
         attach_tc_egress(bpf, &config.tc_egress_program, &config.iface)
@@ -458,6 +474,71 @@ fn attach_programs(bpf: &mut Ebpf, config: &Config) -> Result<()> {
         return with_network_namespace(netns_path, attach);
     }
     attach()
+}
+
+/// gso_clamp_args builds the `ip link` arguments that bound how large an skb the stack
+/// may build for this interface.
+///
+/// This is the setting that actually governs what the capture sees, and it is NOT the
+/// same as `ethtool -K gso off`. The tc egress hook runs in __dev_queue_xmit BEFORE GSO
+/// segmentation, so it observes the pre-segmentation skb — up to 64KiB when the engine
+/// coalesces responses — no matter what the device's offload feature flags say. The BPF
+/// program can only copy COPY_CAP (1536) bytes of it, so every FIX message past the
+/// leading ~11 was discarded: measured at 894 truncated packets costing 459,363 of
+/// 1,791,744 orders (25.6%) their entire response record, against an engine that had in
+/// fact answered 100% of them. gso_max_size/gso_max_segs are enforced where the skb is
+/// built, upstream of the hook, so clamping them is what makes truncation impossible
+/// rather than merely rarer.
+///
+/// gso_max_segs is pinned to 1 as well: gso_max_size alone still permits a multi-segment
+/// skb whose total payload exceeds the cap.
+fn gso_clamp_args(iface: &str, max_size: usize) -> Vec<String> {
+    vec![
+        "link".into(),
+        "set".into(),
+        "dev".into(),
+        iface.into(),
+        "gso_max_size".into(),
+        max_size.to_string(),
+        "gso_max_segs".into(),
+        "1".into(),
+    ]
+}
+
+/// clamp_gso bounds skb construction on the capture interface so the tc egress hook
+/// never sees a payload larger than the BPF program can copy. See gso_clamp_args.
+fn clamp_gso(iface: &str, clamp: usize) {
+    if clamp == 0 {
+        info!(iface, "capture GSO clamp disabled (CAPTURE_CLAMP_MTU=0)");
+        return;
+    }
+    let args = gso_clamp_args(iface, clamp);
+    match std::process::Command::new("ip").args(&args).output() {
+        Ok(out) if out.status.success() => {
+            info!(
+                iface,
+                gso_max_size = clamp,
+                gso_max_segs = 1,
+                "clamped GSO sizing on capture interface"
+            );
+        }
+        Ok(out) => {
+            warn!(
+                iface,
+                clamp,
+                detail = %String::from_utf8_lossy(&out.stderr).trim(),
+                "FAILED to clamp GSO sizing; coalesced responses will be truncated at the capture cap and their orders will look unanswered"
+            );
+        }
+        Err(err) => {
+            warn!(
+                iface,
+                clamp,
+                error = %err,
+                "failed to run ip link; GSO sizing unclamped, coalesced responses will be truncated"
+            );
+        }
+    }
 }
 
 /// disable_offloads performs the module-specific operation described by its name.
@@ -640,6 +721,40 @@ mod tests {
     use super::*;
     use iicpc_schemas_rust::OrderAckedBatch;
     use std::sync::{Mutex, OnceLock};
+
+    /// gso_clamp_args_bounds_both_size_and_segs pins the clamp that keeps coalesced
+    /// responses inside the BPF capture cap. Both knobs are required: gso_max_size alone
+    /// still permits a multi-segment skb whose total payload exceeds the cap, and neither
+    /// is implied by `ethtool -K gso off` (that governs on-wire framing, while the tc
+    /// egress hook runs before segmentation).
+    #[test]
+    fn gso_clamp_args_bounds_both_size_and_segs() {
+        let args = gso_clamp_args("eth0", 1500);
+        assert_eq!(
+            args,
+            vec![
+                "link", "set", "dev", "eth0", "gso_max_size", "1500", "gso_max_segs", "1"
+            ]
+        );
+    }
+
+    /// gso_clamp_target_tracks_the_capture_cap: the clamp must not exceed what the BPF
+    /// program can copy in one record, or truncation returns.
+    #[test]
+    fn gso_clamp_target_tracks_the_capture_cap() {
+        const BPF_COPY_CAP: usize = 1536;
+        for mtu in [1500usize, 1400, 9000] {
+            let args = gso_clamp_args("eth0", mtu);
+            let size: usize = args[5].parse().unwrap();
+            if mtu <= BPF_COPY_CAP {
+                assert!(
+                    size <= BPF_COPY_CAP,
+                    "clamp {size} exceeds the {BPF_COPY_CAP}-byte capture cap"
+                );
+            }
+            assert_eq!(args[7], "1", "gso_max_segs must pin to one segment");
+        }
+    }
 
     fn mk_event(order_id: &str) -> MatchedEvent {
         MatchedEvent {

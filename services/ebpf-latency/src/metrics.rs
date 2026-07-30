@@ -31,6 +31,7 @@ struct Metrics {
     events_decoded: Counter,
     events_decode_errors: Counter,
     ringbuf_dropped: Counter,
+    truncated_captures: Counter,
     flushes: Counter,
     events_flushed: Counter,
     acked_dropped: Counter,
@@ -40,6 +41,7 @@ struct Metrics {
 }
 
 static LAST_RINGBUF_DROPPED: AtomicU64 = AtomicU64::new(0);
+static LAST_TRUNCATED: AtomicU64 = AtomicU64::new(0);
 
 static METRICS: LazyLock<Metrics> = LazyLock::new(|| {
     let mut registry = Registry::default();
@@ -47,6 +49,7 @@ static METRICS: LazyLock<Metrics> = LazyLock::new(|| {
     let events_decoded = Counter::default();
     let events_decode_errors = Counter::default();
     let ringbuf_dropped = Counter::default();
+    let truncated_captures = Counter::default();
     let flushes = Counter::default();
     let events_flushed = Counter::default();
     let acked_dropped = Counter::default();
@@ -68,6 +71,11 @@ static METRICS: LazyLock<Metrics> = LazyLock::new(|| {
         "iicpc_ebpf_ringbuf_dropped",
         "eBPF ring-buffer events dropped.",
         ringbuf_dropped.clone(),
+    );
+    registry.register(
+        "iicpc_ebpf_truncated_captures",
+        "Packets whose payload exceeded the BPF capture cap. Every FIX message past the cap in such a packet is LOST, so its order looks unanswered downstream; a non-zero rate invalidates correctness scoring and biases latency toward uncoalesced responses.",
+        truncated_captures.clone(),
     );
     registry.register("iicpc_ebpf_flushes", "eBPF flushes.", flushes.clone());
     registry.register(
@@ -101,6 +109,7 @@ static METRICS: LazyLock<Metrics> = LazyLock::new(|| {
         events_decoded,
         events_decode_errors,
         ringbuf_dropped,
+        truncated_captures,
         flushes,
         events_flushed,
         acked_dropped,
@@ -157,6 +166,19 @@ pub fn ringbuf_dropped(total: u64) {
     let previous = LAST_RINGBUF_DROPPED.swap(total, Ordering::Relaxed);
     if total > previous {
         METRICS.ringbuf_dropped.inc_by(total - previous);
+    }
+}
+
+/// truncated_captures mirrors the kernel-side truncation counter (an absolute total) into
+/// a monotonic Prometheus counter.
+///
+/// This was a log line only, which is why a defect that cost 25.6% of orders their entire
+/// response record went unnoticed: nothing scraped it, nothing alerted on it, and the
+/// downstream validator saw the result as contestants failing to answer.
+pub fn truncated_captures(total: u64) {
+    let previous = LAST_TRUNCATED.swap(total, Ordering::Relaxed);
+    if total > previous {
+        METRICS.truncated_captures.inc_by(total - previous);
     }
 }
 

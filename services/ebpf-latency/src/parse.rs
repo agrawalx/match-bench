@@ -9,6 +9,17 @@ use crate::capture::{Direction, Transport};
 const SOH: u8 = 0x01;
 const PRICE_SCALE: u64 = 1_000_000_000;
 const MAX_FIX_MESSAGE: usize = 64 * 1024;
+/// FIX_BEGIN is the real start-of-message marker: tag 8 (BeginString) always carries a
+/// value starting "FIX". Resync MUST search for this, not for a bare "8=".
+///
+/// "8=" is not a message boundary — it occurs inside almost every message, because tag 38
+/// (OrderQty) renders as "38=", as do 58, 108, 118. Searching for it made recovery
+/// pathological: after any desync the framer landed on a false start inside the NEXT
+/// message's 38=, passed the two-byte check, failed the "9=" check one field later,
+/// resynced again, and walked forward in small steps — burning a whole message or more per
+/// desync instead of jumping to the next real boundary. Measured at ~284 bytes skipped per
+/// lost request on a pass-1 run.
+const FIX_BEGIN: &[u8] = b"8=FIX";
 const MAX_HTTP_MESSAGE: usize = 64 * 1024;
 
 #[derive(Debug, PartialEq, Eq)]
@@ -72,19 +83,36 @@ pub fn parse(transport: Transport, direction: Direction, msg: &[u8]) -> ParsedMe
 /// frame_fix performs the module-specific operation described by its name.
 /// It keeps validation, side effects, and returned values within this module's contract.
 fn frame_fix(buf: &[u8]) -> Frame {
-    if buf.len() < 2 {
+    if buf.len() < FIX_BEGIN.len() {
+        // Too short to tell a real BeginString from a prefix of one. Waiting is correct:
+        // skipping here would discard the head of a message that is merely incomplete.
         return Frame::Incomplete;
     }
-    if &buf[0..2] != b"8=" {
-        return match find(buf, b"8=") {
+    if !buf.starts_with(FIX_BEGIN) {
+        return match find(buf, FIX_BEGIN) {
             Some(i) => Frame::Resync(i),
-            None => Frame::Resync(buf.len().saturating_sub(1)),
+            // No boundary anywhere in the buffer. Retain the last FIX_BEGIN.len()-1 bytes:
+            // a genuine "8=FIX" may straddle the end of what has been reassembled so far,
+            // and skipping it would turn one desync into a second.
+            None => Frame::Resync(buf.len().saturating_sub(FIX_BEGIN.len() - 1)),
         };
     }
     let Some(soh1) = find_byte(buf, SOH, 0) else {
         return Frame::Incomplete;
     };
-    if buf.len() < soh1 + 3 || &buf[soh1 + 1..soh1 + 3] != b"9=" {
+    // "Not enough bytes yet" is NOT "malformed", and conflating them was a data-loss
+    // bug: a buffer holding exactly "8=FIX.4.2\x01" plus a byte or two is the head of a
+    // perfectly good message that has not finished arriving, and resyncing here discarded
+    // it. The remainder then began mid-message, so the next call skipped forward to the
+    // following BeginString and the whole order was lost — no packet loss required.
+    //
+    // It fires whenever a TCP segment boundary lands within a couple of bytes of a
+    // message's BeginString: about one boundary per segment over ~7 messages, which
+    // matches the ~0.2% of requests that went missing per pass-1 run.
+    if buf.len() < soh1 + 3 {
+        return Frame::Incomplete;
+    }
+    if &buf[soh1 + 1..soh1 + 3] != b"9=" {
         return Frame::Resync(soh1 + 1);
     }
     let Some(soh2) = find_byte(buf, SOH, soh1 + 3) else {
@@ -467,6 +495,102 @@ fn json_decimal_scaled(body: &[u8], key: &str) -> Option<u64> {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    /// A valid message head that has not finished arriving must WAIT, never resync.
+    ///
+    /// This is the bug that produced the entire capture-gap population. Sampled live:
+    /// buffered=11, sample="8=FIX.4.2|9" — a good message whose head was discarded because
+    /// the length check shared a branch with the malformed check. The remainder then
+    /// started mid-message and the next resync skipped 229 bytes to the next BeginString,
+    /// taking the order with it.
+    #[test]
+    fn fix_frame_waits_when_begin_string_arrives_without_the_length_field() {
+        for partial in [
+            &b"8=FIX.4.2\x01"[..],
+            &b"8=FIX.4.2\x019"[..],
+            &b"8=FIX.4.4\x01"[..],
+        ] {
+            assert!(
+                matches!(frame_fix(partial), Frame::Incomplete),
+                "a message head must be awaited, not discarded: {:?}",
+                String::from_utf8_lossy(partial)
+            );
+        }
+    }
+
+    /// Once enough bytes exist, a genuinely wrong second tag still resyncs.
+    #[test]
+    fn fix_frame_resyncs_when_the_second_tag_is_not_body_length() {
+        let buf = b"8=FIX.4.2\x0134=1\x0110=000\x01";
+        assert!(
+            matches!(frame_fix(buf), Frame::Resync(_)),
+            "a real malformed frame must still resync"
+        );
+    }
+
+    /// A desync must land on the NEXT REAL message, not on "8=" inside tag 38.
+    ///
+    /// This is the bug that made a 0.2% request loss self-amplifying: mid-message bytes
+    /// followed by a complete order. Searching for a bare "8=" matched the "8=" inside
+    /// "38=100", so the framer resynced into the middle of the very message it was trying
+    /// to recover, then walked forward field by field and consumed it entirely.
+    #[test]
+    fn fix_resync_skips_to_begin_string_not_to_tag_38() {
+        let garbage = b"45=x\x0138=100\x01";
+        let msg = b"8=FIX.4.4\x019=5\x0135=D\x0110=000\x01";
+        let mut buf = Vec::new();
+        buf.extend_from_slice(garbage);
+        buf.extend_from_slice(msg);
+
+        match frame_fix(&buf) {
+            Frame::Resync(skip) => {
+                assert_eq!(
+                    skip,
+                    garbage.len(),
+                    "resync must skip exactly the garbage and land on 8=FIX, not inside 38="
+                );
+                assert!(
+                    buf[skip..].starts_with(FIX_BEGIN),
+                    "post-resync buffer must start at a real message boundary"
+                );
+            }
+            other => panic!("expected Resync, got {other:?}"),
+        }
+    }
+
+    /// A buffer holding only mid-message bytes keeps the last few, so a BeginString
+    /// straddling the reassembly boundary is not chopped in half.
+    #[test]
+    fn fix_resync_without_a_boundary_retains_a_partial_begin_string() {
+        let buf = b"38=100\x0144=9\x018=FI";
+        match frame_fix(buf) {
+            Frame::Resync(skip) => {
+                assert_eq!(skip, buf.len() - (FIX_BEGIN.len() - 1));
+                assert_eq!(&buf[skip..], b"8=FI", "the partial BeginString must survive");
+            }
+            other => panic!("expected Resync, got {other:?}"),
+        }
+    }
+
+    /// "8=" appearing inside a field must never be treated as a message start.
+    #[test]
+    fn fix_frame_does_not_start_on_tag_38() {
+        let buf = b"38=100\x0110=000\x01";
+        match frame_fix(buf) {
+            Frame::Resync(_) => {}
+            other => panic!("tag 38 must not frame as a message, got {other:?}"),
+        }
+    }
+
+    /// Fewer bytes than "8=FIX" is incomplete, not a desync: discarding here would eat
+    /// the head of a message that has merely not fully arrived.
+    #[test]
+    fn fix_frame_waits_for_enough_bytes_to_identify_a_boundary() {
+        assert!(matches!(frame_fix(b"8=F"), Frame::Incomplete));
+        assert!(matches!(frame_fix(b""), Frame::Incomplete));
+    }
+
     use super::*;
 
     #[test]

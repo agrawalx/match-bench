@@ -28,11 +28,17 @@ physically impossible locally.
 
 ## B. Local-cluster verification track (k3s/kind; eBPF and KEDA both run locally)
 
-1. **Two-concurrent-sessions e2e — highest value item.** Two contestants submitted
-   together: parallel controller dispatch, partition + order-band leases, two sandbox
-   slots + capture pods, band-scoped validation, two live leaderboard tiles, isolated
-   correct scores. Exercises nearly everything built on this branch in one run.
-   Includes the live-SSE smoke (Redis → poll loop → `live_metrics` → frontend).
+1. ~~**Two-concurrent-sessions e2e**~~ **MOSTLY DONE** — `deploy-local/b1-two-sessions.sh`
+   on local k3s. Verified: parallel controller dispatch, both sessions in `running` at
+   the same instant, 2 sandbox slots + 2 capture pods live together, exclusive partition
+   and order-band leases held then released, per-session latency rows with no
+   cross-contestant rows, per-session scoring (session A: sent 216,211 / matched 212,415
+   / 239,916 fills graded).
+   **Still outstanding:** the live-SSE smoke (Redis → poll loop → `live_metrics` →
+   frontend) is NOT covered — the script asserts on Postgres/Timescale rows, never the
+   frontend. Two-live-leaderboard-tiles is therefore also unverified.
+   Getting here required fixing four platform bugs (see "Bugs found by the local track"
+   below), so the run was worth far more than the assertions it now passes.
 2. **Two-pass flow e2e.** Same submission through the pass-1 `correctness` scenario
    (single-connection max-rate, full book replay) and a pass-2 scale scenario
    (invariants mode); verify the taint path fires on induced t7 lateness/anomalies;
@@ -43,9 +49,15 @@ physically impossible locally.
 4. **Stalled-peer harness.** Sink that stops reading mid-run: proves the
    drain-deadline write exit, the watchdog last-tick pending sweep, and that every
    offered order ends accounted (matched or timed_out, inflight back to zero).
-5. **KEDA session-count trigger.** Replace the start-of-run lag pulse with a
-   session-count-driven ScaledObject; implement and verify scale-up/down on the
-   local cluster.
+5. ~~**KEDA session-count trigger.**~~ **DONE, and superseded by a better signal** —
+   `deploy-local/b5-autoscale-shards.sh`, all assertions green on local k3s. Rather than
+   session COUNT, the ScaledObject scales on `iicpc_controller_demanded_workers`
+   (Σ worker_count over in-flight sessions), which is correct for one 500k/s session as
+   well as for ten small ones; session count is not. Verified end to end: rate-aware
+   shard sizing (`shard_reason=rate`, 5400 rps → 3 shards), KEDA scale 1→3, complete
+   ready fan-in, every shard executed EXACTLY once, all shards sharing one barrier
+   epoch, delivered volume 234,307 vs 234,000 expected. KEDA is installed on the local
+   cluster (helm, `keda` namespace). Design + rationale: `docs/rate-aware-sharding-plan.md`.
 6. **W calibration.** Reference engine vs a deliberately-naive (thread-per-conn,
    no ingress ordering) engine; compare jitter distributions; set the published
    cross-flow window W where they separate. Fully local.
@@ -86,6 +98,187 @@ physically impossible locally.
 - **Final benchmark numbers — last, after everything above.** Baseline to beat:
   747,911 orders/s single-node drain (pre-P1/P2); local 4-thread drain reached
   2.2–2.6M/s; EKS expectation ~1.1–1.4M/s per c6i.xlarge node.
+
+## Bugs found by the local-cluster track (2026-07-30)
+
+None of these were on the list; all were found by actually running B1/B5 on k3s. Each
+was invisible to the existing test suite, and the last four were invisible in a way
+worth understanding.
+
+1. **libclang missing from every Rust builder image.** This branch enabled rdkafka's
+   `zstd` feature (zstd-1 on `orders.*`), which pulls zstd-sys → bindgen → dlopen
+   libclang at build time. `bot-fleet`, `telemetry-ingester`, `ebpf-latency` and
+   `contestant-echo` Dockerfiles all lacked it. **This broke the EKS image build too** —
+   `infra/Makefile` builds the same Dockerfiles — so `e2e/01-images.sh` could not have
+   worked either. A host `cargo check` passes because developer machines have clang.
+2. **Three controller lease metrics were silent no-ops.** `libs/go/metrics` exports only
+   names present in a pre-declared catalog; `controller_leased_partitions`,
+   `controller_leased_order_bands` and `controller_admission_blocked_total` were never
+   declared, so every write was dropped and counted as `unregistered_metric`. The lease
+   observability the branch built did not exist at runtime. Now declared, plus
+   `metrics.RegistryErrorCount()` and a test — verified to fail when the catalog entry
+   is removed — so the trap is mechanically caught for any service.
+3. **`runs` rows are never created for Kafka-triggered sessions.** The row is INSERTed
+   only by submission-api's HTTP `StartBenchmark`; the controller and submission-api
+   only ever UPDATE it. Publishing `benchmark.requested` directly (what `e2e/run.sh` and
+   the local scripts do) creates nothing, so score-computer rejected every correctness
+   event with `lookup run <session>: no rows in result set` and no session was ever
+   scored. Worked around in the harness; the platform gap is real and unfixed.
+4. **The worker executed one workload at a time.** `worker.rs` awaited `run_workload`
+   inline in the consume loop, so two concurrent sessions landing on one pod serialized
+   regardless of shard size — B1's load phases ran back-to-back. Now spawned onto a
+   `JoinSet` with one workload per partition and a `MAX_CONCURRENT_WORKLOADS` cap.
+5. **Shard count ignored order rate.** `computeWorkerCount` divided task count by
+   `MAX_TASKS_PER_WORKER` only, so 1000 HFT bots at 1000 rps — 1M orders/s — sharded to
+   ONE worker and the run silently delivered a fraction of its scenario. Now the max of
+   the task ceiling and a new rate ceiling (`WORKER_RPS_CAPACITY`).
+6. **Concurrent workloads competed for the barrier** (a regression introduced by #4).
+   The barrier consumer group was keyed per pod, so two concurrent workloads became
+   competing members of one group and only one was assigned the barrier partition — the
+   other never fired and its shard's load silently vanished (58% delivered). Now keyed
+   per concurrency SLOT: distinct per concurrent workload, still free of `session_id`
+   (which would leak broker-side groups, the reason it was per-pod originally).
+7. **The validator could not decode `orders.sent` at all.** The producer writes the
+   POSITIONAL `OrderSentBatchV2` envelope (session/submission/worker hoisted);
+   telemetry-ingester was updated for it, but the correctness-validator kept decoding
+   the named-map `OrderSentBatch`. Positional bytes read as a named map do not error —
+   they yield a garbage `SessionID`, so the session filter dropped EVERY batch: the
+   validator reported `sent=0` against a topic holding ~600k records, `matched=0`
+   followed, and **every local correctness score was meaningless**. Fixed by adding the
+   Go V2 mirror; `sent 0 → 216,211`, `matched 0 → 212,415` on the next run.
+
+Two lessons worth keeping:
+
+- **Go-to-Go round-trip tests cannot verify a cross-language wire contract.** Four
+  validator tests encoded the superseded named-map format and passed throughout bug #7;
+  one even asserted the producer used `to_vec_named`, true only before V2. They were not
+  merely stale, they were *masking* the bug. `schemas/go/topics/wire_contract_test.go`
+  now pins the layout against real captured producer bytes.
+- **Assertions must fail closed.** Three separate checks passed vacuously on absent
+  data: `matched(0) <= sent(0)` while the validator saw nothing, and
+  `distinct_barrier_epochs <= 1` when zero epochs were logged. All now require the
+  evidence to exist before comparing it.
+
+## Validator: the batch path is deleted (2026-07-31)
+
+**The problem.** The validator carried two full implementations of pass-1 grading: the
+batch `validate.Run` (buffer the whole session, replay the book, compare in a second
+pass) and the streaming `StreamValidator` (single-pass, finalize each order as it leaves
+the book). Only the streaming one ran in production — `main.go` calls
+`source.StreamSession` for both modes — and the batch one survived purely as the thing
+nine equivalence tests compared against. That is worse than dead code: every new check
+had to be written into both paths and kept scoring-identical, and the two disagreed
+structurally (batch summed `engine.Fills()` after processing everything, stream
+accumulated `DrainFills()` per order, so they diverged whenever one order was both maker
+and taker across separate `Apply` calls). Under-reporting could not be made a violation
+without that divergence failing every equivalence test on a field neither path was
+really wrong about.
+
+**The decision.** Delete the batch path entirely — `validate.Run`, `source.DrainSession`
+and its collectors, `pipeline.Run`/`Assemble`/`Counts` — and keep the streaming path as
+the single implementation. Tests that exercised real grading behavior were ported onto
+`StreamValidator` rather than deleted; only the equivalence scaffolding itself is gone.
+`TestUnderReportIsValid` was deleted with it: it asserted that reporting fewer fills than
+the reference is legitimate, came from commit `cf9dae8` ("validator and dockerfile
+fixes") with no rationale, and is contradicted by the audit. If the reference matched an
+order, the contestant owes an execution report for it; silence is a dropped fill.
+
+**What this fixed on the way through.** Removing the second implementation exposed four
+defects that the equivalence tests had been hiding, because they compared the two paths
+to each other rather than to the specification:
+
+1. **Streaming could not detect a self-match at all.** The reference book applies
+   skip-and-continue, so a same-SMP pair produces NO trade — and the streaming path's
+   only self-trade check read the engine's *trades*, which meant it could never fire.
+   Batch had a second check against the book's RESTING state; streaming did not, so
+   every contestant self-match was scored as a generic "reference engine produced no
+   fill" price violation, saying nothing about the rule actually broken. The resting
+   check now lives in `scoreOrder`, backed by `book.RestingSMPMatch` (O(price level),
+   where the batch version copied the whole book per fill).
+2. **`Time` and `CancelReplaceLoss` were unreachable in production.** Queue-jump
+   detection scanned only orders still resting, but the victim of a jump has almost
+   always departed by the time the jumper is scored — it was consumed by the very match
+   under dispute. Every time-priority breach was therefore downgraded to a price
+   violation on the live path. `shortedIndex` now keeps the orders that departed
+   *under-reported* (bounded ring, 64Ki entries, level-indexed) as queue-jump evidence.
+   Membership is narrower than batch's whole-session scan on purpose: earlier in the
+   queue + the reference filled it + the contestant did not report it, all three, is what
+   separates a priority breach from a merely fabricated fill.
+3. **`ScoredFills` underflowed.** Stream mode computed `TotalFills - PhantomFills` on the
+   premise that phantoms were counted into `TotalFills`. They are not — `AddPhantom`
+   increments `PhantomFills` alone — so any session with more phantom fills than real
+   ones wrapped this uint64 to ~1.8e19. The equivalence tests never compared the field.
+4. **Duplicate acks were counted twice.** The batch collector deduped redelivered
+   `orders.acked` events on (order, exec type, T7); the streaming join never did, so a
+   producer retry inflated cumulative reported qty and manufactured overfill violations
+   against an innocent engine. Ported into the join as `pendingOrder.addAck` — a linear
+   scan over the handful of acks held for that order, so there is no per-order map
+   allocated 445k times a session.
+
+**Then a fifth, found by asking whether every class was actually reachable: neither mode
+could see a DROPPED order.** `emitReady` pushes an order to the validator only once it
+has at least one ack (`stream.go`), so an order the contestant never answered was
+discarded by the join. Full mode therefore never counted it in `ScoredOrders` — an engine
+that answered nothing at all scored 1.0 through the empty-session guard, exactly like the
+acker did before `MissedFill` — and invariants mode's lost-order branch, which lives in
+`Apply`, could only ever fire for an order that reached `Apply`, i.e. one whose responses
+failed the T7 sanity gate. `LostOrder`/`LostCancel` were effectively dead in production in
+both modes.
+
+Silently dropping orders and blindly ACKing them are the two ways to game pass 1;
+closing only the second would have left the gate as easy to walk around as before. The
+join now classifies each pending order (`pendingOrder.outcome`) and reports the
+unanswered ones through a new `AddLost` callback on both validators. A dropped order does
+NOT enter the reference book: T3 is captured from the *response*, so an unanswered order
+has no ingress timestamp and no place in the replay timeline. It is graded standalone —
+counted into `ScoredOrders`, flagged, dirtied — which is sufficient, because the failure
+is unconditional: no response is wrong whatever the book would have done.
+
+That work also exposed a **scoring bug in invariants mode's denominator**: `applied` was
+incremented ABOVE the lost-order branch, while `Finish` computes
+`ScoredOrders = applied + LostOrders + LostCancels` on the premise that lost orders
+returned before being counted. Every lost order therefore sat in the denominator twice,
+and an engine that answered nothing scored **0.5 instead of 0**. `applied` now increments
+only when an order actually enters the T7 reorder window — which is also the right
+denominator for the taint rate, since an order with no T7 says nothing about whether the
+T7 stream is trustworthy.
+
+Plus one defect in the book itself, found while making self-match detection live: a
+**repriced order lost its SMP identity**. `replace()` rebuilt the resting order without
+carrying `smpID`/`hasSMP`, so every repriced order was silently exempt from self-match
+prevention — the reference would match it against a same-id aggressor that a compliant
+contestant had correctly skipped, and then score the contestant for the missing fill.
+The correctness scenario uses the HFT action mix, which includes replaces, so this was
+live. The re-inserted order now inherits identity from the order it replaces.
+
+**`AGGRESSIVE_FILL_TOLERANCE_US` is deleted, not merely unread.** It accepted a fill the
+reference never produced when opposite liquidity had been resting within ±tolerance of
+the aggressor's `EffectiveT3` — a hedge against the replay interleaving differently from
+what a live engine could observe. It does not apply: pass 1 runs exactly ONE task
+(`buildCorrectnessTasks`), the worker opens one TCP connection per task
+(`connect_tasks`), so the session is a single flow, `TCPSeq` totally orders it,
+`CrossFlowTie` never engages, and the reference replays in wire order. An engine that
+processes in read order reproduces the reference exactly — there is no interleaving to
+forgive. Pass 2 is book-free and never consulted it. It was implemented only in the
+deleted batch path, making the documented env knob a production no-op, and the
+per-order availability windows feeding it (`book.avail`) grew O(session) on the live
+streaming path — an unbounded allocation in a validator whose whole design premise is
+bounded memory. `model.ParticipantOf`, its last caller, went with it.
+
+**Violation-class reachability is now pinned by tests, not by reading.** Three of these
+defects were classes that existed, were counted, were stored — and could never fire.
+`class_coverage_test.go` provokes every class full mode owns and asserts three things
+each: it fires, its exact counter and `ViolationCount()` both move, and it dirties its
+order so the score actually drops. That last one is the failure shape the original
+order-level score change was written for. Every assertion was mutation-verified by
+disabling each mechanism in turn and confirming the corresponding test fails. Adding a
+`ViolationType` without wiring it now fails a test rather than being discovered a session
+later.
+
+If the epoll-ordering problem (honest stock-socket engines scoring ~45%) is revisited,
+it needs a bounded per-level availability structure and a deliberate grading decision —
+not this knob. That work is the validator redesign, and it belongs to pass 2's
+cross-flow window, not to pass 1.
 
 ## Housekeeping
 

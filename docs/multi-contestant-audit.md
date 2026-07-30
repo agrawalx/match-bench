@@ -176,6 +176,8 @@ By violation type: Time and CancelReplaceLoss are directly ordering-derived. All
 
 `AGGRESSIVE_FILL_TOLERANCE_US` is wired only into the batch path (`validate.Run`) and is a no-op in the production streaming path: `StreamValidator.scoreOrder` never consults `AggressiveFillToleranceNs`, and `main.go` uses only the streaming validator (`validate/validate.go:117-137,286`, `validate/stream.go:123-171`, `main.go:205-217`).
 
+> **Update (2026-07-31).** Resolved by deletion. The batch path and the tolerance knob are both gone; grading is strict. Pass 1 runs one task on one connection, so it has no cross-flow interleaving to forgive, and pass 2 is book-free. See `docs/remaining-work.md` §"Validator: the batch path is deleted".
+
 Per-session replay (G2) works by full-topic scan + in-decoder filter: `StreamSession` opens a reader per partition of *both* `orders.sent` and `orders.acked`, discarding batches whose SessionID mismatches after decode (`source/stream.go:86-122,288,298`). Session start offset is pruned only by decoding a UUIDv7 timestamp from the session ID minus 60s margin (`source/drain.go:269-299`); non-UUIDv7 IDs fall back to reading each partition from `FirstOffset`. `VALIDATOR_CONCURRENCY` (default 4) runs that many parallel full-topic scans, so broker read amplification is O(N × window) and per-session memory is a 1M-order reorder window (`DefaultReorderWindow = 1<<20`) plus join buffer plus live book (`main.go:59,90-92`, `source/stream.go:29-30,117-122`). ContestantID is derived from the first ack event seen in the session, giving per-contestant replay for free as long as sessions are 1:1 with contestants (`stream.go:192-194`, `main.go:223-255`). The batch path (`DrainSession` + `validate.Run`) still exists but is memory-unbounded — the path that previously OOMed; streaming replaced it in production.
 
 ### Corrections from verification
@@ -481,6 +483,8 @@ Replay already works per session: `StreamSession` opens a reader per partition o
 
 The batch path (`DrainSession` + `validate.Run`) is memory-unbounded and already OOMed at 445k/885k orders; it is unreachable from production `main.go`. Delete it in Phase 3 once the tolerance semantics it uniquely holds are ported (Section 6).
 
+> **Update (2026-07-31).** Deleted. The tolerance was NOT ported — it was deleted too, as it forgives cross-flow interleaving that pass 1 (one task, one connection) does not have. What the batch path did uniquely hold, and what WAS ported, is self-match detection against the book's resting state: without it the streaming path could not detect a self-match at all.
+
 ### 5. Live leaderboard end-to-end (G3)
 
 Ground truth: the push skeleton **already exists** — score-computer publishes `LeaderboardUpdateEvent` to `leaderboard.updates` (`worker.go:90-105`), leaderboard-api consumes and broadcasts over SSE at `/api/events` (`consumer.go:40,61`, `main.go:96`), the frontend patches the react-query cache with a row flash (`useSSE.ts:63-72`, `useLeaderboard.ts:80-103`). What's missing is *mid-run* data and payload correctness.
@@ -508,6 +512,8 @@ Blast radius by violation type: **Time** and **CancelReplaceLoss** are directly 
 
 Existing mitigations are ineffective: the only forgiveness on the production path is `CrossFlowTie` with `TieToleranceNs = 100` (`order.go:14`) — 100ns against µs-ms skew excuses nothing. `AGGRESSIVE_FILL_TOLERANCE_US` is wired from env (`main.go:60`) but read only by batch `validate.Run` (`validate.go:117-137`), which nothing in production calls; `StreamValidator.scoreOrder` implements only tolerance==0 semantics. Consequence: honest stock-socket engines (both C++ and Go) score ~45%, and high scores currently require kernel-bypass networking that makes processing order match ingress order.
 
+> **Update (2026-07-31).** Two corrections to this section. (1) `AGGRESSIVE_FILL_TOLERANCE_US` is deleted, so it is no longer even a candidate mitigation — the diagnosis stands, the escape hatch does not. (2) The **SelfTrade** class is no longer ordering-sensitive in the way described above: `r.selfPrices` is gone. The reference book applies skip-and-continue, so a same-SMP pair produces no trade at all and the trade-derived check could never fire; detection now reads the book's RESTING state (`book.RestingSMPMatch`). Scope note: this whole section is about MULTI-flow replay, i.e. pass 2. Pass 1 is single-task/single-connection, where TCPSeq totally orders the session and none of this applies.
+
 #### 6.2 Candidates
 
 **A — Widen the cross-flow tie window** (`EPOLL_TIE_TOLERANCE_US`, ~200-1000µs, threaded through `CrossFlowTie`).
@@ -527,7 +533,7 @@ Same-flow TCPSeq authoritative; cross-flow orders within window W form equivalen
 
 B is the only proposal at small cost that repairs *all four* ordering-sensitive violation classes, because it corrects the replay order itself rather than forgiving individual symptoms. It needs no capture change, no protocol change, no engine surgery — a sort-key swap plus promotion reuse; the reorderer, join, and StreamValidator are untouched. Its trust assumption (T7 reflects processing order) is bounded by the anti-gaming checks and by the latency-score incentive, and its known blind spot (internal pipelining reordering ack emission) is exactly what D closes later if it matters in practice. A ships first because it is hours of work and immediately de-noises Time violations while B is in test. C is reserved for disputed scores: run the schedule-existence check offline on appeal rather than inline on every order. Acceptance test for B: the stock-socket C++ and Go engines, which embody correct matching under epoll/thread ordering, must score near-100% on price/time classes; kernel-bypass engines must not regress.
 
-Also in this workstream: port a tolerance hook into `StreamValidator.scoreOrder` or delete `AGGRESSIVE_FILL_TOLERANCE_US` entirely — a documented env knob that is a production no-op is worse than absent.
+Also in this workstream: port a tolerance hook into `StreamValidator.scoreOrder` or delete `AGGRESSIVE_FILL_TOLERANCE_US` entirely — a documented env knob that is a production no-op is worse than absent. **Done 2026-07-31: deleted.** Porting it was rejected — it would have needed a bounded per-level availability structure (the existing one grew O(session)), and it forgives the wrong thing: a fill the reference never produced, rather than the replay order that made it look wrong. B above corrects the order itself, which is the actual defect.
 
 ### 7. New components — and everything that stays
 

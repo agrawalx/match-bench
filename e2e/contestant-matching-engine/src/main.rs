@@ -52,15 +52,29 @@ struct Order {
     qty: u64,
     order_id: String,
     orig_id: String,
+    /// Self-match-prevention id (FIX tag 7928 / JSON `smp_id`). `None` means the order
+    /// carried no id and is UNCONSTRAINED — it may match anything, including another
+    /// order with no id. `Some(0)` is a real id, distinct from `None`.
+    smp_id: Option<u32>,
+}
+
+/// level_all_same_smp reports whether every remaining maker shares the aggressor's
+/// smp_id, meaning this price level can yield no further fills for it.
+fn level_all_same_smp(level: &std::collections::VecDeque<Resting>, agg: Option<u32>) -> bool {
+    let Some(a) = agg else { return false };
+    !level.is_empty() && level.iter().all(|r| r.smp_id == Some(a))
 }
 
 struct Resting {
     order_id: String,
     remaining: u64,
+    /// The resting order's SMP id; an aggressor carrying the same id skips it.
+    smp_id: Option<u32>,
     #[allow(dead_code)]
     seq: u64,
 }
 
+#[derive(Debug)]
 struct Fill {
     order_id: String,
     price: i64,
@@ -98,6 +112,9 @@ impl Engine {
     fn match_and_rest(&mut self, o: &Order, rest: bool, fills: &mut Vec<Fill>, done: &mut Vec<String>) {
         let mut remaining = o.qty;
         let buy = o.side == Side::Buy;
+        // Levels temporarily removed because every maker in them shares the aggressor's
+        // smp_id. Restored before this call returns — those orders are still live.
+        let mut parked_levels: Vec<(i64, std::collections::VecDeque<Resting>)> = Vec::new();
         while remaining > 0 {
             // best opposite price: buy aggressor takes lowest ask; sell takes highest bid
             let level_price = if buy {
@@ -122,8 +139,19 @@ impl Engine {
             } else {
                 self.bids.get_mut(&level_price).unwrap()
             };
+            // Self-match prevention (skip-and-continue): an aggressor never matches a
+            // resting order carrying the SAME smp_id. It skips that order and continues
+            // to the next one at this level; nothing is cancelled, and the skipped
+            // order keeps its place in the FIFO. An order with no id is unconstrained.
+            let mut skipped: std::collections::VecDeque<Resting> = Default::default();
             while remaining > 0 {
                 let Some(maker) = level.front_mut() else { break };
+                if let (Some(a), Some(m)) = (o.smp_id, maker.smp_id) {
+                    if a == m {
+                        skipped.push_back(level.pop_front().unwrap());
+                        continue;
+                    }
+                }
                 let traded = remaining.min(maker.remaining);
                 // o is the aggressor (taker, 851=2); the resting maker is 851=1.
                 fills.push(Fill { order_id: o.order_id.clone(), price: level_price, qty: traded, liquidity: 2 });
@@ -136,26 +164,52 @@ impl Engine {
                     done.push(m.order_id);
                 }
             }
+            // Restore skipped makers at the FRONT, in their original order: they
+            // arrived before anything still queued, so putting them back elsewhere
+            // would silently reorder time priority.
+            while let Some(r) = skipped.pop_back() {
+                level.push_front(r);
+            }
             if level.is_empty() {
                 if buy {
                     self.asks.remove(&level_price);
                 } else {
                     self.bids.remove(&level_price);
                 }
+            } else if remaining > 0 && level_all_same_smp(level, o.smp_id) {
+                // Every maker left at this level shares the aggressor's id, so it can
+                // yield nothing more. The aggressor must still CONTINUE to the next
+                // price level — that is the "continue" in skip-and-continue — so park
+                // the level out of the tree for this call and restore it afterwards.
+                // Breaking here instead would stop matching entirely and leave better
+                // prices deeper in the book untouched.
+                let parked = if buy {
+                    self.asks.remove(&level_price)
+                } else {
+                    self.bids.remove(&level_price)
+                };
+                if let Some(lv) = parked {
+                    parked_levels.push((level_price, lv));
+                }
             }
         }
 
+        for (price, lv) in parked_levels {
+            let tree = if buy { &mut self.asks } else { &mut self.bids };
+            tree.entry(price).or_default().extend(lv);
+        }
+
         if rest && remaining > 0 && o.kind == Kind::NewLimit {
-            self.insert(o.order_id.clone(), o.side, o.price, remaining);
+            self.insert(o.order_id.clone(), o.side, o.price, remaining, o.smp_id);
         } else {
             // fully filled, or a market order (never rests) -> left the book
             done.push(o.order_id.clone());
         }
     }
 
-    fn insert(&mut self, order_id: String, side: Side, price: i64, remaining: u64) {
+    fn insert(&mut self, order_id: String, side: Side, price: i64, remaining: u64, smp_id: Option<u32>) {
         self.seq += 1;
-        let ro = Resting { order_id: order_id.clone(), remaining, seq: self.seq };
+        let ro = Resting { order_id: order_id.clone(), remaining, smp_id, seq: self.seq };
         self.index.insert(order_id, (side, price));
         let tree = if side == Side::Buy { &mut self.bids } else { &mut self.asks };
         tree.entry(price).or_default().push_back(ro);
@@ -209,7 +263,7 @@ impl Engine {
         }
         // reprice or qty-increase: remove + re-insert at the new level (no match, per reference)
         self.remove(&o.orig_id, done);
-        self.insert(new_id, o.side, o.price, o.qty);
+        self.insert(new_id, o.side, o.price, o.qty, o.smp_id);
     }
 }
 
@@ -576,6 +630,9 @@ fn json_fill(order_id: &str, price: i64, qty: u64, liquidity: u8) -> String {
 /// ord_type=MARKET); Cancel/Replace are distinguished by an "action" field.
 fn parse_order_json(body: &str) -> Option<Order> {
     let order_id = json_string(body, "cl_ord_id")?;
+    // Sent as a fixed-width STRING ("007"): JSON forbids zero-padded numbers, so the
+    // producer pads a string to keep its byte length constant. Absent = unconstrained.
+    let smp_id = json_string(body, "smp_id").and_then(|v| v.trim().parse::<u32>().ok());
     match json_string(body, "action").as_deref() {
         Some("CANCEL") => Some(Order {
             kind: Kind::Cancel,
@@ -584,6 +641,7 @@ fn parse_order_json(body: &str) -> Option<Order> {
             qty: 0,
             order_id,
             orig_id: json_string(body, "orig_cl_ord_id").unwrap_or_default(),
+            smp_id,
         }),
         Some("REPLACE") => Some(Order {
             kind: Kind::Replace,
@@ -592,6 +650,7 @@ fn parse_order_json(body: &str) -> Option<Order> {
             qty: json_u64(body, "qty")?,
             order_id,
             orig_id: json_string(body, "orig_cl_ord_id").unwrap_or_default(),
+            smp_id,
         }),
         _ => {
             let is_market = json_string(body, "ord_type").as_deref() == Some("MARKET");
@@ -602,6 +661,7 @@ fn parse_order_json(body: &str) -> Option<Order> {
                 qty: json_u64(body, "qty")?,
                 order_id,
                 orig_id: String::new(),
+                smp_id,
             })
         }
     }
@@ -751,6 +811,8 @@ fn parse_order(msg: &[u8]) -> Option<Order> {
         .to_string();
     let qty = extract_tag(msg, b"38").and_then(parse_u64).unwrap_or(0);
     let price = extract_tag(msg, b"44").and_then(parse_i64).unwrap_or(0);
+    // FIX tag 7928 = SelfMatchPreventionID. Absent means unconstrained.
+    let smp_id = extract_tag(msg, b"7928").and_then(parse_u64).map(|v| v as u32);
     let ordtype = extract_tag(msg, b"40");
     let kind = match mt {
         b"D" => {
@@ -764,7 +826,7 @@ fn parse_order(msg: &[u8]) -> Option<Order> {
         b"G" => Kind::Replace,
         _ => return None, // logon/heartbeat/etc. ignored
     };
-    Some(Order { kind, side, price, qty, order_id, orig_id })
+    Some(Order { kind, side, price, qty, order_id, orig_id, smp_id })
 }
 
 fn parse_u64(v: &[u8]) -> Option<u64> {
@@ -826,8 +888,13 @@ fn fill_er(order_id: &str, price: i64, qty: u64, seq: u64, liquidity: u8) -> Vec
 mod tests {
     use super::*;
 
-    fn ord(kind: Kind, side: Side, price: i64, qty: u64, id: &str) -> Order {
-        Order { kind, side, price, qty, order_id: id.into(), orig_id: String::new() }
+    pub(super) fn ord(kind: Kind, side: Side, price: i64, qty: u64, id: &str) -> Order {
+        Order { kind, side, price, qty, order_id: id.into(), orig_id: String::new(), smp_id: None }
+    }
+
+    /// ord_smp is `ord` with a self-match-prevention id attached.
+    pub(super) fn ord_smp(kind: Kind, side: Side, price: i64, qty: u64, id: &str, smp: u32) -> Order {
+        Order { smp_id: Some(smp), ..ord(kind, side, price, qty, id) }
     }
 
     #[test]
@@ -1070,5 +1137,103 @@ mod tests {
         assert!(s.contains("\x0131=10000\x01"), "LastPx=raw price");
         assert!(s.contains("\x0111=ord-9\x01"));
         assert!(s.contains("\x01851=2\x01"), "LastLiquidityInd=taker");
+    }
+}
+
+#[cfg(test)]
+mod smp_tests {
+    use super::tests::{ord, ord_smp};
+    use super::*;
+
+    /// The core rule, and it must match services/correctness-validator/internal/book
+    /// exactly: an aggressor skips a resting order sharing its smp_id and continues to
+    /// the next maker at that level. The skipped order stays RESTING — skip-and-continue
+    /// cancels nothing.
+    #[test]
+    fn skips_same_smp_id_and_leaves_it_resting() {
+        let mut e = Engine::default();
+        e.process(&ord_smp(Kind::NewLimit, Side::Sell, 100, 10, "mine", 3));
+        e.process(&ord_smp(Kind::NewLimit, Side::Sell, 100, 10, "other", 5));
+
+        let (fills, done) = e.process(&ord_smp(Kind::NewLimit, Side::Buy, 100, 10, "taker", 3));
+        let ids: Vec<&str> = fills.iter().map(|f| f.order_id.as_str()).collect();
+        assert!(!ids.contains(&"mine"), "matched an order sharing its smp_id: {ids:?}");
+        assert!(ids.contains(&"other"), "should have skipped to 'other': {ids:?}");
+        assert!(!done.contains(&"mine".to_string()), "skipped order must not be removed");
+    }
+
+    /// No id = unconstrained. This is all of pass-2's traffic, where SMP is not graded
+    /// and the field is omitted from the wire entirely, so those runs must behave
+    /// exactly as they did before SMP existed.
+    #[test]
+    fn no_smp_id_matches_anything() {
+        let mut e = Engine::default();
+        e.process(&ord(Kind::NewLimit, Side::Sell, 100, 10, "R"));
+        let (fills, _) = e.process(&ord(Kind::NewLimit, Side::Buy, 100, 10, "T"));
+        assert_eq!(fills.len(), 2, "id-less orders must match");
+    }
+
+    /// 0 is a VALID id, not "absent". Conflating them would make every id-less order
+    /// look like participant 0 and stop the engine matching anything at all.
+    #[test]
+    fn zero_is_a_real_id_not_absent() {
+        let mut e = Engine::default();
+        e.process(&ord_smp(Kind::NewLimit, Side::Sell, 100, 10, "r0", 0));
+        let (f, _) = e.process(&ord_smp(Kind::NewLimit, Side::Buy, 100, 10, "t1", 1));
+        assert_eq!(f.len(), 2, "id 1 must match resting id 0");
+
+        let mut e2 = Engine::default();
+        e2.process(&ord_smp(Kind::NewLimit, Side::Sell, 100, 10, "r0b", 0));
+        let (f2, _) = e2.process(&ord_smp(Kind::NewLimit, Side::Buy, 100, 10, "t0", 0));
+        assert!(f2.is_empty(), "id 0 must not match resting id 0: {f2:?}");
+    }
+
+    /// Skipping must not stop the aggressor: it continues past its own order to worse
+    /// prices, exactly as if the skipped order were not there.
+    #[test]
+    fn continues_to_next_price_level_after_skipping() {
+        let mut e = Engine::default();
+        e.process(&ord_smp(Kind::NewLimit, Side::Sell, 100, 10, "mine100", 2));
+        e.process(&ord_smp(Kind::NewLimit, Side::Sell, 101, 10, "other101", 6));
+
+        let (fills, _) = e.process(&ord_smp(Kind::NewLimit, Side::Buy, 101, 10, "taker", 2));
+        let ids: Vec<&str> = fills.iter().map(|f| f.order_id.as_str()).collect();
+        assert!(ids.contains(&"other101"), "must reach the next level: {ids:?}");
+        assert!(!ids.contains(&"mine100"), "must not match own order: {ids:?}");
+    }
+
+    /// A book where every order shares one id yields NO fills and terminates. This is
+    /// what pass 1 looked like before SMP ids existed: one task meant one identity, so
+    /// the reference book flagged every fill as a self-trade and a correct engine
+    /// scored 0 while an engine that refused to trade scored 1.0.
+    #[test]
+    fn fully_self_crossing_book_produces_no_fills_and_terminates() {
+        let mut e = Engine::default();
+        for (i, id) in ["a", "b", "c"].iter().enumerate() {
+            e.process(&ord_smp(Kind::NewLimit, Side::Sell, 100 + i as i64, 10, id, 7));
+        }
+        let (fills, done) = e.process(&ord_smp(Kind::NewLimit, Side::Buy, 200, 30, "agg", 7));
+        assert!(fills.is_empty(), "nothing may match: {fills:?}");
+        assert!(!done.contains(&"a".to_string()), "resting orders must survive");
+    }
+
+    /// FIX tag 7928 and the JSON smp_id field must both parse, since the platform
+    /// grades FIX, REST and WS identically.
+    #[test]
+    fn parses_smp_id_from_both_protocols() {
+        // extract_tag matches on a LEADING SOH, so a real frame's 8=/9= header must be
+        // present — a body starting at 35= leaves the first tag unreachable.
+        let fix = finalize("35=D\x0149=B\x0156=C\x0134=1\x0111=o1\x0155=IICPC\x0154=1\x0138=5\x0140=2\x0144=100\x017928=007\x0159=0\x01");
+        let o = parse_order(&fix).expect("fix order");
+        assert_eq!(o.smp_id, Some(7), "tag 7928 must parse (zero-padded)");
+
+        let no_tag = finalize("35=D\x0149=B\x0156=C\x0134=1\x0111=o2\x0155=IICPC\x0154=1\x0138=5\x0140=2\x0144=100\x0159=0\x01");
+        assert_eq!(parse_order(&no_tag).expect("fix").smp_id, None, "absent tag = unconstrained");
+
+        let json = r#"{"cl_ord_id":"o3","symbol":"IICPC","side":"BUY","qty":5,"price":100,"smp_id":"003"}"#;
+        assert_eq!(parse_order_json(json).expect("json").smp_id, Some(3), "smp_id string must parse");
+
+        let json_none = r#"{"cl_ord_id":"o4","symbol":"IICPC","side":"BUY","qty":5,"price":100}"#;
+        assert_eq!(parse_order_json(json_none).expect("json").smp_id, None);
     }
 }

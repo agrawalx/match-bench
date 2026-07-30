@@ -189,9 +189,12 @@ func TestCollectorsCountDecodeErrors(t *testing.T) {
 
 	sc := &sentCollector{sessionID: sid}
 	sc.handle(garbage)
-	sentPayload, err := msgpack.Marshal(topics.OrderSentBatch{
+	// V2 positional envelope — the format the producer actually writes.
+	sentPayload, err := msgpack.Marshal(topics.OrderSentBatchV2{
 		SessionID: sid,
-		Events:    []topics.OrderSentEvent{{SessionID: sid, OrderID: "A", Price: 100, Qty: 10, Side: "BUY", PayloadType: "NEW", OrdType: "LIMIT"}},
+		Events: []topics.OrderSentEventFields{
+			{OrderID: "A", Price: 100, Qty: 10, Side: "BUY", PayloadType: "NEW", OrdType: "LIMIT"},
+		},
 	})
 	if err != nil {
 		t.Fatalf("msgpack marshal: %v", err)
@@ -229,7 +232,7 @@ func newUUIDv7(at time.Time) string {
 // It keeps validation, side effects, and returned values within this package's contract.
 func writeSent(ctx context.Context, t *testing.T, brokers []string, sid string, events []topics.OrderSentEvent) {
 	t.Helper()
-	batch := topics.OrderSentBatch{SessionID: sid, WorkerID: "w0", Events: events}
+	batch := sentBatchV2(sid, events)
 	payload, err := msgpack.Marshal(batch)
 	if err != nil {
 		t.Fatalf("msgpack marshal: %v", err)
@@ -258,4 +261,29 @@ func TestResolveStart(t *testing.T) {
 	if got := resolveStart(42, 1197); got != 42 {
 		t.Fatalf("seek=42 must be honored, got %d", got)
 	}
+}
+
+// sentBatchV2 builds the positional V2 envelope from full events, hoisting the identity
+// fields the way the Rust producer does. Shared by the drain tests so no test encodes
+// the superseded named-map format.
+func sentBatchV2(sid string, events []topics.OrderSentEvent) topics.OrderSentBatchV2 {
+	fields := make([]topics.OrderSentEventFields, 0, len(events))
+	for _, e := range events {
+		fields = append(fields, topics.OrderSentEventFields{
+			TaskID:         e.TaskID,
+			OrderID:        e.OrderID,
+			TargetSendTSNS: e.TargetSendTSNS,
+			SendTSNS:       e.SendTSNS,
+			RecvDoneTSNS:   e.RecvDoneTSNS,
+			TimedOut:       e.TimedOut,
+			Price:          e.Price,
+			Qty:            e.Qty,
+			Side:           e.Side,
+			PayloadType:    e.PayloadType,
+			OrdType:        e.OrdType,
+			OrigOrderID:    e.OrigOrderID,
+			BarrierEpochNs: e.BarrierEpochNs,
+		})
+	}
+	return topics.OrderSentBatchV2{SessionID: sid, WorkerID: "w0", Events: fields}
 }

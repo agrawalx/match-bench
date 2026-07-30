@@ -345,6 +345,80 @@ type OrderSentEvent struct {
 	BarrierEpochNs uint64 `json:"barrier_epoch_ns" msgpack:"barrier_epoch_ns"`
 }
 
+// OrderSentEventFields is the per-order wire payload of the POSITIONAL orders.sent
+// batch envelope (OrderSentBatchV2). It is the Go mirror of Rust's
+// `OrderSentEventFields` in schemas/rust/src/lib.rs, and FIELD ORDER IS THE WIRE
+// CONTRACT — the encoding is a msgpack array, not a map, so a reordered field here
+// silently decodes into the wrong destination rather than failing.
+//
+// session_id / submission_id / worker_id are absent by design: they are identical for
+// every event in a batch and are hoisted into the envelope.
+type OrderSentEventFields struct {
+	_msgpack       struct{} `msgpack:",as_array"`
+	TaskID         uint32
+	OrderID        string
+	TargetSendTSNS uint64
+	SendTSNS       uint64
+	RecvDoneTSNS   uint64
+	TimedOut       bool
+	Price          uint64
+	Qty            uint64
+	Side           string // BUY | SELL
+	PayloadType    string // NEW | CANCEL | REPLACE
+	OrdType        string // LIMIT | MARKET
+	OrigOrderID    string
+	BarrierEpochNs uint64
+}
+
+// OrderSentBatchV2 is the positional-msgpack envelope the bot-fleet producer actually
+// writes to orders.sent (Rust `OrderSentBatchV2Ref`). Mirror of Rust's
+// `OrderSentBatchV2`; field order IS the wire contract.
+//
+// WHY THIS EXISTS: the producer moved orders.sent to this hoisted, positional format,
+// and telemetry-ingester was updated with it — but the correctness-validator, the OTHER
+// orders.sent consumer, kept decoding the old named-map OrderSentBatch. Positional
+// bytes decoded as a named map yield a garbage SessionID, so the validator's
+// session-id filter rejected EVERY batch: it reported sent=0 while the topic held
+// ~600k records, which in turn made matched=0 and left every correctness score
+// meaningless. Any future change to the wire format must update both consumers;
+// TestOrderSentBatchV2WireContract pins the layout so drift fails a test instead of a
+// benchmark.
+type OrderSentBatchV2 struct {
+	_msgpack     struct{} `msgpack:",as_array"`
+	SessionID    string
+	SubmissionID string
+	WorkerID     string
+	Events       []OrderSentEventFields
+}
+
+// IntoEvents reconstitutes full OrderSentEvents from the hoisted envelope, mirroring
+// Rust's OrderSentBatchV2::into_events, so consumers that operate on the per-event
+// struct need not know about the wire layout.
+func (b OrderSentBatchV2) IntoEvents() []OrderSentEvent {
+	out := make([]OrderSentEvent, 0, len(b.Events))
+	for _, f := range b.Events {
+		out = append(out, OrderSentEvent{
+			SessionID:      b.SessionID,
+			SubmissionID:   b.SubmissionID,
+			WorkerID:       b.WorkerID,
+			TaskID:         f.TaskID,
+			OrderID:        f.OrderID,
+			TargetSendTSNS: f.TargetSendTSNS,
+			SendTSNS:       f.SendTSNS,
+			RecvDoneTSNS:   f.RecvDoneTSNS,
+			TimedOut:       f.TimedOut,
+			Price:          f.Price,
+			Qty:            f.Qty,
+			Side:           f.Side,
+			PayloadType:    f.PayloadType,
+			OrdType:        f.OrdType,
+			OrigOrderID:    f.OrigOrderID,
+			BarrierEpochNs: f.BarrierEpochNs,
+		})
+	}
+	return out
+}
+
 // OrderAckedBatch groups the state and dependencies used by this package.
 // Keep this type aligned with the runtime contract around it.
 type OrderAckedBatch struct {

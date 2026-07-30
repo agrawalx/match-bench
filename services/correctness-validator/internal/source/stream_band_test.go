@@ -78,9 +78,43 @@ func writeEventsToPartition(ctx context.Context, t *testing.T, brokers []string,
 	}
 }
 
+// sentBatchPayload encodes the POSITIONAL V2 envelope the real bot-fleet producer
+// writes. It must not use the older named-map OrderSentBatch: that encoding is not what
+// StreamSession decodes, so a V1 fixture would make this test pass while the production
+// path stayed broken — which is precisely how sent=0 went unnoticed.
 func sentBatchPayload(t *testing.T, sid string, events []topics.OrderSentEvent) []byte {
 	t.Helper()
-	payload, err := msgpack.Marshal(topics.OrderSentBatch{SessionID: sid, WorkerID: "w0", Events: events})
+	fields := make([]topics.OrderSentEventFields, 0, len(events))
+	var submissionID, workerID string
+	if len(events) > 0 {
+		submissionID, workerID = events[0].SubmissionID, events[0].WorkerID
+	}
+	if workerID == "" {
+		workerID = "w0"
+	}
+	for _, e := range events {
+		fields = append(fields, topics.OrderSentEventFields{
+			TaskID:         e.TaskID,
+			OrderID:        e.OrderID,
+			TargetSendTSNS: e.TargetSendTSNS,
+			SendTSNS:       e.SendTSNS,
+			RecvDoneTSNS:   e.RecvDoneTSNS,
+			TimedOut:       e.TimedOut,
+			Price:          e.Price,
+			Qty:            e.Qty,
+			Side:           e.Side,
+			PayloadType:    e.PayloadType,
+			OrdType:        e.OrdType,
+			OrigOrderID:    e.OrigOrderID,
+			BarrierEpochNs: e.BarrierEpochNs,
+		})
+	}
+	payload, err := msgpack.Marshal(topics.OrderSentBatchV2{
+		SessionID:    sid,
+		SubmissionID: submissionID,
+		WorkerID:     workerID,
+		Events:       fields,
+	})
 	if err != nil {
 		t.Fatalf("msgpack marshal sent: %v", err)
 	}

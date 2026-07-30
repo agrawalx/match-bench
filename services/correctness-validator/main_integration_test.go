@@ -208,12 +208,16 @@ func TestIntegration_TriggerConsumer(t *testing.T) {
 // It keeps validation, side effects, and returned values within this package's contract.
 func produceSession(ctx context.Context, t *testing.T, brokers []string, sessionID, contestant string) {
 	t.Helper()
-	sent := topics.OrderSentBatch{
+	// POSITIONAL V2 envelope (identity fields hoisted) — what the Rust bot-fleet
+	// producer writes and what StreamSession decodes. Encoding the superseded named-map
+	// OrderSentBatch here would make this integration test pass against a format
+	// nothing produces.
+	sent := topics.OrderSentBatchV2{
 		SessionID: sessionID,
 		WorkerID:  "w0",
-		Events: []topics.OrderSentEvent{
-			{SessionID: sessionID, OrderID: "M1", Price: 100, Qty: 10, Side: "SELL", PayloadType: "NEW", OrdType: "LIMIT"},
-			{SessionID: sessionID, OrderID: "T1", Price: 100, Qty: 10, Side: "BUY", PayloadType: "NEW", OrdType: "LIMIT"},
+		Events: []topics.OrderSentEventFields{
+			{OrderID: "M1", Price: 100, Qty: 10, Side: "SELL", PayloadType: "NEW", OrdType: "LIMIT"},
+			{OrderID: "T1", Price: 100, Qty: 10, Side: "BUY", PayloadType: "NEW", OrdType: "LIMIT"},
 		},
 	}
 	acked := topics.OrderAckedBatch{

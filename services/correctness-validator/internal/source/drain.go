@@ -40,14 +40,19 @@ type sentCollector struct {
 // handle applies behavior for its receiver performs the package-specific operation described by its name.
 // It keeps validation, side effects, and returned values within this package's contract.
 func (c *sentCollector) handle(m kafka.Message) {
-	var b topics.OrderSentBatch
+	// Positional V2 envelope, matching decodeBatch in stream.go. DrainSession is no
+	// longer on the live path (StreamSession replaced it), but it is still the
+	// independent cross-check in stream_integration_test.go — so it has to decode the
+	// same bytes the producer writes, or that cross-check silently compares the
+	// streaming path against nothing.
+	var b topics.OrderSentBatchV2
 	if err := msgpack.Unmarshal(m.Value, &b); err != nil {
 		c.decodeErrors++
 		recordDecodeError(topics.TopicOrdersSent, m, err)
 		return
 	}
 	if b.SessionID == c.sessionID {
-		c.events = append(c.events, b.Events...)
+		c.events = append(c.events, b.IntoEvents()...)
 	}
 }
 

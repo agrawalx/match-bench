@@ -341,7 +341,14 @@ func decodeBatch(m kafka.Message, sessionID string, isAck bool) (tsBatch, bool) 
 		}
 		return tsBatch{ts: b.Events[0].T3XDPIngressNS, isAck: true, acks: b.Events}, true
 	}
-	var b topics.OrderSentBatch
+	// orders.sent uses the POSITIONAL V2 envelope (Rust OrderSentBatchV2Ref) with
+	// session_id/submission_id/worker_id hoisted out of the per-event payload. Decoding
+	// it as the older named-map OrderSentBatch does not error — it silently yields a
+	// garbage SessionID, so the filter below dropped every batch and this validator
+	// reported sent=0 against a topic holding ~600k records. See
+	// schemas/go/topics/wire_contract_test.go, which pins the layout against real
+	// producer bytes.
+	var b topics.OrderSentBatchV2
 	if err := msgpack.Unmarshal(m.Value, &b); err != nil {
 		recordDecodeError(topics.TopicOrdersSent, m, err)
 		return tsBatch{}, false
@@ -349,5 +356,6 @@ func decodeBatch(m kafka.Message, sessionID string, isAck bool) (tsBatch, bool) 
 	if b.SessionID != sessionID || len(b.Events) == 0 {
 		return tsBatch{}, false
 	}
-	return tsBatch{ts: b.Events[0].SendTSNS, isAck: false, sent: b.Events}, true
+	events := b.IntoEvents()
+	return tsBatch{ts: events[0].SendTSNS, isAck: false, sent: events}, true
 }

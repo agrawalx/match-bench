@@ -226,6 +226,22 @@ func BuildAll(cfg Config) ([]ScenarioRow, error) {
 // §5, P-F pass 1): exactly one task, no pacer (TargetRPS: 0 is the max-rate
 // sentinel honored by bot-fleet's write loops), single connection so TCPSeq
 // gives an unambiguous total order, HFT action mix.
+//
+// SMPIDCount: 8 is what makes this pass scoreable. One task means one connection,
+// which is deliberate — TCPSeq then totally orders every message. But it also means
+// every order would share a single participant identity, so the reference book's
+// self-trade check fired on EVERY fill: a correct engine scored 0 while an engine
+// that refused to trade produced no fills and scored 1.0. Rotating 8 self-match
+// prevention ids across orders on that one connection restores real cross-participant
+// matching (the broker model: one session, many participants) without giving up the
+// deterministic wire order. Scale scenarios leave this 0 — SMP is not graded in pass
+// 2, and omitting the field keeps their frames byte-identical to pre-SMP output.
+// correctnessSMPIDCount is how many self-match-prevention ids the correctness
+// scenario's single task rotates through. Must be >= 2 for any matching to occur at
+// all; 8 gives a realistic book without making self-crossing rare enough to go
+// untested (roughly 1 in 8 potential matches is self-crossing).
+const correctnessSMPIDCount = 8
+
 func buildCorrectnessTasks(cfg Config) []topics.TaskSpec {
 	return []topics.TaskSpec{
 		{
@@ -237,6 +253,7 @@ func buildCorrectnessTasks(cfg Config) []topics.TaskSpec {
 			MarketPct:     cfg.HFTMarketPct,
 			CancelPct:     cfg.HFTCancelPct,
 			ReplacePct:    cfg.HFTReplacePct,
+			SMPIDCount:    correctnessSMPIDCount,
 		},
 	}
 }

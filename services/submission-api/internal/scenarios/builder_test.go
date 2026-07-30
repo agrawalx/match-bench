@@ -312,3 +312,36 @@ func find(t *testing.T, rows []ScenarioRow, name string) ScenarioRow {
 	t.Fatalf("scenario %q not found", name)
 	return ScenarioRow{}
 }
+
+// TestCorrectnessScenarioSeedsSMPIDs pins the seeding that makes pass 1 scoreable at
+// all. Without rotating SMP ids, the correctness scenario's single task gives every
+// order one participant identity, the reference book flags every fill as a self-trade,
+// and a CORRECT engine scores 0 while one that refuses to trade scores 1.0.
+func TestCorrectnessScenarioSeedsSMPIDs(t *testing.T) {
+	rows, err := BuildAll(DefaultConfig())
+	if err != nil {
+		t.Fatalf("BuildAll: %v", err)
+	}
+	c := find(t, rows, "correctness")
+	if len(c.TaskSpecs) != 1 {
+		t.Fatalf("correctness must stay a single task (one connection => total TCPSeq order), got %d", len(c.TaskSpecs))
+	}
+	if got := c.TaskSpecs[0].SMPIDCount; got < 2 {
+		t.Errorf("correctness SMPIDCount = %d; must be >= 2 or every match is a self-match", got)
+	}
+	if got := c.TaskSpecs[0].SMPIDCount; got != correctnessSMPIDCount {
+		t.Errorf("correctness SMPIDCount = %d, want %d", got, correctnessSMPIDCount)
+	}
+
+	// Scale scenarios must NOT carry SMP ids: SMP is not graded in pass 2, and omitting
+	// the field keeps their wire frames byte-identical to pre-SMP output.
+	for _, name := range []string{"constant", "spike", "ramp"} {
+		s := find(t, rows, name)
+		for i, ts := range s.TaskSpecs {
+			if ts.SMPIDCount != 0 {
+				t.Errorf("%s task %d SMPIDCount = %d, want 0", name, i, ts.SMPIDCount)
+				break
+			}
+		}
+	}
+}

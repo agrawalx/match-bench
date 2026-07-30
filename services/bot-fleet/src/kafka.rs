@@ -325,6 +325,26 @@ pub fn enqueue_to_partition(
     }
 }
 
+/// flush_producer blocks until every queued message has been delivered (or the timeout
+/// expires), returning the number still undelivered.
+///
+/// This is NOT optional at shutdown. enqueue_to_partition is fire-and-forget: it hands the
+/// record to librdkafka's internal queue and drops the DeliveryFuture, so "flushed" in the
+/// caller's accounting means ENQUEUED, not delivered. With linger.ms batching and a queue
+/// sized in the hundreds of megabytes, a process that returns without flushing discards
+/// whatever is still queued — silently, since nothing inspects delivery reports. In the
+/// capture that showed up downstream as orders whose responses simply never existed.
+pub fn flush_producer(producer: &KafkaProducer, timeout: Duration) -> Result<i32> {
+    let _ = producer.inner.flush(timeout);
+    Ok(producer.inner.in_flight_count())
+}
+
+/// in_flight_count reports messages queued in the producer but not yet acknowledged by
+/// the broker. A rising value means the producer is being drained slower than it is fed.
+pub fn in_flight_count(producer: &KafkaProducer) -> i32 {
+    producer.inner.in_flight_count()
+}
+
 /// poll drives the producer's background delivery/callback queue. Call it when an
 /// enqueue reports QueueFull to let in-flight messages drain before retrying.
 pub fn poll_producer(producer: &KafkaProducer, timeout: Duration) {

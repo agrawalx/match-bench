@@ -140,6 +140,110 @@ fn is_spec_stale(published_at_unix_ns: u64, now_unix_ns: u64, max_age_s: u64) ->
     now_unix_ns.saturating_sub(published_at_unix_ns) > max_age_ns
 }
 
+/// Default MAX_CONCURRENT_WORKLOADS: how many workload specs one worker executes at
+/// once.
+///
+/// Was effectively 1 (the consume loop awaited each `run_workload` inline), which
+/// serialized two concurrent sessions that happened to land on the same pod no matter
+/// how small their shards were. The cap is what keeps concurrency from breaking the
+/// memory reasoning in k8s/benchmark/bot-fleet/deployment.yaml: worst case per
+/// workload is tasks x BOT_MAX_INFLIGHT_PER_TASK x ~350 B, so the invariant to hold is
+///
+///   MAX_CONCURRENT_WORKLOADS x (tasks x inflight x ~350 B) <= container memory limit
+///
+/// 2 is safe for EKS-sized shards (1000 tasks x 10k inflight ~= 3.5 GiB each against a
+/// 6Gi limit); local shards are ~200 tasks and tolerate more.
+const DEFAULT_MAX_CONCURRENT_WORKLOADS: usize = 2;
+
+/// max_concurrent_workloads reads MAX_CONCURRENT_WORKLOADS from the environment,
+/// following this codebase's inline env-var parsing convention. A parsed 0 is
+/// promoted to 1: zero would deadlock the loop by admitting nothing.
+fn max_concurrent_workloads() -> usize {
+    std::env::var("MAX_CONCURRENT_WORKLOADS")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .map(|v| v.max(1))
+        .unwrap_or(DEFAULT_MAX_CONCURRENT_WORKLOADS)
+}
+
+/// InFlight tracks which partitions currently have a workload executing, and enforces
+/// the two admission rules that keep concurrent execution safe:
+///
+///  1. **At most one workload in flight per partition.** Offsets are committed per
+///     partition after a workload finishes, so two concurrent workloads on the same
+///     partition would make commits order-dependent: if the second finished first and
+///     committed its offset, the committed position would move PAST the first, losing
+///     it on restart. One-per-partition makes every commit independent and correct.
+///     This costs nothing in practice because the controller's partition lease already
+///     guarantees two concurrent sessions occupy different partitions.
+///  2. **A global concurrency cap** (see MAX_CONCURRENT_WORKLOADS) so memory stays
+///     bounded.
+///
+/// Kept as a separate type with no Kafka dependency so the admission logic is unit
+/// testable without a broker.
+#[derive(Debug, Default)]
+struct InFlight {
+    /// partition -> the concurrency SLOT index that partition's workload occupies.
+    /// The slot is what makes each concurrent workload's barrier consumer group
+    /// distinct (see barrier_group): slots are bounded by MAX_CONCURRENT_WORKLOADS and
+    /// reused, so a pod only ever creates a small fixed set of broker-side groups.
+    partitions: std::collections::HashMap<i32, usize>,
+}
+
+/// Why a workload could not be admitted right now. Both cases mean "retry later",
+/// never "drop": the caller leaves the message uncommitted so Kafka redelivers it.
+#[derive(Debug, PartialEq, Eq)]
+enum Reject {
+    /// This partition already has a workload executing (rule 1).
+    PartitionBusy,
+    /// The global concurrency cap is reached (rule 2).
+    AtCapacity,
+}
+
+impl InFlight {
+    fn new() -> Self {
+        Self {
+            partitions: std::collections::HashMap::new(),
+        }
+    }
+
+    /// try_admit reserves `partition` for a workload and returns the concurrency SLOT
+    /// index it was given, or explains why it cannot be admitted.
+    ///
+    /// The partition-busy check runs FIRST so a busy partition is reported as such even
+    /// when the worker also happens to be at capacity — the two conditions have
+    /// different remedies (wait for that workload vs. wait for any workload).
+    fn try_admit(&mut self, partition: i32, cap: usize) -> Result<usize, Reject> {
+        if self.partitions.contains_key(&partition) {
+            return Err(Reject::PartitionBusy);
+        }
+        if self.partitions.len() >= cap {
+            return Err(Reject::AtCapacity);
+        }
+        // Lowest free slot, so slot indices stay in [0, cap) and are reused rather than
+        // growing without bound.
+        let used: std::collections::HashSet<usize> = self.partitions.values().copied().collect();
+        let slot = (0..cap).find(|s| !used.contains(s)).ok_or(Reject::AtCapacity)?;
+        self.partitions.insert(partition, slot);
+        Ok(slot)
+    }
+
+    /// finish releases a partition once its workload has completed AND its offset has
+    /// been committed.
+    fn finish(&mut self, partition: i32) {
+        self.partitions.remove(&partition);
+    }
+
+    fn len(&self) -> usize {
+        self.partitions.len()
+    }
+
+    #[cfg(test)]
+    fn is_empty(&self) -> bool {
+        self.partitions.is_empty()
+    }
+}
+
 /// run starts the bot-fleet worker loop.
 /// It consumes workload assignments, executes each one, and exits on a
 /// shutdown signal (SIGINT/Ctrl-C or SIGTERM from kubelet).
@@ -200,13 +304,50 @@ pub async fn run(mut config: Config) -> Result<()> {
         });
     }
 
+    // Workloads execute on spawned tasks rather than inline, so one worker can drive
+    // several sessions at once. `in_flight` enforces one workload per partition plus a
+    // global cap; `joinset` owns the running tasks and yields (partition, message) so
+    // the completion handler can commit exactly that partition's offset.
+    let cap = max_concurrent_workloads();
+    let mut in_flight = InFlight::new();
+    let mut joinset: tokio::task::JoinSet<(i32, kafka::KafkaMessage, bool)> =
+        tokio::task::JoinSet::new();
+    // task id -> partition, so a PANICKED task's partition can still be released. A
+    // JoinError carries no payload, so without this side table a panic would leave the
+    // partition reserved forever and silently stop that partition being served for the
+    // pod's lifetime.
+    let mut task_partitions: std::collections::HashMap<tokio::task::Id, i32> =
+        std::collections::HashMap::new();
+    info!(
+        max_concurrent_workloads = cap,
+        "workload execution concurrency"
+    );
+
     loop {
+        // At capacity, stop receiving and drain instead. Kafka redelivers anything we
+        // have not committed, so declining to poll is backpressure, not loss — and it
+        // is why nothing here ever drops a spec it cannot run.
+        let can_accept = in_flight.len() < cap;
+
         tokio::select! {
             _ = cancel.cancelled() => {
-                info!("shutdown requested");
+                info!(in_flight = in_flight.len(), "shutdown requested; draining in-flight workloads");
+                // Let running workloads finish and commit: aborting them would leave
+                // their offsets uncommitted and duplicate the shard on restart. The
+                // workloads observe the same CancelToken, so they wind themselves down.
+                while let Some(joined) = joinset.join_next_with_id().await {
+                    complete_workload(&workload_consumer, &mut in_flight, &mut task_partitions, joined);
+                }
                 return Ok(());
             }
-            message = kafka::recv_message(&workload_consumer) => {
+
+            joined = joinset.join_next_with_id(), if !joinset.is_empty() => {
+                if let Some(joined) = joined {
+                    complete_workload(&workload_consumer, &mut in_flight, &mut task_partitions, joined);
+                }
+            }
+
+            message = kafka::recv_message(&workload_consumer), if can_accept => {
                 let message = message.context("read workload assignment")?;
                 let Some(payload) = message.payload.as_deref() else {
                     kafka::commit_message(&workload_consumer, &message)
@@ -236,25 +377,93 @@ pub async fn run(mut config: Config) -> Result<()> {
                     continue;
                 }
 
-                if let Err(err) = run_workload(
-                    &config,
-                    &control_producer,
-                    &telemetry_producer,
-                    spec,
-                    cancel.clone(),
-                )
-                .await
-                {
-                    metrics::workload_error();
-                    error!(error = %err, "workload failed; dropping and continuing");
-                } else {
-                    metrics::workload_ok();
+                let partition = message.partition();
+                match in_flight.try_admit(partition, cap) {
+                    Ok(slot) => {
+                        let session_id = spec.session_id.clone();
+                        let cfg = config.clone();
+                        let ctrl = control_producer.clone();
+                        let tele = telemetry_producer.clone();
+                        let tok = cancel.clone();
+                        let handle = joinset.spawn(async move {
+                            let ok = match run_workload(&cfg, &ctrl, &tele, spec, tok, slot).await {
+                                Ok(()) => true,
+                                Err(err) => {
+                                    error!(error = %err, session_id = %session_id, "workload failed");
+                                    false
+                                }
+                            };
+                            (partition, message, ok)
+                        });
+                        task_partitions.insert(handle.id(), partition);
+                        metrics::workloads_in_flight(in_flight.len());
+                    }
+                    Err(reason) => {
+                        // Deliberately NOT committed: the spec stays on the partition
+                        // and is redelivered. Reaching this arm means the group handed
+                        // this pod a partition whose predecessor is still running,
+                        // which after the controller's pre-scale gate should be rare.
+                        warn!(
+                            session_id = %spec.session_id,
+                            partition,
+                            in_flight = in_flight.len(),
+                            reason = ?reason,
+                            "workload not admitted; leaving uncommitted for redelivery"
+                        );
+                    }
                 }
-                kafka::commit_message(&workload_consumer, &message)
-                    .context("commit handled workload assignment")?;
             }
         }
     }
+}
+
+/// complete_workload records the outcome of a finished workload, commits its
+/// partition's offset, and frees the partition for the next spec.
+///
+/// Commit happens only after the workload has finished — at-least-once, matching the
+/// previous inline behaviour. Committing at admission would be at-most-once and would
+/// silently lose a shard whenever a pod died mid-run.
+fn complete_workload(
+    consumer: &kafka::KafkaConsumer,
+    in_flight: &mut InFlight,
+    task_partitions: &mut std::collections::HashMap<tokio::task::Id, i32>,
+    joined: Result<(tokio::task::Id, (i32, kafka::KafkaMessage, bool)), tokio::task::JoinError>,
+) {
+    match joined {
+        Ok((id, (partition, message, ok))) => {
+            task_partitions.remove(&id);
+            if ok {
+                metrics::workload_ok();
+            } else {
+                metrics::workload_error();
+            }
+            // A commit failure is logged, not fatal: the offset stays where it was, so
+            // the spec is redelivered and the staleness guard decides whether to run
+            // it. Killing the worker here would strand every other in-flight workload.
+            if let Err(err) = kafka::commit_message(consumer, &message) {
+                error!(error = %err, partition, "commit handled workload assignment failed");
+            }
+            in_flight.finish(partition);
+        }
+        Err(err) => {
+            // The spawned task panicked, so there is no message to commit — the spec
+            // stays uncommitted and Kafka redelivers it, which is the behaviour we
+            // want. But the partition MUST be released or this pod stops serving it
+            // for the rest of its life; the id side table is what makes that possible.
+            metrics::workload_error();
+            let id = err.id();
+            match task_partitions.remove(&id) {
+                Some(partition) => {
+                    in_flight.finish(partition);
+                    error!(error = %err, partition, "workload task panicked; partition released, spec left for redelivery");
+                }
+                None => {
+                    error!(error = %err, "workload task panicked with no tracked partition");
+                }
+            }
+        }
+    }
+    metrics::workloads_in_flight(in_flight.len());
 }
 
 /// run_workload performs the module-specific operation described by its name.
@@ -265,10 +474,25 @@ async fn run_workload(
     telemetry_producer: &KafkaProducer,
     spec: WorkloadSpec,
     cancel: CancelToken,
+    slot: usize,
 ) -> Result<()> {
     validate_spec(config, &spec)?;
 
-    let barrier_group = barrier_group(&config.consumer_group, &spec.session_id, &config.worker_id);
+    // The barrier group must be unique per CONCURRENT SLOT on this pod. The barrier
+    // topic is broadcast — every workload must receive every barrier — but two
+    // concurrent workloads sharing one group become COMPETING MEMBERS of it, and the
+    // barrier partition can only be assigned to one of them. The loser never receives
+    // the barrier, never fires, and its shard's load silently goes missing. Observed in
+    // a 3-shard run: one pod prepared two shards, logged a single "barrier received",
+    // and the session delivered 58% of its scenario.
+    //
+    // Keyed on a SLOT index rather than session_id deliberately. wait_for_barrier
+    // already filters by session_id, so per-session groups are unnecessary — and they
+    // would be created fresh every run and never deleted, leaking consumer groups on
+    // the broker (the reason the group was made per-worker in the first place, commit
+    // 0ed8b9e). Slot indices are bounded by MAX_CONCURRENT_WORKLOADS, so the set of
+    // groups a pod ever creates is small and fully reused across runs.
+    let barrier_group = barrier_group(&config.consumer_group, &config.worker_id, slot);
     let barrier_consumer = kafka::consumer(
         &config.kafka_brokers,
         &barrier_group,
@@ -312,6 +536,17 @@ async fn run_workload(
     let barrier =
         kafka::wait_for_barrier(&barrier_consumer, &spec.session_id, BARRIER_WAIT).await?;
     let barrier_epoch_ns = barrier.target_epoch_unix_nanos;
+    // Logged so a multi-shard run can be checked for a COMMON start epoch: the
+    // controller publishes one barrier per session after full ready fan-in, so every
+    // shard of a session — including shards on other pods — must report the same value
+    // here. Distinct values would mean the scenario's shape was smeared across pods
+    // rather than applied together.
+    info!(
+        session_id = %spec.session_id,
+        worker_index = spec.worker_index,
+        barrier_epoch_ns,
+        "barrier received"
+    );
 
     let telemetry = TelemetrySink::new(
         telemetry_producer.clone(),
@@ -437,8 +672,8 @@ fn validate_spec(config: &Config, spec: &WorkloadSpec) -> Result<()> {
 
 /// barrier_group performs the module-specific operation described by its name.
 /// It keeps validation, side effects, and returned values within this module's contract.
-fn barrier_group(consumer_group: &str, _session_id: &str, worker_id: &str) -> String {
-    format!("{consumer_group}-barrier-{worker_id}")
+fn barrier_group(consumer_group: &str, worker_id: &str, slot: usize) -> String {
+    format!("{consumer_group}-barrier-{worker_id}-slot{slot}")
 }
 
 /// pacer_interval_ns computes the fixed inter-send interval for a paced task.
@@ -2003,6 +2238,88 @@ mod tests {
     }
 
     #[test]
+    /// Distinct partitions run concurrently — the whole point of the change. Two
+    /// concurrent sessions hold distinct partition leases, so their shards must be
+    /// admitted together rather than serialized.
+    fn in_flight_admits_distinct_partitions_concurrently() {
+        let mut f = InFlight::new();
+        assert!(f.try_admit(3, 4).is_ok());
+        assert!(f.try_admit(15, 4).is_ok());
+        assert_eq!(f.len(), 2);
+    }
+
+    #[test]
+    /// A second spec on a partition that is already executing must be rejected, not
+    /// queued alongside: per-partition offset commits are only correct while at most
+    /// one workload per partition is in flight.
+    fn in_flight_serializes_same_partition() {
+        let mut f = InFlight::new();
+        assert!(f.try_admit(7, 4).is_ok());
+        assert_eq!(f.try_admit(7, 4), Err(Reject::PartitionBusy));
+        f.finish(7);
+        assert!(f.try_admit(7, 4).is_ok(), "freed partition is admissible again");
+    }
+
+    #[test]
+    /// At the cap, further specs are rejected as AtCapacity. The caller must leave
+    /// them uncommitted so Kafka redelivers them — backpressure, never data loss.
+    fn in_flight_enforces_global_cap() {
+        let mut f = InFlight::new();
+        assert!(f.try_admit(0, 2).is_ok());
+        assert!(f.try_admit(1, 2).is_ok());
+        assert_eq!(f.try_admit(2, 2), Err(Reject::AtCapacity));
+        f.finish(0);
+        assert!(f.try_admit(2, 2).is_ok(), "capacity freed by completion");
+    }
+
+    #[test]
+    /// A busy partition reports PartitionBusy even when the worker is also at
+    /// capacity: the conditions have different remedies, so the distinction has to
+    /// survive for the log line to be useful.
+    fn in_flight_reports_partition_busy_before_capacity() {
+        let mut f = InFlight::new();
+        assert!(f.try_admit(5, 1).is_ok());
+        assert_eq!(f.try_admit(5, 1), Err(Reject::PartitionBusy));
+    }
+
+    #[test]
+    /// A cap of 1 reproduces the old serialized behaviour exactly, which is the
+    /// escape hatch if a deployment turns out to be memory-bound.
+    fn in_flight_cap_of_one_is_fully_serial() {
+        let mut f = InFlight::new();
+        assert!(f.try_admit(1, 1).is_ok());
+        assert_eq!(f.try_admit(2, 1), Err(Reject::AtCapacity));
+        f.finish(1);
+        assert!(f.try_admit(2, 1).is_ok());
+    }
+
+    #[test]
+    /// finish() on a partition that holds nothing is a no-op, so a completion handler
+    /// that runs twice cannot corrupt the set or free a slot it does not own.
+    fn in_flight_finish_is_idempotent() {
+        let mut f = InFlight::new();
+        f.try_admit(9, 2).expect("admit");
+        f.finish(9);
+        f.finish(9);
+        assert!(f.is_empty());
+        assert!(f.try_admit(9, 2).is_ok());
+    }
+
+    #[test]
+    /// MAX_CONCURRENT_WORKLOADS=0 would admit nothing and wedge the loop forever, so
+    /// it is promoted to 1.
+    fn max_concurrent_workloads_never_zero() {
+        std::env::set_var("MAX_CONCURRENT_WORKLOADS", "0");
+        assert_eq!(max_concurrent_workloads(), 1);
+        std::env::set_var("MAX_CONCURRENT_WORKLOADS", "5");
+        assert_eq!(max_concurrent_workloads(), 5);
+        std::env::set_var("MAX_CONCURRENT_WORKLOADS", "not-a-number");
+        assert_eq!(max_concurrent_workloads(), DEFAULT_MAX_CONCURRENT_WORKLOADS);
+        std::env::remove_var("MAX_CONCURRENT_WORKLOADS");
+        assert_eq!(max_concurrent_workloads(), DEFAULT_MAX_CONCURRENT_WORKLOADS);
+    }
+
+    #[test]
     fn pacer_interval_ns_computes_fixed_period() {
         assert_eq!(pacer_interval_ns(1), Some(1_000_000_000));
         assert_eq!(pacer_interval_ns(1000), Some(1_000_000));
@@ -2398,21 +2715,52 @@ mod tests {
     }
 
     #[test]
-    /// barrier_group_is_per_worker_not_per_session performs the module-specific operation described by its name.
-    /// It keeps validation, side effects, and returned values within this module's contract.
-    fn barrier_group_is_per_worker_not_per_session() {
-        let a = barrier_group("bot-fleet", "sess-1", "worker-7");
-        let b = barrier_group("bot-fleet", "sess-2", "worker-7");
+    /// The barrier group must satisfy TWO constraints that pull in opposite directions.
+    ///
+    /// 1. Stable across sessions (no session_id): a per-session group is created fresh
+    ///    every run and never deleted, leaking consumer groups on the broker. This is
+    ///    why the group was made per-worker originally, and wait_for_barrier already
+    ///    filters by session_id so per-session groups buy nothing.
+    /// 2. Distinct per CONCURRENT SLOT: the barrier topic is broadcast, so every
+    ///    concurrent workload needs its own group. Two workloads sharing one group
+    ///    become competing members and only one is assigned the barrier partition —
+    ///    the other never fires and its shard's load silently disappears.
+    ///
+    /// A bounded slot index satisfies both: no session_id, and at most
+    /// MAX_CONCURRENT_WORKLOADS groups per pod, reused across runs.
+    fn barrier_group_is_stable_across_sessions_but_distinct_per_slot() {
+        let slot0 = barrier_group("bot-fleet", "worker-7", 0);
+        let slot1 = barrier_group("bot-fleet", "worker-7", 1);
 
         assert!(
-            !a.contains("sess-1"),
-            "barrier group must not embed session_id, got {a}"
+            !slot0.contains("sess"),
+            "barrier group must not embed session_id (leaks broker groups), got {slot0}"
         );
+        assert_ne!(
+            slot0, slot1,
+            "concurrent slots must not share a barrier group, or one workload never receives the barrier"
+        );
+        assert_eq!(slot0, "bot-fleet-barrier-worker-7-slot0");
         assert_eq!(
-            a, b,
-            "barrier group must be stable across sessions for one worker"
+            slot0,
+            barrier_group("bot-fleet", "worker-7", 0),
+            "the same slot must reuse the same group across runs"
         );
-        assert_eq!(a, "bot-fleet-barrier-worker-7");
+    }
+
+    #[test]
+    /// Slots are allocated from [0, cap) and REUSED on completion, so the number of
+    /// broker-side barrier groups a pod ever creates stays bounded.
+    fn in_flight_allocates_and_reuses_bounded_slots() {
+        let mut f = InFlight::new();
+        let s0 = f.try_admit(10, 2).expect("first admit");
+        let s1 = f.try_admit(20, 2).expect("second admit");
+        assert_ne!(s0, s1, "concurrent workloads must get distinct slots");
+        assert!(s0 < 2 && s1 < 2, "slots must stay within [0, cap)");
+
+        f.finish(10);
+        let s2 = f.try_admit(30, 2).expect("admit after completion");
+        assert_eq!(s2, s0, "a freed slot must be reused, not incremented past cap");
     }
 
     #[tokio::test]

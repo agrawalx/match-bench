@@ -46,6 +46,16 @@ pub struct KafkaMessage {
     offset: i64,
 }
 
+impl KafkaMessage {
+    /// partition returns the Kafka partition this message arrived on. The worker keys
+    /// its per-partition single-flight admission on this: at most one workload may
+    /// execute per partition, so that each partition's offset commit stays independent
+    /// of every other partition's.
+    pub fn partition(&self) -> i32 {
+        self.partition
+    }
+}
+
 /// ensure_topics performs the module-specific operation described by its name.
 /// It keeps validation, side effects, and returned values within this module's contract.
 pub async fn ensure_topics(brokers: &str, topics: &[&str]) -> Result<()> {

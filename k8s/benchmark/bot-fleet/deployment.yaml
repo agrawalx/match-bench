@@ -88,6 +88,18 @@ spec:
             # BLOCKS at 1 GiB rather than growing.
             - name: BOT_MAX_INFLIGHT_PER_TASK
               value: "10000"
+            # How many workload specs one worker executes CONCURRENTLY. Before this
+            # existed the consume loop awaited each workload inline, so a pod ran one
+            # shard at a time and two concurrent sessions landing on the same pod were
+            # serialized regardless of how small their shards were.
+            #
+            # Sizing is bound by the same worst case as the memory limit above:
+            #   MAX_CONCURRENT_WORKLOADS x (tasks x inflight x ~350 B) <= mem limit
+            # At the EKS shard size (1000 tasks x 10k inflight ~= 3.5 GiB) only 2 fit
+            # under the 6Gi limit. Raise only alongside the limit, or when shards are
+            # known to be small (the local scenarios are ~200 tasks).
+            - name: MAX_CONCURRENT_WORKLOADS
+              value: "2"
           securityContext:
             readOnlyRootFilesystem: true
             allowPrivilegeEscalation: false

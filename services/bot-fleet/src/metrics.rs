@@ -71,6 +71,11 @@ struct Metrics {
     // throttle. Distinguishes "contestant not draining" (inflight pinned high)
     // from "eBPF not decoding" (inflight normal, sends continue).
     inflight: Gauge,
+    // workloads_in_flight: how many workload specs this worker is executing right
+    // now (0..=MAX_CONCURRENT_WORKLOADS). Pinned at the cap means the pod is the
+    // constraint and the fleet needs another replica; sitting at 1 while sessions
+    // queue elsewhere means shards are landing unevenly across pods.
+    workloads_in_flight: Gauge,
     telemetry_dropped: Counter,
     telemetry_batches: Counter,
     telemetry_events_flushed: Counter,
@@ -121,6 +126,7 @@ static METRICS: LazyLock<Metrics> = LazyLock::new(|| {
     let order_write_errors = ProtocolFamily::default();
     let order_write_errors_total = Counter::default();
     let inflight = Gauge::default();
+    let workloads_in_flight = Gauge::default();
     let telemetry_dropped = Counter::default();
     let telemetry_batches = Counter::default();
     let telemetry_events_flushed = Counter::default();
@@ -165,6 +171,11 @@ static METRICS: LazyLock<Metrics> = LazyLock::new(|| {
         "iicpc_bot_inflight",
         "Orders sent-but-unacked across all FIX tasks (contestant-drain backpressure).",
         inflight.clone(),
+    );
+    registry.register(
+        "iicpc_bot_workloads_in_flight",
+        "Workload specs this worker is executing concurrently.",
+        workloads_in_flight.clone(),
     );
     registry.register(
         "iicpc_bot_telemetry_events_dropped",
@@ -213,6 +224,7 @@ static METRICS: LazyLock<Metrics> = LazyLock::new(|| {
         order_write_errors,
         order_write_errors_total,
         inflight,
+        workloads_in_flight,
         telemetry_dropped,
         telemetry_batches,
         telemetry_events_flushed,
@@ -257,6 +269,13 @@ pub fn workload_error() {
         .workloads
         .get_or_create(&[("result", "error")])
         .inc();
+}
+
+/// workloads_in_flight sets the count of workload specs executing concurrently on
+/// this worker. Set (not inc/dec) so the gauge cannot drift out of step with the
+/// authoritative InFlight set the worker loop keeps.
+pub fn workloads_in_flight(n: usize) {
+    METRICS.workloads_in_flight.set(n as i64);
 }
 
 /// tasks_assigned performs the module-specific operation described by its name.

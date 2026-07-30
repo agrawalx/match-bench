@@ -308,6 +308,97 @@ it needs a bounded per-level availability structure and a deliberate grading dec
 not this knob. That work is the validator redesign, and it belongs to pass 2's
 cross-flow window, not to pass 1.
 
+## The capture loses nothing (2026-07-31)
+
+`capture_gaps` is **0**. A 1,844,352-order pass-1 run had every single order matched, and
+a correct engine scored **0.9943**. It started the day at 0.5999 with 25.6% of responses
+missing.
+
+Two separate defects, found in sequence.
+
+**1. The BPF program discarded everything past 1536 bytes of a coalesced packet.** The tc
+egress hook runs before GSO segmentation, so it sees the whole pre-segmentation skb — up
+to 64KiB when the engine batches responses — and `capture_len` clamped to `COPY_CAP`,
+dropping ~514 execution reports per truncated packet as "a sampled loss, fine for a
+latency distribution". True for a histogram, fatal for correctness. Fixed by clamping
+`gso_max_size`/`gso_max_segs` on the capture interface, which bounds skb construction
+UPSTREAM of the hook (`ethtool -K gso off` cannot: it governs on-wire framing only).
+25.6% loss → 0.2%.
+
+**2. The FIX framer manufactured the rest of the loss on well-formed input.** Two bugs
+compounding:
+
+- `frame_fix` treated "not enough bytes yet" as "malformed" — a buffer holding exactly
+  `8=FIX.4.2\x01` plus a byte or two is the head of a good message that has not finished
+  arriving, and it was discarded. The remainder then began mid-message.
+- Resync searched for a bare `8=`, which is not a message boundary: tag 38 (OrderQty)
+  renders as `38=`, as do 58/108/118. So recovery landed inside the NEXT message and
+  walked forward field by field, consuming that one too.
+
+Together they fired whenever a TCP segment boundary landed within ~2 bytes of a
+BeginString — about one boundary per segment over ~7 messages, i.e. the ~0.2% of orders
+that went missing. Fixed: wait when short, resync on `8=FIX`.
+
+**3. And a latent defect the fix exposed: the reassembler could not advance past a hole.**
+`next_seq` only moves through contiguous data, and `drain_hold` only fills from `next_seq`,
+so one missing segment stalled that flow for the rest of the session — the old crude
+resync had been masking it by consuming bytes. Hold overflow made it worse: it cleared
+every segment queued behind the hole AND left `next_seq` pinned, so the overflow repeated
+forever. Fixed with explicit gap recovery: after 4 pushes with no progress, or on hold
+overflow, the hole is declared lost and `next_seq` jumps to the earliest held segment.
+Cost is bounded to the missing bytes.
+
+Measured after: `stream_gap_bytes` = **2** for a whole session, so there were essentially
+no genuine holes at all — every byte the kernel captured was there, and the entire loss
+was self-inflicted.
+
+**What made this findable: an offline property harness** (`framing_property.rs`).
+Generate real FIX traffic, replay it through `Reassembler` + `frame_fix` under arbitrary
+segmentation, reordering, duplication and a permanently dropped segment, and assert every
+message is recovered exactly once. It reproduced both shipped defects in 20ms and found a
+third nobody had seen (a reordered stream START makes the reassembler adopt the wrong
+origin and lose the head — documented, not fixed, since the capture attaches before the
+connection opens).
+
+Four cluster hypotheses were confidently wrong before that harness existed — CPU
+starvation, ring-buffer overflow, Kafka producer queue, capture teardown race. Each cost a
+build/import/run cycle. The framer and reassembler are pure functions; they should never
+have been debugged in a cluster.
+
+**Answered along the way:** broker headroom is a non-question. `producer_inflight` stayed
+0 and `undelivered_at_exit` 0 — a single broker (RF=1, 24 partitions, 4 CPU limit, 20Gi
+local-path) is nowhere near the constraint at these rates. Two real bugs were fixed there
+anyway: the capture never flushed its Kafka producer queue on shutdown (enqueue is
+fire-and-forget, so "flushed" meant "enqueued"), and the capture Job's
+`terminationGracePeriodSeconds` was 5, which would have SIGKILLed any drain mid-flight.
+
+**Residual, accepted:** 0.9943, i.e. 10,583 dirty orders of 1.84M — 7,004 missed fills,
+3,450 price violations, 532 time violations. These are genuine grading findings now, not
+capture artifacts. Leading suspect for the missed fills is the matcher's 5-second idle
+eviction: a resting maker is acked immediately, marked answered, reaped as routine GC, and
+its FILL arrives later when someone finally trades against it — unmatched and dropped
+(`unmatched_response` = 11,837 with requests fully framed). **Decision: not pursuing this
+unless the rate grows at higher throughput.**
+
+### Parked: capture scaling beyond the correctness rate
+
+Pass-1 runs at ~40k orders/s. The stated target is 400-500k/s, and the capture has
+structural limits that this workstream did not touch. Recorded so they are not
+rediscovered under load; deliberately NOT acted on until EKS shows whether they bite.
+
+- Everything after the ring buffer is single-threaded: decode, reassembly, FIX framing and
+  matching all run in one tokio task.
+- The ring buffer is 64MB ≈ 43k records — about 30ms of headroom at 500k/s, versus ~12x
+  that at the correctness rate. `ringbuf_dropped` was 0 all day, but that margin shrinks
+  linearly.
+- Up to 1536 bytes per packet are copied to userspace purely to re-parse FIX there
+  (~100MB/s at 500k/s).
+- The matcher holds a `HashMap<String, _>` entry per in-flight order, keyed by ClOrdID —
+  ~2.5M live entries at 500k/s with the 5s idle window.
+
+If these bite, the shape of the fix is parsing in the kernel to emit fixed-size records,
+or sharding userspace workers per flow.
+
 ## Opened by the 2026-07-31 grading/capture work
 
 1. **`correctness_summary` cannot say WHY an engine failed.** No columns for
@@ -317,14 +408,17 @@ cross-flow window, not to pass 1.
    `maxViolationExamplesPerType` (100) per class, so those three columns silently max out
    at 100 on any real run. The exact counters exist on the Report; they just are not the
    ones being stored. Pre-existing, and it blocks any useful contestant-facing feedback.
-2. **The taint flag is only proven clean.** See B2. It must be forced to fire before a
-   leaderboard can rely on its absence meaning anything.
+2. ~~**The taint flag is only proven clean.**~~ It fired for real on 2026-07-31, on a
+   session where the capture lost 93.8% of responses: the score was published flagged with
+   the reason and the count, instead of presented as authoritative. Both directions of the
+   signal are now observed.
 3. **Pass-1 residual violations are unexplained.** The reference book scores 0.9833 with
    34,743 violations (1.7% of orders). These are real findings now, not capture
    artifacts, so 0.983 should not be assumed to be the ceiling until they are attributed.
 4. **Every latency number recorded before 2026-07-31 is optimistic.** The capture was
-   publishing ~74% of responses, biased toward uncoalesced (low-load) ones. Everything in
-   `deploy-bench/` predates the fix.
+   publishing ~74% of responses, biased toward uncoalesced (low-load) ones, and then a
+   further ~0.2% was lost to the framer. Everything in `deploy-bench/` predates both fixes
+   and should be re-measured before any of it is quoted.
 5. **`gso_max_segs 1` cost: measured, not detectable.** Four max-rate 45s runs, mean
    1,816,640 orders before the clamp vs 1,811,136 after (-0.3%, inside the 1.4% spread
    between the two pre-clamp runs). Execution reports are ~130 bytes, so GSO was batching

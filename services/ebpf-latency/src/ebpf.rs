@@ -146,6 +146,39 @@ static DROPPED_EVENTS: PerCpuArray<u64> = PerCpuArray::with_max_entries(1, 0);
 #[map]
 static TRUNCATED_CAPTURES: PerCpuArray<u64> = PerCpuArray::with_max_entries(1, 0);
 
+// Funnel counters. Everything below used to fail silently: a packet that reached the
+// hook and then failed to copy simply vanished, with no counter anywhere, which is how a
+// ~0.2% request-side loss stayed unexplained through four rounds of diagnosis.
+/// Payload-bearing packets the ingress hook accepted for capture (pre-copy).
+#[cfg(target_arch = "bpf")]
+#[map]
+static XDP_PACKETS: PerCpuArray<u64> = PerCpuArray::with_max_entries(1, 0);
+/// Payload-bearing packets the egress hook accepted for capture (pre-copy).
+#[cfg(target_arch = "bpf")]
+#[map]
+static TC_PACKETS: PerCpuArray<u64> = PerCpuArray::with_max_entries(1, 0);
+/// bpf_xdp_load_bytes returned non-zero — the packet is dropped with no record emitted.
+/// Non-linear / multi-buffer skbs are the usual cause.
+#[cfg(target_arch = "bpf")]
+#[map]
+static XDP_LOAD_FAILED: PerCpuArray<u64> = PerCpuArray::with_max_entries(1, 0);
+/// bpf_skb_load_bytes returned non-zero — same, on the response side.
+#[cfg(target_arch = "bpf")]
+#[map]
+static TC_LOAD_FAILED: PerCpuArray<u64> = PerCpuArray::with_max_entries(1, 0);
+/// Payloads shorter than MIN_CAPTURE_LEN, skipped by capture_len.
+#[cfg(target_arch = "bpf")]
+#[map]
+static SHORT_PAYLOAD: PerCpuArray<u64> = PerCpuArray::with_max_entries(1, 0);
+
+#[cfg(target_arch = "bpf")]
+#[inline(always)]
+fn bump(m: &PerCpuArray<u64>) {
+    if let Some(c) = m.get_ptr_mut(0) {
+        unsafe { ptr::write(c, ptr::read(c).saturating_add(1)) };
+    }
+}
+
 /// capture_len returns the number of payload bytes to copy into the capture buffer, or None
 /// to skip this packet. It bounds the result to [MIN_CAPTURE_LEN, COPY_CAP] in a form the
 /// kernel 6.1 BPF verifier accepts as the ARG_CONST_SIZE length of bpf_*_load_bytes.
@@ -180,6 +213,7 @@ static TRUNCATED_CAPTURES: PerCpuArray<u64> = PerCpuArray::with_max_entries(1, 0
 fn capture_len(bounds: &PacketBounds) -> Option<usize> {
     let len = unsafe { ptr::read_volatile(&bounds.payload_len) };
     if len < MIN_CAPTURE_LEN {
+        bump(&SHORT_PAYLOAD);
         return None;
     }
     if len > COPY_CAP {
@@ -220,6 +254,7 @@ fn try_xdp_ingress(ctx: &XdpContext) {
     let Some(bounds) = xdp_payload_bounds(data, data_end) else {
         return;
     };
+    bump(&XDP_PACKETS);
     let cap = match capture_len(&bounds) {
         Some(cap) => cap,
         None => return,
@@ -230,6 +265,7 @@ fn try_xdp_ingress(ctx: &XdpContext) {
     let dst = unsafe { ptr::addr_of_mut!((*rec).payload) as *mut c_void };
     let ret = unsafe { bpf_xdp_load_bytes(ctx.ctx, bounds.payload_offset as u32, dst, cap as u32) };
     if ret != 0 {
+        bump(&XDP_LOAD_FAILED);
         return;
     }
     emit_capture(rec, &bounds, cap, DIR_REQUEST);
@@ -243,6 +279,7 @@ fn try_tc_egress(ctx: TcContext) {
     let Some(bounds) = tc_payload_bounds(&ctx) else {
         return;
     };
+    bump(&TC_PACKETS);
     let cap = match capture_len(&bounds) {
         Some(cap) => cap,
         None => return,
@@ -260,6 +297,7 @@ fn try_tc_egress(ctx: TcContext) {
         )
     };
     if ret != 0 {
+        bump(&TC_LOAD_FAILED);
         return;
     }
     emit_capture(rec, &bounds, cap, DIR_RESPONSE);

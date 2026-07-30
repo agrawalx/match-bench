@@ -18,11 +18,14 @@ use std::{
 
 use prometheus_client::{
     encoding::text::encode,
-    metrics::{counter::Counter, family::Family},
+    metrics::{counter::Counter, family::Family, gauge::Gauge},
     registry::Registry,
 };
 
 type ResultFamily = Family<[(&'static str, &'static str); 1], Counter>;
+/// LossFamily labels each byte-stream/matcher loss by the reason it happened, so a
+/// non-zero total can be attributed instead of merely noticed.
+type LossFamily = Family<[(&'static str, &'static str); 1], Counter>;
 
 /// Metrics stores the state passed across this module boundary.
 /// Keep field changes compatible with callers and serialized contracts.
@@ -32,6 +35,11 @@ struct Metrics {
     events_decode_errors: Counter,
     ringbuf_dropped: Counter,
     truncated_captures: Counter,
+    stream_loss: LossFamily,
+    producer_inflight: Gauge,
+    undelivered_at_exit: Counter,
+    capture_funnel: LossFamily,
+    framed: LossFamily,
     flushes: Counter,
     events_flushed: Counter,
     acked_dropped: Counter,
@@ -50,6 +58,11 @@ static METRICS: LazyLock<Metrics> = LazyLock::new(|| {
     let events_decode_errors = Counter::default();
     let ringbuf_dropped = Counter::default();
     let truncated_captures = Counter::default();
+    let stream_loss = LossFamily::default();
+    let producer_inflight = Gauge::default();
+    let undelivered_at_exit = Counter::default();
+    let capture_funnel = LossFamily::default();
+    let framed = LossFamily::default();
     let flushes = Counter::default();
     let events_flushed = Counter::default();
     let acked_dropped = Counter::default();
@@ -76,6 +89,31 @@ static METRICS: LazyLock<Metrics> = LazyLock::new(|| {
         "iicpc_ebpf_truncated_captures",
         "Packets whose payload exceeded the BPF capture cap. Every FIX message past the cap in such a packet is LOST, so its order looks unanswered downstream; a non-zero rate invalidates correctness scoring and biases latency toward uncoalesced responses.",
         truncated_captures.clone(),
+    );
+    registry.register(
+        "iicpc_ebpf_stream_loss",
+        "Byte-stream and matcher losses by reason. Every one of these discards data that may contain whole FIX messages; a lost REQUEST leaves its responses unmatchable, which is how an order ends up with no orders.acked record at all. Target is zero — a non-zero rate silently degrades correctness scoring, because the missing order is absent from the reference book that every later fill is graded against.",
+        stream_loss.clone(),
+    );
+    registry.register(
+        "iicpc_ebpf_capture_funnel",
+        "Packets accepted by each capture hook, by stage. Compare against iicpc_ebpf_framed: a packet counted here that never becomes a framed FIX message is a hole in the byte stream.",
+        capture_funnel.clone(),
+    );
+    registry.register(
+        "iicpc_ebpf_framed",
+        "FIX messages successfully framed out of the reassembled byte stream, by direction. A request-side shortfall against orders sent is what leaves an order with no records at all.",
+        framed.clone(),
+    );
+    registry.register(
+        "iicpc_ebpf_producer_inflight",
+        "orders.acked messages enqueued in the Kafka producer but not yet acknowledged by the broker. Enqueue is fire-and-forget, so this is the volume that would be DISCARDED if the process exited now — a rising value means the producer is drained slower than it is fed.",
+        producer_inflight.clone(),
+    );
+    registry.register(
+        "iicpc_ebpf_undelivered_at_exit",
+        "orders.acked messages still queued after the shutdown flush timed out. These are lost, and each one can cost an order its entire response record.",
+        undelivered_at_exit.clone(),
     );
     registry.register("iicpc_ebpf_flushes", "eBPF flushes.", flushes.clone());
     registry.register(
@@ -110,6 +148,11 @@ static METRICS: LazyLock<Metrics> = LazyLock::new(|| {
         events_decode_errors,
         ringbuf_dropped,
         truncated_captures,
+        stream_loss,
+        producer_inflight,
+        undelivered_at_exit,
+        capture_funnel,
+        framed,
         flushes,
         events_flushed,
         acked_dropped,
@@ -180,6 +223,71 @@ pub fn truncated_captures(total: u64) {
     if total > previous {
         METRICS.truncated_captures.inc_by(total - previous);
     }
+}
+
+/// stream_loss mirrors the pipeline's absolute loss totals into labelled monotonic
+/// counters. Each reason discards bytes that may hold whole FIX messages.
+pub fn stream_loss(reason: &'static str, total: u64, last: &AtomicU64) {
+    let previous = last.swap(total, Ordering::Relaxed);
+    if total > previous {
+        METRICS
+            .stream_loss
+            .get_or_create(&[("reason", reason)])
+            .inc_by(total - previous);
+    }
+}
+
+pub static LAST_HOLD_OVERFLOW: AtomicU64 = AtomicU64::new(0);
+pub static LAST_BUFFER_OVERFLOW: AtomicU64 = AtomicU64::new(0);
+pub static LAST_TRUNCATION_RESET: AtomicU64 = AtomicU64::new(0);
+pub static LAST_RESYNC_BYTES: AtomicU64 = AtomicU64::new(0);
+pub static LAST_RETRANSMITTED_BYTES: AtomicU64 = AtomicU64::new(0);
+pub static LAST_UNMATCHED: AtomicU64 = AtomicU64::new(0);
+pub static LAST_EVICTED_IDLE: AtomicU64 = AtomicU64::new(0);
+pub static LAST_EVICTED_CAPACITY: AtomicU64 = AtomicU64::new(0);
+pub static LAST_NO_CLORDID: AtomicU64 = AtomicU64::new(0);
+pub static LAST_STREAM_GAP: AtomicU64 = AtomicU64::new(0);
+pub static LAST_FRAMED_REQ: AtomicU64 = AtomicU64::new(0);
+pub static LAST_FRAMED_RESP: AtomicU64 = AtomicU64::new(0);
+
+/// capture_funnel records packets accepted at a capture stage.
+pub fn capture_funnel(stage: &'static str, delta: u64) {
+    METRICS
+        .capture_funnel
+        .get_or_create(&[("stage", stage)])
+        .inc_by(delta);
+}
+
+/// framed records FIX messages framed out of the byte stream, by direction.
+pub fn framed(direction: &'static str, total: u64, last: &AtomicU64) {
+    let previous = last.swap(total, Ordering::Relaxed);
+    if total > previous {
+        METRICS
+            .framed
+            .get_or_create(&[("direction", direction)])
+            .inc_by(total - previous);
+    }
+}
+
+/// xdp_load_failed / tc_load_failed: the packet reached the hook and the copy failed, so
+/// it is dropped with no record emitted. Previously a bare `return` with no counter.
+pub fn xdp_load_failed(total: u64) {
+    stream_loss("xdp_load_bytes_failed", total, &LAST_XDP_LOAD_FAILED);
+}
+pub fn tc_load_failed(total: u64) {
+    stream_loss("tc_load_bytes_failed", total, &LAST_TC_LOAD_FAILED);
+}
+static LAST_XDP_LOAD_FAILED: AtomicU64 = AtomicU64::new(0);
+static LAST_TC_LOAD_FAILED: AtomicU64 = AtomicU64::new(0);
+
+/// producer_inflight records the current producer queue depth.
+pub fn producer_inflight(n: i64) {
+    METRICS.producer_inflight.set(n);
+}
+
+/// undelivered_at_exit records messages abandoned in the producer queue at shutdown.
+pub fn undelivered_at_exit(n: u64) {
+    METRICS.undelivered_at_exit.inc_by(n);
 }
 
 /// flushed performs the module-specific operation described by its name.

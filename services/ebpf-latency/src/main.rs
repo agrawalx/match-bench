@@ -5,6 +5,8 @@
 //! The comments in this file describe public structure and callable behavior.
 
 mod capture;
+#[cfg(test)]
+mod framing_property;
 mod matcher;
 mod mtu;
 mod netns;
@@ -42,6 +44,11 @@ use pipeline::Pipeline;
 const DEFAULT_RINGBUF_MAP: &str = "EVENTS";
 const DROPPED_EVENTS_MAP: &str = "DROPPED_EVENTS";
 const TRUNCATED_CAPTURES_MAP: &str = "TRUNCATED_CAPTURES";
+const XDP_PACKETS_MAP: &str = "XDP_PACKETS";
+const TC_PACKETS_MAP: &str = "TC_PACKETS";
+const XDP_LOAD_FAILED_MAP: &str = "XDP_LOAD_FAILED";
+const TC_LOAD_FAILED_MAP: &str = "TC_LOAD_FAILED";
+const SHORT_PAYLOAD_MAP: &str = "SHORT_PAYLOAD";
 const DEFAULT_XDP_INGRESS_PROGRAM: &str = "iicpc_xdp_ingress";
 const DEFAULT_TC_EGRESS_PROGRAM: &str = "iicpc_tc_egress";
 const DEFAULT_FLUSH_INTERVAL: Duration = Duration::from_millis(5);
@@ -49,6 +56,10 @@ const DEFAULT_BATCH_SIZE: usize = 4096;
 const EVICT_INTERVAL: Duration = Duration::from_secs(1);
 const MAX_EVENTS_PER_BATCH: usize = 1000;
 const DEFAULT_CLAMP_MTU: usize = 1500;
+/// How long to wait at shutdown for the producer queue to reach the broker. Must stay
+/// below the pod's terminationGracePeriodSeconds or the SIGKILL lands mid-drain and the
+/// flush achieves nothing.
+const PRODUCER_FLUSH_TIMEOUT: Duration = Duration::from_secs(45);
 
 #[derive(Debug, Clone)]
 /// Config stores the state passed across this module boundary.
@@ -176,6 +187,16 @@ async fn run(config: Config, producer: KafkaProducer) -> Result<()> {
     .with_context(|| format!("open ringbuf map {}", config.ringbuf_map))?;
     let dropped_events = take_counter(&mut bpf, DROPPED_EVENTS_MAP);
     let truncated_captures = take_counter(&mut bpf, TRUNCATED_CAPTURES_MAP);
+    let xdp_packets = take_counter(&mut bpf, XDP_PACKETS_MAP);
+    let tc_packets = take_counter(&mut bpf, TC_PACKETS_MAP);
+    let xdp_load_failed = take_counter(&mut bpf, XDP_LOAD_FAILED_MAP);
+    let tc_load_failed = take_counter(&mut bpf, TC_LOAD_FAILED_MAP);
+    let short_payload = take_counter(&mut bpf, SHORT_PAYLOAD_MAP);
+    let mut last_xdp_packets = 0u64;
+    let mut last_tc_packets = 0u64;
+    let mut last_xdp_load_failed = 0u64;
+    let mut last_tc_load_failed = 0u64;
+    let mut last_short_payload = 0u64;
 
     info!(
         iface = %config.iface,
@@ -201,7 +222,27 @@ async fn run(config: Config, producer: KafkaProducer) -> Result<()> {
         tokio::select! {
             sig = shutdown.recv() => {
                 info!(signal = sig, "shutdown signal received; flushing buffered orders.acked tail");
+                // Drain the ring buffer one last time: records captured since the last
+                // tick are still in it, and exiting here would discard them.
+                decoded_total += drain_ringbuf(&mut ringbuf, &mut pipeline, &producer, &config, &mut events);
                 flush(&producer, &config, &mut events);
+                // flush() only ENQUEUES. Without the wait below, everything still in the
+                // producer queue is discarded when this function returns — which is
+                // invisible, because enqueue is fire-and-forget and nothing inspects
+                // delivery reports.
+                let queued = kafka::in_flight_count(&producer);
+                info!(queued, decoded_total, "draining producer queue before exit");
+                let left = kafka::flush_producer(&producer, PRODUCER_FLUSH_TIMEOUT).unwrap_or(queued);
+                if left > 0 {
+                    metrics::undelivered_at_exit(left as u64);
+                    warn!(
+                        undelivered = left,
+                        timeout_s = PRODUCER_FLUSH_TIMEOUT.as_secs(),
+                        "producer queue did NOT drain within the flush timeout; these orders.acked records are lost and their orders will look unanswered"
+                    );
+                } else {
+                    info!("producer queue fully delivered before exit");
+                }
                 return Ok(());
             }
             _ = ticker.tick() => {
@@ -219,6 +260,38 @@ async fn run(config: Config, producer: KafkaProducer) -> Result<()> {
                         "eBPF pipeline stats"
                     );
                     last_decoded = decoded_total;
+                }
+                {
+                    // Attribute every path that can silently discard a FIX message. These
+                    // are what remains between a healthy capture and capture_gaps == 0:
+                    // an order whose records are lost here is absent from the reference
+                    // book, so it damages not just its own grading but every later fill
+                    // that trades against the liquidity it should have provided.
+                    metrics::stream_loss("hold_overflow", pipeline.hold_overflows, &metrics::LAST_HOLD_OVERFLOW);
+                    metrics::stream_loss("buffer_overflow", pipeline.buffer_overflows, &metrics::LAST_BUFFER_OVERFLOW);
+                    metrics::stream_loss("truncation_reset", pipeline.truncation_resets, &metrics::LAST_TRUNCATION_RESET);
+                    metrics::stream_loss("resync_skipped_bytes", pipeline.resync_skipped_bytes, &metrics::LAST_RESYNC_BYTES);
+                    metrics::stream_loss("retransmitted_bytes", pipeline.retransmitted_bytes, &metrics::LAST_RETRANSMITTED_BYTES);
+                    metrics::stream_loss("unmatched_response", pipeline.unmatched_responses(), &metrics::LAST_UNMATCHED);
+                    metrics::stream_loss("matcher_evicted_unanswered", pipeline.evicted_idle(), &metrics::LAST_EVICTED_IDLE);
+                    metrics::stream_loss("framed_no_clordid", pipeline.framed_no_clordid, &metrics::LAST_NO_CLORDID);
+                    metrics::stream_loss("stream_gap_bytes", pipeline.stream_gap_bytes, &metrics::LAST_STREAM_GAP);
+                    // Queue depth: the volume that would be lost if the pod were killed
+                    // right now. This is the measurement that tells us whether the
+                    // producer, not the capture, is where a session's records go missing.
+                    metrics::producer_inflight(kafka::in_flight_count(&producer) as i64);
+                    // The capture funnel, kernel first. A packet counted here that never
+                    // becomes a framed message is a hole in the byte stream, and a hole on
+                    // the REQUEST side costs the whole order: with no inflight entry, both
+                    // of its responses arrive unmatchable and are discarded.
+                    funnel(&xdp_packets, &mut last_xdp_packets, "xdp_packets");
+                    funnel(&tc_packets, &mut last_tc_packets, "tc_packets");
+                    funnel(&short_payload, &mut last_short_payload, "short_payload_skipped");
+                    report_counter(&xdp_load_failed, &mut last_xdp_load_failed, "XDP load_bytes FAILED; request packet dropped with no record", metrics::xdp_load_failed);
+                    report_counter(&tc_load_failed, &mut last_tc_load_failed, "tc load_bytes FAILED; response packet dropped with no record", metrics::tc_load_failed);
+                    metrics::framed("request", pipeline.framed_requests, &metrics::LAST_FRAMED_REQ);
+                    metrics::framed("response", pipeline.framed_responses, &metrics::LAST_FRAMED_RESP);
+                    metrics::stream_loss("matcher_evicted_capacity", pipeline.evicted_capacity(), &metrics::LAST_EVICTED_CAPACITY);
                 }
                 report_counter(&dropped_events, &mut last_dropped, "eBPF ring buffer dropped events", metrics::ringbuf_dropped);
                 // Not "check GSO/TSO off": ethtool feature flags govern on-wire framing,
@@ -455,6 +528,18 @@ fn report_counter(
         if total > *last {
             sink(total);
             warn!(total, delta = total - *last, "{msg}");
+        }
+        *last = total;
+    }
+}
+
+/// funnel mirrors a kernel-side absolute counter into the capture-funnel metric without
+/// warning on it — these are totals, not losses.
+fn funnel(map: &Option<PerCpuArray<MapData, u64>>, last: &mut u64, stage: &'static str) {
+    if let Some(map) = map {
+        let total = read_counter(map);
+        if total > *last {
+            metrics::capture_funnel(stage, total - *last);
         }
         *last = total;
     }

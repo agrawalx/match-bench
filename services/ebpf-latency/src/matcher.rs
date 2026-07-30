@@ -14,6 +14,11 @@ const MAX_INFLIGHT: usize = 1_000_000;
 /// Keep field changes compatible with callers and serialized contracts.
 struct Inflight {
     t3_ns: u64,
+    /// responded: at least one response has been matched to this request. Eviction of a
+    /// responded entry is routine cleanup; eviction of an UNRESPONDED one means the
+    /// request is gone before its response arrived, and any response that shows up later
+    /// is dropped as unmatched.
+    responded: bool,
     client_ip: u32,
     client_port: u16,
     tcp_seq: u32,
@@ -49,6 +54,14 @@ pub struct MatchedEvent {
 pub struct Matcher {
     inflight: HashMap<String, Inflight>,
     pub unmatched_responses: u64,
+    /// evicted_idle_unanswered: requests dropped after DEFAULT_IDLE_NS that had never
+    /// been responded to. A response arriving after this is unmatchable and discarded, so
+    /// this is a real loss path. Evictions of ANSWERED entries are excluded — on_response
+    /// leaves the entry in place, so idle eviction is also the matcher's only garbage
+    /// collection, and counting those made routine cleanup look like data loss.
+    pub evicted_idle_unanswered: u64,
+    /// evicted_capacity: requests dropped because the inflight map hit MAX_INFLIGHT.
+    pub evicted_capacity: u64,
 }
 
 impl Matcher {
@@ -86,6 +99,7 @@ impl Matcher {
                     clordid.to_string(),
                     Inflight {
                         t3_ns,
+                        responded: false,
                         client_ip,
                         client_port,
                         tcp_seq,
@@ -117,6 +131,7 @@ impl Matcher {
             return None;
         };
         inflight.reordering_detected |= reordered;
+        inflight.responded = true;
         inflight.last_activity_ns = inflight.last_activity_ns.max(t7_ns);
         let pod_service_time_ns = t7_ns.saturating_sub(inflight.t3_ns);
         Some(MatchedEvent {
@@ -141,14 +156,22 @@ impl Matcher {
     /// It keeps validation, side effects, and returned values within this module's contract.
     pub fn evict_idle(&mut self, now_ns: u64, idle_ns: u64) -> usize {
         let before = self.inflight.len();
-        self.inflight
-            .retain(|_, v| now_ns.saturating_sub(v.last_activity_ns) < idle_ns);
+        let mut unanswered = 0u64;
+        self.inflight.retain(|_, v| {
+            let keep = now_ns.saturating_sub(v.last_activity_ns) < idle_ns;
+            if !keep && !v.responded {
+                unanswered += 1;
+            }
+            keep
+        });
+        self.evicted_idle_unanswered = self.evicted_idle_unanswered.saturating_add(unanswered);
         before - self.inflight.len()
     }
 
     /// evict_oldest performs the module-specific operation described by its name.
     /// It keeps validation, side effects, and returned values within this module's contract.
     fn evict_oldest(&mut self) {
+        self.evicted_capacity = self.evicted_capacity.saturating_add(1);
         if let Some(key) = self
             .inflight
             .iter()

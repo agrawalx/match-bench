@@ -177,7 +177,7 @@ ${K} -n platform set image deployment/submission-api submission-api=$IMG/submiss
 # every submission-api boot.
 ${K} -n platform set env deployment/submission-api \
   AUTH_REQUIRED=false DEFAULT_CONTESTANT_ID=echo-contestant \
-  RESEED_SCENARIOS=true SEED_SCENARIOS=constant,spike,ramp \
+  RESEED_SCENARIOS=true SEED_SCENARIOS=correctness,constant,spike,ramp \
   CONSTANT_TOTAL_RPS=$CONSTANT_RPS SPIKE_PEAK_RPS=$SPIKE_RPS RAMP_PEAK_RPS=$RAMP_RPS \
   CONSTANT_DURATION_S=60 SPIKE_DURATION_S=60 RAMP_DURATION_S=$RAMP_DURATION_S
 applynp k8s/platform/leaderboard-api

@@ -59,7 +59,24 @@ pub fn partition_for(order_id: &str, num_partitions: i32) -> i32 {
 
 /// Default width (in partitions) of a session's partition band, used when
 /// BOT_PARTITION_BAND_WIDTH / ORDERS_PARTITION_BAND_WIDTH is unset.
-pub const DEFAULT_PARTITION_BAND_WIDTH: i32 = 8;
+///
+/// 6 divides the 24 orders.sent/orders.acked partitions into exactly 4 EXCLUSIVE
+/// bands (0-5, 6-11, 12-17, 18-23), one per concurrently-running session at the
+/// controller's MAX_CONCURRENT_SESSIONS=4.
+///
+/// The invariant that matters: `MAX_CONCURRENT_SESSIONS <=
+/// floor(orders_partitions / band_width)`. It was violated when this was 8 —
+/// floor(24/8) = 3 distinct bands against 4 leased sessions, so band 3's
+/// `base = 3*8 = 24` wrapped modulo 24 straight back onto band 0's partitions.
+/// Producer and consumer agreed on the wraparound, so traffic was consistent but
+/// NOT exclusive: two sessions shared partitions and band-scoped validation
+/// isolation silently stopped holding at the 4th session.
+///
+/// MUST stay in lockstep with the validator's VALIDATOR_ORDER_BAND_WIDTH default
+/// (services/correctness-validator/main.go): the bot writes into
+/// `[band*width, band*width+width)` and the validator reads exactly that range, so
+/// a mismatch makes the validator read partitions the bot never wrote.
+pub const DEFAULT_PARTITION_BAND_WIDTH: i32 = 6;
 
 /// session_band_partition maps (session_id, order_id) onto a Kafka partition.
 ///
@@ -106,6 +123,22 @@ pub fn session_band_partition(
 /// in both languages without needing a signed type or an `Option`/pointer on
 /// the wire.
 pub const ORDER_BAND_UNSET: u32 = u32::MAX;
+
+/// Sentinel for `OrderSentEvent::smp_id` meaning "this order carried NO self-match
+/// prevention id on the wire" — no FIX tag 7928, no `smp_id` JSON key. Such an order
+/// is UNCONSTRAINED: an engine may match it against anything, including another order
+/// with no id.
+///
+/// `u32::MAX` for the same reason as `ORDER_BAND_UNSET`: real ids are small
+/// (`< smp_id_count`), so the max value is permanently free as a sentinel in both
+/// languages. Critically it is NOT 0 — 0 is a valid SMP id, and conflating "absent"
+/// with "id 0" would make every id-less pass-2 order look like one participant, which
+/// under skip-and-continue would stop the engine matching anything at all.
+pub const SMP_ID_NONE: u32 = u32::MAX;
+
+fn smp_id_none() -> u32 {
+    SMP_ID_NONE
+}
 
 /// band_partition maps (band, order_id) onto a Kafka partition using an
 /// EXCLUSIVELY leased band (see `bot-fleet-controller`'s band lease
@@ -255,6 +288,17 @@ pub struct TaskSpec {
     /// legacy target when `targets` is empty). Defaults to 0.
     #[serde(default)]
     pub target_idx: u8,
+    /// smp_id_count is how many distinct self-match-prevention ids this task
+    /// rotates through (`smp = seq % smp_id_count`). The correctness scenario sets
+    /// 8 so a single-connection run still produces cross-participant matching;
+    /// scale scenarios leave it 0.
+    ///
+    /// 0 (and 1) mean "no SMP id": the bot omits the field from the wire entirely —
+    /// no FIX tag 7928, no `smp_id` JSON key — so pass-2 frames stay byte-identical
+    /// to pre-SMP output, and a contestant can distinguish "no id" from "id 0". An
+    /// order without an SMP id is unconstrained and matches normally.
+    #[serde(default)]
+    pub smp_id_count: u32,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -301,6 +345,14 @@ pub struct OrderSentEvent {
     pub orig_order_id: String,
     #[serde(default)]
     pub barrier_epoch_ns: u64,
+    /// smp_id is the self-match-prevention id this order was sent under, as
+    /// assigned by the bot. `SMP_ID_NONE` means the order carried no SMP id on the
+    /// wire and is unconstrained. The validator reads it from HERE rather than from
+    /// the eBPF capture: acked events are joined to sent events by order id, and the
+    /// bot is the authority on what it assigned, so the capture never needs to parse
+    /// FIX tag 7928.
+    #[serde(default = "smp_id_none")]
+    pub smp_id: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -333,6 +385,9 @@ pub struct OrderSentEventFields {
     pub ord_type: OrdType,
     pub orig_order_id: String,
     pub barrier_epoch_ns: u64,
+    /// APPENDED LAST on purpose: this struct is POSITIONAL msgpack, so field order
+    /// is the wire contract and a new field may only go at the end.
+    pub smp_id: u32,
 }
 
 /// OrderSentEventFieldsRef is the zero-copy encode-side mirror of
@@ -352,6 +407,7 @@ pub struct OrderSentEventFieldsRef<'a> {
     pub ord_type: OrdType,
     pub orig_order_id: &'a str,
     pub barrier_epoch_ns: u64,
+    pub smp_id: u32,
 }
 
 impl<'a> From<&'a OrderSentEvent> for OrderSentEventFieldsRef<'a> {
@@ -370,6 +426,7 @@ impl<'a> From<&'a OrderSentEvent> for OrderSentEventFieldsRef<'a> {
             ord_type: e.ord_type,
             orig_order_id: &e.orig_order_id,
             barrier_epoch_ns: e.barrier_epoch_ns,
+            smp_id: e.smp_id,
         }
     }
 }
@@ -400,6 +457,7 @@ impl OrderSentEventFields {
             ord_type: self.ord_type,
             orig_order_id: self.orig_order_id,
             barrier_epoch_ns: self.barrier_epoch_ns,
+            smp_id: self.smp_id,
         }
     }
 }
@@ -976,6 +1034,60 @@ mod tests {
         }
     }
 
+    /// The band arithmetic must satisfy
+    /// `MAX_CONCURRENT_SESSIONS <= floor(orders_partitions / DEFAULT_PARTITION_BAND_WIDTH)`,
+    /// or leased bands alias onto each other and "exclusive band" stops being true.
+    ///
+    /// This asserts against the SHIPPED constant rather than a literal. The neighbouring
+    /// `band_partition_exclusive_across_leased_bands` hardcodes `band_width = 6` and so
+    /// kept passing while production ran width 8 — floor(24/8) = 3 bands against 4 leased
+    /// sessions, wrapping band 3 back onto band 0. A test that restates the intended
+    /// value cannot catch the constant drifting away from it.
+    #[test]
+    fn default_band_width_yields_enough_exclusive_bands_for_max_concurrent_sessions() {
+        // Both values are contracts with services outside this crate: 24 is the
+        // orders.sent/orders.acked partition count created by
+        // k8s/data/kafka/topic-init-job.yaml and defaulted in bot-fleet's config.rs;
+        // 4 is MAX_CONCURRENT_SESSIONS in bot-fleet-controller/main.go.
+        const ORDERS_PARTITIONS: i32 = 24;
+        const MAX_CONCURRENT_SESSIONS: i32 = 4;
+
+        let distinct_bands = ORDERS_PARTITIONS / DEFAULT_PARTITION_BAND_WIDTH;
+        assert!(
+            distinct_bands >= MAX_CONCURRENT_SESSIONS,
+            "DEFAULT_PARTITION_BAND_WIDTH={DEFAULT_PARTITION_BAND_WIDTH} over \
+             {ORDERS_PARTITIONS} partitions yields only {distinct_bands} exclusive bands, \
+             but the controller leases {MAX_CONCURRENT_SESSIONS} concurrent sessions — \
+             band {distinct_bands} would wrap onto band 0's partitions"
+        );
+
+        // And prove it concretely: every leased band's partition set is disjoint from
+        // every other's, using the real constant.
+        let mut ranges = Vec::new();
+        for band in 0..MAX_CONCURRENT_SESSIONS as u32 {
+            let mut seen = std::collections::HashSet::new();
+            for i in 0..500 {
+                seen.insert(band_partition(
+                    band,
+                    &format!("o_{band}_{i}"),
+                    ORDERS_PARTITIONS,
+                    DEFAULT_PARTITION_BAND_WIDTH,
+                ));
+            }
+            ranges.push(seen);
+        }
+        for i in 0..ranges.len() {
+            for j in (i + 1)..ranges.len() {
+                assert!(
+                    ranges[i].is_disjoint(&ranges[j]),
+                    "band {i} and band {j} overlap at the shipped default width: {:?} vs {:?}",
+                    ranges[i],
+                    ranges[j]
+                );
+            }
+        }
+    }
+
     /// order_band_unset_sentinel_defaults_and_round_trips checks the WorkloadSpec
     /// back-compat contract: an old payload without `order_band` decodes to the
     /// unset sentinel, and the sentinel round-trips through JSON.
@@ -1023,6 +1135,7 @@ mod tests {
             ord_type: OrdType::Limit,
             orig_order_id: String::new(),
             barrier_epoch_ns: 1_770_000_000_000_000_000,
+            smp_id: SMP_ID_NONE,
         }];
         let event_refs: Vec<OrderSentEventFieldsRef> =
             events.iter().map(OrderSentEventFieldsRef::from).collect();
@@ -1071,6 +1184,7 @@ mod tests {
             ord_type: OrdType::Limit,
             orig_order_id: String::new(),
             barrier_epoch_ns: 1_770_000_000_000_000_000,
+            smp_id: SMP_ID_NONE,
         };
         let bytes = rmp_serde::to_vec_named(&ev).expect("encode");
         let back: OrderSentEvent = rmp_serde::from_slice(&bytes).expect("decode");

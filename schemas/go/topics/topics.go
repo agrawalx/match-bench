@@ -50,6 +50,16 @@ func PortForProtocol(protocol string) uint16 {
 // in both languages.
 const OrderBandUnset = uint32(math.MaxUint32)
 
+// SMPIDNone is the sentinel for OrderSentEvent.SMPID meaning "this order carried NO
+// self-match prevention id on the wire" — no FIX tag 7928, no smp_id JSON key. Such an
+// order is UNCONSTRAINED: an engine may match it against anything, including another
+// order with no id.
+//
+// Mirrors Rust's SMP_ID_NONE (u32::MAX). Critically NOT 0 — 0 is a valid SMP id, and
+// conflating "absent" with "id 0" would make every id-less pass-2 order look like one
+// participant, which under skip-and-continue would stop an engine matching anything.
+const SMPIDNone = uint32(math.MaxUint32)
+
 func fnv1a64(s string) uint64 {
 	var hash uint64 = 0xcbf29ce484222325
 	for i := 0; i < len(s); i++ {
@@ -285,6 +295,16 @@ type TaskSpec struct {
 	// TargetIdx indexes the owning WorkloadSpec's Targets (or its single
 	// resolved legacy target when Targets is empty). Defaults to 0.
 	TargetIdx uint8 `json:"target_idx"`
+	// SMPIDCount is how many distinct self-match-prevention ids this task rotates
+	// through (smp = seq % SMPIDCount). The correctness scenario sets 8 so a
+	// single-connection run still produces cross-participant matching; scale
+	// scenarios leave it 0.
+	//
+	// 0 (and 1) mean "no SMP id": the bot omits the field from the wire entirely —
+	// no FIX tag 7928, no smp_id JSON key — so pass-2 frames stay byte-identical to
+	// pre-SMP output, and a contestant can distinguish "no id" from "id 0". An order
+	// without an SMP id is unconstrained and matches normally.
+	SMPIDCount uint32 `json:"smp_id_count,omitempty"`
 }
 
 // Scenario groups the state and dependencies used by this package.
@@ -343,6 +363,20 @@ type OrderSentEvent struct {
 	OrdType        string `json:"ord_type" msgpack:"ord_type"`         // LIMIT | MARKET (FIX tag 40) — distinguishes market from limit new orders, which share payload_type=NEW.
 	OrigOrderID    string `json:"orig_order_id" msgpack:"orig_order_id"`
 	BarrierEpochNs uint64 `json:"barrier_epoch_ns" msgpack:"barrier_epoch_ns"`
+	// SMPID is the self-match-prevention id this order was sent under, as assigned
+	// by the bot. SMPIDNone means the order carried no SMP id on the wire and is
+	// unconstrained. Read from HERE rather than from the eBPF capture: acked events
+	// are joined to sent events by order id, and the bot is the authority on what it
+	// assigned, so the capture never needs to parse FIX tag 7928.
+	// SMPID is the self-match-prevention id, or SMPIDNone when the order carried no
+	// id on the wire.
+	//
+	// CAUTION: the Go zero value of this field is 0, which is a VALID id — so a
+	// zero-valued OrderSentEvent built in code (rather than decoded from the wire)
+	// reads as "participant 0" unless it explicitly sets SMPIDNone. Decoded events
+	// always carry an explicit value, so this only bites synthetic construction; see
+	// pipeline.AssembleOrder, which normalises it.
+	SMPID uint32 `json:"smp_id" msgpack:"smp_id"`
 }
 
 // OrderSentEventFields is the per-order wire payload of the POSITIONAL orders.sent
@@ -368,6 +402,10 @@ type OrderSentEventFields struct {
 	OrdType        string // LIMIT | MARKET
 	OrigOrderID    string
 	BarrierEpochNs uint64
+	// APPENDED LAST on purpose: this struct is POSITIONAL msgpack (see the
+	// msgpack:",as_array" tag), so field order IS the wire contract and a new field
+	// may only go at the end. Must mirror Rust's OrderSentEventFields exactly.
+	SMPID uint32
 }
 
 // OrderSentBatchV2 is the positional-msgpack envelope the bot-fleet producer actually
@@ -414,6 +452,7 @@ func (b OrderSentBatchV2) IntoEvents() []OrderSentEvent {
 			OrdType:        f.OrdType,
 			OrigOrderID:    f.OrigOrderID,
 			BarrierEpochNs: f.BarrierEpochNs,
+			SMPID:          f.SMPID,
 		})
 	}
 	return out

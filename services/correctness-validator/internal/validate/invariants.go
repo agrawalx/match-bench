@@ -488,6 +488,7 @@ func (v *InvariantsValidator) Finish() Report {
 			"t7 stream unreliable: %d late + %d anomalous of %d orders exceeds rate %.4f",
 			v.rep.T7ReorderLate, v.rep.T7Anomalies, v.applied, v.lateTaintRate)
 	}
+	v.rep.CaptureGaps = v.captureGaps
 	// Capture loss taints for the same reason the T7 anomalies above do: the grading is
 	// only as trustworthy as the sample it ran on.
 	if total := v.rep.ScoredOrders + v.captureGaps; total > 0 &&

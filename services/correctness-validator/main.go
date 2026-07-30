@@ -359,10 +359,25 @@ func (v *validator) validateSession(ctx context.Context, sessionID string) error
 	metrics.Counter("validator_sessions_validated_total", "Correctness-validator sessions processed by result.", metrics.Labels("result", "success"), 1)
 	log.Info("session validated",
 		"contestant_id", contestant,
+		"mode", mode,
 		"total_fills", report.TotalFills,
 		"valid_fills", report.ValidFills,
 		"score", report.CorrectnessScore(),
+		"scored_orders", report.ScoredOrders,
+		"dirty_orders", report.DirtyOrders,
 		"violations", report.ViolationCount(),
+		"missed_fills", report.MissedFills,
+		"lost_orders", report.LostOrders,
+		"lost_cancels", report.LostCancels,
+		// capture_gaps is the platform's own loss, excluded from the score in both
+		// directions; a non-trivial rate means the score ran on a sample.
+		"capture_gaps", report.CaptureGaps,
+		"t7_reorder_late", report.T7ReorderLate,
+		"t7_anomalies", report.T7Anomalies,
+		"tainted", report.Tainted,
+		"taint_reason", report.TaintReason,
+		"jitter_p99_us", report.Jitter.P99Us,
+		"jitter_inversion_rate", report.Jitter.InversionRate,
 		"sent", counts.SentEvents, "acked", counts.AckedEvents, "matched", counts.MatchedOrders)
 	return nil
 }

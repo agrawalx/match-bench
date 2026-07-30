@@ -194,6 +194,7 @@ func (v *StreamValidator) Finish() Report {
 	// A score computed while the platform lost a material share of the responses is a
 	// score computed on a sample. Publish it, flagged, rather than presenting it as
 	// authoritative — the same contract invariants mode uses for an unreliable T7 stream.
+	v.rep.CaptureGaps = v.captureGaps
 	total := v.rep.ScoredOrders + v.captureGaps
 	if total > 0 && float64(v.captureGaps)/float64(total) > DefaultCaptureGapTaintRate {
 		v.rep.Tainted = true

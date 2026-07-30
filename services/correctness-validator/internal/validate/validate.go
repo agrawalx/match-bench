@@ -88,10 +88,16 @@ type Report struct {
 	// the example slice would otherwise grow to on a long adversarial run.
 	violationExamplesByType map[ViolationType]int
 
-	// Invariants-mode-only fields (zero in full-replay mode).
 	LostOrders  uint64
 	LostCancels uint64
-	Jitter      JitterStats
+	// CaptureGaps counts orders excluded from grading because the platform lost their
+	// response records: the bot recorded a response but no orders.acked record arrived.
+	// Reported so an operator can tell a contestant that dropped orders apart from a
+	// capture that lost the evidence — the two look identical downstream, and
+	// conflating them once cost a correct engine a third of its score.
+	CaptureGaps uint64
+	// Invariants-mode-only fields (zero in full-replay mode).
+	Jitter JitterStats
 	// T7ReorderLate counts orders whose minT7Ns arrived after the T7 reorder
 	// window had already evicted (and released) that point in the timeline. These
 	// are excluded from the incremental FIFO/cross-flow checks (their ordering

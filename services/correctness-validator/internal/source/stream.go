@@ -18,6 +18,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"time"
 
 	"github.com/iicpc/correctness-validator/internal/model"
 	"github.com/iicpc/correctness-validator/internal/pipeline"
@@ -35,6 +36,8 @@ const (
 	// event-time watermark passes their send time + this window.
 	DefaultJoinWindowNS = uint64(500 * 1000 * 1000)
 	partitionChanDepth  = 4
+	// maxGapSamples bounds the capture-gap send-time sample used for diagnosis.
+	maxGapSamples = 200_000
 )
 
 // StreamCounts is the per-session event accounting for the store record.
@@ -46,6 +49,14 @@ type StreamCounts struct {
 	// Separate from MatchedOrders because these never become model.Orders — they have
 	// no ingress timestamp to place them in the replay.
 	LostOrders uint64
+	// CaptureGapLastSecond counts capture gaps whose order was SENT within the final
+	// second of the session, and CaptureGapSpreadNs is the send-time span between the
+	// earliest and latest gap. Together they separate the two candidate causes: a
+	// teardown race (the capture stops while the last responses are still arriving)
+	// concentrates gaps at the very end, while a steady-state loss spreads them across
+	// the whole run.
+	CaptureGapLastSecond uint64
+	CaptureGapSpreadNs   uint64
 	// CaptureGaps counts orders the bot got a response for whose orders.acked record
 	// never reached this validator. These are the PLATFORM's losses, not the
 	// contestant's, and are excluded from scoring in both directions. A non-trivial
@@ -265,6 +276,11 @@ func StreamSession(
 		}
 	}
 
+	// Send times of capture-gap orders, for the teardown-vs-steady-state diagnosis
+	// below. Bounded: a session that loses more than this has a problem the exact
+	// distribution will not change the diagnosis of.
+	var gapSendTS []uint64
+	var maxSendTS uint64
 	pending := make(map[string]*pendingOrder)
 	order := make([]string, 0, 1024) // insertion order of pending ids, for FIFO emit
 	contestant := ""
@@ -309,6 +325,9 @@ func StreamSession(
 				// The response existed (the bot saw it) but no capture record reached
 				// us. Not scoreable in either direction — see pendingOrder.outcome.
 				counts.CaptureGaps++
+				if po.sent.SendTSNS != 0 && len(gapSendTS) < maxGapSamples {
+					gapSendTS = append(gapSendTS, po.sent.SendTSNS)
+				}
 				addCaptureGap()
 			case outcomeUnsent:
 				for _, a := range po.acks { // ack with no sent → phantom fills
@@ -362,6 +381,10 @@ func StreamSession(
 		} else {
 			for _, s := range b.sent {
 				counts.SentEvents++
+				// Session end, for locating capture gaps in the timeline.
+				if s.SendTSNS > maxSendTS {
+					maxSendTS = s.SendTSNS
+				}
 				po := pending[s.OrderID]
 				if po == nil {
 					po = &pendingOrder{}
@@ -388,6 +411,21 @@ func StreamSession(
 		if s.errp != nil && *s.errp != nil {
 			return counts, contestant, fmt.Errorf("partition reader: %w", *s.errp)
 		}
+	}
+	if len(gapSendTS) > 0 && maxSendTS > 0 {
+		lo, hi := gapSendTS[0], gapSendTS[0]
+		for _, ts := range gapSendTS {
+			if ts < lo {
+				lo = ts
+			}
+			if ts > hi {
+				hi = ts
+			}
+			if maxSendTS-ts <= uint64(time.Second) {
+				counts.CaptureGapLastSecond++
+			}
+		}
+		counts.CaptureGapSpreadNs = hi - lo
 	}
 	if duplicateAcks > 0 {
 		metrics.Counter("validator_events_drained_total", "Correctness-validator events drained from Kafka by topic.",

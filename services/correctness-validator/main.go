@@ -366,12 +366,27 @@ func (v *validator) validateSession(ctx context.Context, sessionID string) error
 		"scored_orders", report.ScoredOrders,
 		"dirty_orders", report.DirtyOrders,
 		"violations", report.ViolationCount(),
+		"overfills", report.Overfills,
+		"price_violations", report.PriceViolations,
+		// TimeViolations covers both ordering classes; log the split so a
+		// cancel-replace priority loss is not read as a plain queue jump.
+		"time_violations", report.TimeViolations-report.CancelReplaceLosses,
+		"cancel_replace_loss", report.CancelReplaceLosses,
+		// A contestant that implements self-match prevention correctly must never
+		// produce one of these; B2 asserts on it.
+		"self_trades", report.SelfTrades,
+		"phantom_fills", report.PhantomFills,
 		"missed_fills", report.MissedFills,
 		"lost_orders", report.LostOrders,
 		"lost_cancels", report.LostCancels,
 		// capture_gaps is the platform's own loss, excluded from the score in both
 		// directions; a non-trivial rate means the score ran on a sample.
 		"capture_gaps", report.CaptureGaps,
+		// Where the gaps sit in the session. Concentrated in the final second means the
+		// capture is being torn down while responses are still in flight (a fixable
+		// race); spread across the run means steady-state loss.
+		"capture_gaps_last_second", counts.CaptureGapLastSecond,
+		"capture_gap_spread_s", float64(counts.CaptureGapSpreadNs)/1e9,
 		"t7_reorder_late", report.T7ReorderLate,
 		"t7_anomalies", report.T7Anomalies,
 		"tainted", report.Tainted,

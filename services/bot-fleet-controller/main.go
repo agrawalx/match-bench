@@ -83,10 +83,24 @@ func main() {
 	}
 	leases := controller.NewPartitionLeaseAllocator(workloadPartitions)
 
+	// Order bands are leased 1:1 with MAX_CONCURRENT_SESSIONS, so this MUST NOT exceed
+	// the number of DISTINCT bands the partition count yields:
+	//
+	//     MAX_CONCURRENT_SESSIONS <= floor(orders_partitions / band_width)
+	//
+	// At the shipped 24 partitions and DEFAULT_PARTITION_BAND_WIDTH=6 that is
+	// floor(24/6) = 4 EXCLUSIVE 6-partition bands (0-5, 6-11, 12-17, 18-23), one per
+	// concurrently-running session.
+	//
+	// The invariant was violated while band_width was 8: floor(24/8) = 3 bands against
+	// 4 leased sessions, so band 3's base = 3*8 = 24 wrapped modulo 24 back onto band
+	// 0's partitions. Producer and consumer agreed on the wraparound, so traffic stayed
+	// consistent but NOT exclusive — two sessions shared partitions and band-scoped
+	// validation isolation silently stopped holding at the 4th session.
+	//
+	// Raising this ceiling means changing the arithmetic, not just this number: widen
+	// orders.* beyond 24 partitions, or narrow band_width further.
 	maxConcurrentSessions := envOrInt("MAX_CONCURRENT_SESSIONS", 4)
-	// Order bands are leased 1:1 with MAX_CONCURRENT_SESSIONS: 24
-	// orders.sent/orders.acked partitions split into 4 EXCLUSIVE 6-partition
-	// bands (0-5, 6-11, 12-17, 18-23), one per concurrently-running session.
 	bandLeases := controller.NewBandLeaseAllocator(maxConcurrentSessions)
 
 	orchClient := orchestrator.NewClient(orchURL)

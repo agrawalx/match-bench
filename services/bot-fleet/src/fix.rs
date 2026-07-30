@@ -50,6 +50,11 @@ pub struct OrderFrame {
     pub tag52_offset: Option<usize>,
     pub payload_type: PayloadType,
     pub ord_type: OrdType,
+    /// Self-match-prevention id encoded into `bytes` (FIX tag 7928 / JSON `smp_id`),
+    /// or `SMP_ID_NONE` when the task carries no SMP id and the field is OMITTED from
+    /// the wire entirely. Carried alongside the frame so telemetry can report what was
+    /// actually sent without re-parsing the payload.
+    pub smp_id: u32,
 }
 
 impl OrderFrame {
@@ -154,6 +159,7 @@ fn build_fix_body(
     price: u64,
     qty: u64,
     side: Side,
+    smp_id: u32,
 ) -> String {
     let side_tag = match side {
         Side::Buy => "1",
@@ -161,24 +167,26 @@ fn build_fix_body(
     };
 
     let msg_seq_num = seq + 1;
+    // Empty when the order carries no SMP id, so the tag is absent from the wire.
+    let smp = fix_smp_tag(smp_id);
 
     match kind {
         FrameKind::New => format!(
-            "35=D\x0149=IICPC-BOT\x0156=CONTESTANT\x0134={msg_seq_num}\x0152=19700101-00:00:00.000\x0111={order_id}\x0121=1\x0155=IICPC\x0154={side_tag}\x0138={qty}\x0140=2\x0144={price}\x0159=0\x01"
+            "35=D\x0149=IICPC-BOT\x0156=CONTESTANT\x0134={msg_seq_num}\x0152=19700101-00:00:00.000\x0111={order_id}\x0121=1\x0155=IICPC\x0154={side_tag}\x0138={qty}\x0140=2\x0144={price}\x01{smp}59=0\x01"
         ),
         FrameKind::Market => format!(
-            "35=D\x0149=IICPC-BOT\x0156=CONTESTANT\x0134={msg_seq_num}\x0152=19700101-00:00:00.000\x0111={order_id}\x0121=1\x0155=IICPC\x0154={side_tag}\x0138={qty}\x0140=1\x0159=0\x01"
+            "35=D\x0149=IICPC-BOT\x0156=CONTESTANT\x0134={msg_seq_num}\x0152=19700101-00:00:00.000\x0111={order_id}\x0121=1\x0155=IICPC\x0154={side_tag}\x0138={qty}\x0140=1\x01{smp}59=0\x01"
         ),
         FrameKind::Cancel => {
             let orig_order_id = orig_order_id.expect("cancel requires orig_order_id");
             format!(
-                "35=F\x0149=IICPC-BOT\x0156=CONTESTANT\x0134={msg_seq_num}\x0152=19700101-00:00:00.000\x0111={order_id}\x0141={orig_order_id}\x0155=IICPC\x0154={side_tag}\x0138={qty}\x01"
+                "35=F\x0149=IICPC-BOT\x0156=CONTESTANT\x0134={msg_seq_num}\x0152=19700101-00:00:00.000\x0111={order_id}\x0141={orig_order_id}\x0155=IICPC\x0154={side_tag}\x0138={qty}\x01{smp}"
             )
         }
         FrameKind::Replace => {
             let orig_order_id = orig_order_id.expect("replace requires orig_order_id");
             format!(
-                "35=G\x0149=IICPC-BOT\x0156=CONTESTANT\x0134={msg_seq_num}\x0152=19700101-00:00:00.000\x0111={order_id}\x0141={orig_order_id}\x0121=1\x0155=IICPC\x0154={side_tag}\x0138={qty}\x0140=2\x0144={price}\x01"
+                "35=G\x0149=IICPC-BOT\x0156=CONTESTANT\x0134={msg_seq_num}\x0152=19700101-00:00:00.000\x0111={order_id}\x0141={orig_order_id}\x0121=1\x0155=IICPC\x0154={side_tag}\x0138={qty}\x0140=2\x0144={price}\x01{smp}"
             )
         }
     }
@@ -252,12 +260,13 @@ fn build_frame(
     qty: u64,
     side: Side,
     kind: FrameKind,
+    smp_id: u32,
 ) -> OrderFrame {
     let order_id = kind.order_id(session_id, bot_id, seq);
 
     let (bytes, tag52_offset) = match protocol {
         Protocol::Fix => {
-            let body = build_fix_body(kind, seq, &order_id, orig_order_id, price, qty, side);
+            let body = build_fix_body(kind, seq, &order_id, orig_order_id, price, qty, side, smp_id);
             let fix = finalize_fix(fix_version, &body);
             let tag52_offset = find_tag52_offset(&fix);
             (fix, tag52_offset)
@@ -288,6 +297,7 @@ fn build_frame(
         tag52_offset,
         payload_type: kind.payload_type(),
         ord_type: kind.ord_type(),
+        smp_id,
     }
 }
 
@@ -315,6 +325,7 @@ pub fn order_frame(
         qty,
         side,
         FrameKind::New,
+        iicpc_schemas_rust::SMP_ID_NONE,
     )
 }
 
@@ -341,6 +352,7 @@ pub fn market_frame(
         qty,
         side,
         FrameKind::Market,
+        iicpc_schemas_rust::SMP_ID_NONE,
     )
 }
 
@@ -369,6 +381,7 @@ pub fn cancel_frame(
         qty,
         side,
         FrameKind::Cancel,
+        iicpc_schemas_rust::SMP_ID_NONE,
     )
 }
 
@@ -397,6 +410,7 @@ pub fn replace_frame(
         qty,
         side,
         FrameKind::Replace,
+        iicpc_schemas_rust::SMP_ID_NONE,
     )
 }
 
@@ -427,6 +441,23 @@ fn digit_width(mut v: u64) -> usize {
         v /= 10;
     }
     w
+}
+
+/// SMP_ID_WIDTH is the fixed width of FIX tag 7928's value. Zero-padded ASCII, which
+/// FIX's tag=value model allows, so the field never changes length and the in-place
+/// byte patcher keeps working (unlike JSON, where leading zeros are illegal in
+/// numbers — see build_json_payload_natural).
+const SMP_ID_WIDTH: usize = 3;
+
+/// fix_smp_tag renders `7928=<padded>\x01`, or the EMPTY STRING when the order
+/// carries no SMP id. Omitting the tag entirely (rather than sending 7928=000 or an
+/// empty value) is the contract: an order with no id is UNCONSTRAINED, and a
+/// contestant must be able to tell that apart from id 0.
+fn fix_smp_tag(smp_id: u32) -> String {
+    if smp_id == iicpc_schemas_rust::SMP_ID_NONE {
+        return String::new();
+    }
+    format!("7928={}\x01", pad_u64(smp_id as u64, SMP_ID_WIDTH))
 }
 
 fn pad_u64(v: u64, width: usize) -> String {
@@ -464,22 +495,24 @@ fn apply_checksum_delta(buf: &mut [u8], checksum_off: usize, old_sum: u32, new_s
     buf[checksum_off + 2] = b'0' + (new_checksum % 10) as u8;
 }
 
-fn build_fix_body_padded(kind: FrameKind, seq: u64, order_id: &str, side: Side, qty: u64, price: u64) -> String {
+fn build_fix_body_padded(kind: FrameKind, seq: u64, order_id: &str, side: Side, qty: u64, price: u64, smp_id: u32) -> String {
     let side_tag = match side {
         Side::Buy => "1",
         Side::Sell => "2",
     };
     let msg_seq_num = pad_u64(seq + 1, FIX_NUM_WIDTH);
     let qty_s = pad_u64(qty, FIX_NUM_WIDTH);
+    // Fixed width, so the field never shifts the offsets the patcher relies on.
+    let smp = fix_smp_tag(smp_id);
     match kind {
         FrameKind::New => {
             let price_s = pad_u64(price, FIX_NUM_WIDTH);
             format!(
-                "35=D\x0149=IICPC-BOT\x0156=CONTESTANT\x0134={msg_seq_num}\x0152=19700101-00:00:00.000\x0111={order_id}\x0121=1\x0155=IICPC\x0154={side_tag}\x0138={qty_s}\x0140=2\x0144={price_s}\x0159=0\x01"
+                "35=D\x0149=IICPC-BOT\x0156=CONTESTANT\x0134={msg_seq_num}\x0152=19700101-00:00:00.000\x0111={order_id}\x0121=1\x0155=IICPC\x0154={side_tag}\x0138={qty_s}\x0140=2\x0144={price_s}\x01{smp}59=0\x01"
             )
         }
         FrameKind::Market => format!(
-            "35=D\x0149=IICPC-BOT\x0156=CONTESTANT\x0134={msg_seq_num}\x0152=19700101-00:00:00.000\x0111={order_id}\x0121=1\x0155=IICPC\x0154={side_tag}\x0138={qty_s}\x0140=1\x0159=0\x01"
+            "35=D\x0149=IICPC-BOT\x0156=CONTESTANT\x0134={msg_seq_num}\x0152=19700101-00:00:00.000\x0111={order_id}\x0121=1\x0155=IICPC\x0154={side_tag}\x0138={qty_s}\x0140=1\x01{smp}59=0\x01"
         ),
         FrameKind::Cancel | FrameKind::Replace => {
             unreachable!("build_fix_body_padded only supports New/Market; Cancel/Replace use the reference builder")
@@ -505,13 +538,23 @@ struct FixTemplate {
     price_off: Option<usize>,
     tag52_off: usize,
     checksum_off: usize,
+    /// Byte offset of FIX tag 7928's fixed-width value, or None when this template
+    /// was built for an order with no SMP id (the tag is then absent entirely).
+    /// Fixed width means `patch` can rewrite the id in place, so the rotating id does
+    /// not force a re-render per order.
+    smp_off: Option<usize>,
+    /// The SMP id currently baked into `buf`. When `patch` is called with a different
+    /// id it is written at `smp_off`; when it is called with SMP_ID_NONE against a
+    /// template that HAS the tag (or vice versa) the buffer must be rebuilt, since
+    /// presence/absence changes the byte length.
+    smp_id: u32,
 }
 
 impl FixTemplate {
     #[allow(clippy::too_many_arguments)]
-    fn build(kind: FrameKind, fix_version: &str, session_id: &str, bot_id: u64, seq: u64, qty: u64, price: u64, side: Side) -> Self {
+    fn build(kind: FrameKind, fix_version: &str, session_id: &str, bot_id: u64, seq: u64, qty: u64, price: u64, side: Side, smp_id: u32) -> Self {
         let order_id = kind.order_id(session_id, bot_id, seq);
-        let body = build_fix_body_padded(kind, seq, &order_id, side, qty, price);
+        let body = build_fix_body_padded(kind, seq, &order_id, side, qty, price, smp_id);
         let buf = finalize_fix(fix_version, &body);
 
         let tag34_off = find_subslice(&buf, b"\x0134=").expect("tag 34 present") + 4;
@@ -524,6 +567,10 @@ impl FixTemplate {
             find_subslice(&buf, clordid_prefix.as_bytes()).expect("ClOrdID present") + clordid_prefix.len();
         let tag52_off = find_tag52_offset(&buf).expect("tag 52 placeholder present");
         let checksum_off = buf.len() - 4;
+        // None when this order carries no SMP id: the tag is absent from the buffer,
+        // so there is nothing to patch and presence/absence changes byte length.
+        let smp_off = (smp_id != iicpc_schemas_rust::SMP_ID_NONE)
+            .then(|| find_subslice(&buf, b"\x017928=").expect("tag 7928 present") + 6);
 
         Self {
             kind,
@@ -539,13 +586,20 @@ impl FixTemplate {
             price_off,
             tag52_off,
             checksum_off,
+            smp_off,
+            smp_id,
         }
     }
 
-    fn patch(&mut self, seq: u64, qty: u64, price: u64, side: Side) -> OrderFrame {
+    fn patch(&mut self, seq: u64, qty: u64, price: u64, side: Side, smp_id: u32) -> OrderFrame {
         let needed_width = digit_width(seq);
-        if needed_width != self.clordid_seq_width {
-            *self = Self::build(self.kind, &self.fix_version, &self.session_id, self.bot_id, seq, qty, price, side);
+        // A template baked WITH the tag cannot serve an order without it (or vice
+        // versa): presence changes the buffer length, so every offset after it moves.
+        // Within a session smp_id_count is constant, so this only triggers on the
+        // pathological mixed case and costs nothing in the normal path.
+        let smp_presence_changed = (smp_id == iicpc_schemas_rust::SMP_ID_NONE) != self.smp_off.is_none();
+        if needed_width != self.clordid_seq_width || smp_presence_changed {
+            *self = Self::build(self.kind, &self.fix_version, &self.session_id, self.bot_id, seq, qty, price, side, smp_id);
         } else {
             let mut old_sum = 0u32;
             let mut new_sum = 0u32;
@@ -557,6 +611,17 @@ impl FixTemplate {
             let (o, n) = write_padded_u64(&mut self.buf, self.clordid_seq_off, self.clordid_seq_width, seq);
             old_sum += o;
             new_sum += n;
+
+            // Rotating SMP id: fixed width, so it patches in place like tag 34/38/44
+            // and never forces a re-render.
+            if let Some(off) = self.smp_off {
+                if smp_id != self.smp_id {
+                    let (o, n) = write_padded_u64(&mut self.buf, off, SMP_ID_WIDTH, smp_id as u64);
+                    old_sum += o;
+                    new_sum += n;
+                    self.smp_id = smp_id;
+                }
+            }
 
             let side_byte = match side {
                 Side::Buy => b'1',
@@ -589,6 +654,7 @@ impl FixTemplate {
             tag52_offset: Some(self.tag52_off),
             payload_type: self.kind.payload_type(),
             ord_type: self.kind.ord_type(),
+            smp_id,
         }
     }
 }
@@ -601,18 +667,30 @@ impl FixTemplate {
 // as it is for FIX's tag=value fields. This is a deliberate deviation from a literal
 // reading of "fixed-width zero-padded ... JSON qty/price" in the plan, made to avoid
 // emitting invalid JSON.
-fn build_json_payload_natural(kind: FrameKind, order_id: &str, side: Side, qty: u64, price: u64) -> String {
+/// json_smp_field renders `,"smp_id":"007"` or the EMPTY STRING when the order carries
+/// no id. A fixed-width STRING, not a number: JSON forbids leading zeros in numbers
+/// (RFC 8259), but a zero-padded string keeps a constant byte length so the in-place
+/// patcher and REST Content-Length both stay stable across the rotation.
+fn json_smp_field(smp_id: u32) -> String {
+    if smp_id == iicpc_schemas_rust::SMP_ID_NONE {
+        return String::new();
+    }
+    format!(",\"smp_id\":\"{:0width$}\"", smp_id, width = SMP_ID_WIDTH)
+}
+
+fn build_json_payload_natural(kind: FrameKind, order_id: &str, side: Side, qty: u64, price: u64, smp_id: u32) -> String {
     let side_name = match side {
         Side::Buy => "BUY",
         Side::Sell => "SELL",
     };
     let encoded_order_id = serde_json::to_string(order_id).expect("serializing String cannot fail");
+    let smp = json_smp_field(smp_id);
     match kind {
         FrameKind::New => {
-            format!("{{\"cl_ord_id\":{encoded_order_id},\"symbol\":\"IICPC\",\"side\":\"{side_name}\",\"qty\":{qty},\"price\":{price}}}")
+            format!("{{\"cl_ord_id\":{encoded_order_id},\"symbol\":\"IICPC\",\"side\":\"{side_name}\",\"qty\":{qty},\"price\":{price}{smp}}}")
         }
         FrameKind::Market => {
-            format!("{{\"cl_ord_id\":{encoded_order_id},\"symbol\":\"IICPC\",\"side\":\"{side_name}\",\"qty\":{qty},\"ord_type\":\"MARKET\"}}")
+            format!("{{\"cl_ord_id\":{encoded_order_id},\"symbol\":\"IICPC\",\"side\":\"{side_name}\",\"qty\":{qty},\"ord_type\":\"MARKET\"{smp}}}")
         }
         FrameKind::Cancel | FrameKind::Replace => {
             unreachable!("build_json_payload_natural only supports New/Market; Cancel/Replace use the reference builder")
@@ -641,6 +719,11 @@ struct JsonTemplate {
     qty_off: Option<usize>,
     price_width: usize,
     price_off: Option<usize>,
+    /// Offset of the fixed-width `smp_id` STRING value, or None when the order carries
+    /// no id (the field is then absent from the body entirely).
+    smp_off: Option<usize>,
+    /// The id currently rendered in `buf`; a different id is patched in place.
+    smp_id: u32,
 }
 
 impl JsonTemplate {
@@ -655,9 +738,10 @@ impl JsonTemplate {
         qty: u64,
         price: u64,
         side: Side,
+        smp_id: u32,
     ) -> Self {
         let order_id = kind.order_id(session_id, bot_id, seq);
-        let json = build_json_payload_natural(kind, &order_id, side, qty, price);
+        let json = build_json_payload_natural(kind, &order_id, side, qty, price, smp_id);
         let (buf, json_start) = match protocol {
             Protocol::Rest => {
                 let rest = build_rest_request(kind.rest_method(), target_host, &kind.rest_path(""), &json);
@@ -679,6 +763,9 @@ impl JsonTemplate {
         let clordid_seq_off = find_subslice(&buf[json_start..], clordid_prefix.as_bytes())
             .map(|p| json_start + p + clordid_prefix.len())
             .expect("ClOrdID present in JSON body");
+        let smp_off = (smp_id != iicpc_schemas_rust::SMP_ID_NONE)
+            .then(|| find_subslice(&buf[json_start..], b"\"smp_id\":\"").map(|p| json_start + p + 10))
+            .flatten();
 
         Self {
             kind,
@@ -695,18 +782,26 @@ impl JsonTemplate {
             qty_off,
             price_width: digit_width(price),
             price_off,
+            smp_off,
+            smp_id,
         }
     }
 
-    fn patch(&mut self, seq: u64, qty: u64, price: u64, side: Side) -> OrderFrame {
+    fn patch(&mut self, seq: u64, qty: u64, price: u64, side: Side, smp_id: u32) -> OrderFrame {
         let side_name = match side {
             Side::Buy => "BUY",
             Side::Sell => "SELL",
         };
+        // Presence of the smp_id field changes the body length, so a template baked
+        // with it cannot serve an order without it (or vice versa). Within a session
+        // smp_id_count is constant, so this only fires on the pathological mixed case.
+        let smp_presence_changed =
+            (smp_id == iicpc_schemas_rust::SMP_ID_NONE) != self.smp_off.is_none();
         let needs_rebuild = digit_width(seq) != self.clordid_seq_width
             || side_name.len() != self.side_len
             || digit_width(qty) != self.qty_width
-            || (self.price_off.is_some() && digit_width(price) != self.price_width);
+            || (self.price_off.is_some() && digit_width(price) != self.price_width)
+            || smp_presence_changed;
 
         if needs_rebuild {
             *self = Self::build(
@@ -719,9 +814,18 @@ impl JsonTemplate {
                 qty,
                 price,
                 side,
+                smp_id,
             );
         } else {
             write_padded_u64(&mut self.buf, self.clordid_seq_off, self.clordid_seq_width, seq);
+            // Fixed-width string value: patches in place, no re-render, and the REST
+            // Content-Length is unaffected.
+            if let Some(off) = self.smp_off {
+                if smp_id != self.smp_id {
+                    write_padded_u64(&mut self.buf, off, SMP_ID_WIDTH, smp_id as u64);
+                    self.smp_id = smp_id;
+                }
+            }
             if let Some(off) = self.qty_off {
                 write_padded_u64(&mut self.buf, off, self.qty_width, qty);
             }
@@ -743,6 +847,7 @@ impl JsonTemplate {
             tag52_offset: None,
             payload_type: self.kind.payload_type(),
             ord_type: self.kind.ord_type(),
+            smp_id,
         }
     }
 }
@@ -766,32 +871,62 @@ pub struct TemplateCache {
     session_id: String,
     target_host: String,
     bot_id: u64,
+    /// How many distinct self-match-prevention ids this task rotates through. 0 or 1
+    /// mean "no SMP id": the field is OMITTED from the wire entirely, which is what
+    /// pass-2 scale scenarios use and keeps their bytes identical to pre-SMP output.
+    smp_id_count: u32,
     fix: [Option<FixTemplate>; 4],
     json: [Option<JsonTemplate>; 4],
 }
 
 impl TemplateCache {
     pub fn new(protocol: Protocol, fix_version: &str, session_id: &str, target_host: &str, bot_id: u64) -> Self {
+        Self::with_smp(protocol, fix_version, session_id, target_host, bot_id, 0)
+    }
+
+    /// with_smp builds a cache whose orders carry a rotating self-match-prevention id.
+    /// `smp_id_count <= 1` means no SMP id at all (field omitted from the wire).
+    pub fn with_smp(
+        protocol: Protocol,
+        fix_version: &str,
+        session_id: &str,
+        target_host: &str,
+        bot_id: u64,
+        smp_id_count: u32,
+    ) -> Self {
         Self {
             protocol,
             fix_version: fix_version.to_string(),
             session_id: session_id.to_string(),
             target_host: target_host.to_string(),
             bot_id,
+            smp_id_count,
             fix: [None, None, None, None],
             json: [None, None, None, None],
         }
     }
 
+    /// smp_for maps a sequence number onto this task's SMP id, or `SMP_ID_NONE` when
+    /// the task carries none. Round-robin so a single-connection correctness run still
+    /// produces cross-participant matching; deterministic from `seq`, so a given
+    /// global_seed reproduces the same assignment with no extra bot state.
+    fn smp_for(&self, seq: u64) -> u32 {
+        if self.smp_id_count <= 1 {
+            return iicpc_schemas_rust::SMP_ID_NONE;
+        }
+        (seq % self.smp_id_count as u64) as u32
+    }
+
     fn render_fast(&mut self, kind: FrameKind, seq: u64, qty: u64, price: u64, side: Side) -> OrderFrame {
+        let smp_id = self.smp_for(seq);
         match self.protocol {
             Protocol::Fix => {
                 let slot = &mut self.fix[idx(kind)];
                 match slot {
-                    Some(t) => t.patch(seq, qty, price, side),
+                    Some(t) => t.patch(seq, qty, price, side, smp_id),
                     None => {
-                        let mut t = FixTemplate::build(kind, &self.fix_version, &self.session_id, self.bot_id, seq, qty, price, side);
-                        let frame = t.patch(seq, qty, price, side);
+                        let mut t = FixTemplate::build(kind, &self.fix_version, &self.session_id, self.bot_id, seq, qty, price, side, smp_id);
+                        let frame = t.patch(seq, qty, price, side, smp_id);
                         *slot = Some(t);
                         frame
                     }
@@ -800,7 +935,7 @@ impl TemplateCache {
             Protocol::Rest | Protocol::Ws => {
                 let slot = &mut self.json[idx(kind)];
                 match slot {
-                    Some(t) => t.patch(seq, qty, price, side),
+                    Some(t) => t.patch(seq, qty, price, side, smp_id),
                     None => {
                         let mut t = JsonTemplate::build(
                             kind,
@@ -812,8 +947,9 @@ impl TemplateCache {
                             qty,
                             price,
                             side,
+                            smp_id,
                         );
-                        let frame = t.patch(seq, qty, price, side);
+                        let frame = t.patch(seq, qty, price, side, smp_id);
                         *slot = Some(t);
                         frame
                     }
@@ -843,6 +979,7 @@ impl TemplateCache {
             qty,
             side,
             FrameKind::Cancel,
+            self.smp_for(seq),
         )
     }
 
@@ -859,6 +996,7 @@ impl TemplateCache {
             qty,
             side,
             FrameKind::Replace,
+            self.smp_for(seq),
         )
     }
 }
@@ -928,12 +1066,16 @@ impl WsFrameTemplate {
     #[allow(clippy::too_many_arguments)]
     pub fn new(kind_is_new: bool, session_id: &str, bot_id: u64, seq: u64, qty: u64, price: u64, side: Side, mask_key: [u8; 4]) -> Self {
         let kind = if kind_is_new { FrameKind::New } else { FrameKind::Market };
-        let json = JsonTemplate::build(kind, Protocol::Ws, session_id, bot_id, "", seq, qty, price, side);
+        let json = JsonTemplate::build(kind, Protocol::Ws, session_id, bot_id, "", seq, qty, price, side, iicpc_schemas_rust::SMP_ID_NONE);
         Self { json, mask_key }
     }
 
     pub fn patch(&mut self, seq: u64, qty: u64, price: u64, side: Side) -> Vec<u8> {
-        let frame = self.json.patch(seq, qty, price, side);
+        // No SMP id: this template is the standalone WS masking helper used by the
+        // roundtrip example, not the TemplateCache path that carries SMP ids.
+        let frame = self
+            .json
+            .patch(seq, qty, price, side, iicpc_schemas_rust::SMP_ID_NONE);
         build_ws_frame(&frame.bytes, self.mask_key)
     }
 }
@@ -1451,6 +1593,162 @@ mod tests {
             );
 
             assert!(wire[1] & 0x80 != 0, "client frames must set the mask bit");
+        }
+    }
+}
+
+#[cfg(test)]
+mod smp_tests {
+    use super::*;
+    use iicpc_schemas_rust::SMP_ID_NONE;
+
+    fn tag_value(bytes: &[u8], tag: &str) -> Option<String> {
+        let needle = format!("\x01{tag}=");
+        let start = find_subslice(bytes, needle.as_bytes())? + needle.len();
+        let end = bytes[start..].iter().position(|&b| b == 0x01)? + start;
+        Some(String::from_utf8_lossy(&bytes[start..end]).to_string())
+    }
+
+    #[test]
+    /// With no SMP id the tag must be ABSENT, not 7928=000 and not an empty value.
+    /// A contestant has to distinguish "unconstrained" from "id 0", and pass-2 frames
+    /// must stay byte-identical to pre-SMP output.
+    fn fix_omits_tag_7928_when_no_smp_id() {
+        let mut c = TemplateCache::new(Protocol::Fix, "FIX.4.2", "sess", "host", 7);
+        let f = c.render_new(1, 10_000, 5, Side::Buy);
+        assert!(
+            find_subslice(&f.bytes, b"\x017928=").is_none(),
+            "tag 7928 must be absent without an SMP id, got: {}",
+            String::from_utf8_lossy(&f.bytes)
+        );
+        assert_eq!(f.smp_id, SMP_ID_NONE);
+    }
+
+    #[test]
+    /// The id must ROTATE across orders and be patched in place, not baked once.
+    fn fix_rotates_smp_id_round_robin() {
+        let mut c = TemplateCache::with_smp(Protocol::Fix, "FIX.4.2", "sess", "host", 7, 8);
+        for seq in 0..24u64 {
+            let f = c.render_new(seq, 10_000, 5, Side::Buy);
+            let want = (seq % 8) as u32;
+            assert_eq!(f.smp_id, want, "seq {seq} frame smp_id");
+            assert_eq!(
+                tag_value(&f.bytes, "7928").as_deref(),
+                Some(format!("{want:03}").as_str()),
+                "seq {seq} wire tag 7928"
+            );
+        }
+    }
+
+    #[test]
+    /// FIX BodyLength(9) and CheckSum(10) must stay correct as the id changes —
+    /// the in-place patch updates the checksum delta rather than re-rendering.
+    fn fix_checksum_survives_smp_rotation() {
+        let mut c = TemplateCache::with_smp(Protocol::Fix, "FIX.4.2", "sess", "host", 7, 8);
+        for seq in 0..16u64 {
+            let f = c.render_new(seq, 10_000, 5, Side::Buy);
+            let body_start = find_subslice(&f.bytes, b"\x0135=").expect("body start") + 1;
+            let checksum_start = f.bytes.len() - 7; // "10=xxx\x01"
+            let sum: u32 = f.bytes[..checksum_start]
+                .iter()
+                .fold(0u32, |a, b| a.wrapping_add(u32::from(*b)));
+            let want = format!("{:03}", sum % 256);
+            let got = String::from_utf8_lossy(&f.bytes[checksum_start + 3..checksum_start + 6]).to_string();
+            assert_eq!(got, want, "seq {seq} checksum over frame {}", String::from_utf8_lossy(&f.bytes));
+            assert!(body_start > 0);
+        }
+    }
+
+    #[test]
+    /// smp_for is the rotation contract: count <= 1 means "no id at all".
+    fn smp_for_maps_seq_to_id() {
+        let none = TemplateCache::new(Protocol::Fix, "FIX.4.2", "s", "h", 1);
+        assert_eq!(none.smp_for(0), SMP_ID_NONE);
+        assert_eq!(none.smp_for(99), SMP_ID_NONE);
+
+        let one = TemplateCache::with_smp(Protocol::Fix, "FIX.4.2", "s", "h", 1, 1);
+        assert_eq!(one.smp_for(5), SMP_ID_NONE, "a single id is no constraint at all");
+
+        let eight = TemplateCache::with_smp(Protocol::Fix, "FIX.4.2", "s", "h", 1, 8);
+        assert_eq!(eight.smp_for(0), 0);
+        assert_eq!(eight.smp_for(7), 7);
+        assert_eq!(eight.smp_for(8), 0);
+        assert_eq!(eight.smp_for(9), 1);
+    }
+}
+
+#[cfg(test)]
+mod smp_json_tests {
+    use super::*;
+    use iicpc_schemas_rust::SMP_ID_NONE;
+
+    fn body(bytes: &[u8]) -> String {
+        let s = String::from_utf8_lossy(bytes).to_string();
+        match s.find("\r\n\r\n") {
+            Some(i) => s[i + 4..].to_string(),
+            None => s,
+        }
+    }
+
+    #[test]
+    /// Without an SMP id the key must be ABSENT from the JSON body — not "" and not 0.
+    /// Pass-2 scale scenarios rely on this to stay byte-identical to pre-SMP output.
+    fn json_omits_smp_id_when_none() {
+        for proto in [Protocol::Rest, Protocol::Ws] {
+            let mut c = TemplateCache::new(proto, "FIX.4.2", "sess", "host", 7);
+            let f = c.render_new(1, 10_000, 5, Side::Buy);
+            let b = body(&f.bytes);
+            assert!(!b.contains("smp_id"), "{proto:?} body must omit smp_id, got {b}");
+            assert_eq!(f.smp_id, SMP_ID_NONE);
+        }
+    }
+
+    #[test]
+    /// The id rotates and is patched in place; the body stays valid JSON throughout.
+    fn json_rotates_smp_id_and_stays_valid() {
+        for proto in [Protocol::Rest, Protocol::Ws] {
+            let mut c = TemplateCache::with_smp(proto, "FIX.4.2", "sess", "host", 7, 8);
+            for seq in 0..24u64 {
+                let f = c.render_new(seq, 10_000, 5, Side::Buy);
+                let b = body(&f.bytes);
+                let v: serde_json::Value =
+                    serde_json::from_str(&b).unwrap_or_else(|e| panic!("{proto:?} seq {seq} invalid JSON {b}: {e}"));
+                let want = (seq % 8) as u32;
+                assert_eq!(f.smp_id, want, "{proto:?} seq {seq} frame smp_id");
+                assert_eq!(
+                    v["smp_id"].as_str(),
+                    Some(format!("{want:03}").as_str()),
+                    "{proto:?} seq {seq} body smp_id"
+                );
+            }
+        }
+    }
+
+    #[test]
+    /// REST Content-Length must not move as the id rotates — that is why the value is a
+    /// fixed-width STRING rather than a number (JSON forbids zero-padded numbers, so a
+    /// numeric id would change width at 10 and 100 and force a re-render).
+    fn rest_content_length_constant_across_smp_rotation() {
+        // Hold the ClOrdID digit width CONSTANT (seq 100..116, all 3 digits) so this
+        // isolates the SMP rotation. A seq crossing 9->10 legitimately changes
+        // Content-Length via the ClOrdID, which is pre-existing behaviour pinned by
+        // rest_content_length_is_constant_while_digit_widths_are_stable — not something
+        // this test is measuring.
+        let mut c = TemplateCache::with_smp(Protocol::Rest, "FIX.4.2", "sess", "host", 7, 8);
+        let first = c.render_new(100, 10_000, 5, Side::Buy);
+        let want = String::from_utf8_lossy(&first.bytes)
+            .lines()
+            .find(|l| l.to_ascii_lowercase().starts_with("content-length:"))
+            .map(str::to_string)
+            .expect("content-length header");
+        for seq in 101..117u64 {
+            let f = c.render_new(seq, 10_000, 5, Side::Buy);
+            let got = String::from_utf8_lossy(&f.bytes)
+                .lines()
+                .find(|l| l.to_ascii_lowercase().starts_with("content-length:"))
+                .map(str::to_string)
+                .expect("content-length header");
+            assert_eq!(got, want, "seq {seq} Content-Length changed during SMP rotation");
         }
     }
 }

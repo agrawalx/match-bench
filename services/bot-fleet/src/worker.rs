@@ -853,6 +853,10 @@ struct PendingOrder {
     side: Side,
     payload_type: PayloadType,
     ord_type: OrdType,
+    /// Self-match-prevention id this order was sent under, or `SMP_ID_NONE` when the
+    /// task carries no SMP id. Captured here at send time so the telemetry event
+    /// reports what was actually put on the wire rather than re-deriving it later.
+    smp_id: u32,
 }
 
 type PendingMap = Arc<Mutex<HashMap<String, PendingOrder>>>;
@@ -1136,7 +1140,7 @@ async fn fix_write_loop(
 
     // One template per FrameKind, reused for the task's whole lifetime (P2).
     let mut template_cache =
-        fix::TemplateCache::new(Protocol::Fix, &fix_version, &session_id, &target_host, u64::from(task.task_id));
+        fix::TemplateCache::with_smp(Protocol::Fix, &fix_version, &session_id, &target_host, u64::from(task.task_id), task.smp_id_count);
 
     // Reused across iterations to avoid per-batch allocation.
     let mut frames: Vec<OrderFrame> = Vec::with_capacity(batch_max);
@@ -1221,6 +1225,7 @@ async fn fix_write_loop(
                         side: frame.side,
                         payload_type: frame.payload_type,
                         ord_type: frame.ord_type,
+                        smp_id: frame.smp_id,
                     },
                 );
             }
@@ -1377,6 +1382,7 @@ async fn fix_read_loop(
                     worker_id: worker_id.clone(),
                     task_id,
                     order_id: p.order_id,
+                    smp_id: p.smp_id,
                     target_send_ts_ns: p.target_send_ts_ns,
                     send_ts_ns: p.send_ts_ns,
                     recv_done_ts_ns,
@@ -1467,6 +1473,7 @@ async fn watchdog_loop(
                     worker_id: worker_id.clone(),
                     task_id,
                     order_id: p.order_id,
+                    smp_id: p.smp_id,
                     target_send_ts_ns: p.target_send_ts_ns,
                     send_ts_ns: p.send_ts_ns,
                     recv_done_ts_ns: 0,
@@ -1699,7 +1706,7 @@ async fn rw_write_loop(
 
     // One template per FrameKind, reused for the task's whole lifetime (P2').
     let mut template_cache =
-        fix::TemplateCache::new(writer.protocol(), &fix_version, &session_id, &target_host, u64::from(task.task_id));
+        fix::TemplateCache::with_smp(writer.protocol(), &fix_version, &session_id, &target_host, u64::from(task.task_id), task.smp_id_count);
 
     let mut frames: Vec<OrderFrame> = Vec::with_capacity(batch_max);
     let mut targets: Vec<u64> = Vec::with_capacity(batch_max);
@@ -1777,6 +1784,7 @@ async fn rw_write_loop(
                         side: frame.side,
                         payload_type: frame.payload_type,
                         ord_type: frame.ord_type,
+                        smp_id: frame.smp_id,
                     },
                 );
             }
@@ -1887,6 +1895,7 @@ async fn emit_response(
             worker_id: worker_id.to_string(),
             task_id,
             order_id: p.order_id,
+            smp_id: p.smp_id,
             target_send_ts_ns: p.target_send_ts_ns,
             send_ts_ns: p.send_ts_ns,
             recv_done_ts_ns,
@@ -2473,6 +2482,7 @@ mod tests {
                 tag52_offset: None,
                 payload_type: PayloadType::New,
                 ord_type: OrdType::Limit,
+                smp_id: iicpc_schemas_rust::SMP_ID_NONE,
             }
         }
         let frames = vec![frame(b"AAA"), frame(b"BB"), frame(b"C")];
@@ -2639,6 +2649,7 @@ mod tests {
                 cancel_pct: 0,
                 replace_pct: 0,
                 target_idx: 0,
+                smp_id_count: 0,
             }],
         }
     }
@@ -2710,6 +2721,7 @@ mod tests {
             side: frame.side,
             payload_type: frame.payload_type,
             ord_type: frame.ord_type,
+            smp_id: frame.smp_id,
         };
         assert_eq!(pending.orig_order_id, "sess1_7_1_O");
     }
@@ -2839,6 +2851,7 @@ mod tests {
             side: Side::Buy,
             payload_type: PayloadType::New,
             ord_type: OrdType::Limit,
+            smp_id: iicpc_schemas_rust::SMP_ID_NONE,
         }
     }
 

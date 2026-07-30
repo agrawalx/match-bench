@@ -459,6 +459,7 @@ mod tests {
             ord_type: OrdType::Limit,
             orig_order_id: String::new(),
             barrier_epoch_ns: 1_770_000_000_000_000_000,
+            smp_id: iicpc_schemas_rust::SMP_ID_NONE,
         }
     }
 

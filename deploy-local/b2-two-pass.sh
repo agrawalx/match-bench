@@ -169,12 +169,25 @@ fi
 
 # The reference book applies skip-and-continue, so a contestant that implements SMP
 # correctly must never produce a self-trade.
+#
+# Fail CLOSED on an absent value. This read an unlogged field for its whole life, so
+# book_self was always empty and the assertion silently did nothing — the run reported
+# 11/11 while never checking self-trades at all, and the stored column meanwhile sat at
+# exactly 100 (the violation-example cap) with nobody looking.
 book_self=$(val "${SESSION[book]}" self_trades)
-if [ -n "$book_self" ]; then
-  [ "$book_self" = 0 ] \
-    && ok "book produced no self-trades (SMP honoured on both sides)" \
-    || fail "book produced $book_self self-trades — contestant and reference book disagree on SMP"
+if [ -z "$book_self" ]; then
+  fail "self_trades was not reported — cannot assert the SMP rule, and an unasserted rule is an unenforced one"
+elif [ "$book_self" = 0 ]; then
+  ok "book produced no self-trades (SMP honoured on both sides)"
+else
+  fail "book produced $book_self self-trades — contestant and reference book disagree on SMP"
 fi
+
+# Attribute what a correct engine still loses. These are exact counters now, not counts
+# of capped examples.
+for f in price_violations time_violations cancel_replace_loss missed_fills overfills capture_gaps; do
+  printf "   book %s=%s\n" "$f" "$(val "${SESSION[book]}" "$f")"
+done
 
 # A correct engine must actually TRADE. Zero fills would mean SMP is over-applied and
 # the book is self-crossing everything — the pre-fix failure mode wearing a new mask.

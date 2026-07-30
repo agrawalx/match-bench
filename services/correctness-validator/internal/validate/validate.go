@@ -67,8 +67,12 @@ type Report struct {
 	PhantomFills    uint64
 	Overfills       uint64
 	PriceViolations uint64
-	TimeViolations  uint64
-	SelfTrades      uint64
+	// TimeViolations counts BOTH ordering classes: plain time-priority breaches and
+	// cancel-replace priority losses. CancelReplaceLosses is the exact size of the
+	// second, so Time-only = TimeViolations - CancelReplaceLosses.
+	TimeViolations      uint64
+	CancelReplaceLosses uint64
+	SelfTrades          uint64
 	// MissedFills counts orders the reference book matched but the contestant never
 	// filled. Per ORDER, not per fill — the point is the absence of fills.
 	MissedFills uint64
@@ -222,6 +226,11 @@ func (r *Report) add(t ViolationType, id string, qty uint64, price int64, detail
 func (r *Report) flagJump(e *book.Engine, o *model.Order, jumper string, qty uint64, price int64) {
 	r.TimeViolations++
 	if e.Repriced(o.OrderID) {
+		// Counted exactly, not derived from the retained examples. TimeViolations covers
+		// both ordering classes, so the split used to be recovered by counting entries in
+		// Violations — which is capped at maxViolationExamplesPerType, so any run with
+		// more than 100 of either class reported exactly 100 and looked plausible.
+		r.CancelReplaceLosses++
 		r.add(CancelReplaceLoss, o.OrderID, qty, price,
 			fmt.Sprintf("repriced order filled ahead of %s, which was already resting at the new level (lost time priority on REPLACE)", jumper))
 		return

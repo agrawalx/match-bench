@@ -137,21 +137,22 @@ func (s *Store) Save(ctx context.Context, rec Record) (bool, error) {
 	if status == "" {
 		status = StatusScored
 	}
-	// Count time / self_trade / cancel_replace_loss by exact violation type. The
-	// Report.TimeViolations field also counts cancel-replace priority losses, so
-	// counting the entries directly is the only way to get the true per-type
-	// split. phantom/overfill/price already have dedicated report counters.
-	var timeCount, selfTradeCount, crlCount int64
-	for _, v := range rec.Report.Violations {
-		switch v.Type {
-		case validate.Time:
-			timeCount++
-		case validate.SelfTrade:
-			selfTradeCount++
-		case validate.CancelReplaceLoss:
-			crlCount++
-		}
+	// Per-class counts come from the EXACT report counters, never from the retained
+	// Violations examples. Those examples are capped at maxViolationExamplesPerType
+	// (100) per class, so counting them made these columns silently saturate: a real
+	// pass-1 run stored time=100 and self_trades=100 — plausible-looking numbers that
+	// were simply the cap, hiding both the true magnitude and, in the self-trade case,
+	// whether a supposedly SMP-correct engine was self-matching at all.
+	//
+	// TimeViolations covers both ordering classes, so the Time-only figure is the
+	// difference. Clamped because the two counters are incremented at the same call
+	// site and must not be able to produce a negative column if that ever changes.
+	crlCount := int64(rec.Report.CancelReplaceLosses)
+	timeCount := int64(rec.Report.TimeViolations) - crlCount
+	if timeCount < 0 {
+		timeCount = 0
 	}
+	selfTradeCount := int64(rec.Report.SelfTrades)
 
 	tag, err := s.pool.Exec(ctx, `
 INSERT INTO correctness_summary

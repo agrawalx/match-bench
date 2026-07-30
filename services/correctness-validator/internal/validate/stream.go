@@ -286,40 +286,17 @@ func (v *StreamValidator) scoreOrder(o *model.Order, r *orderRef) bool {
 			v.rep.add(Overfill, o.OrderID, resp.FillQty, price,
 				fmt.Sprintf("cumulative reported %d exceeds order qty %d", cumReported, o.Qty))
 
-		// The contestant filled against a resting order carrying the same self-match
-		// prevention id. Checked against the reference book's RESTING state, not its
-		// trades: the reference applies skip-and-continue, so a genuine self-match
-		// produces no trade at all and there is nothing to compare to. Ordered ahead of
-		// the r == nil branch deliberately — without it the same event surfaces as a
-		// generic "reference engine produced no fill" price violation, which says
-		// nothing about the rule the contestant actually broke.
-		case v.selfMatchedAgainstBook(o, price):
-			v.rep.SelfTrades++
-			v.rep.add(SelfTrade, o.OrderID, resp.FillQty, price,
-				"filled against a resting order carrying the same self-match-prevention id")
-
 		case r == nil:
-			if jumper, ok := v.queueJump(o, price); ok {
-				v.rep.flagJump(v.engine, o, jumper, resp.FillQty, price)
-			} else {
-				v.rep.PriceViolations++
-				v.rep.add(Price, o.OrderID, resp.FillQty, price,
-					"reference engine produced no fill for this order")
-			}
+			v.classifyUnexplained(o, price, resp.FillQty,
+				"reference engine produced no fill for this order")
 
 		case !hasPrice(r.prices, price):
-			v.rep.PriceViolations++
-			v.rep.add(Price, o.OrderID, resp.FillQty, price,
+			v.classifyUnexplained(o, price, resp.FillQty,
 				"reported fill price not produced by the reference engine for this order")
 
 		case cumReported > r.qty:
-			if jumper, ok := v.queueJump(o, price); ok {
-				v.rep.flagJump(v.engine, o, jumper, resp.FillQty, price)
-			} else {
-				v.rep.PriceViolations++
-				v.rep.add(Price, o.OrderID, resp.FillQty, price,
-					fmt.Sprintf("cumulative reported %d exceeds reference fill qty %d", cumReported, r.qty))
-			}
+			v.classifyUnexplained(o, price, resp.FillQty,
+				fmt.Sprintf("cumulative reported %d exceeds reference fill qty %d", cumReported, r.qty))
 
 		default:
 			v.rep.ValidFills++
@@ -341,6 +318,36 @@ func (v *StreamValidator) scoreOrder(o *model.Order, r *orderRef) bool {
 		return true
 	}
 	return false
+}
+
+// classifyUnexplained names the rule broken by a fill the reference did not produce.
+//
+// It is only ever reached for a fill that is ALREADY wrong — the reference produced no
+// fill for this order, none at this price, or less than the contestant claims. Its job is
+// to say WHY, in decreasing order of specificity: a self-match, then a queue jump, then
+// the generic price violation.
+//
+// The self-match test lives here, and not ahead of the reference comparison, because "an
+// order sharing my SMP id rests at this price" is the ordinary state of a pass-1 book:
+// eight ids rotate across one connection, so a busy level routinely holds the aggressor's
+// own id alongside everyone else's. Testing it first therefore reclassified perfectly
+// legitimate fills — the reference skips the same-id maker under skip-and-continue and
+// matches the NEXT one, the contestant reports exactly that fill, and it was scored a
+// self-trade because the skipped order was still sitting there. Against a real pass-1 run
+// that turned a correct engine's clean crosses into violations.
+func (v *StreamValidator) classifyUnexplained(o *model.Order, price int64, qty uint64, detail string) {
+	if v.selfMatchedAgainstBook(o, price) {
+		v.rep.SelfTrades++
+		v.rep.add(SelfTrade, o.OrderID, qty, price,
+			"filled against a resting order carrying the same self-match-prevention id")
+		return
+	}
+	if jumper, ok := v.queueJump(o, price); ok {
+		v.rep.flagJump(v.engine, o, jumper, qty, price)
+		return
+	}
+	v.rep.PriceViolations++
+	v.rep.add(Price, o.OrderID, qty, price, detail)
 }
 
 // selfMatchedAgainstBook reports whether the contestant filled `o` at `price` against a

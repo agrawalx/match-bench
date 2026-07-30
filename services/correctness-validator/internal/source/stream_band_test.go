@@ -212,6 +212,8 @@ func TestIntegration_BandIsolation(t *testing.T) {
 		counts, _, err := StreamSession(ctx, brokers, sessionID, 0, band, bandWidth,
 			func(*model.Order) {},
 			func(string, uint64, int64) {},
+			func(string, model.Kind) {},
+			func() {},
 		)
 		if err != nil {
 			t.Fatalf("StreamSession(%s): %v", sessionID, err)

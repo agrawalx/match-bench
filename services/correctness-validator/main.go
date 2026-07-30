@@ -57,7 +57,15 @@ func main() {
 	settleDelay := time.Duration(envInt("SETTLE_DELAY_MS", 10000)) * time.Millisecond
 	validationTimeout := time.Duration(envInt("VALIDATION_TIMEOUT_MS", 60000)) * time.Millisecond
 	concurrency := envInt("VALIDATOR_CONCURRENCY", 4)
-	validate.AggressiveFillToleranceNs = uint64(envInt("AGGRESSIVE_FILL_TOLERANCE_US", 0)) * 1000
+	// AGGRESSIVE_FILL_TOLERANCE_US is gone, not merely unread. It forgave a fill the
+	// reference did not produce when opposite liquidity had been resting within ±tolerance
+	// of the aggressor's EffectiveT3 — a hedge against the replay interleaving differently
+	// from what a live engine could observe. Pass 1 runs ONE task, so one TCP connection,
+	// so TCPSeq totally orders the session and the replay order is the wire order: there
+	// is no interleaving to forgive. Pass 2 is book-free and never consulted it. It was
+	// implemented only in the deleted batch validator, making the env knob a documented
+	// production no-op, and the per-order availability windows feeding it grew O(session)
+	// in the engine.
 	reorderWindow := envInt("REORDER_WINDOW", 0) // 0 -> source.DefaultReorderWindow
 	// VALIDATOR_MODE: full (default) is the current book-replay behavior; invariants
 	// is the pass-2 book-free mode (docs/multi-contestant-audit.md §5, P-F). This is a
@@ -74,7 +82,11 @@ func main() {
 	// DEFAULT_PARTITION_BAND_WIDTH: partitions per exclusively-leased order
 	// band. Must match the producer side or band-restricted reads will miss
 	// partitions the session actually wrote to.
-	bandWidth := int32(envInt("VALIDATOR_ORDER_BAND_WIDTH", 8))
+	//
+	// 6 yields exactly 4 exclusive bands over 24 partitions, matching the
+	// controller's MAX_CONCURRENT_SESSIONS=4. See the constant's doc comment in
+	// schemas/rust/src/lib.rs for why 8 broke exclusivity at the 4th session.
+	bandWidth := int32(envInt("VALIDATOR_ORDER_BAND_WIDTH", 6))
 	workloadGroup := envOr("KAFKA_WORKLOAD_BAND_GROUP", "correctness-validator-band")
 	brokers := parseBrokers(kafkaBrokers)
 	if err := checkTimeoutConfig(validationTimeout, settleDelay); err != nil {
@@ -266,6 +278,8 @@ func (v *validator) validateSession(ctx context.Context, sessionID string) error
 		counts, contestant, err = source.StreamSession(ctx, v.brokers, sessionID, v.reorderWindow, orderBand, v.bandWidth,
 			iv.Apply,
 			iv.AddUnmatched,
+			iv.AddLost,
+			iv.AddCaptureGap,
 		)
 		if err != nil {
 			metrics.Counter("validator_validation_errors_total", "Correctness-validator validation errors by stage.", metrics.Labels("stage", "drain"), 1)
@@ -280,6 +294,8 @@ func (v *validator) validateSession(ctx context.Context, sessionID string) error
 			func(id string, qty uint64, price int64) {
 				sv.AddPhantom(validate.ReportedFill{OrderID: id, Qty: qty, Price: price})
 			},
+			sv.AddLost,
+			sv.AddCaptureGap,
 		)
 		if err != nil {
 			metrics.Counter("validator_validation_errors_total", "Correctness-validator validation errors by stage.", metrics.Labels("stage", "drain"), 1)

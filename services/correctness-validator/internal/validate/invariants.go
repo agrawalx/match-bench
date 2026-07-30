@@ -246,11 +246,14 @@ type InvariantsValidator struct {
 	max1Flow         model.Flow
 	max1Set, max2Set bool
 
-	jitter    *jitterHistogram
-	processed uint64
+	jitter        *jitterHistogram
+	processed     uint64
 	anomalyCapNs  uint64
 	lateTaintRate float64
 	applied       uint64
+	// captureGaps counts orders excluded from grading because the platform lost their
+	// response records (see AddCaptureGap).
+	captureGaps uint64
 }
 
 // NewInvariantsValidator constructs an invariants-mode validator with cross-flow
@@ -329,7 +332,6 @@ func (v *InvariantsValidator) Apply(o *model.Order) {
 	// early but fills late must still be positioned by its earliest response, or the
 	// FIFO/cross-flow checks below see a spuriously late processing time for it and
 	// flag violations that aren't real.
-	v.applied++
 	var hasResp bool
 	var minT7Ns uint64
 	for _, resp := range o.Responses {
@@ -361,6 +363,14 @@ func (v *InvariantsValidator) Apply(o *model.Order) {
 		}
 		return
 	}
+	// Counted only once the order is actually graded on processing order. It used to be
+	// incremented above the lost branch, so a lost order landed in BOTH `applied` and
+	// LostOrders — and Finish sums the two, so every lost order sat in the score
+	// denominator twice. An engine that answered nothing scored 0.5 instead of 0.
+	// `applied` is also the taint-rate denominator, where lost orders never belonged
+	// either: taint measures whether the t7 stream is trustworthy, and an order with no
+	// t7 says nothing about that.
+	v.applied++
 	v.window.push(invRec{
 		orderID: o.OrderID,
 		flow:    o.Flow,
@@ -429,6 +439,33 @@ func (v *InvariantsValidator) AddUnmatched(_ string, _ uint64, _ int64) {
 	v.rep.PhantomFills++
 }
 
+// AddCaptureGap records an order whose response the bot received but whose orders.acked
+// record never reached the validator. Pass 2 grades processing ORDER, which is derived
+// entirely from captured T7 timestamps, so an order with no capture record contributes
+// nothing and must not be counted against the contestant either — see the full-mode
+// AddCaptureGap for the measurement that motivated this.
+func (v *InvariantsValidator) AddCaptureGap() {
+	v.captureGaps++
+}
+
+// AddLost records an order the bot sent that the contestant never answered, reported by
+// the source rather than discovered in Apply.
+//
+// Apply's own lost branch can only fire for an order that REACHED it, and the join emits
+// an order only once it has at least one ack — so before this, Apply's branch caught
+// only orders whose responses failed the T7 sanity gate, never a genuinely dropped one.
+// It deliberately does not touch `applied`: that counts orders entering the T7 reorder
+// window, and Finish adds the lost counters to it separately.
+func (v *InvariantsValidator) AddLost(orderID string, kind model.Kind) {
+	if kind == model.Cancel {
+		v.rep.LostCancels++
+	} else {
+		v.rep.LostOrders++
+	}
+	v.rep.add(lostViolationType(kind), orderID, 0, 0,
+		"order/cancel sent but never received any response")
+}
+
 // Finish flushes whatever remains buffered in the T7 reorder window (running the same
 // incremental onEmit checks on it) and returns the accumulated report. There is no
 // separate batch pass here — Finish's only job left is draining the tail of the
@@ -439,12 +476,26 @@ func (v *InvariantsValidator) Finish() Report {
 	// See the ScoredFills doc comment on Report: invariants mode's TotalFills is
 	// real fills only (phantoms never touch it), so it is the denominator directly.
 	v.rep.ScoredFills = v.rep.TotalFills
+	// Order-level denominator: every order this validator graded. v.applied counts
+	// orders pushed into the T7 reorder window; lost orders return before that, so
+	// they are added explicitly or an engine that loses everything would divide by
+	// zero and score a perfect 1.0.
+	v.rep.ScoredOrders = v.applied + v.rep.LostOrders + v.rep.LostCancels
 	suspect := v.rep.T7ReorderLate + v.rep.T7Anomalies
 	if v.applied > 0 && float64(suspect)/float64(v.applied) > v.lateTaintRate {
 		v.rep.Tainted = true
 		v.rep.TaintReason = fmt.Sprintf(
 			"t7 stream unreliable: %d late + %d anomalous of %d orders exceeds rate %.4f",
 			v.rep.T7ReorderLate, v.rep.T7Anomalies, v.applied, v.lateTaintRate)
+	}
+	// Capture loss taints for the same reason the T7 anomalies above do: the grading is
+	// only as trustworthy as the sample it ran on.
+	if total := v.rep.ScoredOrders + v.captureGaps; total > 0 &&
+		float64(v.captureGaps)/float64(total) > DefaultCaptureGapTaintRate {
+		v.rep.Tainted = true
+		v.rep.TaintReason = fmt.Sprintf(
+			"capture lost the responses for %d of %d orders (%.1f%%): the contestant answered them but no orders.acked record arrived, so they are excluded from grading",
+			v.captureGaps, total, 100*float64(v.captureGaps)/float64(total))
 	}
 	return v.rep
 }

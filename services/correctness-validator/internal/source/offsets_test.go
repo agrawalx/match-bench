@@ -1,4 +1,5 @@
-// Package source defines tests for drain test.
+// Package source defines tests for session offset resolution, plus the Kafka fixture
+// helpers shared by this package's integration tests.
 //
 // This file is part of the IICPC benchmarking platform and keeps its
 // responsibilities local to the surrounding package. It should be read with
@@ -8,8 +9,6 @@ package source
 import (
 	"context"
 	"fmt"
-	"os"
-	"strings"
 	"testing"
 	"time"
 
@@ -97,126 +96,57 @@ func TestStartOffsetForSession(t *testing.T) {
 	}
 }
 
-// TestIntegration_DrainBoundedWindow performs the package-specific operation described by its name.
+// TestResolveStart performs the package-specific operation described by its name.
 // It keeps validation, side effects, and returned values within this package's contract.
-func TestIntegration_DrainBoundedWindow(t *testing.T) {
-	brokersCSV := strings.TrimSpace(os.Getenv("KAFKA_BROKERS"))
-	if brokersCSV == "" {
-		t.Skip("set KAFKA_BROKERS to run the bounded-drain integration test")
+func TestResolveStart(t *testing.T) {
+	if got := resolveStart(-1, 591); got != 591 {
+		t.Fatalf("seek=-1 (no session events) must map to last=591, got %d", got)
 	}
-	brokers := strings.Split(brokersCSV, ",")
-	ctx := context.Background()
-
-	old := newUUIDv7(time.Now().Add(-30 * time.Minute))
-	writeSent(ctx, t, brokers, old, []topics.OrderSentEvent{
-		{SessionID: old, OrderID: "OLD1", Price: 1, Qty: 1, Side: "BUY", PayloadType: "NEW", OrdType: "LIMIT"},
-	})
-
-	sid := newUUIDv7(time.Now())
-	want := []topics.OrderSentEvent{
-		{SessionID: sid, OrderID: "A", Price: 100, Qty: 10, Side: "BUY", PayloadType: "NEW", OrdType: "LIMIT"},
-		{SessionID: sid, OrderID: "B", Price: 101, Qty: 5, Side: "SELL", PayloadType: "NEW", OrdType: "LIMIT"},
+	if got := resolveStart(0, 297); got != 0 {
+		t.Fatalf("seek=0 must be honored, got %d", got)
 	}
-	writeSent(ctx, t, brokers, sid, want)
-
-	sents, _, err := DrainSession(ctx, brokers, sid)
-	if err != nil {
-		t.Fatalf("DrainSession: %v", err)
-	}
-	if len(sents) != len(want) {
-		t.Fatalf("DrainSession returned %d sent events, want %d: %+v", len(sents), len(want), sents)
-	}
-	gotIDs := map[string]bool{}
-	for _, e := range sents {
-		if e.SessionID != sid {
-			t.Errorf("leaked event from another session: %+v", e)
-		}
-		gotIDs[e.OrderID] = true
-	}
-	if !gotIDs["A"] || !gotIDs["B"] {
-		t.Errorf("missing events; got order ids %v, want A and B", gotIDs)
+	if got := resolveStart(42, 1197); got != 42 {
+		t.Fatalf("seek=42 must be honored, got %d", got)
 	}
 }
 
-// ackedMsg performs the package-specific operation described by its name.
-// It keeps validation, side effects, and returned values within this package's contract.
-func ackedMsg(t *testing.T, b topics.OrderAckedBatch) kafka.Message {
-	t.Helper()
-	payload, err := msgpack.Marshal(b)
-	if err != nil {
-		t.Fatalf("msgpack marshal: %v", err)
-	}
-	return kafka.Message{Value: payload}
-}
-
-// TestAckedCollectorDedup performs the package-specific operation described by its name.
-// It keeps validation, side effects, and returned values within this package's contract.
-func TestAckedCollectorDedup(t *testing.T) {
-	const sid = "sess-dedup"
-	fill := topics.OrderAckedEvent{SessionID: sid, OrderID: "A", ExecType: "2", FillQty: 5, FillPrice: 100, T7XDPEgressNS: 1000}
-	otherT7 := fill
-	otherT7.T7XDPEgressNS = 2000
-	otherExec := fill
-	otherExec.ExecType = "1"
-	otherOrder := fill
-	otherOrder.OrderID = "B"
-
-	c := newAckedCollector(sid)
-	c.handle(ackedMsg(t, topics.OrderAckedBatch{SessionID: sid, ContestantID: "team-dedup", Events: []topics.OrderAckedEvent{fill, otherT7}}))
-	c.handle(ackedMsg(t, topics.OrderAckedBatch{SessionID: sid, ContestantID: "team-dedup", Events: []topics.OrderAckedEvent{fill, otherT7}}))
-	c.handle(ackedMsg(t, topics.OrderAckedBatch{SessionID: sid, ContestantID: "team-dedup", Events: []topics.OrderAckedEvent{otherExec, otherOrder}}))
-	c.handle(ackedMsg(t, topics.OrderAckedBatch{SessionID: "other-session", Events: []topics.OrderAckedEvent{fill}}))
-
-	if len(c.events) != 4 {
-		t.Fatalf("collected %d events, want 4 (dupes dropped, near-dupes kept): %+v", len(c.events), c.events)
-	}
-	want := []topics.OrderAckedEvent{fill, otherT7, otherExec, otherOrder}
-	for i, e := range c.events {
-		if e != want[i] {
-			t.Errorf("events[%d] = %+v, want %+v (arrival order must be preserved)", i, e, want[i])
-		}
-	}
-	if c.duplicates != 2 {
-		t.Errorf("duplicates = %d, want 2", c.duplicates)
-	}
-}
-
-// TestCollectorsCountDecodeErrors performs the package-specific operation described by its name.
-// It keeps validation, side effects, and returned values within this package's contract.
-func TestCollectorsCountDecodeErrors(t *testing.T) {
+// TestDecodeBatchSurvivesGarbage: one unparseable message must not sink the session
+// read. This was the batch collectors' decode-error test; decodeBatch is the streaming
+// path's equivalent choke point.
+func TestDecodeBatchSurvivesGarbage(t *testing.T) {
 	const sid = "sess-decode"
 	garbage := kafka.Message{Partition: 3, Offset: 42, Value: []byte{0xc1}}
 
-	sc := &sentCollector{sessionID: sid}
-	sc.handle(garbage)
+	if _, ok := decodeBatch(garbage, sid, false); ok {
+		t.Error("garbage orders.sent message decoded ok=true, want false")
+	}
+	if _, ok := decodeBatch(garbage, sid, true); ok {
+		t.Error("garbage orders.acked message decoded ok=true, want false")
+	}
+
 	// V2 positional envelope — the format the producer actually writes.
 	sentPayload, err := msgpack.Marshal(topics.OrderSentBatchV2{
 		SessionID: sid,
 		Events: []topics.OrderSentEventFields{
-			{OrderID: "A", Price: 100, Qty: 10, Side: "BUY", PayloadType: "NEW", OrdType: "LIMIT"},
+			{OrderID: "A", Price: 100, Qty: 10, Side: "BUY", PayloadType: "NEW", OrdType: "LIMIT", SendTSNS: 7},
 		},
 	})
 	if err != nil {
 		t.Fatalf("msgpack marshal: %v", err)
 	}
-	sc.handle(kafka.Message{Value: sentPayload})
-	if sc.decodeErrors != 1 {
-		t.Errorf("sentCollector.decodeErrors = %d, want 1", sc.decodeErrors)
-	}
-	if len(sc.events) != 1 {
-		t.Errorf("sentCollector kept %d events, want 1 (decode failure must not sink the drain)", len(sc.events))
+	b, ok := decodeBatch(kafka.Message{Value: sentPayload}, sid, false)
+	if !ok || len(b.sent) != 1 {
+		t.Fatalf("valid sent batch after a decode failure: ok=%v events=%d", ok, len(b.sent))
 	}
 
-	ac := newAckedCollector(sid)
-	ac.handle(garbage)
-	ac.handle(ackedMsg(t, topics.OrderAckedBatch{SessionID: sid, Events: []topics.OrderAckedEvent{
+	ackPayload, err := msgpack.Marshal(topics.OrderAckedBatch{SessionID: sid, Events: []topics.OrderAckedEvent{
 		{SessionID: sid, OrderID: "A", ExecType: "0", T7XDPEgressNS: 1500},
-	}}))
-	if ac.decodeErrors != 1 {
-		t.Errorf("ackedCollector.decodeErrors = %d, want 1", ac.decodeErrors)
+	}})
+	if err != nil {
+		t.Fatalf("msgpack marshal: %v", err)
 	}
-	if len(ac.events) != 1 {
-		t.Errorf("ackedCollector kept %d events, want 1 (decode failure must not sink the drain)", len(ac.events))
+	if b, ok := decodeBatch(kafka.Message{Value: ackPayload}, sid, true); !ok || len(b.acks) != 1 {
+		t.Fatalf("valid acked batch after a decode failure: ok=%v events=%d", ok, len(b.acks))
 	}
 }
 
@@ -249,23 +179,10 @@ func writeSent(ctx context.Context, t *testing.T, brokers []string, sid string, 
 	}
 }
 
-// TestResolveStart performs the package-specific operation described by its name.
-// It keeps validation, side effects, and returned values within this package's contract.
-func TestResolveStart(t *testing.T) {
-	if got := resolveStart(-1, 591); got != 591 {
-		t.Fatalf("seek=-1 (no session events) must map to last=591, got %d", got)
-	}
-	if got := resolveStart(0, 297); got != 0 {
-		t.Fatalf("seek=0 must be honored, got %d", got)
-	}
-	if got := resolveStart(42, 1197); got != 42 {
-		t.Fatalf("seek=42 must be honored, got %d", got)
-	}
-}
-
 // sentBatchV2 builds the positional V2 envelope from full events, hoisting the identity
-// fields the way the Rust producer does. Shared by the drain tests so no test encodes
-// the superseded named-map format.
+// fields the way the Rust producer does, so no test encodes the superseded named-map
+// format (a Go-to-Go round trip of the wrong envelope passes while Go and Rust disagree,
+// which is how the sent=0 bug survived four tests).
 func sentBatchV2(sid string, events []topics.OrderSentEvent) topics.OrderSentBatchV2 {
 	fields := make([]topics.OrderSentEventFields, 0, len(events))
 	for _, e := range events {

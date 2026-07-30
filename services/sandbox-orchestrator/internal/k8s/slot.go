@@ -587,7 +587,13 @@ func (m *Manager) captureJobSpec(slotID, contestantID, nodeName, podUID, contain
 	autoMount := false
 	backoffLimit := int32(0)
 	ttl := int32(300)
-	graceful := int64(5)
+	// The capture must be given time to drain its Kafka producer queue on SIGTERM.
+	// Enqueue is fire-and-forget, so anything still queued when SIGKILL lands is
+	// discarded — and each discarded batch costs the orders in it their entire response
+	// record, which downstream reads as a contestant that never answered. At 5s this was
+	// far too short for a queue that batches with linger.ms and can hold hundreds of MB;
+	// it must stay comfortably above the capture's own PRODUCER_FLUSH_TIMEOUT.
+	graceful := int64(60)
 	captureDeadline := captureJobActiveDeadlineSeconds
 	bpffsType := corev1.HostPathDirectoryOrCreate
 

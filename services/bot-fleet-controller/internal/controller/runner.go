@@ -33,6 +33,21 @@ type RunConfig struct {
 	BarrierSafetyGap time.Duration
 
 	MaxTasksPerWorker int
+	// CapacityWaitTimeout bounds the blocking pre-scale gate: how long a session
+	// waits for the bot-fleet consumer group to have one member per shard before
+	// giving up. Zero disables the gate (publish immediately, the pre-gate
+	// behaviour). Must exceed the fleet's realistic scale-up time — pod schedule +
+	// image pull + Kafka group join — or sessions fail while KEDA is still working.
+	CapacityWaitTimeout time.Duration
+	// CapacityPollInterval is how often the gate re-reads group membership.
+	CapacityPollInterval time.Duration
+	// WorkerRPSCapacity is one bot-fleet worker's sustainable send rate in orders
+	// per second, used as the throughput ceiling when sizing a session's shard
+	// count. Environment-specific and therefore configuration: measured
+	// single-worker ceilings range from ~50k/s (local loopback) to 600-790k/s
+	// (drain, telemetry off). Zero disables the ceiling, leaving shard count
+	// determined by task count alone (the pre-rate-awareness behaviour).
+	WorkerRPSCapacity uint64
 
 	// LeaseAcquireTimeout bounds how long a session blocks waiting for free
 	// workload.assignments partitions before admission fails outright. This
@@ -53,6 +68,17 @@ type Runner struct {
 	bandLeases *PartitionLeaseAllocator
 	runConfig  RunConfig
 	log        *slog.Logger
+	// capacityProbe reports bot-fleet consumer-group capacity for the blocking
+	// pre-scale gate. Nil disables the gate — which is what every existing test
+	// constructing a Runner directly gets, so none of them need a live broker.
+	capacityProbe CapacityProbe
+}
+
+// SetCapacityProbe installs the pre-scale gate's capacity probe. Set at wiring time in
+// main rather than passed to NewRunner, which already takes eight arguments and is
+// constructed in several tests that must not need a broker.
+func (r *Runner) SetCapacityProbe(p CapacityProbe) {
+	r.capacityProbe = p
 }
 
 // NewRunner performs the package-specific operation described by its name.
@@ -119,8 +145,24 @@ func (r *Runner) Run(parent context.Context, req topics.BenchmarkRequested) {
 		return
 	}
 
-	workerCount := computeWorkerCount(len(scenario.TaskSpecs), r.runConfig.MaxTasksPerWorker)
-	log = log.With("scenario_name", scenario.Name, "total_tasks", len(scenario.TaskSpecs), "worker_count", workerCount)
+	totalRPS := totalTargetRPS(scenario.TaskSpecs)
+	workerCount := computeWorkerCountForLoad(
+		len(scenario.TaskSpecs), totalRPS,
+		r.runConfig.MaxTasksPerWorker, r.runConfig.WorkerRPSCapacity,
+	)
+	// shard_reason names the binding ceiling so an unexpected worker_count is
+	// diagnosable from one log line instead of by re-deriving both ceilings.
+	shardReason := "tasks"
+	if workerCount > computeWorkerCount(len(scenario.TaskSpecs), r.runConfig.MaxTasksPerWorker) {
+		shardReason = "rate"
+	}
+	log = log.With(
+		"scenario_name", scenario.Name,
+		"total_tasks", len(scenario.TaskSpecs),
+		"total_target_rps", totalRPS,
+		"worker_count", workerCount,
+		"shard_reason", shardReason,
+	)
 	metrics.Counter("sessions_started_total", "Benchmark sessions started by scenario.", metrics.Labels("scenario_name", scenario.Name), 1)
 
 	sess := &Session{
@@ -246,19 +288,34 @@ func (r *Runner) runSession(
 
 	specs := r.buildWorkloadSpecs(sess, sub, scenario, workerCount, orderBand)
 
-	// Pre-scale gate: record leased-demand (this session's workerCount plus
-	// whatever every other in-flight session already holds) against the
-	// partition budget, so bot-fleet under-provisioning shows up before the
-	// ready-fan-in deadline races KEDA's scale-up. Deviation from the audit:
-	// no k8s client is wired into this service to compare against
-	// readyReplicas directly, so the gate is metric/log-only for now
-	// (controller_leased_partitions) rather than a live readyReplicas
-	// comparison; PARTIAL_READY_POLICY=fail (awaitReady above) is the hard
-	// backstop if bot-fleet can't actually keep up.
+	// Pre-scale gate — BLOCKING. Wait until the bot-fleet consumer group actually has
+	// one member per shard, and has finished rebalancing, before publishing anything.
+	//
+	// This used to be log-only, which left a real hazard: publishing worker_count specs
+	// to a smaller fleet means a pod receives more specs than it can run concurrently
+	// and leaves the surplus UNCOMMITTED, so when KEDA's new pod joins, the rebalance
+	// re-delivers those specs and a shard runs TWICE. A local 3-shard run reproduced
+	// exactly that — worker_index 0 and 1 each prepared twice, and the session
+	// delivered 142k orders against an expected 324k because the duplicate runs began
+	// after the barrier epoch had passed.
+	//
+	// The group is read via Kafka DescribeGroups rather than Deployment readyReplicas:
+	// group membership is what determines whether a spec can be received at all (a pod
+	// that has not joined yet cannot), and it needs no Kubernetes RBAC.
 	log.Info("pre-scale gate: leased-partition demand",
 		"session_worker_count", workerCount,
 		"total_leased_partitions", r.leases.LeasedCount(),
 	)
+	if r.capacityProbe != nil {
+		if err := awaitCapacity(
+			ctx, r.capacityProbe, int(workerCount),
+			r.runConfig.CapacityWaitTimeout, r.runConfig.CapacityPollInterval, log,
+		); err != nil {
+			recordSessionStage("await_capacity", stageStart, err)
+			r.fail(ctx, sess, "bot-fleet capacity: "+err.Error(), log)
+			return
+		}
+	}
 
 	stageStart = time.Now()
 	if err := r.producer.PublishWorkloadSpec(ctx, specs, leases); err != nil {
@@ -314,6 +371,47 @@ func computeWorkerCount(totalTasks, maxTasksPerWorker int) uint32 {
 	}
 	count := (totalTasks + maxTasksPerWorker - 1) / maxTasksPerWorker
 	return uint32(count)
+}
+
+// totalTargetRPS sums target_rps across a scenario's task specs — the scenario's
+// aggregate order rate, and the input to the throughput ceiling below. Accumulates
+// in uint64: 1000 tasks at high per-task rates overflow a uint32 sum.
+func totalTargetRPS(specs []topics.TaskSpec) uint64 {
+	var total uint64
+	for i := range specs {
+		total += uint64(specs[i].TargetRPS)
+	}
+	return total
+}
+
+// computeWorkerCountForLoad sizes a session's shard count against BOTH of the
+// worker's real limits and takes whichever demands more:
+//
+//   - tasks / maxTasksPerWorker  — the memory and file-descriptor bound. One task is
+//     one TCP connection plus a pending map, so this caps per-pod footprint.
+//   - rps / workerRPSCapacity    — the throughput bound. A pod can only pace so many
+//     orders per second regardless of how few connections carry them.
+//
+// Sharding on task count alone (the previous behaviour) silently under-provisions
+// whenever load is concentrated: 1000 HFT bots at 1000 rps is 1M orders/s and fits
+// the task ceiling exactly, so it sharded to ONE worker and the run delivered a
+// fraction of its scenario. Task count is a proxy for the wrong quantity.
+//
+// workerRPSCapacity == 0 disables the throughput ceiling, reproducing the old
+// task-count-only result exactly — so an unset WORKER_RPS_CAPACITY changes nothing.
+// The value is environment-specific (measured single-worker ceilings on this branch
+// span ~50k/s on local loopback to 600-790k/s draining with telemetry off), which is
+// why it is configuration rather than a constant.
+func computeWorkerCountForLoad(totalTasks int, totalRPS uint64, maxTasksPerWorker int, workerRPSCapacity uint64) uint32 {
+	byTasks := computeWorkerCount(totalTasks, maxTasksPerWorker)
+	if workerRPSCapacity == 0 || totalRPS == 0 {
+		return byTasks
+	}
+	byRate := (totalRPS + workerRPSCapacity - 1) / workerRPSCapacity
+	if byRate > uint64(byTasks) {
+		return uint32(byRate)
+	}
+	return byTasks
 }
 
 // transition applies behavior for its receiver performs the package-specific operation described by its name.

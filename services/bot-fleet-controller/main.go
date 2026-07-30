@@ -92,6 +92,16 @@ func main() {
 	orchClient := orchestrator.NewClient(orchURL)
 	sessions := controller.NewSessionManager()
 	runner := controller.NewRunner(sessions, st, orchClient, producer, leases, bandLeases, runConfig, log)
+	// The pre-scale gate reads the WORKER's consumer group (bot-fleet), not either of
+	// the controller's own groups above: its members are the consumers that can receive
+	// a workload spec. Must match KAFKA_CONSUMER_GROUP on the bot-fleet Deployment.
+	if runConfig.CapacityWaitTimeout > 0 {
+		workerGroup := envOr("KAFKA_WORKER_GROUP", "bot-fleet")
+		runner.SetCapacityProbe(producer.GroupCapacityProbe(workerGroup))
+		log.Info("pre-scale gate enabled",
+			"worker_group", workerGroup,
+			"timeout", runConfig.CapacityWaitTimeout.String())
+	}
 	consumer := controller.NewConsumerWithConcurrency(kafkaBrokers, benchmarkGroup, botReadyGroup, runner, producer, sessions, log, maxConcurrentSessions)
 	defer consumer.Close()
 
@@ -175,6 +185,19 @@ func runConfigFromEnv() controller.RunConfig {
 		BarrierSafetyGap: envOrDuration("BARRIER_SAFETY_GAP", 500*time.Millisecond),
 
 		MaxTasksPerWorker: envOrInt("MAX_TASKS_PER_WORKER", controller.DefaultMaxTasksPerWorker),
+		// WORKER_RPS_CAPACITY defaults to 0 = throughput ceiling OFF, preserving the
+		// task-count-only sharding this service shipped with. Deployments set it to
+		// their MEASURED single-worker send ceiling; there is no safe universal
+		// default (~50k/s local loopback vs 600-790k/s drain on EKS).
+		WorkerRPSCapacity: uint64(envOrInt("WORKER_RPS_CAPACITY", 0)),
+
+		// Pre-scale gate. 0 disables it. The default allows for KEDA's polling
+		// interval plus a pod schedule, image pull and Kafka group join; it is
+		// deliberately shorter than READY_DEADLINE so an under-provisioned fleet is
+		// reported as a capacity shortfall rather than as a confusing partial ready
+		// fan-in later in the run.
+		CapacityWaitTimeout:  envOrDuration("CAPACITY_WAIT_TIMEOUT", 90*time.Second),
+		CapacityPollInterval: envOrDuration("CAPACITY_POLL_INTERVAL", 2*time.Second),
 
 		LeaseAcquireTimeout: envOrDuration("LEASE_ACQUIRE_TIMEOUT", 60*time.Second),
 	}

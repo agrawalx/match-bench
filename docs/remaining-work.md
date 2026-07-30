@@ -39,10 +39,21 @@ physically impossible locally.
    frontend. Two-live-leaderboard-tiles is therefore also unverified.
    Getting here required fixing four platform bugs (see "Bugs found by the local track"
    below), so the run was worth far more than the assertions it now passes.
-2. **Two-pass flow e2e.** Same submission through the pass-1 `correctness` scenario
-   (single-connection max-rate, full book replay) and a pass-2 scale scenario
-   (invariants mode); verify the taint path fires on induced t7 lateness/anomalies;
-   verify jitter lands on the leaderboard. Depends on A1.
+2. ~~**Two-pass flow e2e.**~~ **DONE (2026-07-31), both halves.**
+   - Pass 1 — `deploy-local/b2-two-pass.sh`, 11/11. The correct book scores 0.9833 and
+     QUALIFIES; the acker scores 0.0444 and is DISQUALIFIED. This had never passed: the
+     acker used to score a clean 1.0. Getting here needed the whole validator and eBPF
+     workstream below.
+   - Pass 2 — `deploy-local/b2-pass2.sh`, 10/10, on `constant` (204 tasks = 204 flows,
+     60s). Book-free grading selected correctly for a paced scenario, order accounting
+     exact (scored 216,197 + capture_gaps 10 = sent 216,207), lost-order and capture-gap
+     reporting live, jitter histogram fed, taint clean. Duplicate-ack suppression dropped
+     3,869 redeliveries.
+   **Still outstanding:** the taint path is only proven in its *clean* direction. Forcing
+   it to fire (tiny `VALIDATOR_T7_ANOMALY_CAP_MS`, or a low `VALIDATOR_LATE_TAINT_RATE`)
+   is untested outside unit tests, so "not tainted" is trustworthy and "tainted" is not
+   yet. Jitter-on-the-leaderboard is also still unverified — it reaches the score event,
+   but nothing renders it (see A3).
 3. **Mixed-protocol run.** `ProtocolAll` submission against the dual-listener
    reference engine: FIX + REST + WS to one contestant simultaneously, eBPF
    capturing 9898 and 8080, per-task targets from Shape A.
@@ -61,6 +72,23 @@ physically impossible locally.
 6. **W calibration.** Reference engine vs a deliberately-naive (thread-per-conn,
    no ingress ordering) engine; compare jitter distributions; set the published
    cross-flow window W where they separate. Fully local.
+   **First real measurement is in (B2 pass 2, 2026-07-31), and W is wrong by roughly
+   30x.** On 204 flows at 3.6k orders/s the CORRECT reference engine recorded an
+   inversion rate of 0.478 and a jitter p99 of ~16.8ms, against
+   `CROSS_FLOW_WINDOW_US = 500` (0.5ms). It scored 0.797: ~20% of its orders were
+   flagged, essentially all of it cross-flow ordering (lost=0, missed=0, overfills=0).
+   204 epoll-served connections do not drain in kernel-arrival order, and W is currently
+   set far below the scale of that effect.
+   Two caveats on the number. It is a log2-bucket estimate — p99 reported as 16777.216us
+   is exactly 2^24 ns, a bucket boundary, so the true value is somewhere in
+   [8.4ms, 16.8ms). And every jitter figure recorded BEFORE 2026-07-31 came from a
+   capture that silently dropped 25.6% of responses, biased toward uncoalesced
+   (low-load) ones — i.e. biased low. Any W calibrated on pre-fix data is invalid.
+   This still needs the naive-engine comparison to find where the distributions
+   SEPARATE: widening W to ~20-50ms would stop punishing correct engines but also
+   forgives real queue-jumps, which is why the audit's option B (replay by T7-derived
+   processing order, correcting the replay rather than forgiving the symptom) remains
+   the better fix.
 
 ## C. Kafka topology exercise (wants a running local cluster to measure against)
 
@@ -279,6 +307,30 @@ If the epoll-ordering problem (honest stock-socket engines scoring ~45%) is revi
 it needs a bounded per-level availability structure and a deliberate grading decision —
 not this knob. That work is the validator redesign, and it belongs to pass 2's
 cross-flow window, not to pass 1.
+
+## Opened by the 2026-07-31 grading/capture work
+
+1. **`correctness_summary` cannot say WHY an engine failed.** No columns for
+   `missed_fills`, `lost_orders`, `lost_cancels`, `capture_gaps` or `tainted` — the score
+   persists, the reasons do not. Worse, `time_violations`, `self_trades` and
+   `cancel_replace_loss` are computed by iterating `Report.Violations`, which is capped at
+   `maxViolationExamplesPerType` (100) per class, so those three columns silently max out
+   at 100 on any real run. The exact counters exist on the Report; they just are not the
+   ones being stored. Pre-existing, and it blocks any useful contestant-facing feedback.
+2. **The taint flag is only proven clean.** See B2. It must be forced to fire before a
+   leaderboard can rely on its absence meaning anything.
+3. **Pass-1 residual violations are unexplained.** The reference book scores 0.9833 with
+   34,743 violations (1.7% of orders). These are real findings now, not capture
+   artifacts, so 0.983 should not be assumed to be the ceiling until they are attributed.
+4. **Every latency number recorded before 2026-07-31 is optimistic.** The capture was
+   publishing ~74% of responses, biased toward uncoalesced (low-load) ones. Everything in
+   `deploy-bench/` predates the fix.
+5. **`gso_max_segs 1` cost: measured, not detectable.** Four max-rate 45s runs, mean
+   1,816,640 orders before the clamp vs 1,811,136 after (-0.3%, inside the 1.4% spread
+   between the two pre-clamp runs). Execution reports are ~130 bytes, so GSO was batching
+   tiny messages for syscall economy rather than moving bulk bytes. It is a
+   per-packet-overhead tax, so re-measure if per-node rates climb toward the D-bucket
+   targets. Applies only to the contestant's capture interface.
 
 ## Housekeeping
 

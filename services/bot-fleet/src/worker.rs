@@ -1531,7 +1531,28 @@ impl RwWriter {
             }
             Self::Ws(s) => {
                 for frame in frames.iter_mut() {
-                    s.feed(WsMessage::Binary(std::mem::take(&mut frame.bytes)))
+                    let bytes = std::mem::take(&mut frame.bytes);
+                    // TEXT, not Binary. RFC 6455 defines 0x1 as a UTF-8 text frame and 0x2 as
+                    // arbitrary bytes; a JSON order is text, and every mainstream
+                    // JSON-over-WebSocket exchange API sends it as such. Sending binary made
+                    // the platform demand something no contestant would write: an engine that
+                    // handled only 0x1 received every order, framed it correctly, and then
+                    // silently discarded it — 90,496 orders sent, ZERO answered, while FIX and
+                    // REST on that same engine scored 0.994 and 0.996. The platform's own
+                    // reference engine got this "wrong", which is the clearest possible
+                    // evidence that contestants would too.
+                    debug_assert!(
+                        std::str::from_utf8(&bytes).is_ok(),
+                        "WS order payload must be UTF-8"
+                    );
+                    // SAFETY: the payload is UTF-8 by construction. JsonTemplate renders it
+                    // with `format!` from `String`s (serde_json::to_string for the ClOrdID,
+                    // ASCII literals for symbol/side/keys) and its in-place fast path patches
+                    // only ASCII digits and the BUY/SELL literal. Validating here would cost
+                    // a full scan of every order body on the hot path; the debug_assert above
+                    // catches any future renderer that breaks the invariant.
+                    let json = unsafe { String::from_utf8_unchecked(bytes) };
+                    s.feed(WsMessage::Text(json))
                         .await
                         .context("feed WS order")?;
                 }

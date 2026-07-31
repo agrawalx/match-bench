@@ -460,10 +460,23 @@ async fn http_conn(stream: tokio::net::TcpStream, mtx: UnboundedSender<Cmd>) -> 
                 }
                 buf.drain(..req.total_len);
             }
-        } else {
+        }
+        // NOT an `else`. The upgrade handshake and the client's first order frames routinely
+        // arrive in the SAME TCP segment, so by the time ws_mode flips there are already
+        // complete frames sitting in `buf`. Going back to `rd.read()` here left them
+        // unprocessed, and a client that waits for responses before sending more deadlocked
+        // permanently: measured as 90,496 orders sent and ZERO answered over WebSocket,
+        // while FIX and REST on the same engine scored 0.994 and 0.996.
+        if ws_mode {
             loop {
                 let Some(frame) = parse_ws_frame(&buf) else { break };
                 match frame.opcode {
+                    // TEXT only, deliberately. A JSON order is text (RFC 6455 opcode 0x1),
+                    // and this engine exists to model what a competent contestant would
+                    // write — so it must FAIL when the platform sends something else rather
+                    // than quietly absorbing it. Accepting binary here too would make this
+                    // engine pass while every realistically-written submission failed, which
+                    // is exactly the platform fault this fixture is supposed to expose.
                     0x1 => {
                         if let Some(order) = parse_order_json(&frame.payload) {
                             if mtx.send(Cmd { order, wire: Wire::Ws, out: otx.clone() }).is_err() {
@@ -472,7 +485,16 @@ async fn http_conn(stream: tokio::net::TcpStream, mtx: UnboundedSender<Cmd>) -> 
                         }
                     }
                     0x8 => return Ok(()), // close frame
-                    _ => {}
+                    // Loudly, not silently. A silent `_ => {}` here cost hours: orders
+                    // arrived, framed cleanly, and vanished with no counter, no log and a
+                    // perfectly healthy-looking engine.
+                    other => {
+                        eprintln!(
+                            "WS: ignoring unexpected opcode 0x{other:x} ({} bytes) — this engine \
+                             accepts TEXT (0x1) JSON orders",
+                            frame.payload.len()
+                        );
+                    }
                 }
                 buf.drain(..frame.total_len);
             }

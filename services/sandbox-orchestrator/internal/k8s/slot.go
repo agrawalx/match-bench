@@ -687,7 +687,17 @@ func (m *Manager) captureJobSpec(slotID, contestantID, nodeName, podUID, contain
 func captureResources() corev1.ResourceRequirements {
 	return corev1.ResourceRequirements{
 		Requests: corev1.ResourceList{
-			corev1.ResourceCPU:    resource.MustParse("200m"),
+			// 2 (was 200m). The REQUEST, not the limit, is what protects the capture under
+			// node pressure: it sets the CFS weight and the scheduler's floor, so a 200m
+			// request on a container whose userspace path wants ~3 cores meant that any
+			// other work on the node could squeeze it until the ring buffer overflowed.
+			//
+			// Measured: the same max-rate REST workload dropped 23,436 ring-buffer records
+			// (3.2% capture_gaps, session tainted) while the node was busy, and 0 on a quiet
+			// node while decoding MORE records (4,185,669 vs 4,112,553). Kafka was ruled out
+			// (producer_inflight 24) and CFS throttling was 0, so the loss was plain CPU
+			// starvation by neighbours.
+			corev1.ResourceCPU:    resource.MustParse("2"),
 			corev1.ResourceMemory: resource.MustParse("256Mi"),
 		},
 		Limits: corev1.ResourceList{

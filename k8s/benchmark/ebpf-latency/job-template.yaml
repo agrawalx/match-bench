@@ -46,7 +46,13 @@ spec:
               containerPort: 9090
           resources:
             requests:
-              cpu: 200m
+              # 2 (was 200m). The request, not the limit, is what protects this container
+              # under node pressure — it sets the CFS weight and the scheduler's floor.
+              # Measured: identical max-rate workloads dropped 23,436 ring-buffer records on
+              # a busy node and 0 on a quiet one, with no CFS throttling either time, i.e.
+              # plain CPU starvation by neighbours. Keep in sync with captureResources() in
+              # sandbox-orchestrator/internal/k8s/slot.go.
+              cpu: "2"
               memory: 256Mi
             limits:
               # 4 (was 2): at >150k delivered the userspace drain+parse+publish wants

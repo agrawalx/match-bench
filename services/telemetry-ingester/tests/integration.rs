@@ -8,8 +8,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use iicpc_schemas_rust::{
     OrdType, OrderAckedBatch, OrderAckedEvent, OrderSentBatchV2, OrderSentBatchV2Ref,
-    OrderSentEvent, OrderSentEventFieldsRef, PayloadType, Side, TOPIC_ORDERS_ACKED,
-    TOPIC_ORDERS_SENT,
+    OrderSentEvent, OrderSentEventFieldsRef, PayloadType, Side, SMP_ID_NONE,
+    TOPIC_ORDERS_ACKED, TOPIC_ORDERS_SENT,
 };
 use iicpc_telemetry_ingester::aggregate::{Aggregator, Snapshot, DEFAULT_WAVE_NS};
 use iicpc_telemetry_ingester::redis_sink::RedisSink;
@@ -92,6 +92,9 @@ fn sent(session: &str, order: &str, t0: u64, t1: u64, r9: u64, timed_out: bool) 
         ord_type: OrdType::Limit,
         orig_order_id: String::new(),
         barrier_epoch_ns: 0,
+        // Explicitly SMP_ID_NONE, never a bare 0: zero is a VALID participant id as well as
+        // Rust's default, so a synthetic event that omits this reads as "participant 0".
+        smp_id: SMP_ID_NONE,
     }
 }
 

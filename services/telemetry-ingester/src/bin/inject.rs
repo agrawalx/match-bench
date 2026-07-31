@@ -26,7 +26,8 @@ use rdkafka::util::Timeout;
 
 use iicpc_schemas_rust::{
     session_band_partition, OrdType, OrderAckedBatch, OrderAckedEvent, OrderSentEvent,
-    PayloadType, Side, DEFAULT_PARTITION_BAND_WIDTH, TOPIC_ORDERS_ACKED, TOPIC_ORDERS_SENT,
+    PayloadType, Side, DEFAULT_PARTITION_BAND_WIDTH, SMP_ID_NONE, TOPIC_ORDERS_ACKED,
+    TOPIC_ORDERS_SENT,
 };
 
 fn env_or<T: std::str::FromStr>(k: &str, d: T) -> T {
@@ -105,6 +106,10 @@ async fn main() -> Result<()> {
                         ord_type: OrdType::Limit,
                         orig_order_id: String::new(),
                         barrier_epoch_ns: barrier,
+                        // Explicitly SMP_ID_NONE, never a bare 0: zero is a VALID participant
+                        // id as well as Rust's default, so injected load that omits this reads
+                        // as "participant 0" and self-crosses against every order carrying it.
+                        smp_id: SMP_ID_NONE,
                     };
                     let acked = OrderAckedEvent {
                         session_id: session.clone(),

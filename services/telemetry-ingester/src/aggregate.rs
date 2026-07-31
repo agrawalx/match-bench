@@ -400,7 +400,7 @@ pub fn serialize_hist(hist: &Histogram<u64>) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use iicpc_schemas_rust::{OrdType, PayloadType, Side};
+    use iicpc_schemas_rust::{OrdType, PayloadType, Side, SMP_ID_NONE};
 
     /// acked performs the module-specific operation described by its name.
     /// It keeps validation, side effects, and returned values within this module's contract.
@@ -476,6 +476,10 @@ mod tests {
             ord_type: OrdType::Limit,
             orig_order_id: String::new(),
             barrier_epoch_ns: 0,
+            // Explicitly SMP_ID_NONE, never a bare 0: zero is a VALID participant id as well
+            // as Rust's default, so a synthetic event that omits this reads as "participant
+            // 0" and self-crosses against every other order carrying that id.
+            smp_id: SMP_ID_NONE,
         }
     }
 

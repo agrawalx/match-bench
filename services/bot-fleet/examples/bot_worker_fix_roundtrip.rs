@@ -203,6 +203,12 @@ async fn async_main() -> Result<()> {
                 cancel_pct: 0,
                 replace_pct: 0,
                 target_idx: 0,
+                // 0 means this task emits NO self-match-prevention id — no FIX tag 7928 at
+                // all — which keeps the roundtrip frames byte-identical to what this example
+                // asserted before the field existed. Note this is NOT the same convention as
+                // OrderSentEvent::smp_id, where 0 is a valid participant and the "absent"
+                // sentinel is u32::MAX.
+                smp_id_count: 0,
             })
             .collect(),
     };

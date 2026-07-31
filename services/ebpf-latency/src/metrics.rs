@@ -26,6 +26,9 @@ type ResultFamily = Family<[(&'static str, &'static str); 1], Counter>;
 /// LossFamily labels each byte-stream/matcher loss by the reason it happened, so a
 /// non-zero total can be attributed instead of merely noticed.
 type LossFamily = Family<[(&'static str, &'static str); 1], Counter>;
+/// Thread names are discovered at runtime, so this family carries an owned label rather
+/// than the &'static str the others use.
+type ThreadCpuFamily = Family<[(&'static str, String); 1], Gauge>;
 
 /// Metrics stores the state passed across this module boundary.
 /// Keep field changes compatible with callers and serialized contracts.
@@ -37,6 +40,13 @@ struct Metrics {
     truncated_captures: Counter,
     stream_loss: LossFamily,
     producer_inflight: Gauge,
+    /// Per-thread CPU as a percentage of ONE core, keyed by the kernel's comm. A single
+    /// thread pinned near 100 identifies the bottleneck stage directly; the process total
+    /// cannot, because everything after the ring buffer shares one tokio task.
+    thread_cpu: ThreadCpuFamily,
+    process_cpu: Gauge,
+    cpu_throttled_periods: Gauge,
+    cpu_throttled_usec: Gauge,
     undelivered_at_exit: Counter,
     capture_funnel: LossFamily,
     framed: LossFamily,
@@ -60,6 +70,10 @@ static METRICS: LazyLock<Metrics> = LazyLock::new(|| {
     let truncated_captures = Counter::default();
     let stream_loss = LossFamily::default();
     let producer_inflight = Gauge::default();
+    let thread_cpu = ThreadCpuFamily::default();
+    let process_cpu = Gauge::default();
+    let cpu_throttled_periods = Gauge::default();
+    let cpu_throttled_usec = Gauge::default();
     let undelivered_at_exit = Counter::default();
     let capture_funnel = LossFamily::default();
     let framed = LossFamily::default();
@@ -111,6 +125,26 @@ static METRICS: LazyLock<Metrics> = LazyLock::new(|| {
         producer_inflight.clone(),
     );
     registry.register(
+        "iicpc_ebpf_thread_cpu_percent",
+        "Per-thread CPU as a percentage of ONE core, by thread name. Everything after the ring buffer (decode, reassembly, framing, matching) runs in a single tokio task, so a value near 100 on one thread means that stage is saturated and is what drops ring-buffer records — a distinction the process total cannot make.",
+        thread_cpu.clone(),
+    );
+    registry.register(
+        "iicpc_ebpf_process_cpu_percent",
+        "Total CPU across all threads, as a percentage of one core (200 = two cores busy).",
+        process_cpu.clone(),
+    );
+    registry.register(
+        "iicpc_ebpf_cpu_throttled_periods",
+        "CFS periods in which this container was throttled (cgroup cpu.stat nr_throttled). Non-zero means the capture was held BELOW its CPU limit while work was pending — a different problem from needing more CPU, and one fixed by a limit/request change rather than by code. The container is Burstable (requests 200m, limits 4), so node pressure can squeeze it.",
+        cpu_throttled_periods.clone(),
+    );
+    registry.register(
+        "iicpc_ebpf_cpu_throttled_usec",
+        "Total microseconds this container spent throttled by CFS (cgroup cpu.stat).",
+        cpu_throttled_usec.clone(),
+    );
+    registry.register(
         "iicpc_ebpf_undelivered_at_exit",
         "orders.acked messages still queued after the shutdown flush timed out. These are lost, and each one can cost an order its entire response record.",
         undelivered_at_exit.clone(),
@@ -150,6 +184,10 @@ static METRICS: LazyLock<Metrics> = LazyLock::new(|| {
         truncated_captures,
         stream_loss,
         producer_inflight,
+        thread_cpu,
+        process_cpu,
+        cpu_throttled_periods,
+        cpu_throttled_usec,
         undelivered_at_exit,
         capture_funnel,
         framed,
@@ -241,6 +279,7 @@ pub static LAST_HOLD_OVERFLOW: AtomicU64 = AtomicU64::new(0);
 pub static LAST_BUFFER_OVERFLOW: AtomicU64 = AtomicU64::new(0);
 pub static LAST_TRUNCATION_RESET: AtomicU64 = AtomicU64::new(0);
 pub static LAST_RESYNC_BYTES: AtomicU64 = AtomicU64::new(0);
+pub static LAST_WS_COMPRESSED: AtomicU64 = AtomicU64::new(0);
 pub static LAST_RETRANSMITTED_BYTES: AtomicU64 = AtomicU64::new(0);
 pub static LAST_UNMATCHED: AtomicU64 = AtomicU64::new(0);
 pub static LAST_EVICTED_IDLE: AtomicU64 = AtomicU64::new(0);
@@ -279,6 +318,25 @@ pub fn tc_load_failed(total: u64) {
 }
 static LAST_XDP_LOAD_FAILED: AtomicU64 = AtomicU64::new(0);
 static LAST_TC_LOAD_FAILED: AtomicU64 = AtomicU64::new(0);
+
+/// thread_cpu publishes one thread's utilisation as a percentage of one core.
+pub fn thread_cpu(name: &str, percent: f64) {
+    METRICS
+        .thread_cpu
+        .get_or_create(&[("thread", name.to_string())])
+        .set(percent.round() as i64);
+}
+
+/// process_cpu publishes total utilisation across all threads (200 = two full cores).
+pub fn process_cpu(percent: f64) {
+    METRICS.process_cpu.set(percent.round() as i64);
+}
+
+/// cpu_throttling publishes cgroup CFS throttling totals.
+pub fn cpu_throttling(periods: u64, usec: u64) {
+    METRICS.cpu_throttled_periods.set(periods as i64);
+    METRICS.cpu_throttled_usec.set(usec as i64);
+}
 
 /// producer_inflight records the current producer queue depth.
 pub fn producer_inflight(n: i64) {

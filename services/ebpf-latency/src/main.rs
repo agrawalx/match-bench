@@ -5,6 +5,7 @@
 //! The comments in this file describe public structure and callable behavior.
 
 mod capture;
+mod cpu;
 #[cfg(test)]
 mod framing_property;
 mod matcher;
@@ -216,6 +217,7 @@ async fn run(config: Config, producer: KafkaProducer) -> Result<()> {
     let mut decoded_total = 0u64;
     let mut last_decoded = 0u64;
     let mut stats_tick = 0u64;
+    let mut cpu_sampler = cpu::CpuSampler::new();
     let mut shutdown = ShutdownSignal::new()?;
 
     loop {
@@ -243,6 +245,45 @@ async fn run(config: Config, producer: KafkaProducer) -> Result<()> {
                 } else {
                     info!("producer queue fully delivered before exit");
                 }
+                // FINAL totals, logged rather than left to a scrape.
+                //
+                // Every counter here is also exported to Prometheus, but the capture runs as
+                // a per-run Job whose pod is reaped on completion, and a ~50s life scraped
+                // every 15s loses whatever accumulated after the last scrape. That is not
+                // hypothetical: one run's funnel reported 3.01M records emitted against
+                // 4.11M events decoded — an impossibility that is purely an artefact of the
+                // missing final scrape, and which made several cross-run comparisons
+                // unreliable before anyone noticed. These lines are the authoritative
+                // numbers for a session; the time series is only for shape.
+                // Re-read the kernel counter rather than reusing the last reported value:
+                // records dropped between the final tick and shutdown are exactly the ones
+                // a scrape would miss, and they are the ones worth knowing about.
+                let ringbuf_dropped_final = dropped_events
+                    .as_ref()
+                    .map(read_counter)
+                    .unwrap_or(last_dropped);
+                let (thr_periods, thr_usec) = cpu::read_throttling()
+                    .map(|t| (t.nr_throttled, t.throttled_usec))
+                    .unwrap_or((0, 0));
+                info!(
+                    decoded_total,
+                    ringbuf_dropped = ringbuf_dropped_final,
+                    cpu_throttled_periods = thr_periods,
+                    cpu_throttled_ms = thr_usec / 1_000,
+                    hold_overflows = pipeline.hold_overflows,
+                    buffer_overflows = pipeline.buffer_overflows,
+                    truncation_resets = pipeline.truncation_resets,
+                    resync_skipped_bytes = pipeline.resync_skipped_bytes,
+                    stream_gap_bytes = pipeline.stream_gap_bytes,
+                    retransmitted_bytes = pipeline.retransmitted_bytes,
+                    ws_compressed_frames = pipeline.ws_compressed_frames,
+                    framed_requests = pipeline.framed_requests,
+                    framed_responses = pipeline.framed_responses,
+                    framed_no_clordid = pipeline.framed_no_clordid,
+                    unmatched_responses = pipeline.unmatched_responses(),
+                    evicted_idle = pipeline.evicted_idle(),
+                    "eBPF capture FINAL counters"
+                );
                 return Ok(());
             }
             _ = ticker.tick() => {
@@ -252,6 +293,46 @@ async fn run(config: Config, producer: KafkaProducer) -> Result<()> {
                 // (both directions), unmatched_responses = responses seen with no prior request
                 // capture to pair against, pending = matched events buffered for the next flush.
                 stats_tick += 1;
+                // Sample CPU on the same cadence as the stats log rather than every flush:
+                // reading /proc/self/task is cheap but not free, and a profiler that
+                // measurably slows the thing it measures answers the wrong question.
+                if stats_tick % 10 == 0 {
+                    let (threads, total) = cpu_sampler.sample();
+                    if !threads.is_empty() {
+                        metrics::process_cpu(total);
+                        for t in &threads {
+                            metrics::thread_cpu(&t.name, t.percent);
+                        }
+                        // Logged as well as exported: the capture Job is per-run and its
+                        // pod is reaped on completion, so a scrape can miss the window
+                        // entirely. The log survives in the Job's output.
+                        let top: Vec<String> = threads
+                            .iter()
+                            .take(4)
+                            .map(|t| format!("{}={:.0}%", t.name, t.percent))
+                            .collect();
+                        // Throttling alongside CPU, because the two answer different
+                        // questions: high CPU says the capture is working hard, throttled
+                        // periods say it was STOPPED while work was pending. The container
+                        // is Burstable (requests 200m, limits 4), so on a busy node it can
+                        // be squeezed toward its request — and a 2-core cap causing exactly
+                        // these ringbuf drops is already on record in slot.go.
+                        let (thr_periods, thr_usec) = match cpu::read_throttling() {
+                            Some(t) => {
+                                metrics::cpu_throttling(t.nr_throttled, t.throttled_usec);
+                                (t.nr_throttled, t.throttled_usec)
+                            }
+                            None => (0, 0),
+                        };
+                        info!(
+                            process_cpu_percent = format!("{total:.0}"),
+                            top_threads = %top.join(" "),
+                            throttled_periods = thr_periods,
+                            throttled_ms = thr_usec / 1_000,
+                            "eBPF capture CPU"
+                        );
+                    }
+                }
                 if stats_tick % 10 == 0 && decoded_total != last_decoded {
                     info!(
                         decoded = decoded_total,
@@ -271,6 +352,7 @@ async fn run(config: Config, producer: KafkaProducer) -> Result<()> {
                     metrics::stream_loss("buffer_overflow", pipeline.buffer_overflows, &metrics::LAST_BUFFER_OVERFLOW);
                     metrics::stream_loss("truncation_reset", pipeline.truncation_resets, &metrics::LAST_TRUNCATION_RESET);
                     metrics::stream_loss("resync_skipped_bytes", pipeline.resync_skipped_bytes, &metrics::LAST_RESYNC_BYTES);
+                    metrics::stream_loss("ws_compressed_frame", pipeline.ws_compressed_frames, &metrics::LAST_WS_COMPRESSED);
                     metrics::stream_loss("retransmitted_bytes", pipeline.retransmitted_bytes, &metrics::LAST_RETRANSMITTED_BYTES);
                     metrics::stream_loss("unmatched_response", pipeline.unmatched_responses(), &metrics::LAST_UNMATCHED);
                     metrics::stream_loss("matcher_evicted_unanswered", pipeline.evicted_idle(), &metrics::LAST_EVICTED_IDLE);

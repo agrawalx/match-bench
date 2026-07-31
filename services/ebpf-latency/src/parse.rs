@@ -21,6 +21,10 @@ const MAX_FIX_MESSAGE: usize = 64 * 1024;
 /// lost request on a pass-1 run.
 const FIX_BEGIN: &[u8] = b"8=FIX";
 const MAX_HTTP_MESSAGE: usize = 64 * 1024;
+/// Upper bound on a WebSocket frame the capture will wait for. Matches the reassembler's
+/// MAX_BUFFERED: a frame larger than the buffer can never be completed, so waiting for one
+/// would stall the flow permanently.
+const MAX_WS_MESSAGE: usize = 1 << 20;
 
 #[derive(Debug, PartialEq, Eq)]
 /// Frame enumerates the states or variants handled by this module.
@@ -194,17 +198,39 @@ fn frame_http_ws(direction: Direction, buf: &[u8]) -> Frame {
         return Frame::Incomplete;
     }
     if looks_like_http(buf) {
-        frame_http(buf)
-    } else {
-        frame_ws(direction, buf)
+        return frame_http(buf);
     }
+    // "Not enough bytes yet" is NOT "malformed" — the same conflation that cost FIX ~0.2% of
+    // its requests (see frame_fix). looks_like_http needs four bytes to recognise a method,
+    // so a buffer holding "P", "PO" or "POS" is the head of a good request that has not
+    // finished arriving. Falling through to frame_ws here reads byte 1 as a WebSocket length
+    // header, finds the mask bit inconsistent with the direction, and resyncs into the middle
+    // of the request.
+    //
+    // Only STRICT prefixes of a method token wait. A two-byte WebSocket frame is not a prefix
+    // of any of them, so genuine short frames are unaffected.
+    if is_http_method_prefix(buf) {
+        return Frame::Incomplete;
+    }
+    frame_ws(direction, buf)
+}
+
+/// The tokens that open an HTTP message. Shared by looks_like_http and
+/// is_http_method_prefix so the two can never disagree about what counts as HTTP.
+const HTTP_PREFIXES: [&[u8]; 5] = [b"POST", b"GET ", b"PUT ", b"DELE", b"HTTP"];
+
+/// True when `buf` is a strict prefix of an HTTP method token — too short to classify, but
+/// consistent with a request that is still arriving.
+fn is_http_method_prefix(buf: &[u8]) -> bool {
+    HTTP_PREFIXES
+        .iter()
+        .any(|p| buf.len() < p.len() && p.starts_with(buf))
 }
 
 /// looks_like_http performs the module-specific operation described by its name.
 /// It keeps validation, side effects, and returned values within this module's contract.
 fn looks_like_http(buf: &[u8]) -> bool {
-    const PREFIXES: [&[u8]; 5] = [b"POST", b"GET ", b"PUT ", b"DELE", b"HTTP"];
-    PREFIXES.iter().any(|p| buf.starts_with(p))
+    HTTP_PREFIXES.iter().any(|p| buf.starts_with(p))
 }
 
 /// frame_http performs the module-specific operation described by its name.
@@ -262,6 +288,17 @@ fn frame_ws(direction: Direction, buf: &[u8]) -> Frame {
     if buf.len() < 2 {
         return Frame::Incomplete;
     }
+    // Byte 0 is FIN | RSV1 | RSV2 | RSV3 | opcode(4). Validating it is the only structure a
+    // WebSocket stream offers for re-synchronisation: unlike FIX ("8=FIX.4.2") and HTTP
+    // ("POST"), a binary frame header has no reserved marker, so after a gap the framer was
+    // reading JSON payload bytes as headers and wandering through the stream — a hole cost
+    // far more than its own bytes.
+    //
+    // Only 12 of 256 byte values are legal here, and every printable ASCII byte (0x20-0x7E)
+    // sets a bit in the RSV mask, so a JSON payload cannot masquerade as a header.
+    if !is_ws_frame_header(buf[0]) {
+        return Frame::Resync(1);
+    }
     let masked = buf[1] & 0x80 != 0;
     let len7 = (buf[1] & 0x7f) as usize;
     let (mut header, payload_len) = if len7 < 126 {
@@ -272,7 +309,22 @@ fn frame_ws(direction: Direction, buf: &[u8]) -> Frame {
         }
         (4usize, ((buf[2] as usize) << 8) | buf[3] as usize)
     } else {
-        return Frame::Resync(1);
+        // len7 == 127: the 64-bit extended length, which RFC 6455 requires for any payload
+        // past 65535 bytes — reachable by an engine that batches execution reports. Treating
+        // it as malformed desynchronised the stream one byte at a time, losing the frame and
+        // walking into the next.
+        if buf.len() < 10 {
+            return Frame::Incomplete;
+        }
+        let len = u64::from_be_bytes([
+            buf[2], buf[3], buf[4], buf[5], buf[6], buf[7], buf[8], buf[9],
+        ]);
+        // A frame larger than the reassembler can ever hold would stall this flow forever
+        // waiting for bytes that cannot be buffered, so treat it as a desync instead.
+        if len > MAX_WS_MESSAGE as u64 {
+            return Frame::Resync(1);
+        }
+        (10usize, len as usize)
     };
     if masked {
         header += 4;
@@ -286,6 +338,58 @@ fn frame_ws(direction: Direction, buf: &[u8]) -> Frame {
         return Frame::Incomplete;
     }
     Frame::Message(total)
+}
+
+/// True when `b` can legally open a WebSocket frame: reserved bits clear and a defined
+/// opcode (continuation, text, binary, close, ping, pong).
+///
+/// RSV1 is treated as illegal rather than tolerated. It signals `permessage-deflate`, and a
+/// compressed payload carries no readable `cl_ord_id` no matter how it is framed — so the
+/// submission is unscoreable either way. Tolerating RSV1 would double the accepted byte
+/// space and, worse, admit 0x40-0x4F ("@" through "O"), which appear throughout ordinary
+/// JSON — measurably weakening the very marker this function exists to provide.
+fn is_ws_frame_header(b: u8) -> bool {
+    b & 0x70 == 0 && matches!(b & 0x0f, 0x0 | 0x1 | 0x2 | 0x8 | 0x9 | 0xA)
+}
+
+/// True when `buf` opens what would be a legal WebSocket frame except that RSV1 is set —
+/// i.e. a `permessage-deflate` compressed frame.
+///
+/// Compression is not supported: the pipeline reads `cl_ord_id` out of the payload as plain
+/// JSON. Without this, such a submission desynchronises and goes silent, which is
+/// indistinguishable from an engine that answered nothing. Counting it turns that into a
+/// named signal instead of a mystery zero.
+///
+/// Checking byte 0 ALONE is not enough, and shipping that was a mistake: roughly 9% of
+/// arbitrary bytes satisfy it, so a REST session that had been holed by ring-buffer drops
+/// reported 925 "compressed frames" on a stream carrying no WebSocket at all. Port 8080
+/// serves REST and WS both, so the transport cannot disambiguate it either. The frame must
+/// therefore be plausible as a WHOLE — correct mask direction and a length that actually
+/// fits — before this claims anything.
+pub fn ws_looks_compressed(direction: Direction, buf: &[u8]) -> bool {
+    if buf.len() < 2 {
+        return false;
+    }
+    // RSV1 set, RSV2/RSV3 clear, defined opcode.
+    if buf[0] & 0x40 == 0 || buf[0] & 0x30 != 0 {
+        return false;
+    }
+    if !matches!(buf[0] & 0x0f, 0x0 | 0x1 | 0x2 | 0x8 | 0x9 | 0xA) {
+        return false;
+    }
+    // Masking is mandatory client-to-server and forbidden server-to-client; a mismatch
+    // means these bytes are not a frame header at all.
+    let masked = buf[1] & 0x80 != 0;
+    if masked != (direction == Direction::Request) {
+        return false;
+    }
+    // And the frame must actually fit what has been reassembled.
+    let len7 = (buf[1] & 0x7f) as usize;
+    if len7 >= 126 {
+        return false;
+    }
+    let header = 2 + if masked { 4 } else { 0 };
+    header + len7 <= buf.len()
 }
 
 /// parse_http_ws performs the module-specific operation described by its name.
@@ -314,6 +418,13 @@ fn ws_unmasked_payload(direction: Direction, frame: &[u8]) -> Vec<u8> {
         (2usize, len7)
     } else if len7 == 126 && frame.len() >= 4 {
         (4usize, ((frame[2] as usize) << 8) | frame[3] as usize)
+    } else if len7 == 127 && frame.len() >= 10 {
+        // Must mirror frame_ws: framing a 64-bit-length frame correctly but then reading an
+        // empty body here would move the loss downstream rather than fix it.
+        let len = u64::from_be_bytes([
+            frame[2], frame[3], frame[4], frame[5], frame[6], frame[7], frame[8], frame[9],
+        ]);
+        (10usize, len as usize)
     } else {
         return Vec::new();
     };

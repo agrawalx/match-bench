@@ -54,9 +54,29 @@ physically impossible locally.
    is untested outside unit tests, so "not tainted" is trustworthy and "tainted" is not
    yet. Jitter-on-the-leaderboard is also still unverified — it reaches the score event,
    but nothing renders it (see A3).
-3. **Mixed-protocol run.** `ProtocolAll` submission against the dual-listener
-   reference engine: FIX + REST + WS to one contestant simultaneously, eBPF
-   capturing 9898 and 8080, per-task targets from Shape A.
+3. ~~**Mixed-protocol run.**~~ **DONE (2026-07-31).** Both forms pass:
+   `deploy-local/b3-mixed3.sh` (3 tasks, one per protocol) and
+   `deploy-local/b3-mixed-protocol.sh` (single-protocol grading, then 204 tasks as
+   `ProtocolAll`). Phase 1 grades the SAME engine over each transport and asserts the
+   scores agree: FIX 0.99445 / REST 0.99633 / WS 0.99636, spread 0.0019. Phase 2 ran the
+   full 204 tasks with `matched + capture_gaps == sent` (216,204 + 0) and no task dropped
+   at connect.
+   Getting here needed three platform fixes, none of which were on this list and every one
+   of which would have hit real contestants:
+   - **WebSocket submissions scored 0.** bot-fleet sent `WsMessage::Binary` (opcode 0x2)
+     while any conventionally-written engine handles TEXT (0x1) — including this repo's own
+     reference engine. 90,496 orders sent, ZERO answered, while FIX and REST on the same
+     engine scored 0.994/0.996. The bot now sends TEXT.
+   - **`ProtocolAll` submissions could not connect at all.** sandbox-orchestrator has always
+     accepted a `ports` array; bot-fleet-controller only ever sent a single `port`, so the
+     pod exposed one port while the bots dialled three targets. Every REST and WS task timed
+     out — identically at 3 tasks and at 204, which is what ruled out the "connect storm"
+     reading. Ports are now derived from `submissionTargets()` so the two cannot drift.
+   - **A deadlock in the reference engine**: frames arriving in the same TCP segment as the
+     WS upgrade sat unprocessed until more data arrived, which never came from a client
+     waiting on responses.
+   **Still outstanding:** phase-2 grading of a multi-protocol submission is dominated by
+   cross-flow ordering — see B6, which this run showed is not a pass-2-only problem.
 4. **Stalled-peer harness.** Sink that stops reading mid-run: proves the
    drain-deadline write exit, the watchdog last-tick pending sweep, and that every
    offered order ends accounted (matched or timed_out, inflight back to zero).
@@ -89,6 +109,20 @@ physically impossible locally.
    forgives real queue-jumps, which is why the audit's option B (replay by T7-derived
    processing order, correcting the replay rather than forgiving the symptom) remains
    the better fix.
+   **W is NOT a pass-2-only problem (2026-07-31).** A `ProtocolAll` submission runs three
+   concurrent flows, so pass 1 loses its single-connection guarantee too. Measured on the
+   3-task mixed run: score 0.8446 with **314,686 of 314,687 violations being
+   `time_violations`** — price violations, missed fills, self-trades and lost orders were
+   all ZERO, and 314,686/2,024,475 = 15.54% accounts for the score exactly. The rationale
+   recorded for deleting `AGGRESSIVE_FILL_TOLERANCE_US` ("pass 1 runs one task on one
+   connection, so TCPSeq totally orders the session") holds only for single-protocol
+   submissions. Whatever is decided for W has to cover multi-flow replay in BOTH passes.
+   **Also invalidating for calibration:** every latency and jitter figure is now measured in
+   a deliberately de-optimised network regime (MTU 1500 instead of 9001, GRO/GSO/TSO off)
+   that the capture requires — see `docs/grading-network-regime.md`. Pass-2 jitter p99 moved
+   4.19ms -> 33.55ms when the capture stopped truncating, most of which is the metric
+   becoming honest rather than the system slowing down. W must be calibrated inside that
+   regime, and cannot later be reused against numbers taken with offloads on.
 
 ## C. Kafka topology exercise (wants a running local cluster to measure against)
 
@@ -425,6 +459,41 @@ or sharding userspace workers per flow.
    tiny messages for syscall economy rather than moving bulk bytes. It is a
    per-packet-overhead tax, so re-measure if per-node rates climb toward the D-bucket
    targets. Applies only to the contestant's capture interface.
+
+## Opened by the 2026-07-31 mixed-protocol / capture-CPU work
+
+1. **The capture had no CPU telemetry, and the first three CPU measurements were all wrong.**
+   Now fixed and covered by tests, but recorded because each is a trap that will recur:
+   `process_cpu_percent` read 970% (~10 cores) purely as a sampling artefact — samples driven
+   by a `tokio::time::interval` with default `Burst` missed-tick behaviour collapse to ~1ms
+   under load, and against 10ms `/proc` accounting that yields 0% or ~1000% from the same
+   healthy process; the throttling counter read `/sys/fs/cgroup/cpu.stat`, which under
+   `HostPID: true` with no private cgroup mount is the host ROOT cgroup and can only ever
+   report `nr_throttled: 0`; and a hand-read of `/proc/1/stat` measured the host's systemd,
+   not the capture. **There is still no trustworthy CPU figure for the capture** — the fixed
+   sampler produces the first one on the next loaded run. Splitting it by thread name
+   (`rdk:*` = Kafka produce and zstd, versus `tokio-rt-worker`/`iicpc-ebpf-late` = drain,
+   reassembly, framing, matching) is what says which half to optimise.
+2. **Ring-buffer drops were host CPU starvation, not a capture limit.** The same max-rate
+   REST workload dropped 23,436 records (3.2% capture_gaps, session tainted) on a busy node
+   and 0 on a quiet one while decoding MORE records (4,185,669 vs 4,112,553). Kafka was ruled
+   out (`producer_inflight` 24) and CFS throttling was 0. The capture's CPU **request** was
+   200m against a contestant pinned Guaranteed at 4 — a 20:1 CFS weight disadvantage on a
+   node where the contestant is graded on throughput and will saturate its cores by design.
+   Raised to 2. This applies to EKS, not only to a laptop: a dedicated sandbox node does not
+   remove the contention, it concentrates it between exactly those two pods. Full
+   investigation, including the hypotheses the data killed:
+   `docs/capture-ringbuf-drops.md`.
+3. **`CAPTURE_CAP` = 1536 is what forces MTU 1500 platform-wide**, costing ~6x the packet
+   count for the same bytes. Raising it to >= 9029 restores jumbo frames and fits the per-CPU
+   map limit; going further would let GSO/GRO stay on entirely. Nobody has measured what the
+   current tax costs, and the fairness argument for keeping it ("uniform, therefore neutral")
+   is weaker than it looks because the tax is proportional to packet count and so scales with
+   each engine's I/O behaviour. Plan: `docs/capture-cap-plan.md`.
+4. **`cargo test -p <crate>` is not a sufficient gate.** `telemetry-ingester` (three sites,
+   including the `inject` BINARY) and a bot-fleet example had not compiled since `b0655fb`
+   added `smp_id`, because the suite that was being run never covered them.
+   **`cargo test --workspace` is the gate.**
 
 ## Housekeeping
 

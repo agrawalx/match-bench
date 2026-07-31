@@ -257,7 +257,7 @@ func (r *Runner) runSession(
 	r.transition(ctx, sess, topics.RunStatusDeploying, "allocating sandbox slot", log)
 	image := sub.ImageRef
 	stageStart = time.Now()
-	if _, err := r.orch.CreateSlot(ctx, sess.SessionID, sess.ContestantID, image, sub.Port, orderBand); err != nil {
+	if _, err := r.orch.CreateSlot(ctx, sess.SessionID, sess.ContestantID, image, submissionPorts(sub), orderBand); err != nil {
 		recordSessionStage("create_slot", stageStart, err)
 		r.fail(ctx, sess, "create slot: "+err.Error(), log)
 		return
@@ -534,6 +534,32 @@ func submissionTargets(sub *store.SubmissionInfo) []topics.TargetSpec {
 	return []topics.TargetSpec{
 		{Protocol: sub.Protocol, Port: topics.PortForProtocol(sub.Protocol)},
 	}
+}
+
+// submissionPorts returns every distinct port the sandbox pod must expose for a
+// submission, derived from the SAME target table the bots connect through.
+//
+// Deriving it from submissionTargets rather than from sub.Port is the point: those two
+// must agree by construction. When they did not, a ProtocolAll pod exposed only
+// sub.Port, the bots dialled all three targets, and every REST and WS task timed out
+// against a port the pod had never opened — while FIX worked perfectly, which made it
+// look like a load or concurrency problem for far longer than it should have.
+//
+// REST and WS share PortHTTPWS, so the list is de-duplicated: a repeated ContainerPort
+// is rejected by the API server.
+func submissionPorts(sub *store.SubmissionInfo) []int {
+	targets := submissionTargets(sub)
+	ports := make([]int, 0, len(targets))
+	seen := make(map[int]struct{}, len(targets))
+	for _, t := range targets {
+		p := int(t.Port)
+		if _, dup := seen[p]; dup {
+			continue
+		}
+		seen[p] = struct{}{}
+		ports = append(ports, p)
+	}
+	return ports
 }
 
 // buildWorkloadSpecs applies behavior for its receiver performs the package-specific operation described by its name.

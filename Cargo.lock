@@ -1157,6 +1157,7 @@ dependencies = [
  "libc",
  "prometheus-client",
  "rmp-serde",
+ "rustc-hash",
  "tokio",
  "tracing",
  "tracing-subscriber",

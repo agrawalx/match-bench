@@ -4,10 +4,58 @@
 //! behavior consistent with the service contracts documented in design.md.
 //! The comments in this file describe public structure and callable behavior.
 
-use std::collections::HashMap;
+// FxHashMap, not std's SipHash map: the only keys ever INSERTED are
+// bot-generated ClOrdIDs (contestant-supplied ids on responses that match
+// nothing are never stored), so hash-flooding is not a threat model here and
+// the DoS-resistant hash is pure cost on the per-record hot path.
+use rustc_hash::FxHashMap;
 
 pub const DEFAULT_IDLE_NS: u64 = 5_000_000_000;
 const MAX_INFLIGHT: usize = 1_000_000;
+/// Upper bound on a ClOrdID the matcher will track. Bot-generated ids are
+/// `{session}_{task}_{seq}_{K}` — ~40 bytes worst case — so 64 covers them
+/// with margin. Anything longer is NOT a bot order (the request side of the
+/// capture only carries bot traffic), so it is counted and dropped rather
+/// than tracked.
+const MAX_KEY_LEN: usize = 64;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Key is a ClOrdID inlined into a fixed-width array. The matcher previously
+/// keyed `HashMap<String, _>`, which allocated on every insert and hashed
+/// through a heap pointer on every lookup — on the hot path, once per capture
+/// record. Zero-padded bytes plus an explicit length make Eq total without
+/// any heap involvement.
+struct Key {
+    len: u8,
+    bytes: [u8; MAX_KEY_LEN],
+}
+
+/// Hash covers only the filled prefix. A derived Hash would SipHash all 64
+/// bytes — measurably slower than the String key it replaces (+18% on the
+/// matcher bench). Equal keys have equal (len, prefix), so this agrees with
+/// the derived Eq over the zero-padded array.
+impl std::hash::Hash for Key {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        state.write(&self.bytes[..usize::from(self.len)]);
+    }
+}
+
+impl Key {
+    /// new returns None when the id exceeds MAX_KEY_LEN — the caller counts
+    /// those instead of tracking them.
+    fn new(clordid: &str) -> Option<Self> {
+        let s = clordid.as_bytes();
+        if s.len() > MAX_KEY_LEN {
+            return None;
+        }
+        let mut bytes = [0u8; MAX_KEY_LEN];
+        bytes[..s.len()].copy_from_slice(s);
+        Some(Self {
+            len: s.len() as u8,
+            bytes,
+        })
+    }
+}
 
 #[derive(Debug, Clone)]
 /// Inflight stores the state passed across this module boundary.
@@ -52,8 +100,12 @@ pub struct MatchedEvent {
 /// Matcher stores the state passed across this module boundary.
 /// Keep field changes compatible with callers and serialized contracts.
 pub struct Matcher {
-    inflight: HashMap<String, Inflight>,
+    inflight: FxHashMap<Key, Inflight>,
     pub unmatched_responses: u64,
+    /// oversized_clordid: ids longer than MAX_KEY_LEN seen on either side.
+    /// Requests carry only bot-generated ids (bounded ~40 bytes), so nonzero
+    /// here means a fabricated or corrupted id, never a lost bot order.
+    pub oversized_clordid: u64,
     /// evicted_idle_unanswered: requests dropped after DEFAULT_IDLE_NS that had never
     /// been responded to. A response arriving after this is unmatchable and discarded, so
     /// this is a real loss path. Evictions of ANSWERED entries are excluded — on_response
@@ -85,7 +137,11 @@ impl Matcher {
         if clordid.is_empty() {
             return;
         }
-        match self.inflight.get_mut(clordid) {
+        let Some(key) = Key::new(clordid) else {
+            self.oversized_clordid = self.oversized_clordid.saturating_add(1);
+            return;
+        };
+        match self.inflight.get_mut(&key) {
             Some(existing) => {
                 existing.retransmission_count = existing.retransmission_count.saturating_add(1);
                 existing.reordering_detected |= reordered;
@@ -96,7 +152,7 @@ impl Matcher {
                     self.evict_oldest();
                 }
                 self.inflight.insert(
-                    clordid.to_string(),
+                    key,
                     Inflight {
                         t3_ns,
                         responded: false,
@@ -126,7 +182,15 @@ impl Matcher {
         reordered: bool,
         liquidity_ind: u8,
     ) -> Option<MatchedEvent> {
-        let Some(inflight) = self.inflight.get_mut(clordid) else {
+        let Some(key) = Key::new(clordid) else {
+            // Cannot have been tracked (on_request refuses the same length),
+            // so this is an unmatched response like any other, plus the
+            // oversized marker for diagnosis.
+            self.oversized_clordid = self.oversized_clordid.saturating_add(1);
+            self.unmatched_responses = self.unmatched_responses.saturating_add(1);
+            return None;
+        };
+        let Some(inflight) = self.inflight.get_mut(&key) else {
             self.unmatched_responses = self.unmatched_responses.saturating_add(1);
             return None;
         };
@@ -176,7 +240,7 @@ impl Matcher {
             .inflight
             .iter()
             .min_by_key(|(_, v)| v.last_activity_ns)
-            .map(|(k, _)| k.clone())
+            .map(|(k, _)| *k)
         {
             self.inflight.remove(&key);
         }
@@ -263,6 +327,39 @@ mod tests {
         let e = m.on_response("o1", 200, "0", 0, 0, "", false, 0).unwrap();
         assert_eq!(e.t3_ns, 100);
         assert_eq!(e.retransmission_count, 1);
+    }
+
+    #[test]
+    /// A 64-byte id (exactly MAX_KEY_LEN) is tracked and matched like any
+    /// other; the fixed-width key must not truncate or reject the boundary.
+    fn max_len_clordid_still_matches() {
+        let id = "x".repeat(64);
+        let mut m = Matcher::new();
+        m.on_request(&id, 100, 1, 5, 10, false);
+        let e = m.on_response(&id, 250, "0", 0, 0, "", false, 0).unwrap();
+        assert_eq!(e.order_id, id);
+        assert_eq!(e.pod_service_time_ns, 150);
+        assert_eq!(m.oversized_clordid, 0);
+    }
+
+    #[test]
+    /// Ids longer than MAX_KEY_LEN are never bot orders: the request is
+    /// counted and dropped rather than tracked, and a response carrying one
+    /// is unmatched. Distinct ids sharing a 64-byte prefix must not collide.
+    fn oversized_clordid_is_counted_not_tracked() {
+        let long_a = format!("{}A", "y".repeat(64));
+        let long_b = format!("{}B", "y".repeat(64));
+        let mut m = Matcher::new();
+        m.on_request(&long_a, 100, 1, 5, 10, false);
+        assert_eq!(m.oversized_clordid, 1);
+        // Same 64-byte prefix, different id — must not match anything.
+        assert!(m.on_response(&long_b, 200, "0", 0, 0, "", false, 0).is_none());
+        assert_eq!(m.oversized_clordid, 2);
+        assert_eq!(m.unmatched_responses, 1);
+        // And the prefix itself was never inserted either.
+        let prefix = "y".repeat(64);
+        assert!(m.on_response(&prefix, 300, "0", 0, 0, "", false, 0).is_none());
+        assert_eq!(m.unmatched_responses, 2);
     }
 
     #[test]

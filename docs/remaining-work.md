@@ -98,6 +98,23 @@ physically impossible locally.
    cumulative across sessions, and the ingester writes NO metrics row for a
    zero-response session (`aggregate.rs` gates on a non-empty service_time
    histogram) — `offered=0` in Timescale is the EXPECTED shape of a full stall.
+
+   **Recovery semantics reviewed and ACCEPTED as-is (2026-08-01).** The stall
+   self-resumes at two levels: acks shrinking the pending map wake the cap-wait
+   loop via `notify`, and a peer that resumes reading unblocks `write_all` through
+   plain TCP flow control. Mid-run, the recovery window is the remainder of the
+   run — deliberate (a per-write timeout was tried and collapsed offered load,
+   see the comment at `worker.rs` `write_all`), and the right grading semantics:
+   stalled seconds cost score automatically. Past `task_end + 5s`
+   (`RESPONSE_TIMEOUT_NS`, the drain grace) the write is abandoned, the task
+   exits, and the last-tick sweep marks everything pending `timed_out` —
+   discarded for good; a peer recovering later gets nothing. One structural
+   detail worth knowing when reading stall telemetry: a batch blocked inside
+   `write_all` has no expiry entries (those are pushed only after a successful
+   write), so the watchdog cannot time it out mid-run — which is why a full
+   stall shows inflight pinned at exactly one batch (64) rather than decaying.
+   The worker frees for the next assignment afterward: proven empirically by
+   consecutive B4/B2 runs on the same pods with zero restarts.
 5. ~~**KEDA session-count trigger.**~~ **DONE, and superseded by a better signal** —
    `deploy-local/b5-autoscale-shards.sh`, all assertions green on local k3s. Rather than
    session COUNT, the ScaledObject scales on `iicpc_controller_demanded_workers`

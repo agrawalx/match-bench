@@ -501,7 +501,102 @@ or sharding userspace workers per flow.
 - Eventually: PR to main; ARCHITECTURE.md "Where this is going" chapter will need a
   refresh once B/C land (it describes some of this as future work that is now done).
 
-## Suggested sequence
+## What is left, in priority order (2026-08-01)
 
-A1 → local k3s bring-up → B1+B2 in one cluster session → C on that same cluster →
-B3–B6 → D when AWS access returns → final bench.
+B1, B2 (both passes), B3 (both forms) and the contestant submission path all pass on
+local k3s and were re-run — not inherited — after this session's fixes. What follows is
+everything still open, ordered by what would hurt most if it stayed broken.
+
+### 1. C1 — single topic ownership (a loaded gun, cheap to defuse)
+
+Topic creation lives in BOTH `services/bot-fleet/src/kafka.rs` and the k8s
+`topic-init-job`, both `--if-not-exists`, with the code hardcoding
+`TOPIC_REPLICATION_FACTOR = 3` and `min.insync.replicas = 2` against a single-broker
+cluster running RF=1. It only works because the init Job wins the race and the app-side
+per-topic failures are swallowed. If the app path ever wins, `min.insync.replicas=2` on
+RF=1 makes **every produce fail** with `NOT_ENOUGH_REPLICAS`. Decision already taken:
+single broker, RF=1 is fine — so make the code say that. Highest ratio of risk removed
+to effort of anything on this list.
+
+### 2. Two ranking decisions that change what contestants are graded on
+
+- **W (B6).** No longer a pass-2-only question: a `ProtocolAll` submission runs three
+  concurrent flows, so pass 1 loses its single-connection guarantee too (measured: 15.5%
+  of orders flagged as `time_violations`, accounting for the score exactly). Whatever is
+  chosen has to cover multi-flow replay in BOTH passes. The naive-engine comparison that
+  finds where the distributions separate is fully local; only the final number needs EKS.
+- **`P99AtPeakNS` is the WORST SINGLE SECOND** (`MaxP99NS`), commented "diagnostic;
+  retained for visibility" — but `score.go` ranks on it as a tie-break. The pass/fail
+  gate correctly uses `StableP99NS` (median of per-second p99), which is immune to
+  cold start. The ranking is not. For a 45s run the deciding second is very often the
+  connection-setup one.
+
+### 3. Scoring: a passing engine shows "pending", a failing one publishes
+
+`score.Compute` returns `ErrMissingRampSession` and writes NO `scores` row when the
+run-group has no ramp session — but a DISQUALIFIED group returns a result and DOES get a
+row. So a correct engine in an incomplete group renders "pending" forever while a bad one
+publishes a visible score. All 51 run-groups in the local DB are single-session, so this
+fires constantly. Three options: trigger the full scenario suite (the browser path already
+does), relax `Compute` to score what is present, or have the frontend fall back to
+`correctness_summary`. The third is smallest and does not touch scoring semantics.
+
+### 4. B4 — stalled-peer harness
+
+Still never started, and the only thing that proves the drain-deadline write exit, the
+watchdog last-tick pending sweep, and that every offered order ends accounted for
+(matched or timed_out, inflight back to zero). Biggest untouched verification item.
+
+### 5. A2 — echo-engine template rendering
+
+No longer just a theoretical cap. Measured 2026-08-01: 4 flows paced at 41k/s each against
+the echo delivered ~20k orders/s and left 360,410 orders evicted unanswered
+(`framed_requests − framed_responses` matches `evicted_idle` almost exactly), versus ~46k
+orders/s against the reference book engine. The echo is now the slowest thing in the loop
+and actively blocks load testing, not just capacity claims.
+
+### 6. Contestant-facing feedback and display
+
+- `correctness_summary` now carries every violation class and the breakdown sums exactly;
+  what remains is surfacing it usefully.
+- **HDR chart vs latency timeseries disagree** and both are right: `LatencyTimeline.tsx`
+  drops `WARMUP_MS = 2000`, while `histForSession` merges each wave's cumulative
+  histogram including warmup. Measured 12.71ms in the HDR against 0.30-0.68ms across the
+  visible timeseries. Either exclude the same warmup window or label the HDR as
+  whole-session.
+- **A3** taint badge + jitter rendering — both values reach the score event, nothing shows
+  them.
+- **`runs` rows are never created for Kafka-triggered sessions.** Only submission-api's
+  HTTP `StartBenchmark` INSERTs them; every harness in `deploy-local/` works around it by
+  inserting rows itself.
+
+### 7. Live-SSE smoke
+
+Redis → poll loop → `live_metrics` → frontend is still unverified end to end; B1 asserts
+on Postgres/Timescale rows and never the UI. Two-live-leaderboard-tiles unverified with it.
+
+### 8. Kafka topology C2-C6
+
+Per-topic sizing, retention by semantics, `benchmark.requested` partitioning, the
+partition/band revisit, and the disk/compression plan. Wants a running local cluster to
+measure against; none of it is urgent next to C1.
+
+### 9. Capture throughput — parked until EKS, with instrumentation ready
+
+The capture is NOT CPU-bound at any load this laptop can produce: peak 86% of ONE core
+with zero ring-buffer drops and zero CFS throttling. `iicpc-ebpf-late` (the single tokio
+pipeline task) dominates at roughly 5x all rdkafka threads combined, so sharding that task
+is the lever if and when it is needed. Cost tracks FLOW COUNT and burst shape rather than
+record count: 1 -> 4 flows more than doubled peak CPU (33% -> 75%) for 13% more orders,
+while records decoded FELL 40% because fuller packets carry more messages each.
+
+Three attempts could not exceed ~46k orders/s delivered — bounded by the single-node veth
+wall and by A2 — so the ceiling is an EKS measurement. Any per-record extrapolation from
+local runs is invalid; the earlier "~3 cores at >150k delivered" note in
+`sandbox-orchestrator/internal/k8s/slot.go` does not reconcile with these numbers and
+should be treated as unverified until re-measured there.
+
+### D. EKS-only (unchanged)
+
+Karpenter, Graviton botworker pool, gp3 throughput, the cpuset NodeConfig conflict,
+frame-pointer builds, and the final benchmark numbers — last, after everything above.

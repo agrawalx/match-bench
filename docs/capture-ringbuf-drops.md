@@ -404,6 +404,17 @@ Fix outcomes against their predictions:
 - **Ring 256MB + pod 1Gi/2Gi: shipped**, pinned by a Go test so ring and memcg limits
   cannot drift apart.
 
+**And the flamegraph paid for itself the same day.** Profiling the HTTP pipeline bench
+(`docs/http-pipeline-flamegraph.svg`) attributed the HTTP multiplier precisely: `find()`
+was a positional substring scan compiling to one memcmp call per byte offset — **63% of
+the entire profile** — and every JSON field lookup heap-allocated its `"key"` search
+pattern via `format!` (~15% more across malloc/free/format_inner). Fix: `memchr::memmem`
+(SIMD) + stack-built patterns. Measured: HTTP framing 720k → 1.57M msgs/s, WS 855k →
+2.51M msgs/s, HTTP pipeline **585k → 1.28M records/s (+96%) ≈ 638k orders/s single
+core — HTTP is now above the 400–500k target too, with no sharding.** With FIX at
+~1.85M orders/s and HTTP at ~638k, item 4 (sharding) is not currently needed for any
+protocol at the stated targets; it stays parked unless targets rise or EKS disagrees.
+
 ### 6.3 Acceptance
 
 - Criterion: single-core pipeline ceiling recorded per protocol; matcher-key and record-size

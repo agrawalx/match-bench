@@ -25,6 +25,14 @@ physically impossible locally.
 3. **Frontend badge for `ResultTainted`** (optional). The taint flag reaches the
    score event; surface it on the leaderboard row so a flagged pass-2 result is
    visibly provisional.
+   **Jitter is NOT part of this item — corrected 2026-08-01.** It is already rendered:
+   `LeaderboardRow.tsx` shows `jitter_p99_us` (with tests for the present and absent
+   cases) and leaderboard-api exposes all four percentiles plus the inversion rate, with
+   real values stored (`p50=65.536us p99=2097.152us inversion_rate=0.4973`). Those are
+   exact powers of two — 2^16 and 2^21 ns — so they are coarse HDR bucket boundaries, not
+   precise figures. What is genuinely missing is jitter on the RUN DETAIL page: nothing
+   under `frontend/src/components/run/` references it, so a run shows correctness,
+   throughput and latency but not the ordering quality that W is calibrated against.
 
 ## B. Local-cluster verification track (k3s/kind; eBPF and KEDA both run locally)
 
@@ -53,7 +61,7 @@ physically impossible locally.
    it to fire (tiny `VALIDATOR_T7_ANOMALY_CAP_MS`, or a low `VALIDATOR_LATE_TAINT_RATE`)
    is untested outside unit tests, so "not tainted" is trustworthy and "tainted" is not
    yet. Jitter-on-the-leaderboard is also still unverified — it reaches the score event,
-   but nothing renders it (see A3).
+   but the leaderboard row renders it; the run detail page does not (see A3).
 3. ~~**Mixed-protocol run.**~~ **DONE (2026-07-31).** Both forms pass:
    `deploy-local/b3-mixed3.sh` (3 tasks, one per protocol) and
    `deploy-local/b3-mixed-protocol.sh` (single-protocol grading, then 204 tasks as
@@ -639,7 +647,17 @@ and actively blocks load testing, not just capacity claims.
   histogram including warmup. Measured 12.71ms in the HDR against 0.30-0.68ms across the
   visible timeseries. Either exclude the same warmup window or label the HDR as
   whole-session.
-- **A3** taint badge + jitter rendering — both values reach the score event, nothing shows
+- **A3** taint badge — reaches the score event, nothing shows it. Jitter is already on the
+  leaderboard row; what is missing is jitter on the RUN DETAIL page. Note jitter exists
+  ONLY for pass-2 scenarios: `jitterHistogram` lives in the validator's `invariants.go`
+  because P-G jitter measures cross-flow processing-order inversion, and pass 1 runs a
+  single connection where TCP sequence totally orders the session — the metric is
+  undefined there, not merely unmeasured. `aggregateJitter` then takes the worst value
+  across sessions PER PERCENTILE independently, so the published number is a per-percentile
+  max rather than any one session's distribution. Consequence of the pass-1-only
+  correctness decision: W is calibrated entirely from passes that no longer decide
+  correctness, while the penalty W causes now also lands on pass-1 multi-protocol runs,
+  where jitter itself is never measured. Nothing shows
   them.
 - **`runs` rows are never created for Kafka-triggered sessions.** Only submission-api's
   HTTP `StartBenchmark` INSERTs them; every harness in `deploy-local/` works around it by

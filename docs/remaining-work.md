@@ -505,6 +505,32 @@ or sharding userspace workers per flow.
    added `smp_id`, because the suite that was being run never covered them.
    **`cargo test --workspace` is the gate.**
 
+## Local cluster state left behind (2026-08-01)
+
+Not backlog items, but the next session will waste time rediscovering them.
+
+- **Code committed but NOT deployed locally.** `sandbox-orchestrator` carries the capture
+  CPU request raise (200m -> 2) and `score-computer` carries pass-1-only correctness
+  (b0b790c); neither image was rebuilt/imported, so the RUNNING orchestrator still requests
+  200m and the RUNNING score-computer still pools pass-1 and pass-2 into
+  `total_correctness`. Rebuild + `sudo k3s ctr images import` + rollout before trusting a
+  leaderboard number or re-testing ring-buffer drops.
+- **A CoreDNS workaround is installed and must never reach EKS.** ConfigMap
+  `coredns-custom` in `kube-system` NXDOMAINs `*.*.iitr.ac.in` so Alpine builds resolve.
+  The campus resolver answers the search-domain-expanded form (`dl-cdn.alpinelinux.org.
+  iitr.ac.in`) with NOERROR-and-no-records instead of NXDOMAIN, and musl stops there rather
+  than trying the absolute name — which broke every contestant Kaniko build. It survives
+  k3s restarts. VPC DNS behaves correctly, so this is local-only scaffolding.
+- **Throwaway scenarios seeded:** `cpu4`, `cpu4x41k`, `smoke`, `mixed3`. Since
+  `StartBenchmark` fans out over every row in the table, a browser-triggered submission
+  currently runs eight sessions including two max-rate ones. `mixed3` is worth keeping for
+  B3 re-runs; the other three are disposable.
+- **The node IP moves.** It changed three times in one session (WiFi DHCP), each time
+  breaking the cluster, the registry push endpoint (spawner env) and the pull config
+  (`/etc/rancher/k3s/registries.yaml`) independently. A dummy interface plus `--node-ip`
+  would end this permanently; `up-dev.sh` already warns when the installed registries.yaml
+  no longer matches.
+
 ## Housekeeping
 
 - ~25 commits on `feat/bot-tps` unpushed: `git push fork feat/bot-tps`.

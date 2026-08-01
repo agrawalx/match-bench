@@ -28,6 +28,16 @@ spec:
           args:
             - |
               broker="kafka-0.kafka.data.svc.cluster.local:9092"
+              # RF and min.insync default to 1: that is what a single-broker cluster can
+              # satisfy, and this deployment runs one broker. They were hardcoded to 3 and
+              # 2, which no single-broker cluster can ever meet -- and because
+              # min.insync.replicas=2 on RF=1 makes EVERY produce fail with
+              # NOT_ENOUGH_REPLICAS, creating a topic that way is worse than not creating
+              # it. Override both for a real multi-broker cluster. Keep in step with
+              # ensure_topics() in services/bot-fleet/src/kafka.rs, which reads the same
+              # values from KAFKA_TOPIC_REPLICATION_FACTOR / KAFKA_MIN_INSYNC_REPLICAS.
+              rf="${KAFKA_TOPIC_REPLICATION_FACTOR:-1}"
+              insync="${KAFKA_MIN_INSYNC_REPLICAS:-1}"
               failed=0
               create_topic() {
                 topic="$1"
@@ -39,8 +49,8 @@ spec:
                   --if-not-exists \
                   --topic "$topic" \
                   --partitions "$partitions" \
-                  --replication-factor 3 \
-                  --config min.insync.replicas=2 \
+                  --replication-factor "$rf" \
+                  --config min.insync.replicas="$insync" \
                   --config retention.ms="$retention_ms" \
                   --config max.message.bytes=1048576
               }

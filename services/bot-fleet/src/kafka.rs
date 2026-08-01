@@ -13,6 +13,7 @@ use rdkafka::{
     client::DefaultClientContext,
     config::ClientConfig,
     consumer::{CommitMode, Consumer, StreamConsumer},
+    error::RDKafkaErrorCode,
     message::Message,
     producer::{DeliveryFuture, FutureProducer, FutureRecord, Producer},
     Offset, TopicPartitionList,
@@ -20,7 +21,32 @@ use rdkafka::{
 
 use iicpc_schemas_rust::{BarrierEvent, ReadySignal};
 
-const TOPIC_REPLICATION_FACTOR: i32 = 3;
+/// Replication factor and min.insync.replicas for topics this service creates.
+///
+/// Both default to 1, which is what a single-broker cluster can actually satisfy, and both
+/// are overridable for a real multi-broker deployment.
+///
+/// They used to be hardcoded to 3 and 2. On one broker RF=3 cannot be satisfied, so every
+/// topic creation failed -- and the failure was invisible, because create_topics() returns a
+/// PER-TOPIC result vector that this function never inspected. Worse than the failure was
+/// the shape of it: had the app path ever won the race against the topic-init Job and
+/// created topics with min.insync.replicas=2 on RF=1, EVERY subsequent produce would fail
+/// with NOT_ENOUGH_REPLICAS, because a single replica can never satisfy two in-sync ones.
+/// The live cluster runs RF=1 / min.insync=1, so the code now says what the deployment is.
+const DEFAULT_TOPIC_REPLICATION_FACTOR: i32 = 1;
+const DEFAULT_MIN_INSYNC_REPLICAS: &str = "1";
+
+fn topic_replication_factor() -> i32 {
+    std::env::var("KAFKA_TOPIC_REPLICATION_FACTOR")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(DEFAULT_TOPIC_REPLICATION_FACTOR)
+}
+
+fn min_insync_replicas() -> String {
+    std::env::var("KAFKA_MIN_INSYNC_REPLICAS")
+        .unwrap_or_else(|_| DEFAULT_MIN_INSYNC_REPLICAS.to_string())
+}
 const DEFAULT_TOPIC_PARTITIONS: i32 = 3;
 const HIGH_THROUGHPUT_TOPIC_PARTITIONS: i32 = 24;
 
@@ -64,25 +90,43 @@ pub async fn ensure_topics(brokers: &str, topics: &[&str]) -> Result<()> {
         .create()
         .context("create kafka admin client")?;
 
+    let rf = topic_replication_factor();
+    let insync = min_insync_replicas();
     let new_topics: Vec<NewTopic> = topics
         .iter()
         .map(|topic| {
-            NewTopic::new(
-                topic,
-                topic_partitions(topic),
-                TopicReplication::Fixed(TOPIC_REPLICATION_FACTOR),
-            )
-            .set("min.insync.replicas", "2")
-            .set("retention.ms", topic_retention_ms(topic))
-            .set("max.message.bytes", "1048576")
+            NewTopic::new(topic, topic_partitions(topic), TopicReplication::Fixed(rf))
+                .set("min.insync.replicas", insync.as_str())
+                .set("retention.ms", topic_retention_ms(topic))
+                .set("max.message.bytes", "1048576")
         })
         .collect();
 
-    admin
+    let results = admin
         .create_topics(&new_topics, &AdminOptions::new())
         .await
         .context("create topics")?;
 
+    // Inspect the PER-TOPIC results. The Vec returned here was previously discarded, so a
+    // cluster that could not satisfy the requested replication reported success while
+    // creating nothing -- the failure only surfaced later as a missing topic or as produce
+    // errors, far from the cause. TopicAlreadyExists is the normal path (the topic-init Job
+    // usually wins the race) and is not an error.
+    for r in results {
+        match r {
+            Ok(_) => {}
+            Err((topic, RDKafkaErrorCode::TopicAlreadyExists)) => {
+                tracing::debug!(%topic, "topic already exists");
+            }
+            Err((topic, code)) => {
+                return Err(anyhow::anyhow!(
+                    "create topic {topic}: {code:?} (replication_factor={rf}, \
+                     min.insync.replicas={insync}); a single-broker cluster cannot satisfy \
+                     replication above 1"
+                ));
+            }
+        }
+    }
     Ok(())
 }
 

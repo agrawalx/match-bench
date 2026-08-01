@@ -1149,6 +1149,7 @@ dependencies = [
  "aya",
  "aya-ebpf",
  "aya-ebpf-macros",
+ "criterion",
  "futures",
  "iicpc-bot-fleet",
  "iicpc-logger-rust",

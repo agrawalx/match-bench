@@ -186,7 +186,16 @@ func TestComputeNoRampDisqualifiedReturnsResult(t *testing.T) {
 // It keeps validation, side effects, and returned values within this package's contract.
 func TestComputeNoRampWithoutDQReturnsError(t *testing.T) {
 	in := baseInput()
-	in.Sessions = in.Sessions[:2]
+	// Drop ONLY the ramp. Truncating the slice also removed the pass-1 session, which is
+	// now the sole source of correctness -- the group then scored 0, disqualified, and
+	// Compute returned nil instead of the error this test exists to check.
+	kept := in.Sessions[:0]
+	for _, s := range in.Sessions {
+		if s.Scenario != "ramp" {
+			kept = append(kept, s)
+		}
+	}
+	in.Sessions = kept
 	if _, err := Compute(in); !errors.Is(err, ErrMissingRampSession) {
 		t.Fatalf("err = %v, want ErrMissingRampSession", err)
 	}
@@ -242,7 +251,14 @@ func TestComputeCoverageAtThresholdKeepsViolationDQ(t *testing.T) {
 // It keeps validation, side effects, and returned values within this package's contract.
 func TestComputeIncompleteTelemetryKeepsCorrectnessGates(t *testing.T) {
 	in := baseInput()
-	in.Sessions[0].Correct.ValidFills = 800
+	// Degrade the PASS-1 session: it is the only source of the aggregate correctness
+	// score now, so degrading a pass-2 session would leave the aggregate at 1.0 and
+	// this test would silently stop exercising the gate it is named after.
+	for i := range in.Sessions {
+		if in.Sessions[i].Scenario == ScenarioCorrectness {
+			in.Sessions[i].Correct.ValidFills = 800
+		}
+	}
 	in.Sessions[2].Correct.SentCount = 1000
 	in.Sessions[2].Correct.MatchedCount = 100
 	res, err := Compute(in)
@@ -334,11 +350,37 @@ func TestSortResultsTiebreak(t *testing.T) {
 // It keeps validation, side effects, and returned values within this package's contract.
 func TestAggregateCorrectnessDoesNotOverflow(t *testing.T) {
 	got := aggregateCorrectness([]Session{
-		{Correct: Correctness{ValidFills: math.MaxUint64, TotalFills: math.MaxUint64}},
-		{Correct: Correctness{ValidFills: math.MaxUint64, TotalFills: math.MaxUint64}},
+		{Scenario: ScenarioCorrectness, Correct: Correctness{ValidFills: math.MaxUint64, TotalFills: math.MaxUint64}},
+		{Scenario: ScenarioCorrectness, Correct: Correctness{ValidFills: math.MaxUint64, TotalFills: math.MaxUint64}},
 	})
 	if got != 1 {
 		t.Fatalf("correctness = %v, want 1", got)
+	}
+}
+
+// TestAggregateCorrectnessIgnoresPass2 pins the rule that only the full-replay pass-1
+// session decides correctness. Pass 2 grades book-free invariants, where an engine that
+// fills every order unconditionally scores a perfect 1.0 -- measured at exactly that for
+// the echo engine against 0.62 for the same binary in full mode. Pooling the two let the
+// pass that cannot tell those apart outvote the one that can, weighted by fill count.
+func TestAggregateCorrectnessIgnoresPass2(t *testing.T) {
+	got := aggregateCorrectness([]Session{
+		{Scenario: ScenarioCorrectness, Correct: Correctness{ValidFills: 50, TotalFills: 100}},
+		{Scenario: "constant", Correct: Correctness{ValidFills: 10_000, TotalFills: 10_000}},
+	})
+	if got != 0.5 {
+		t.Fatalf("correctness = %v, want 0.5 (pass-1 only, not diluted by a perfect pass-2)", got)
+	}
+}
+
+// TestAggregateCorrectnessWithoutPass1IsZero: a group never graded against the reference
+// book has no correctness evidence, and must not read as perfect.
+func TestAggregateCorrectnessWithoutPass1IsZero(t *testing.T) {
+	got := aggregateCorrectness([]Session{
+		{Scenario: "constant", Correct: Correctness{ValidFills: 10_000, TotalFills: 10_000}},
+	})
+	if got != 0 {
+		t.Fatalf("correctness = %v, want 0 when no pass-1 session exists", got)
 	}
 }
 
@@ -422,6 +464,12 @@ func baseInput() Input {
 					{WaveIndex: 2, P99NS: 900_000, ErrorRate: 0},
 				},
 			},
+			// LAST on purpose: several tests address sessions positionally
+			// (in.Sessions[2] is the ramp), so this must not shift their indices.
+			// Correctness now comes only from the pass-1 session; without one the group
+			// scores 0 and every fixture here would disqualify for a reason unrelated to
+			// what it actually tests.
+			{SessionID: "correctness", Scenario: ScenarioCorrectness, Correct: correct},
 		},
 	}
 }

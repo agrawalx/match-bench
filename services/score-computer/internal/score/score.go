@@ -273,9 +273,35 @@ func Compute(in Input) (Result, error) {
 
 // aggregateCorrectness performs the package-specific operation described by its name.
 // It keeps validation, side effects, and returned values within this package's contract.
+// ScenarioCorrectness is the pass-1 scenario: one task on one connection, replayed
+// against the reference book in full mode. It is the ONLY source of the published
+// correctness score.
+const ScenarioCorrectness = "correctness"
+
+// aggregateCorrectness returns the correctness of the PASS-1 session alone.
+//
+// It used to pool ValidFills/TotalFills across every session in the run-group, which made
+// the published number a fill-weighted blend of full-replay and invariants grading. That
+// is not a stricter or a looser rule, it is a meaningless one: the two passes answer
+// different questions. Pass 2 grades book-free invariants, so an engine that fills every
+// order unconditionally scores 1.0 there -- measured at exactly 1.0 for the echo engine,
+// against 0.62 for the same binary in full mode. Pass-2 sessions also carry far more fills
+// than the single-connection pass-1 run, so the blend was DOMINATED by the pass that cannot
+// tell a correct engine from a fill-everything one, and it fed both the disqualification
+// gate and the leaderboard ranking.
+//
+// Pass-2 correctness is still computed, stored per session and available as a metric; it
+// simply does not decide anything.
+//
+// With no pass-1 session in the group there is nothing to certify, so this returns 0 rather
+// than falling back to whatever sessions exist — a group that was never graded against the
+// book must not read as perfect.
 func aggregateCorrectness(sessions []Session) float64 {
 	var valid, total float64
 	for _, s := range sessions {
+		if s.Scenario != ScenarioCorrectness {
+			continue
+		}
 		valid += float64(s.Correct.ValidFills)
 		total += float64(s.Correct.TotalFills)
 	}

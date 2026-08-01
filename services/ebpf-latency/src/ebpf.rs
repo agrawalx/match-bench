@@ -34,14 +34,18 @@ const FIX_PORT: u16 = 9898;
 const HTTP_WS_PORT: u16 = 8080;
 
 #[cfg(target_arch = "bpf")]
-const CAPTURE_CAP: usize = 1536;
-// Maximum payload bytes copied per packet into the capture buffer. The length passed to
-// bpf_*_load_bytes must satisfy the kernel 6.1 BPF verifier (EKS AL2023), whose ARG_CONST_SIZE
-// length arg requires the register to carry umin ≥ 1 (else a zero-size probe fails with "R3 min
-// value is outside of the allowed memory range") AND umax ≤ value_size - payload_off. See
-// capture_len for how those bounds are established (read_volatile + relational guards) and why
-// oversized payloads are clamped to this constant rather than skipped/masked. COPY_CAP ==
-// CAPTURE_CAP ⇒ off 28 + 1536 = 1564 ≤ 1568 value_size.
+const CAPTURE_CAP: usize = 9029;
+// Maximum payload bytes copied per packet into the capture buffer. 9029 = 9001 + 28 covers a
+// full jumbo frame, so EKS keeps MTU 9001 and the platform-wide MTU-1500 clamp (and its ~6x
+// packet-count tax) is no longer forced by the capture — see docs/capture-ringbuf-drops.md
+// §6.2. The per-CPU scratch value is 28 + 9029 = 9057, well under the 32KB PCPU_MIN_UNIT_SIZE
+// bound on per-CPU map values. The length passed to bpf_*_load_bytes must satisfy the kernel
+// 6.1 BPF verifier (EKS AL2023), whose ARG_CONST_SIZE length arg requires the register to
+// carry umin ≥ 1 (else a zero-size probe fails with "R3 min value is outside of the allowed
+// memory range") AND umax ≤ value_size - payload_off. See capture_len for how those bounds are
+// established (read_volatile + relational guards) and why oversized payloads are clamped to
+// this constant rather than skipped/masked. The proof shape is structural — none of it
+// references the constant's value, only COPY_CAP == CAPTURE_CAP == the payload array length.
 #[cfg(target_arch = "bpf")]
 const COPY_CAP: usize = CAPTURE_CAP;
 // Minimum payload length we capture. Must be ≥ 2 so the `len < MIN_CAPTURE_LEN` guard in

@@ -56,7 +56,14 @@ const DEFAULT_FLUSH_INTERVAL: Duration = Duration::from_millis(5);
 const DEFAULT_BATCH_SIZE: usize = 4096;
 const EVICT_INTERVAL: Duration = Duration::from_secs(1);
 const MAX_EVENTS_PER_BATCH: usize = 1000;
-const DEFAULT_CLAMP_MTU: usize = 1500;
+// 9001 (was 1500): with CAPTURE_CAP at 9029 a full jumbo frame fits one
+// capture record, so the MTU clamp that de-optimised the whole grading path
+// (~6x packet count, docs/grading-network-regime.md) is no longer needed to
+// keep the capture complete. gso_max_size still clamps to this value —
+// pre-GSO skbs at the tc hook must stay within one record — and clamp_to only
+// ever lowers an interface MTU, so on a 1500-MTU local veth this is a no-op.
+// CAPTURE_CLAMP_MTU=1500 remains the rollback lever.
+const DEFAULT_CLAMP_MTU: usize = 9001;
 /// How long to wait at shutdown for the producer queue to reach the broker. Must stay
 /// below the pod's terminationGracePeriodSeconds or the SIGKILL lands mid-drain and the
 /// flush achieves nothing.
@@ -926,18 +933,37 @@ mod tests {
     /// program can copy in one record, or truncation returns.
     #[test]
     fn gso_clamp_target_tracks_the_capture_cap() {
-        const BPF_COPY_CAP: usize = 1536;
-        for mtu in [1500usize, 1400, 9000] {
+        for mtu in [1500usize, 1400, 9000, DEFAULT_CLAMP_MTU] {
             let args = gso_clamp_args("eth0", mtu);
             let size: usize = args[5].parse().unwrap();
-            if mtu <= BPF_COPY_CAP {
+            if mtu <= capture::CAPTURE_CAP {
                 assert!(
-                    size <= BPF_COPY_CAP,
-                    "clamp {size} exceeds the {BPF_COPY_CAP}-byte capture cap"
+                    size <= capture::CAPTURE_CAP,
+                    "clamp {size} exceeds the {}-byte capture cap",
+                    capture::CAPTURE_CAP
                 );
             }
             assert_eq!(args[7], "1", "gso_max_segs must pin to one segment");
         }
+    }
+
+    /// The DEFAULT clamp and the capture cap must stay compatible: a pre-GSO
+    /// skb bounded by gso_max_size = DEFAULT_CLAMP_MTU carries at most
+    /// MTU - 40 bytes of TCP payload, and every one of those bytes must fit a
+    /// single capture record or truncation (25.6% response loss, 2026-07-31)
+    /// silently returns. 9029 = 9001 + 28 covers a full jumbo frame plus the
+    /// record header, which is what lets EKS keep MTU 9001 (the kernel-side
+    /// constant in ebpf.rs and this mirror move in lockstep — capture.rs's
+    /// decode rejects captured_len above the mirror, so a stale mirror would
+    /// discard every complete jumbo capture as corrupt).
+    #[test]
+    fn default_clamp_fits_the_capture_cap() {
+        assert_eq!(capture::CAPTURE_CAP, 9029);
+        assert_eq!(DEFAULT_CLAMP_MTU, 9001);
+        assert!(DEFAULT_CLAMP_MTU <= capture::CAPTURE_CAP);
+        // Per-CPU scratch value: header + cap must fit the 32KB
+        // PCPU_MIN_UNIT_SIZE bound on per-CPU map values.
+        assert!(capture::CAPTURE_HEADER_LEN + capture::CAPTURE_CAP <= 32 * 1024);
     }
 
     fn mk_event(order_id: &str) -> MatchedEvent {

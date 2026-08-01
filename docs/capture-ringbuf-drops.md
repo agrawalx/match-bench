@@ -1,10 +1,11 @@
 # Ring-buffer drops in the eBPF capture: what is measured, what is not
 
-Status: **investigation in progress.** The cause is NOT yet identified. This records what has
-been measured, which hypotheses the measurements killed, what instrumentation was added to
-make the remaining question answerable, and the approach proposed once it is.
+Status: **root cause resolved** — the drops were host CPU contention starving a Burstable
+container (§5b), not a capture throughput limit, not Kafka, not the traffic. The document
+now also carries the forward plan (§6): how the capture's real ceiling gets measured without
+the cluster in the loop, and the ordered fixes that raise it.
 
-Written 2026-07-31.
+Written 2026-07-31. Root cause confirmed 2026-07-31 (§5b). Plan rewritten 2026-08-01 (§6).
 
 ---
 
@@ -113,14 +114,7 @@ this container's QoS class exposes it to, on whichever run happened to overlap.
 §3: the run that dropped is not distinguished by anything about its traffic, because the
 cause was not in its traffic. It is a genuine confound and it is not yet excluded.
 **Any re-measurement must run on a quiet host**, or the result means nothing.
-
-These runs executed on a local k3s single node — the same laptop that was concurrently
-running multi-core Rust/Docker builds during parts of this session. A build pegging every
-core would starve the capture's userspace loop and produce exactly this signature, on
-whichever run happened to overlap.
-
-This is a genuine confound and it is not currently excluded. **Any re-measurement must run on
-a quiet host**, or the result means nothing.
+(Confirmed by the §5b re-run.)
 
 ## 5. What is still unknown, and the instrumentation added for it
 
@@ -211,42 +205,214 @@ None of this changes the §5b conclusion — that rests on `ringbuf_dropped`, `c
 `producer_inflight`, which were never in doubt. It does mean **no trustworthy CPU figure for
 the capture exists yet**; the next loaded run with the fixed sampler produces the first one.
 
-## 6. Proposed approach
+## 6. The plan: measure offline, ship the no-regret fixes, gate on cluster counters
 
-**Step 1 — finish the measurement, on a quiet host.** Re-run the dropping scenario with no
-builds or other load on the node, and read `cpu_throttled_periods` and the per-thread numbers
-together. Everything below is contingent on what they say; committing to a fix now would
-repeat the mistake this session already made twice (a confidently wrong root cause for the
-WebSocket failure, then another for the connect timeouts).
+Rewritten 2026-08-01, after the root cause landed (§5b) and the code was re-read against the
+original proposal. Several items from the first version of this section are already done or
+already dead; recording which, so they are not re-proposed.
 
-Note the cheapest possible outcome is also the most likely one right now: if throttling
-explains it, the fix is a CPU **request** change on a Burstable container, not a line of
-capture code. Do not start sharding a pipeline to solve a scheduling problem.
+### 6.0 Status of the original proposals
 
-**Step 2 — fix what the measurement names.** In the order I would expect to matter:
+**CPU request raise — SHIPPED.** `captureResources` now requests **2 CPU** (was 200m), limit
+4, memory 256Mi/512Mi (`sandbox-orchestrator/internal/k8s/slot.go`). The request is the CFS
+weight and scheduler floor, which is exactly what the §5b starvation exploited. One drift
+item: the comment on the LIMIT block still says "request stays 200m", contradicting the
+request block five lines above it — fix in the next pass that touches the file.
 
-- **Raise the capture's CPU request** (currently 200m against a known ~3-core appetite) so it
-  is not squeezable under node pressure, or give it Guaranteed QoS on the sandbox node. This
-  is first because it is the leading hypothesis and by far the cheapest fix.
+**Drain-loop batching — already correct, no work pending.** `drain_ringbuf` reads ALL
+currently-available records per 5ms tick, synchronously and non-blockingly; `flush` enqueues
+to Kafka without blocking and DROPS the batch on QueueFull rather than stalling the drain
+(the old blocking `send().await` froze the capture at ~107k/s and is long gone). A
+per-record wakeup path some earlier notes assumed does not exist.
 
-- **Shard the pipeline per flow.** Decode, reassembly, framing and matching are one tokio
-  task today. Reassembly is already keyed by `(FlowKey, Direction)`, so per-flow sharding is
-  natural: hash the flow to one of N workers, each owning its reassemblers. The matcher is
-  keyed by ClOrdID and would need either a shared concurrent map or a merge stage. This is
-  the fix if one thread is pinned.
-- **Grow the ring buffer.** 64MB is ~43k records, roughly 30ms of headroom at 500k records/s.
-  Cheap, independent of the above, and buys margin for bursts regardless of cause. It treats
-  the symptom, so it should follow rather than replace the diagnosis.
-- **Cut per-record cost in the matcher.** `HashMap<String, Inflight>` keyed on ClOrdID means
-  millions of live entries with per-entry String allocation at target rates. An interned or
-  fixed-width key removes allocation from the hot path.
-- **Parse in the kernel.** Emit fixed-size records (ClOrdID + timestamps, ~64 bytes) instead
-  of copying up to 1536 bytes per packet for userspace to re-parse. This removes both the
-  copy and the userspace framing cost, and would dissolve the `CAPTURE_CAP` question that
-  currently forces MTU 1500 (see the capture-cap plan). Largest payoff, largest effort.
+**Publish serialization — already msgpack** (`rmp_serde::to_vec_named`, batched,
+co-partitioned by order id). Not a pending optimization.
 
-**Step 3 — re-run the gate.** `capture_gaps` on a max-rate single-protocol run is the
-acceptance criterion; it must be 0, not merely under the 1% taint threshold.
+**Kernel-side parse — dead by design, do not re-propose.** The parser's input is a TCP byte
+stream; a BPF hook's input is packets. FIX/HTTP/WS messages do not align with packet
+boundaries — a message splits across segments, a segment carries several messages, and the
+ClOrdID sits at a variable offset (FIX tag 11 anywhere in the tag soup, REST inside a JSON
+body, WS behind variable-length frame headers). Extracting it in-kernel requires per-flow
+stream reassembly with held-back bytes — exactly what userspace `Reassembler` exists for,
+and BPF can hold neither arbitrary per-flow byte buffers nor unbounded scans. This was
+attempted much earlier in the project and failed for precisely this reason. The
+capture-only-kernel / parse-in-userspace split is the design, not a compromise.
+
+### 6.1 Why the ceiling is measured offline, not with cluster ramps
+
+The local single-node cluster hits the veth packet-rate wall before the capture saturates: a
+load ramp there measures the load generator, not the capture. But everything after the ring
+buffer is deterministic userspace — so the pipeline's ceiling is measurable with **no
+network in the loop at all**: feed synthetic capture records straight into
+`Pipeline::process` in a criterion macro-bench and read records/s per core off the report.
+
+This is not a new idea in this repo — it is the `framing_property.rs` lesson applied to
+throughput. That offline harness reproduced in 20ms two shipped framing defects that four
+confidently-wrong cluster hypotheses (CPU starvation, ring-buffer overflow, Kafka queue,
+teardown race) had failed to find, each at the cost of a build/import/run cycle. The framer
+and reassembler are pure functions and were never going to be debugged in a cluster; neither
+is their throughput. The property harness's FIX traffic generators are the natural bench
+fixtures.
+
+One cost center the pipeline benches CANNOT see: the Kafka producer's own threads. The
+per-thread CPU telemetry was built to split exactly this — `rdk:*` threads (produce + zstd
+compression) versus `tokio-rt-worker`/`iicpc-ebpf-late` (drain, reassembly, framing,
+matching). The first trustworthy loaded reading decides which half to optimise: if `rdk:*`
+dominates, the lever is producer config (compression level, batching), not pipeline code,
+and no amount of criterion work on the pipeline will move the ceiling.
+
+The criterion harness (`services/ebpf-latency/benches/`, to be added) carries:
+
+- **decode** — `Capture` parse from raw record bytes;
+- **reassembly** — `push()` on a contiguous stream, and separately a reordered/hold-path
+  variant; realistic record sizes (~150B FIX response vs full-size);
+- **framing per protocol** — FIX tag scan vs HTTP response parse vs WS frame decode, on
+  payloads lifted from the e2e fixtures. This is the only stage where the three protocols
+  genuinely differ; REST is the prime suspect (header parse, most bytes per order);
+- **matcher** — insert/match/evict at a realistic live-set size (1M+ entries), including a
+  fixed-width-key prototype as the A/B (see 6.2);
+- **full pipeline** — the macro-bench: N flows of mixed realistic traffic through
+  `Pipeline::process` single-threaded. This number IS the single-core ceiling.
+
+Target arithmetic the ceiling is judged against: 400–500k orders/s × ~2 capture records per
+order (request + response; measured 2.0–2.1 across all three protocols in §2) ≈ **~1M
+records/s**. The macro-bench verdict against that number decides sharding (6.2, item 4) —
+without a single cluster run.
+
+The harness doubles as permanent regression tracking: any future change that eats pipeline
+throughput fails a visible benchmark instead of a live session.
+
+Kernel-side cost is measured separately and cheaply: `sysctl kernel.bpf_stats_enabled=1`
+during any loaded run, then `bpftool prog show` → `run_time_ns / run_cnt` for the XDP and tc
+programs. Expected sub-µs/packet; this is a box-check, not an investigation.
+
+Cluster runs keep exactly one role: **regression gate**. A max-rate run per protocol on a
+quiet host must show `capture_gaps` = 0, `ringbuf_dropped` = 0, `cpu_throttled_periods` = 0
+in the FINAL counters line — at whatever rate the local wall permits. A run with nonzero
+throttling is invalid, not a data point (§4b).
+
+**Precondition for any local cluster run: redeploy the orchestrator first.** The CPU
+request raise is committed but the running local orchestrator was never rebuilt/imported —
+the LIVE capture pods still request 200m (see "Local cluster state left behind",
+`remaining-work.md`). A local measurement taken before that redeploy is exposed to the
+exact starvation this document diagnosed, and is void.
+
+### 6.2 Fixes, in order
+
+**1. Pod memory raise, paired with ring-buffer growth.** Ring 64MB → 256MB; pod memory
+256Mi/512Mi → **1Gi/2Gi**. These must move together: BPF map memory is memcg-charged to the
+creating process since kernel 5.11, so a 256MB ring plus userspace heap does not fit under
+the current 512Mi limit — growing the ring alone OOM-kills the capture at startup. The raise
+also covers two userspace worst cases the current limit cannot: the matcher's live set under
+an unresponsive engine (entries linger up to the 5s idle eviction → 500k/s × 5s ≈ 2.5M
+entries ≈ 400–500MB at ~150–200B/entry — OOM exactly when measuring the interesting failure
+mode), and reassembly hold buffers after the capture-cap change (64 held segments × 9KB ≈
+576KB/flow worst case). Ring growth is insurance — it extends the survivable-starvation
+window ~4x (64MB is ~43k max-size records ≈ 43ms at 1M records/s against a 5ms drain
+cadence, ample when userspace actually runs) — but it is nearly free and the memory raise
+that enables it is needed anyway. Measured on cluster only: FINAL counters under load.
+
+**2. Matcher fixed-width key.** `HashMap<String, Inflight>` allocates a String per record on
+the hot path. Replace the key with a fixed-width form of ClOrdID. Behavior-neutral, wins at
+any load. Precondition: confirm the ClOrdID width/format the bot fleet generates (fixed
+width → `[u8; N]`; else an inline-string type). Measured in criterion: the matcher bench
+A/Bs String vs fixed-width at 1M live entries; the delta is the whole argument.
+
+While in this code, expect the **5s idle-eviction question to reopen**. It is the leading
+suspect for the pass-1 residual missed fills (a resting maker is acked, marked answered,
+reaped as routine GC, and its FILL arrives later when someone trades against it —
+unmatched and dropped; 7,004 missed fills / `unmatched_response` 11,837 on the 1.84M-order
+run, see `remaining-work.md`). That was parked with the explicit condition "unless the rate
+grows at higher throughput" — and raising throughput is this plan's stated goal, so the
+work that raises the rate trips the revisit trigger itself. The eviction window also sizes
+worst-case matcher memory (item 1), so the two decisions are coupled.
+
+**3. `CAPTURE_CAP` 1536 → 9029.** Covers a full jumbo frame, so EKS keeps MTU 9001 and the
+`net-tune` MTU clamp disappears. Three wins at once: ~6x fewer capture records wherever the
+engine's egress coalesces (per-record pipeline overhead is the cost that scales with record
+COUNT — decode, map lookups, `push()` calls, marks — while per-byte framing cost is
+invariant); the veth wall itself rises (~6x fewer packets per byte through the veth pair —
+the wall is packet-rate-bound); and the load generator's ceiling rises with it. The verifier
+proof in `capture_len` survives the constant change — its bounds are structural
+(read_volatile + relational JLT/JGT, clamp path returns the CONSTANT cap), none reference
+1536 — and 28 + 9029 = 9057 fits the 32KB per-CPU value limit. Lockstep changes: the
+userspace mirror `capture.rs CAPTURE_CAP` (its `captured_len` sanity check would otherwise
+reject every complete jumbo capture as corrupt), the `clamp_gso` target (1500 → 9001, still
+bounding pre-GSO skbs to one jumbo frame), and the test constant in `main.rs`. `gro-disable`
+STAYS — GRO coalesces to 64KB regardless of MTU.
+
+Temper the expectation before measuring: the "~6x fewer records" win is
+**engine-behavior-dependent, not automatic**. Execution reports are ~130 bytes, and the
+measured cost of `gso_max_segs 1` was −0.3% (inside run-to-run spread) — GSO was batching
+tiny messages for syscall economy, not moving bulk bytes. Coalescing wins materialize only
+where the engine actually batches multiple messages per write. So the criterion A/B must
+use realistic batch-size distributions (as observed from real engines), not synthetic
+all-jumbo streams — an all-jumbo fixture would overstate the win roughly 6x.
+
+Measured twice: criterion (pipeline fed record streams at realistic batch distributions,
+1536-cap vs 9029-cap framing of the same byte stream) and ONE quiet-host cluster A/B (MTU
+1500 vs 9001, same scenario) using bot-side send/receive timestamps as the
+capture-independent witness — which also finally separates the measurement-correction from
+the genuine slowdown, the experiment `grading-network-regime.md` calls for and nobody has
+run.
+
+**4. CONDITIONAL — per-flow sharding.** Only if the 6.1 macro-bench puts the single-core
+ceiling below ~1M records/s. Mechanism, if needed: **N ring buffers with flow-hash steering
+in the BPF programs** — kernel logic stays hash + index (verifier-trivial, no parsing);
+`FlowKey` is direction-normalized, so a flow's XDP-side requests and tc-side responses land
+in the SAME ring; each userspace worker owns its ring, its flows' reassemblers, and its
+matcher shard. ClOrdIDs live on one flow, so the matcher shards along with the flows — no
+shared concurrent map, no merge stage. This supersedes the earlier sketch that hashed flows
+to workers behind a single ring and worried about a shared matcher; steering in the kernel
+dissolves that problem.
+
+### 6.2b Measured (2026-08-01, first criterion baseline + the shipped fixes)
+
+The harness exists (`services/ebpf-latency/benches/capture_bench.rs`) and items 1–3 are
+implemented. Numbers from one laptop core (relative structure is the finding; EKS absolute
+numbers will differ):
+
+| stage | cost | verdict |
+|---|---|---|
+| record decode | ~0.9 ns/record | irrelevant |
+| reassembly | ~53 GiB/s | irrelevant |
+| FIX frame+parse | ~140–210 ns/msg (7.1M/s) | cheap |
+| **HTTP frame+parse** | **~1.4 µs/msg (720k/s)** | **the bottleneck, 7–10x FIX** |
+| WS frame+parse | ~1.2 µs/msg (855k/s) | second hotspot |
+| matcher pair (100k occupancy) | 202 ns → 186 ns after fixed key | ~5% of a FIX order |
+
+Full pipeline, single core: **FIX ~2.7M records/s baseline (≈1.37M orders/s) — already
+above the ~1M records/s target with no sharding.** **HTTP ~585k records/s (≈292k orders/s)
+— below target; HTTP parse cost is the single biggest TPS lever in the whole plan**, bigger
+than every shipped item combined. WS sits between them. So the sharding decision (6.2 item
+4) is protocol-specific: FIX never needs it; HTTP needs either a parse-cost fix (first) or
+~2 workers.
+
+Fix outcomes against their predictions:
+
+- **Matcher fixed-width key: shipped, −8%** on the matcher bench (2.02→1.86ms per 10k
+  pairs) — but only on the third attempt. A derived Hash over the zero-padded 64-byte
+  array measured **+18% slower** than the String key, and SipHash over the filled prefix
+  still +7%; only prefix-hash + FxHashMap wins (inserted keys are bot-generated, so
+  SipHash's flood resistance was pure cost). The "removing malloc always wins" argument
+  from the first version of this section was measurably false as stated.
+- **CAPTURE_CAP 9029: shipped.** Per-order userspace cost flat, as the tempered
+  expectation predicted; one new second-order cost surfaced — framing inside a
+  jumbo-packed record pays `consume()`'s memmove of the record's tail per message
+  (~10% on a 40-message record). The change's real wins stay kernel/wire-side (packet
+  count, veth wall, loadgen ceiling). BPF object builds; live 6.1 verifier load pending.
+- **Ring 256MB + pod 1Gi/2Gi: shipped**, pinned by a Go test so ring and memcg limits
+  cannot drift apart.
+
+### 6.3 Acceptance
+
+- Criterion: single-core pipeline ceiling recorded per protocol; matcher-key and record-size
+  A/B deltas recorded; benches runnable by anyone, tracked so regressions are visible.
+- Cluster, per protocol, max-rate, quiet host: `capture_gaps` = 0 and `ringbuf_dropped` = 0
+  — zero, not merely under the 1% taint threshold — with `cpu_throttled_periods` = 0 or the
+  run is void.
+- The ceiling number itself comes from criterion, never from a cluster ramp, until the
+  cluster stops being the smaller of the two walls (EKS bench tier).
 
 ## 7. Open questions
 
@@ -255,7 +421,8 @@ acceptance criterion; it must be 0, not merely under the 1% taint threshold.
   throttled during the dropping run is now measurable but not yet measured.
 - Is the 5s matcher idle-eviction window contributing? `matcher_evicted_unanswered` was 36,264
   on the dropping run, but that is expected downstream of dropped responses rather than an
-  independent cause.
-- What actually differs about the REST run? No measured variable explains it, and §4b means
-  the honest answer may be "nothing — it was the run that happened to share the host with a
-  build".
+  independent cause. The window does, however, size the matcher's worst-case memory — it is
+  the residence time in the 2.5M-entry arithmetic of §6.2 item 1.
+- ~~What actually differs about the REST run?~~ **Answered by §5b: nothing.** No traffic
+  variable distinguished it because the cause was never in its traffic — it was the run that
+  happened to share the host with a build.

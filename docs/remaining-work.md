@@ -126,10 +126,20 @@ physically impossible locally.
 
 ## C. Kafka topology exercise (wants a running local cluster to measure against)
 
-1. **Single topic ownership.** Topic creation exists in BOTH
-   `services/bot-fleet/src/kafka.rs` (retention values disagree with the manifest)
-   and `k8s/data/kafka/topic-init-job.yaml`, both `--if-not-exists` — boot order
-   decides which config wins. Init Job becomes sole creator; app code only verifies.
+1. ~~**Single topic ownership.**~~ **DONE (2026-08-01, 1ec926b).** The recorded
+   diagnosis was slightly off: BOTH creators asked for `replication-factor 3` and
+   `min.insync.replicas 2`, so they agreed with each other and both were unsatisfiable
+   on this one-broker cluster. The app path also DISCARDED the per-topic result vector
+   `create_topics()` returns, so it reported success having created nothing. The live
+   broker shows `orders.sent` at RF=1 / `min.insync.replicas=1` and no init Job present,
+   so something else created the topics — had the app path won that race with
+   `min.insync.replicas=2` on RF=1, every produce would have failed with
+   `NOT_ENOUGH_REPLICAS`. Both now default to 1 and read
+   `KAFKA_TOPIC_REPLICATION_FACTOR` / `KAFKA_MIN_INSYNC_REPLICAS`; `ensure_topics` fails
+   loudly on anything except `TopicAlreadyExists`.
+   **Still open from the original item:** the app and the Job remain two independent
+   creators racing on `--if-not-exists`. They now agree on replication, but retention
+   values are still defined in two places.
 2. **Per-topic sizing table** from measured inventory (msg rate, msg size, consumer
    parallelism, replay-window need, per local runs): partitions, replication factor,
    retention, compression per topic — replacing the arbitrary 3/24 two-tier split.
@@ -507,18 +517,7 @@ B1, B2 (both passes), B3 (both forms) and the contestant submission path all pas
 local k3s and were re-run — not inherited — after this session's fixes. What follows is
 everything still open, ordered by what would hurt most if it stayed broken.
 
-### 1. C1 — single topic ownership (a loaded gun, cheap to defuse)
-
-Topic creation lives in BOTH `services/bot-fleet/src/kafka.rs` and the k8s
-`topic-init-job`, both `--if-not-exists`, with the code hardcoding
-`TOPIC_REPLICATION_FACTOR = 3` and `min.insync.replicas = 2` against a single-broker
-cluster running RF=1. It only works because the init Job wins the race and the app-side
-per-topic failures are swallowed. If the app path ever wins, `min.insync.replicas=2` on
-RF=1 makes **every produce fail** with `NOT_ENOUGH_REPLICAS`. Decision already taken:
-single broker, RF=1 is fine — so make the code say that. Highest ratio of risk removed
-to effort of anything on this list.
-
-### 2. Two ranking decisions that change what contestants are graded on
+### 1. Two ranking decisions that change what contestants are graded on
 
 - **W (B6).** No longer a pass-2-only question: a `ProtocolAll` submission runs three
   concurrent flows, so pass 1 loses its single-connection guarantee too (measured: 15.5%
@@ -531,7 +530,7 @@ to effort of anything on this list.
   cold start. The ranking is not. For a 45s run the deciding second is very often the
   connection-setup one.
 
-### 3. Scoring: a passing engine shows "pending", a failing one publishes
+### 2. Scoring: a passing engine shows "pending", a failing one publishes
 
 `score.Compute` returns `ErrMissingRampSession` and writes NO `scores` row when the
 run-group has no ramp session — but a DISQUALIFIED group returns a result and DOES get a
@@ -541,13 +540,13 @@ fires constantly. Three options: trigger the full scenario suite (the browser pa
 does), relax `Compute` to score what is present, or have the frontend fall back to
 `correctness_summary`. The third is smallest and does not touch scoring semantics.
 
-### 4. B4 — stalled-peer harness
+### 3. B4 — stalled-peer harness
 
 Still never started, and the only thing that proves the drain-deadline write exit, the
 watchdog last-tick pending sweep, and that every offered order ends accounted for
 (matched or timed_out, inflight back to zero). Biggest untouched verification item.
 
-### 5. A2 — echo-engine template rendering
+### 4. A2 — echo-engine template rendering
 
 No longer just a theoretical cap. Measured 2026-08-01: 4 flows paced at 41k/s each against
 the echo delivered ~20k orders/s and left 360,410 orders evicted unanswered
@@ -555,7 +554,7 @@ the echo delivered ~20k orders/s and left 360,410 orders evicted unanswered
 orders/s against the reference book engine. The echo is now the slowest thing in the loop
 and actively blocks load testing, not just capacity claims.
 
-### 6. Contestant-facing feedback and display
+### 5. Contestant-facing feedback and display
 
 - `correctness_summary` now carries every violation class and the breakdown sums exactly;
   what remains is surfacing it usefully.
@@ -570,7 +569,7 @@ and actively blocks load testing, not just capacity claims.
   HTTP `StartBenchmark` INSERTs them; every harness in `deploy-local/` works around it by
   inserting rows itself.
 
-### 7. Live-SSE — mostly observed working; only the concurrent case is open
+### 6. Live-SSE — mostly observed working; only the concurrent case is open
 
 Downgraded 2026-08-01. The live path was watched working during this session's runs: the
 HDR histograms updated in the browser repeatedly WHILE a benchmark was in progress, which
@@ -585,13 +584,13 @@ isolated (separate slots, leases, latency rows, no cross-contestant rows); nobod
 watched two tiles update side by side. That is the only part worth a deliberate test, and
 it needs a human looking at the page during a B1 run rather than a script.
 
-### 8. Kafka topology C2-C6
+### 7. Kafka topology C2-C6
 
 Per-topic sizing, retention by semantics, `benchmark.requested` partitioning, the
 partition/band revisit, and the disk/compression plan. Wants a running local cluster to
-measure against; none of it is urgent next to C1.
+measure against, and none of it is urgent. C1 is done (see section C).
 
-### 9. Capture throughput — parked until EKS, with instrumentation ready
+### 8. Capture throughput — parked until EKS, with instrumentation ready
 
 The capture is NOT CPU-bound at any load this laptop can produce: peak 86% of ONE core
 with zero ring-buffer drops and zero CFS throttling. `iicpc-ebpf-late` (the single tokio

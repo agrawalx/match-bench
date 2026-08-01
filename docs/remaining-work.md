@@ -530,15 +530,28 @@ everything still open, ordered by what would hurt most if it stayed broken.
   cold start. The ranking is not. For a 45s run the deciding second is very often the
   connection-setup one.
 
-### 2. Scoring: a passing engine shows "pending", a failing one publishes
+### 2. Make the run-group shape match the scoring rule
 
-`score.Compute` returns `ErrMissingRampSession` and writes NO `scores` row when the
-run-group has no ramp session — but a DISQUALIFIED group returns a result and DOES get a
-row. So a correct engine in an incomplete group renders "pending" forever while a bad one
-publishes a visible score. All 51 run-groups in the local DB are single-session, so this
-fires constantly. Three options: trigger the full scenario suite (the browser path already
-does), relax `Compute` to score what is present, or have the frontend fall back to
-`correctness_summary`. The third is smallest and does not touch scoring semantics.
+**Decided 2026-08-01: a run-group is one `correctness` run plus one `ramp` run.**
+Correctness comes from the pass-1 session alone (b0b790c); the ramp supplies latency and
+TPS. Pass-2 invariants correctness is still recorded per session as a metric and decides
+nothing — book-free grading cannot separate a correct engine from one that fills every
+order (measured: the echo scored 1.0 in invariants mode against 0.62 in full mode).
+
+That shape closes two edges by construction rather than by code: `aggregateCorrectness`
+always has a pass-1 session to read, and `score.Compute` never returns
+`ErrMissingRampSession`, so every group produces a `scores` row. The old asymmetry —
+disqualified groups published while passing ones showed "pending" forever — cannot arise
+once every group contains a ramp.
+
+**What still has to change for that to be what actually runs:**
+- `StartBenchmark` fans out over EVERY row returned by `ListScenarios`, so the scenario
+  table (or the trigger) has to be reduced to exactly these two. The local table currently
+  holds eight, including throwaways seeded during testing (`cpu4`, `cpu4x41k`, `smoke`,
+  `mixed3`), and a browser-triggered submission runs all of them.
+- Dropping `spike` from the group removes the only source of `SpikeRecoveryNS`
+  (`score.go` matches `Scenario == "spike"`). Either accept that the metric goes away or
+  keep a spike session in the group.
 
 ### 3. B4 — stalled-peer harness
 

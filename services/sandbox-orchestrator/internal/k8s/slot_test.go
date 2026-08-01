@@ -292,3 +292,34 @@ func TestBandwidthAnnotations(t *testing.T) {
 }
 
 var _ = metav1.ObjectMeta{}
+
+// TestCaptureResourcesPairWithRingBuffer pins the capture container's memory
+// to the 256MB BPF ring buffer it must contain: BPF map memory is
+// memcg-charged to the creating pod (kernel >= 5.11), so shrinking these
+// limits without shrinking the ring in ebpf.rs OOM-kills the capture at
+// startup. The CPU request is the CFS floor that ended the ringbuf-drop
+// starvation class (docs/capture-ringbuf-drops.md 5b) and must not regress.
+func TestCaptureResourcesPairWithRingBuffer(t *testing.T) {
+	res := captureResources()
+	for name, want := range map[string]string{
+		"cpu request":    "2",
+		"memory request": "1Gi",
+		"cpu limit":      "4",
+		"memory limit":   "2Gi",
+	} {
+		var got string
+		switch name {
+		case "cpu request":
+			got = res.Requests.Cpu().String()
+		case "memory request":
+			got = res.Requests.Memory().String()
+		case "cpu limit":
+			got = res.Limits.Cpu().String()
+		case "memory limit":
+			got = res.Limits.Memory().String()
+		}
+		if got != want {
+			t.Errorf("capture %s = %s, want %s", name, got, want)
+		}
+	}
+}

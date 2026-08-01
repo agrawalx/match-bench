@@ -136,7 +136,14 @@ struct PacketBounds {
 
 #[cfg(target_arch = "bpf")]
 #[map]
-static EVENTS: RingBuf = RingBuf::with_byte_size(64 * 1024 * 1024, 0);
+// 256MB (was 64): survivable-starvation window. 64MB ≈ 43ms of headroom at
+// 1M max-size records/s against a 5ms drain cadence — ample while userspace
+// runs, but the one observed drop cause is the drain NOT running (host CPU
+// starvation, docs/capture-ringbuf-drops.md §5b), and 4x the ring is 4x the
+// outage the capture can absorb without loss. BPF map memory is memcg-charged
+// to the pod since kernel 5.11, so this moves in lockstep with the capture
+// pod's memory limit (slot.go captureResources, 2Gi).
+static EVENTS: RingBuf = RingBuf::with_byte_size(256 * 1024 * 1024, 0);
 
 #[cfg(target_arch = "bpf")]
 #[map]

@@ -85,9 +85,19 @@ physically impossible locally.
      waiting on responses.
    **Still outstanding:** phase-2 grading of a multi-protocol submission is dominated by
    cross-flow ordering — see B6, which this run showed is not a pass-2-only problem.
-4. **Stalled-peer harness.** Sink that stops reading mid-run: proves the
-   drain-deadline write exit, the watchdog last-tick pending sweep, and that every
-   offered order ends accounted (matched or timed_out, inflight back to zero).
+4. ~~**Stalled-peer harness.**~~ **DONE (2026-08-01), 5/5 —**
+   `deploy-local/b4-stalled-peer.sh` + `deploy-local/stall-sink` (drains 256KB per
+   connection, then stops reading with the socket held open; `STALL_AFTER_BYTES=0`
+   wedges immediately). Run against the pass-1 correctness scenario: 14,272 orders
+   sent, then 45 consecutive seconds of send_rate=0 with inflight pinned — and the
+   session still completed on schedule, zero worker restarts, final inflight 0.
+   One finding corrected the claim itself: the platform's defense is the
+   **inflight-cap throttle** (sends stop at 64 unacked per task; writes stay
+   non-blocking, `max_write_block_ms` ~0 throughout), not a blocking-write drain
+   deadline. Two measurement traps recorded in the harness: prometheus counters are
+   cumulative across sessions, and the ingester writes NO metrics row for a
+   zero-response session (`aggregate.rs` gates on a non-empty service_time
+   histogram) — `offered=0` in Timescale is the EXPECTED shape of a full stall.
 5. ~~**KEDA session-count trigger.**~~ **DONE, and superseded by a better signal** —
    `deploy-local/b5-autoscale-shards.sh`, all assertions green on local k3s. Rather than
    session COUNT, the ScaledObject scales on `iicpc_controller_demanded_workers`
@@ -448,8 +458,13 @@ rediscovered under load; deliberately NOT acted on until EKS shows whether they 
 - The matcher holds a `HashMap<String, _>` entry per in-flight order, keyed by ClOrdID —
   ~2.5M live entries at 500k/s with the 5s idle window.
 
-If these bite, the shape of the fix is parsing in the kernel to emit fixed-size records,
-or sharding userspace workers per flow.
+~~If these bite, the shape of the fix is parsing in the kernel to emit fixed-size records,
+or sharding userspace workers per flow.~~ **Superseded (2026-08-01): kernel-side parse is
+dead by design** — messages do not align with packet boundaries and in-kernel stream
+reassembly is not possible; it was attempted early in the project and failed for exactly
+this reason. The full plan for these limits — offline criterion ceiling measurement,
+ordered fixes (memory+ring pairing, matcher key, `CAPTURE_CAP` 9029, conditional per-flow
+sharding via flow-hash-steered ring buffers) — is `docs/capture-ringbuf-drops.md` §6.
 
 ## Opened by the 2026-07-31 grading/capture work
 
@@ -587,11 +602,7 @@ once every group contains a ramp.
   (`score.go` matches `Scenario == "spike"`). Either accept that the metric goes away or
   keep a spike session in the group.
 
-### 3. B4 — stalled-peer harness
-
-Still never started, and the only thing that proves the drain-deadline write exit, the
-watchdog last-tick pending sweep, and that every offered order ends accounted for
-(matched or timed_out, inflight back to zero). Biggest untouched verification item.
+### 3. ~~B4 — stalled-peer harness~~ DONE (2026-08-01), 5/5 — see section B item 4.
 
 ### 4. A2 — echo-engine template rendering
 

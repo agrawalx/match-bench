@@ -70,7 +70,10 @@ const SUBMISSION_ID: &str = "roundtrip-submission";
 // EXAMPLE_DROP_EVERY) turn this into a load/profiling harness. EXAMPLE_BENCH=1
 // skips telemetry collection + assertions (pair with BOT_DISABLE_TELEMETRY=1).
 fn env_u64(key: &str, default: u64) -> u64 {
-    env::var(key).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
+    env::var(key)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default)
 }
 fn target_rps() -> u32 {
     env_u64("EXAMPLE_RPS", 20) as u32
@@ -117,7 +120,8 @@ async fn async_main() -> Result<()> {
     let suffix = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
-        .as_millis() as u64 + std::process::id() as u64;
+        .as_millis() as u64
+        + std::process::id() as u64;
     let workload_topic = format!("test.workload.{suffix}");
     let barrier_topic = format!("test.barrier.{suffix}");
     let ready_topic = format!("test.ready.{suffix}");

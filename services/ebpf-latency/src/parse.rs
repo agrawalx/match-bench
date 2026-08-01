@@ -678,7 +678,11 @@ mod tests {
         match frame_fix(buf) {
             Frame::Resync(skip) => {
                 assert_eq!(skip, buf.len() - (FIX_BEGIN.len() - 1));
-                assert_eq!(&buf[skip..], b"8=FI", "the partial BeginString must survive");
+                assert_eq!(
+                    &buf[skip..],
+                    b"8=FI",
+                    "the partial BeginString must survive"
+                );
             }
             other => panic!("expected Resync, got {other:?}"),
         }

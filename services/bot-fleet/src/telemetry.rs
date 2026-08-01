@@ -192,7 +192,7 @@ impl TelemetrySink {
         }
         match first_err {
             Some(err) => Err(err),
-            None => Ok(())
+            None => Ok(()),
         }
     }
 }
@@ -500,7 +500,12 @@ mod tests {
         for (part, chunk) in emitted.iter().chain(drained.iter()) {
             for e in chunk {
                 assert_eq!(
-                    session_band_partition(&e.session_id, &e.order_id, n, DEFAULT_PARTITION_BAND_WIDTH),
+                    session_band_partition(
+                        &e.session_id,
+                        &e.order_id,
+                        n,
+                        DEFAULT_PARTITION_BAND_WIDTH
+                    ),
                     *part,
                     "wrong partition"
                 );
@@ -519,8 +524,14 @@ mod tests {
             let _ = b.push(test_event(i));
         }
         let used = b.drain_ready().len();
-        assert!(used >= 2, "a busy session must use several partitions in its band, used {used}");
-        assert!(used as i32 <= band_width, "session must stay within its band, used {used}");
+        assert!(
+            used >= 2,
+            "a busy session must use several partitions in its band, used {used}"
+        );
+        assert!(
+            used as i32 <= band_width,
+            "session must stay within its band, used {used}"
+        );
     }
 
     /// When `order_band` is leased (set), the batcher must use `band_partition`
@@ -548,7 +559,10 @@ mod tests {
             }
         }
         for (part, chunk) in b.drain_ready() {
-            assert!((12..18).contains(&part), "partition {part} outside leased band [12, 18)");
+            assert!(
+                (12..18).contains(&part),
+                "partition {part} outside leased band [12, 18)"
+            );
             for ev in &chunk {
                 assert_eq!(part, band_partition(band, &ev.order_id, n, band_width));
             }

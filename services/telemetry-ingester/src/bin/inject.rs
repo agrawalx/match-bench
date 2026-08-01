@@ -25,9 +25,8 @@ use rdkafka::producer::{FutureProducer, FutureRecord};
 use rdkafka::util::Timeout;
 
 use iicpc_schemas_rust::{
-    session_band_partition, OrdType, OrderAckedBatch, OrderAckedEvent, OrderSentEvent,
-    PayloadType, Side, DEFAULT_PARTITION_BAND_WIDTH, SMP_ID_NONE, TOPIC_ORDERS_ACKED,
-    TOPIC_ORDERS_SENT,
+    session_band_partition, OrdType, OrderAckedBatch, OrderAckedEvent, OrderSentEvent, PayloadType,
+    Side, DEFAULT_PARTITION_BAND_WIDTH, SMP_ID_NONE, TOPIC_ORDERS_ACKED, TOPIC_ORDERS_SENT,
 };
 
 fn env_or<T: std::str::FromStr>(k: &str, d: T) -> T {
@@ -87,7 +86,8 @@ async fn main() -> Result<()> {
                 for _ in 0..batch {
                     seq += threads;
                     let oid = format!("{session}-{tid}-{seq}-O");
-                    let p = session_band_partition(&session, &oid, parts, DEFAULT_PARTITION_BAND_WIDTH);
+                    let p =
+                        session_band_partition(&session, &oid, parts, DEFAULT_PARTITION_BAND_WIDTH);
                     let svc = 80_000u64; // 80us synthetic service time
                     let sent = OrderSentEvent {
                         session_id: session.clone(),

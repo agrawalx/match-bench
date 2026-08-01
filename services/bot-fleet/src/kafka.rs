@@ -521,7 +521,11 @@ mod tests {
             assert_eq!(filter_compression_level(n), Some(n), "expected {n} to pass");
         }
         for n in [15, 19, 22, -5, -131_072, 13, -2] {
-            assert_eq!(filter_compression_level(n), None, "expected {n} to be rejected");
+            assert_eq!(
+                filter_compression_level(n),
+                None,
+                "expected {n} to be rejected"
+            );
         }
     }
 }

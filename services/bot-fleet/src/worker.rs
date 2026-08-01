@@ -223,7 +223,9 @@ impl InFlight {
         // Lowest free slot, so slot indices stay in [0, cap) and are reused rather than
         // growing without bound.
         let used: std::collections::HashSet<usize> = self.partitions.values().copied().collect();
-        let slot = (0..cap).find(|s| !used.contains(s)).ok_or(Reject::AtCapacity)?;
+        let slot = (0..cap)
+            .find(|s| !used.contains(s))
+            .ok_or(Reject::AtCapacity)?;
         self.partitions.insert(partition, slot);
         Ok(slot)
     }
@@ -286,7 +288,7 @@ pub async fn run(mut config: Config) -> Result<()> {
 
     let cancel = CancelToken::new();
     {
-        let cancel = cancel.clone(); // clone does not create a independent copy of the flag. 
+        let cancel = cancel.clone(); // clone does not create a independent copy of the flag.
         tokio::spawn(async move {
             let mut sigterm =
                 match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
@@ -760,9 +762,7 @@ async fn connect_tasks(spec: &WorkloadSpec) -> Result<Vec<ConnectedTask>> {
 /// resolved targets table by `target_idx`, falling back to the first target
 /// if the index is out of range (defensive against a malformed message).
 fn resolve_task_target(targets: &[TargetSpec], task: &TaskSpec) -> TargetSpec {
-    *targets
-        .get(task.target_idx as usize)
-        .unwrap_or(&targets[0])
+    *targets.get(task.target_idx as usize).unwrap_or(&targets[0])
 }
 
 /// resolve_target performs the module-specific operation described by its name.
@@ -909,7 +909,11 @@ where
 /// Pops every queue entry that is due (`deadline_ns <= now_ns`), or all of them if
 /// `last_tick`, preserving FIFO order. Pure and unit-testable independent of the
 /// pending map / telemetry plumbing around it.
-fn pop_due_expirations(queue: &mut VecDeque<ExpiryEntry>, now_ns: u64, last_tick: bool) -> Vec<ExpiryEntry> {
+fn pop_due_expirations(
+    queue: &mut VecDeque<ExpiryEntry>,
+    now_ns: u64,
+    last_tick: bool,
+) -> Vec<ExpiryEntry> {
     let mut ids = Vec::new();
     while let Some(&entry) = queue.front() {
         if !last_tick && entry.deadline_ns > now_ns {
@@ -1139,8 +1143,14 @@ async fn fix_write_loop(
     let mut sent: u64 = 0;
 
     // One template per FrameKind, reused for the task's whole lifetime (P2).
-    let mut template_cache =
-        fix::TemplateCache::with_smp(Protocol::Fix, &fix_version, &session_id, &target_host, u64::from(task.task_id), task.smp_id_count);
+    let mut template_cache = fix::TemplateCache::with_smp(
+        Protocol::Fix,
+        &fix_version,
+        &session_id,
+        &target_host,
+        u64::from(task.task_id),
+        task.smp_id_count,
+    );
 
     // Reused across iterations to avoid per-batch allocation.
     let mut frames: Vec<OrderFrame> = Vec::with_capacity(batch_max);
@@ -1283,7 +1293,11 @@ async fn fix_write_loop(
                     let mut queue = expiry.lock().expect("expiry queue poisoned");
                     for frame in frames.iter() {
                         if let Some((seq, kind)) = fix::split_order_id(&frame.order_id) {
-                            queue.push_back(ExpiryEntry { deadline_ns, seq, kind });
+                            queue.push_back(ExpiryEntry {
+                                deadline_ns,
+                                seq,
+                                kind,
+                            });
                         }
                         // A non-splitting id (impossible for generator output) simply
                         // gets no queue entry; the watchdog's last-tick pending sweep
@@ -1523,7 +1537,11 @@ impl RwWriter {
     /// `feed` queues each frame without a syscall, and the trailing `flush` issues
     /// one write for the whole batch — same syscall-amortization shape as REST
     /// without bypassing tungstenite's framing/masking.
-    async fn write_batch(&mut self, frames: &mut [OrderFrame], scratch: &mut Vec<u8>) -> Result<()> {
+    async fn write_batch(
+        &mut self,
+        frames: &mut [OrderFrame],
+        scratch: &mut Vec<u8>,
+    ) -> Result<()> {
         match self {
             Self::Rest(w) => {
                 concat_frames(frames, scratch);
@@ -1726,8 +1744,14 @@ async fn rw_write_loop(
     let mut sent: u64 = 0;
 
     // One template per FrameKind, reused for the task's whole lifetime (P2').
-    let mut template_cache =
-        fix::TemplateCache::with_smp(writer.protocol(), &fix_version, &session_id, &target_host, u64::from(task.task_id), task.smp_id_count);
+    let mut template_cache = fix::TemplateCache::with_smp(
+        writer.protocol(),
+        &fix_version,
+        &session_id,
+        &target_host,
+        u64::from(task.task_id),
+        task.smp_id_count,
+    );
 
     let mut frames: Vec<OrderFrame> = Vec::with_capacity(batch_max);
     let mut targets: Vec<u64> = Vec::with_capacity(batch_max);
@@ -1838,7 +1862,11 @@ async fn rw_write_loop(
             Ok(()) => {
                 let send_ts_ns = unix_nanos();
                 metrics::orders_sent_by(protocol_label, count);
-                metrics::observe_write(protocol_label, send_ts_ns.saturating_sub(write_start_ns), count);
+                metrics::observe_write(
+                    protocol_label,
+                    send_ts_ns.saturating_sub(write_start_ns),
+                    count,
+                );
                 {
                     let mut map = pending.lock().expect("pending map poisoned");
                     for frame in frames.iter() {
@@ -1857,7 +1885,11 @@ async fn rw_write_loop(
                     let mut queue = expiry.lock().expect("expiry queue poisoned");
                     for frame in frames.iter() {
                         if let Some((seq, kind)) = fix::split_order_id(&frame.order_id) {
-                            queue.push_back(ExpiryEntry { deadline_ns, seq, kind });
+                            queue.push_back(ExpiryEntry {
+                                deadline_ns,
+                                seq,
+                                kind,
+                            });
                         }
                         // A non-splitting id (impossible for generator output) simply
                         // gets no queue entry; the watchdog's last-tick pending sweep
@@ -2287,7 +2319,10 @@ mod tests {
         assert!(f.try_admit(7, 4).is_ok());
         assert_eq!(f.try_admit(7, 4), Err(Reject::PartitionBusy));
         f.finish(7);
-        assert!(f.try_admit(7, 4).is_ok(), "freed partition is admissible again");
+        assert!(
+            f.try_admit(7, 4).is_ok(),
+            "freed partition is admissible again"
+        );
     }
 
     #[test]
@@ -2429,7 +2464,10 @@ mod tests {
             clordid_from_json(br#"{ "cl_ord_id" : "ord-3" , "exec_type":"0" }"#).as_deref(),
             Some("ord-3")
         );
-        assert_eq!(clordid_from_json(br#"{"cl_ord_id":""}"#).as_deref(), Some(""));
+        assert_eq!(
+            clordid_from_json(br#"{"cl_ord_id":""}"#).as_deref(),
+            Some("")
+        );
     }
 
     #[test]
@@ -2448,7 +2486,11 @@ mod tests {
     /// deadline (matching the prior `HashMap::retain(... || last_tick)` semantics).
     fn pop_due_expirations_evicts_only_due_entries_in_fifo_order() {
         fn e(deadline_ns: u64, seq: u32) -> ExpiryEntry {
-            ExpiryEntry { deadline_ns, seq, kind: b'O' }
+            ExpiryEntry {
+                deadline_ns,
+                seq,
+                kind: b'O',
+            }
         }
         let mut queue: VecDeque<ExpiryEntry> = VecDeque::new();
         queue.push_back(e(100, 1));
@@ -2468,8 +2510,16 @@ mod tests {
     #[test]
     /// pop_due_expirations_last_tick_drains_everything covers the final-tick flush.
     fn pop_due_expirations_last_tick_drains_everything() {
-        let a = ExpiryEntry { deadline_ns: u64::MAX, seq: 1, kind: b'O' };
-        let b = ExpiryEntry { deadline_ns: u64::MAX, seq: 2, kind: b'C' };
+        let a = ExpiryEntry {
+            deadline_ns: u64::MAX,
+            seq: 1,
+            kind: b'O',
+        };
+        let b = ExpiryEntry {
+            deadline_ns: u64::MAX,
+            seq: 2,
+            kind: b'C',
+        };
         let mut queue: VecDeque<ExpiryEntry> = VecDeque::new();
         queue.push_back(a);
         queue.push_back(b);
@@ -2793,7 +2843,10 @@ mod tests {
 
         f.finish(10);
         let s2 = f.try_admit(30, 2).expect("admit after completion");
-        assert_eq!(s2, s0, "a freed slot must be reused, not incremented past cap");
+        assert_eq!(
+            s2, s0,
+            "a freed slot must be reused, not incremented past cap"
+        );
     }
 
     #[tokio::test]

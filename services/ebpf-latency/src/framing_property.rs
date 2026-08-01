@@ -26,7 +26,10 @@ struct Lcg(u64);
 
 impl Lcg {
     fn next(&mut self, bound: usize) -> usize {
-        self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        self.0 = self
+            .0
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         ((self.0 >> 33) as usize) % bound.max(1)
     }
 }
@@ -119,7 +122,8 @@ fn every_segmentation_recovers_every_message() {
         let segs = segment(&bytes, &[size]);
         let got = replay(&segs);
         assert_eq!(
-            got, expected,
+            got,
+            expected,
             "segment size {size}: recovered {} of {} messages",
             got.len(),
             expected.len()
@@ -155,7 +159,13 @@ fn out_of_order_segments_recover_every_message() {
         segs.swap(i, i + 1);
     }
     let got = replay(&segs);
-    assert_eq!(got, expected, "recovered {} of {}", got.len(), expected.len());
+    assert_eq!(
+        got,
+        expected,
+        "recovered {} of {}",
+        got.len(),
+        expected.len()
+    );
 }
 
 /// Retransmissions: every segment delivered twice. Duplicates must not produce duplicate
@@ -170,7 +180,13 @@ fn duplicate_segments_do_not_duplicate_messages() {
         doubled.push(s.clone());
     }
     let got = replay(&doubled);
-    assert_eq!(got, expected, "recovered {} of {}", got.len(), expected.len());
+    assert_eq!(
+        got,
+        expected,
+        "recovered {} of {}",
+        got.len(),
+        expected.len()
+    );
 }
 
 /// THE regression test: one segment is never delivered.
@@ -382,9 +398,8 @@ enum LenForm {
 }
 
 fn json_body(seq: usize, pad_to: usize) -> Vec<u8> {
-    let mut s = format!(
-        "{{\"cl_ord_id\":\"sess_7_{seq}_O\",\"side\":\"1\",\"qty\":100,\"price\":1000"
-    );
+    let mut s =
+        format!("{{\"cl_ord_id\":\"sess_7_{seq}_O\",\"side\":\"1\",\"qty\":100,\"price\":1000");
     while s.len() + 2 < pad_to {
         s.push_str(",\"p\":\"xxxxxxxx\"");
     }
@@ -740,7 +755,13 @@ fn ws_duplicate_segments_do_not_duplicate_messages() {
         doubled.push(s.clone());
     }
     let got = replay_transport(Transport::HttpWs, Direction::Response, &doubled);
-    assert_eq!(got, expected, "recovered {} of {}", got.len(), expected.len());
+    assert_eq!(
+        got,
+        expected,
+        "recovered {} of {}",
+        got.len(),
+        expected.len()
+    );
 }
 
 /// Out-of-order delivery, interior pairs only (see the FIX equivalent for why the stream
@@ -753,7 +774,13 @@ fn ws_out_of_order_segments_recover_every_message() {
         segs.swap(i, i + 1);
     }
     let got = replay_transport(Transport::HttpWs, Direction::Response, &segs);
-    assert_eq!(got, expected, "recovered {} of {}", got.len(), expected.len());
+    assert_eq!(
+        got,
+        expected,
+        "recovered {} of {}",
+        got.len(),
+        expected.len()
+    );
 }
 
 /// A permanently missing segment must cost only the messages overlapping it. This is the

@@ -8,8 +8,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use iicpc_schemas_rust::{
     OrdType, OrderAckedBatch, OrderAckedEvent, OrderSentBatchV2, OrderSentBatchV2Ref,
-    OrderSentEvent, OrderSentEventFieldsRef, PayloadType, Side, SMP_ID_NONE,
-    TOPIC_ORDERS_ACKED, TOPIC_ORDERS_SENT,
+    OrderSentEvent, OrderSentEventFieldsRef, PayloadType, Side, SMP_ID_NONE, TOPIC_ORDERS_ACKED,
+    TOPIC_ORDERS_SENT,
 };
 use iicpc_telemetry_ingester::aggregate::{Aggregator, Snapshot, DEFAULT_WAVE_NS};
 use iicpc_telemetry_ingester::redis_sink::RedisSink;
@@ -185,7 +185,10 @@ fn aggregate_synthetic(session: &str, contestant: &str) -> (Vec<Snapshot>, Expec
 /// (`OrderSentBatchV2Ref`, `rmp_serde::to_vec`), not the legacy per-event named
 /// format.
 fn encode_sent_batch(session: &str, worker_id: &str, events: &[OrderSentEvent]) -> Vec<u8> {
-    let submission_id = events.first().map(|e| e.submission_id.as_str()).unwrap_or("sub-1");
+    let submission_id = events
+        .first()
+        .map(|e| e.submission_id.as_str())
+        .unwrap_or("sub-1");
     let event_refs: Vec<OrderSentEventFieldsRef> =
         events.iter().map(OrderSentEventFieldsRef::from).collect();
     rmp_serde::to_vec(&OrderSentBatchV2Ref {
@@ -462,7 +465,9 @@ async fn full_pipeline_kafka_to_timescale_and_redis() {
                 if let Ok(b) = rmp_serde::from_slice::<OrderSentBatchV2>(p) {
                     if b.session_id == session {
                         let count = b.events.len();
-                        b.into_events().into_iter().for_each(|e| agg.observe_sent(&e));
+                        b.into_events()
+                            .into_iter()
+                            .for_each(|e| agg.observe_sent(&e));
                         seen += count;
                     }
                 }

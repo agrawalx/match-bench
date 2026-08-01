@@ -242,7 +242,10 @@ mod tests {
             env::set_var("BOT_WRITE_BATCH", "0");
         }
         let config = Config::from_env();
-        assert_eq!(config.max_inflight_per_task, Config::default().max_inflight_per_task);
+        assert_eq!(
+            config.max_inflight_per_task,
+            Config::default().max_inflight_per_task
+        );
         assert_eq!(config.write_batch, Config::default().write_batch);
 
         unsafe {

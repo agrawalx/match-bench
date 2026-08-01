@@ -266,7 +266,16 @@ fn build_frame(
 
     let (bytes, tag52_offset) = match protocol {
         Protocol::Fix => {
-            let body = build_fix_body(kind, seq, &order_id, orig_order_id, price, qty, side, smp_id);
+            let body = build_fix_body(
+                kind,
+                seq,
+                &order_id,
+                orig_order_id,
+                price,
+                qty,
+                side,
+                smp_id,
+            );
             let fix = finalize_fix(fix_version, &body);
             let tag52_offset = find_tag52_offset(&fix);
             (fix, tag52_offset)
@@ -495,7 +504,15 @@ fn apply_checksum_delta(buf: &mut [u8], checksum_off: usize, old_sum: u32, new_s
     buf[checksum_off + 2] = b'0' + (new_checksum % 10) as u8;
 }
 
-fn build_fix_body_padded(kind: FrameKind, seq: u64, order_id: &str, side: Side, qty: u64, price: u64, smp_id: u32) -> String {
+fn build_fix_body_padded(
+    kind: FrameKind,
+    seq: u64,
+    order_id: &str,
+    side: Side,
+    qty: u64,
+    price: u64,
+    smp_id: u32,
+) -> String {
     let side_tag = match side {
         Side::Buy => "1",
         Side::Sell => "2",
@@ -552,7 +569,17 @@ struct FixTemplate {
 
 impl FixTemplate {
     #[allow(clippy::too_many_arguments)]
-    fn build(kind: FrameKind, fix_version: &str, session_id: &str, bot_id: u64, seq: u64, qty: u64, price: u64, side: Side, smp_id: u32) -> Self {
+    fn build(
+        kind: FrameKind,
+        fix_version: &str,
+        session_id: &str,
+        bot_id: u64,
+        seq: u64,
+        qty: u64,
+        price: u64,
+        side: Side,
+        smp_id: u32,
+    ) -> Self {
         let order_id = kind.order_id(session_id, bot_id, seq);
         let body = build_fix_body_padded(kind, seq, &order_id, side, qty, price, smp_id);
         let buf = finalize_fix(fix_version, &body);
@@ -563,8 +590,9 @@ impl FixTemplate {
         let price_off = matches!(kind, FrameKind::New)
             .then(|| find_subslice(&buf, b"\x0144=").expect("tag 44 present") + 4);
         let clordid_prefix = format!("\x0111={session_id}_{bot_id}_");
-        let clordid_seq_off =
-            find_subslice(&buf, clordid_prefix.as_bytes()).expect("ClOrdID present") + clordid_prefix.len();
+        let clordid_seq_off = find_subslice(&buf, clordid_prefix.as_bytes())
+            .expect("ClOrdID present")
+            + clordid_prefix.len();
         let tag52_off = find_tag52_offset(&buf).expect("tag 52 placeholder present");
         let checksum_off = buf.len() - 4;
         // None when this order carries no SMP id: the tag is absent from the buffer,
@@ -597,9 +625,20 @@ impl FixTemplate {
         // versa): presence changes the buffer length, so every offset after it moves.
         // Within a session smp_id_count is constant, so this only triggers on the
         // pathological mixed case and costs nothing in the normal path.
-        let smp_presence_changed = (smp_id == iicpc_schemas_rust::SMP_ID_NONE) != self.smp_off.is_none();
+        let smp_presence_changed =
+            (smp_id == iicpc_schemas_rust::SMP_ID_NONE) != self.smp_off.is_none();
         if needed_width != self.clordid_seq_width || smp_presence_changed {
-            *self = Self::build(self.kind, &self.fix_version, &self.session_id, self.bot_id, seq, qty, price, side, smp_id);
+            *self = Self::build(
+                self.kind,
+                &self.fix_version,
+                &self.session_id,
+                self.bot_id,
+                seq,
+                qty,
+                price,
+                side,
+                smp_id,
+            );
         } else {
             let mut old_sum = 0u32;
             let mut new_sum = 0u32;
@@ -608,7 +647,12 @@ impl FixTemplate {
             old_sum += o;
             new_sum += n;
 
-            let (o, n) = write_padded_u64(&mut self.buf, self.clordid_seq_off, self.clordid_seq_width, seq);
+            let (o, n) = write_padded_u64(
+                &mut self.buf,
+                self.clordid_seq_off,
+                self.clordid_seq_width,
+                seq,
+            );
             old_sum += o;
             new_sum += n;
 
@@ -678,7 +722,14 @@ fn json_smp_field(smp_id: u32) -> String {
     format!(",\"smp_id\":\"{:0width$}\"", smp_id, width = SMP_ID_WIDTH)
 }
 
-fn build_json_payload_natural(kind: FrameKind, order_id: &str, side: Side, qty: u64, price: u64, smp_id: u32) -> String {
+fn build_json_payload_natural(
+    kind: FrameKind,
+    order_id: &str,
+    side: Side,
+    qty: u64,
+    price: u64,
+    smp_id: u32,
+) -> String {
     let side_name = match side {
         Side::Buy => "BUY",
         Side::Sell => "SELL",
@@ -744,7 +795,8 @@ impl JsonTemplate {
         let json = build_json_payload_natural(kind, &order_id, side, qty, price, smp_id);
         let (buf, json_start) = match protocol {
             Protocol::Rest => {
-                let rest = build_rest_request(kind.rest_method(), target_host, &kind.rest_path(""), &json);
+                let rest =
+                    build_rest_request(kind.rest_method(), target_host, &kind.rest_path(""), &json);
                 let start = rest.len() - json.len();
                 (rest, start)
             }
@@ -756,15 +808,19 @@ impl JsonTemplate {
             Side::Buy => "BUY",
             Side::Sell => "SELL",
         };
-        let side_off = find_subslice(&buf[json_start..], b"\"side\":\"").map(|p| json_start + p + 8);
+        let side_off =
+            find_subslice(&buf[json_start..], b"\"side\":\"").map(|p| json_start + p + 8);
         let qty_off = find_subslice(&buf[json_start..], b"\"qty\":").map(|p| json_start + p + 6);
-        let price_off = find_subslice(&buf[json_start..], b"\"price\":").map(|p| json_start + p + 8);
+        let price_off =
+            find_subslice(&buf[json_start..], b"\"price\":").map(|p| json_start + p + 8);
         let clordid_prefix = format!("\"cl_ord_id\":\"{session_id}_{bot_id}_");
         let clordid_seq_off = find_subslice(&buf[json_start..], clordid_prefix.as_bytes())
             .map(|p| json_start + p + clordid_prefix.len())
             .expect("ClOrdID present in JSON body");
         let smp_off = (smp_id != iicpc_schemas_rust::SMP_ID_NONE)
-            .then(|| find_subslice(&buf[json_start..], b"\"smp_id\":\"").map(|p| json_start + p + 10))
+            .then(|| {
+                find_subslice(&buf[json_start..], b"\"smp_id\":\"").map(|p| json_start + p + 10)
+            })
             .flatten();
 
         Self {
@@ -817,7 +873,12 @@ impl JsonTemplate {
                 smp_id,
             );
         } else {
-            write_padded_u64(&mut self.buf, self.clordid_seq_off, self.clordid_seq_width, seq);
+            write_padded_u64(
+                &mut self.buf,
+                self.clordid_seq_off,
+                self.clordid_seq_width,
+                seq,
+            );
             // Fixed-width string value: patches in place, no re-render, and the REST
             // Content-Length is unaffected.
             if let Some(off) = self.smp_off {
@@ -880,7 +941,13 @@ pub struct TemplateCache {
 }
 
 impl TemplateCache {
-    pub fn new(protocol: Protocol, fix_version: &str, session_id: &str, target_host: &str, bot_id: u64) -> Self {
+    pub fn new(
+        protocol: Protocol,
+        fix_version: &str,
+        session_id: &str,
+        target_host: &str,
+        bot_id: u64,
+    ) -> Self {
         Self::with_smp(protocol, fix_version, session_id, target_host, bot_id, 0)
     }
 
@@ -917,7 +984,14 @@ impl TemplateCache {
         (seq % self.smp_id_count as u64) as u32
     }
 
-    fn render_fast(&mut self, kind: FrameKind, seq: u64, qty: u64, price: u64, side: Side) -> OrderFrame {
+    fn render_fast(
+        &mut self,
+        kind: FrameKind,
+        seq: u64,
+        qty: u64,
+        price: u64,
+        side: Side,
+    ) -> OrderFrame {
         let smp_id = self.smp_for(seq);
         match self.protocol {
             Protocol::Fix => {
@@ -925,7 +999,17 @@ impl TemplateCache {
                 match slot {
                     Some(t) => t.patch(seq, qty, price, side, smp_id),
                     None => {
-                        let mut t = FixTemplate::build(kind, &self.fix_version, &self.session_id, self.bot_id, seq, qty, price, side, smp_id);
+                        let mut t = FixTemplate::build(
+                            kind,
+                            &self.fix_version,
+                            &self.session_id,
+                            self.bot_id,
+                            seq,
+                            qty,
+                            price,
+                            side,
+                            smp_id,
+                        );
                         let frame = t.patch(seq, qty, price, side, smp_id);
                         *slot = Some(t);
                         frame
@@ -966,7 +1050,14 @@ impl TemplateCache {
         self.render_fast(FrameKind::Market, seq, qty, 0, side)
     }
 
-    pub fn render_cancel(&mut self, seq: u64, orig_order_id: &str, price: u64, qty: u64, side: Side) -> OrderFrame {
+    pub fn render_cancel(
+        &mut self,
+        seq: u64,
+        orig_order_id: &str,
+        price: u64,
+        qty: u64,
+        side: Side,
+    ) -> OrderFrame {
         build_frame(
             self.protocol,
             &self.fix_version,
@@ -983,7 +1074,14 @@ impl TemplateCache {
         )
     }
 
-    pub fn render_replace(&mut self, seq: u64, orig_order_id: &str, price: u64, qty: u64, side: Side) -> OrderFrame {
+    pub fn render_replace(
+        &mut self,
+        seq: u64,
+        orig_order_id: &str,
+        price: u64,
+        qty: u64,
+        side: Side,
+    ) -> OrderFrame {
         build_frame(
             self.protocol,
             &self.fix_version,
@@ -1019,7 +1117,9 @@ pub fn build_ws_frame(payload: &[u8], mask_key: [u8; 4]) -> Vec<u8> {
         out.push((len >> 8) as u8);
         out.push((len & 0xff) as u8);
     } else {
-        panic!("build_ws_frame: payload too large for the len16 template (bot orders are small JSON)");
+        panic!(
+            "build_ws_frame: payload too large for the len16 template (bot orders are small JSON)"
+        );
     }
     out.extend_from_slice(&mask_key);
     let start = out.len();
@@ -1064,9 +1164,33 @@ pub struct WsFrameTemplate {
 
 impl WsFrameTemplate {
     #[allow(clippy::too_many_arguments)]
-    pub fn new(kind_is_new: bool, session_id: &str, bot_id: u64, seq: u64, qty: u64, price: u64, side: Side, mask_key: [u8; 4]) -> Self {
-        let kind = if kind_is_new { FrameKind::New } else { FrameKind::Market };
-        let json = JsonTemplate::build(kind, Protocol::Ws, session_id, bot_id, "", seq, qty, price, side, iicpc_schemas_rust::SMP_ID_NONE);
+    pub fn new(
+        kind_is_new: bool,
+        session_id: &str,
+        bot_id: u64,
+        seq: u64,
+        qty: u64,
+        price: u64,
+        side: Side,
+        mask_key: [u8; 4],
+    ) -> Self {
+        let kind = if kind_is_new {
+            FrameKind::New
+        } else {
+            FrameKind::Market
+        };
+        let json = JsonTemplate::build(
+            kind,
+            Protocol::Ws,
+            session_id,
+            bot_id,
+            "",
+            seq,
+            qty,
+            price,
+            side,
+            iicpc_schemas_rust::SMP_ID_NONE,
+        );
         Self { json, mask_key }
     }
 
@@ -1206,7 +1330,17 @@ mod tests {
 
         let t = Instant::now();
         for seq in 0..n {
-            let f = order_frame(Protocol::Rest, fv, sid, host, 42, seq, 10_000, 25, Side::Buy);
+            let f = order_frame(
+                Protocol::Rest,
+                fv,
+                sid,
+                host,
+                42,
+                seq,
+                10_000,
+                25,
+                Side::Buy,
+            );
             sink += f.bytes.len();
         }
         let rest_only = t.elapsed().as_nanos() / n as u128;
@@ -1234,8 +1368,28 @@ mod tests {
         let logon = logon_frame("FIX.4.2", 1);
         assert_eq!(extract_tag(&logon, b"34"), Some(b"1".as_ref()));
 
-        let first = order_frame(Protocol::Fix, "FIX.4.2", "sess1", "host", 7, 1, 10_000, 5, Side::Buy);
-        let second = order_frame(Protocol::Fix, "FIX.4.2", "sess1", "host", 7, 2, 10_000, 5, Side::Buy);
+        let first = order_frame(
+            Protocol::Fix,
+            "FIX.4.2",
+            "sess1",
+            "host",
+            7,
+            1,
+            10_000,
+            5,
+            Side::Buy,
+        );
+        let second = order_frame(
+            Protocol::Fix,
+            "FIX.4.2",
+            "sess1",
+            "host",
+            7,
+            2,
+            10_000,
+            5,
+            Side::Buy,
+        );
 
         assert_eq!(extract_tag(&first.bytes, b"34"), Some(b"2".as_ref()));
         assert_eq!(extract_tag(&second.bytes, b"34"), Some(b"3".as_ref()));
@@ -1310,7 +1464,17 @@ mod tests {
 
     #[test]
     fn patch_timestamp_sets_sending_time_and_keeps_checksum_valid() {
-        let mut frame = order_frame(Protocol::Fix, "FIX.4.2", "sess1", "host", 7, 42, 10_000, 5, Side::Buy);
+        let mut frame = order_frame(
+            Protocol::Fix,
+            "FIX.4.2",
+            "sess1",
+            "host",
+            7,
+            42,
+            10_000,
+            5,
+            Side::Buy,
+        );
         let off = frame.tag52_offset.expect("tag 52 offset must be located");
 
         assert_eq!(
@@ -1336,11 +1500,31 @@ mod tests {
     /// rest_and_ws_frames_have_no_tag52_offset_and_carry_no_fix_bytes ensures the
     /// single-protocol render (P1) really only builds the requested representation.
     fn rest_and_ws_frames_have_no_tag52_offset_and_carry_no_fix_bytes() {
-        let rest = order_frame(Protocol::Rest, "FIX.4.2", "sess1", "host", 7, 1, 10_000, 5, Side::Buy);
+        let rest = order_frame(
+            Protocol::Rest,
+            "FIX.4.2",
+            "sess1",
+            "host",
+            7,
+            1,
+            10_000,
+            5,
+            Side::Buy,
+        );
         assert!(rest.tag52_offset.is_none());
         assert!(rest.bytes.starts_with(b"POST /orders HTTP/1.1"));
 
-        let ws = order_frame(Protocol::Ws, "FIX.4.2", "sess1", "host", 7, 1, 10_000, 5, Side::Buy);
+        let ws = order_frame(
+            Protocol::Ws,
+            "FIX.4.2",
+            "sess1",
+            "host",
+            7,
+            1,
+            10_000,
+            5,
+            Side::Buy,
+        );
         assert!(ws.tag52_offset.is_none());
         assert!(ws.bytes.starts_with(b"{\"cl_ord_id\""));
     }
@@ -1394,7 +1578,9 @@ mod tests {
     // format!-built frame, across randomized seq/qty/price/kind and width rollovers.
 
     fn small_lcg(state: &mut u64) -> u64 {
-        *state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        *state = state
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         *state >> 33
     }
 
@@ -1408,7 +1594,11 @@ mod tests {
             let seq = i; // monotonic increasing, drives ClOrdID width rollovers at 1,10,100,1000
             let qty = small_lcg(&mut state) % 100_000;
             let price = small_lcg(&mut state) % 1_000_000;
-            let side = if small_lcg(&mut state).is_multiple_of(2) { Side::Buy } else { Side::Sell };
+            let side = if small_lcg(&mut state).is_multiple_of(2) {
+                Side::Buy
+            } else {
+                Side::Sell
+            };
             let is_market = small_lcg(&mut state).is_multiple_of(5);
 
             let got = if is_market {
@@ -1442,7 +1632,10 @@ mod tests {
                     "price mismatch seq={seq}"
                 );
             }
-            assert!(embedded_checksum_is_valid(&got.bytes), "seq={seq}: checksum must stay valid after patch");
+            assert!(
+                embedded_checksum_is_valid(&got.bytes),
+                "seq={seq}: checksum must stay valid after patch"
+            );
             assert_eq!(
                 extract_tag(&got.bytes, b"52"),
                 extract_tag(&want.bytes, b"52"),
@@ -1452,7 +1645,9 @@ mod tests {
     }
 
     fn parse_ascii_u64(digits: &[u8]) -> u64 {
-        digits.iter().fold(0u64, |acc, &b| acc * 10 + u64::from(b - b'0'))
+        digits
+            .iter()
+            .fold(0u64, |acc, &b| acc * 10 + u64::from(b - b'0'))
     }
 
     #[test]
@@ -1462,7 +1657,17 @@ mod tests {
 
         for seq in [8u64, 9, 10, 11, 98, 99, 100, 101, 998, 999, 1000, 1001] {
             let got = cache.render_new(seq, 10_000, 25, Side::Buy);
-            let want = order_frame(Protocol::Fix, fv, sid, host, bot, seq, 10_000, 25, Side::Buy);
+            let want = order_frame(
+                Protocol::Fix,
+                fv,
+                sid,
+                host,
+                bot,
+                seq,
+                10_000,
+                25,
+                Side::Buy,
+            );
             assert_eq!(got.order_id, want.order_id, "seq={seq}");
             assert_eq!(
                 extract_tag(&got.bytes, b"11"),
@@ -1479,11 +1684,33 @@ mod tests {
         let mut cache = TemplateCache::new(Protocol::Fix, fv, sid, host, bot);
 
         let cancel = cache.render_cancel(5, "sess-cr_9_1_O", 10_000, 25, Side::Buy);
-        let want = cancel_frame(Protocol::Fix, fv, sid, host, bot, 5, "sess-cr_9_1_O", 10_000, 25, Side::Buy);
+        let want = cancel_frame(
+            Protocol::Fix,
+            fv,
+            sid,
+            host,
+            bot,
+            5,
+            "sess-cr_9_1_O",
+            10_000,
+            25,
+            Side::Buy,
+        );
         assert_eq!(cancel.bytes, want.bytes);
 
         let replace = cache.render_replace(6, "sess-cr_9_1_O", 11_000, 30, Side::Sell);
-        let want = replace_frame(Protocol::Fix, fv, sid, host, bot, 6, "sess-cr_9_1_O", 11_000, 30, Side::Sell);
+        let want = replace_frame(
+            Protocol::Fix,
+            fv,
+            sid,
+            host,
+            bot,
+            6,
+            "sess-cr_9_1_O",
+            11_000,
+            30,
+            Side::Sell,
+        );
         assert_eq!(replace.bytes, want.bytes);
     }
 
@@ -1498,19 +1725,34 @@ mod tests {
                 let seq = i;
                 let qty = small_lcg(&mut state) % 50_000;
                 let price = small_lcg(&mut state) % 500_000;
-                let side = if small_lcg(&mut state).is_multiple_of(2) { Side::Buy } else { Side::Sell };
+                let side = if small_lcg(&mut state).is_multiple_of(2) {
+                    Side::Buy
+                } else {
+                    Side::Sell
+                };
 
                 let got = cache.render_new(seq, price, qty, side);
                 let want = order_frame(protocol, fv, sid, host, bot, seq, price, qty, side);
 
-                assert_eq!(got.order_id, want.order_id, "protocol={protocol:?} seq={seq}");
+                assert_eq!(
+                    got.order_id, want.order_id,
+                    "protocol={protocol:?} seq={seq}"
+                );
 
                 let got_json = json_body_of(protocol, &got.bytes);
                 let want_json = json_body_of(protocol, &want.bytes);
-                let got_v: serde_json::Value = serde_json::from_slice(got_json).expect("got json parses");
-                let want_v: serde_json::Value = serde_json::from_slice(want_json).expect("want json parses");
-                assert_eq!(got_v["cl_ord_id"], want_v["cl_ord_id"], "protocol={protocol:?} seq={seq}");
-                assert_eq!(got_v["side"], want_v["side"], "protocol={protocol:?} seq={seq}");
+                let got_v: serde_json::Value =
+                    serde_json::from_slice(got_json).expect("got json parses");
+                let want_v: serde_json::Value =
+                    serde_json::from_slice(want_json).expect("want json parses");
+                assert_eq!(
+                    got_v["cl_ord_id"], want_v["cl_ord_id"],
+                    "protocol={protocol:?} seq={seq}"
+                );
+                assert_eq!(
+                    got_v["side"], want_v["side"],
+                    "protocol={protocol:?} seq={seq}"
+                );
                 assert_eq!(
                     got_v["qty"].as_u64().unwrap(),
                     want_v["qty"].as_u64().unwrap(),
@@ -1547,8 +1789,14 @@ mod tests {
 
         let header = |bytes: &[u8]| -> usize {
             let s = std::str::from_utf8(bytes).unwrap();
-            let line = s.lines().find(|l| l.starts_with("Content-Length:")).unwrap();
-            line.trim_start_matches("Content-Length:").trim().parse().unwrap()
+            let line = s
+                .lines()
+                .find(|l| l.starts_with("Content-Length:"))
+                .unwrap();
+            line.trim_start_matches("Content-Length:")
+                .trim()
+                .parse()
+                .unwrap()
         };
 
         // Same digit widths (seq/qty/price all 1-digit vs 6-digit-but-fixed across both
@@ -1653,8 +1901,14 @@ mod smp_tests {
                 .iter()
                 .fold(0u32, |a, b| a.wrapping_add(u32::from(*b)));
             let want = format!("{:03}", sum % 256);
-            let got = String::from_utf8_lossy(&f.bytes[checksum_start + 3..checksum_start + 6]).to_string();
-            assert_eq!(got, want, "seq {seq} checksum over frame {}", String::from_utf8_lossy(&f.bytes));
+            let got = String::from_utf8_lossy(&f.bytes[checksum_start + 3..checksum_start + 6])
+                .to_string();
+            assert_eq!(
+                got,
+                want,
+                "seq {seq} checksum over frame {}",
+                String::from_utf8_lossy(&f.bytes)
+            );
             assert!(body_start > 0);
         }
     }
@@ -1667,7 +1921,11 @@ mod smp_tests {
         assert_eq!(none.smp_for(99), SMP_ID_NONE);
 
         let one = TemplateCache::with_smp(Protocol::Fix, "FIX.4.2", "s", "h", 1, 1);
-        assert_eq!(one.smp_for(5), SMP_ID_NONE, "a single id is no constraint at all");
+        assert_eq!(
+            one.smp_for(5),
+            SMP_ID_NONE,
+            "a single id is no constraint at all"
+        );
 
         let eight = TemplateCache::with_smp(Protocol::Fix, "FIX.4.2", "s", "h", 1, 8);
         assert_eq!(eight.smp_for(0), 0);
@@ -1698,7 +1956,10 @@ mod smp_json_tests {
             let mut c = TemplateCache::new(proto, "FIX.4.2", "sess", "host", 7);
             let f = c.render_new(1, 10_000, 5, Side::Buy);
             let b = body(&f.bytes);
-            assert!(!b.contains("smp_id"), "{proto:?} body must omit smp_id, got {b}");
+            assert!(
+                !b.contains("smp_id"),
+                "{proto:?} body must omit smp_id, got {b}"
+            );
             assert_eq!(f.smp_id, SMP_ID_NONE);
         }
     }
@@ -1711,8 +1972,8 @@ mod smp_json_tests {
             for seq in 0..24u64 {
                 let f = c.render_new(seq, 10_000, 5, Side::Buy);
                 let b = body(&f.bytes);
-                let v: serde_json::Value =
-                    serde_json::from_str(&b).unwrap_or_else(|e| panic!("{proto:?} seq {seq} invalid JSON {b}: {e}"));
+                let v: serde_json::Value = serde_json::from_str(&b)
+                    .unwrap_or_else(|e| panic!("{proto:?} seq {seq} invalid JSON {b}: {e}"));
                 let want = (seq % 8) as u32;
                 assert_eq!(f.smp_id, want, "{proto:?} seq {seq} frame smp_id");
                 assert_eq!(
@@ -1748,7 +2009,10 @@ mod smp_json_tests {
                 .find(|l| l.to_ascii_lowercase().starts_with("content-length:"))
                 .map(str::to_string)
                 .expect("content-length header");
-            assert_eq!(got, want, "seq {seq} Content-Length changed during SMP rotation");
+            assert_eq!(
+                got, want,
+                "seq {seq} Content-Length changed during SMP rotation"
+            );
         }
     }
 }

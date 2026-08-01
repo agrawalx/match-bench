@@ -37,7 +37,8 @@ static WRITES_TOTAL: AtomicU64 = AtomicU64::new(0);
 
 type ResultFamily = Family<[(&'static str, &'static str); 1], Counter>;
 type ProtocolFamily = Family<[(&'static str, &'static str); 1], Counter>;
-type ProtocolHistogramFamily = Family<[(&'static str, &'static str); 1], Histogram, fn() -> Histogram>;
+type ProtocolHistogramFamily =
+    Family<[(&'static str, &'static str); 1], Histogram, fn() -> Histogram>;
 
 /// protocol_label maps a wire protocol to its metric label ("fix"|"rest"|"ws"), the
 /// mandatory QoL-3 dimension: with mixed-protocol runs, a stall can't be attributed

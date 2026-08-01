@@ -41,3 +41,4 @@ services/auth-api/auth-api
 wget-log
 infra/terraform/.terraform/
 deploy-local/images.tar
+/graphify-out 

@@ -70,9 +70,7 @@ impl RedisSink {
                 .query_async(&mut conn)
                 .await
                 .context("redis GET live pointer")?;
-            let current_wave: i64 = current
-                .and_then(|v| v.parse::<i64>().ok())
-                .unwrap_or(-1);
+            let current_wave: i64 = current.and_then(|v| v.parse::<i64>().ok()).unwrap_or(-1);
             if (s.wave_index as i64) >= current_wave {
                 let mut set_pipe = redis::pipe();
                 set_pipe
@@ -202,8 +200,12 @@ mod tests {
         // Write the newer wave first, then an older wave arrives late (e.g. replay
         // after restart, or reordering across a rebalance). The live pointer must
         // stay at the newer wave, not regress.
-        sink.write(&[newer.clone()]).await.expect("redis write newer");
-        sink.write(&[older.clone()]).await.expect("redis write older");
+        sink.write(&[newer.clone()])
+            .await
+            .expect("redis write newer");
+        sink.write(&[older.clone()])
+            .await
+            .expect("redis write older");
 
         let client = redis::Client::open(url).expect("redis client");
         let mut conn = client

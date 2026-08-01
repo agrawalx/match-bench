@@ -730,7 +730,10 @@ mod tests {
         assert_eq!(spec.targets.len(), 3);
         assert_eq!(spec.tasks[0].target_idx, 2);
         assert_eq!(spec.resolved_targets(), spec.targets);
-        assert_eq!(spec.targets[spec.tasks[0].target_idx as usize].protocol, Protocol::Ws);
+        assert_eq!(
+            spec.targets[spec.tasks[0].target_idx as usize].protocol,
+            Protocol::Ws
+        );
     }
 
     #[test]
@@ -806,8 +809,8 @@ mod tests {
             "jitter_max_us":800.0,
             "jitter_inversion_rate":0.02
         }"#;
-        let ev: CorrectnessScoreEvent =
-            serde_json::from_slice(with_jitter).expect("decode correctness score event with jitter");
+        let ev: CorrectnessScoreEvent = serde_json::from_slice(with_jitter)
+            .expect("decode correctness score event with jitter");
         assert_eq!(ev.jitter_p50_us, 12.5);
         assert_eq!(ev.jitter_p99_us, 90.0);
         assert_eq!(ev.jitter_p999_us, 150.0);
@@ -910,7 +913,10 @@ mod tests {
             );
             seen.insert(p);
         }
-        assert!(seen.len() > 1, "a busy session should still spread within its band");
+        assert!(
+            seen.len() > 1,
+            "a busy session should still spread within its band"
+        );
     }
 
     /// session_band_partition_spreads_sessions_across_bands checks different
@@ -925,7 +931,10 @@ mod tests {
             let base = session_band_partition(&session, "order_0", n, band_width);
             seen.insert(base / band_width);
         }
-        assert!(seen.len() > 1, "sessions must spread across more than one band");
+        assert!(
+            seen.len() > 1,
+            "sessions must spread across more than one band"
+        );
     }
 
     /// session_band_partition_reaches_all_partitions_with_uneven_band_width is a
@@ -952,7 +961,8 @@ mod tests {
                 "test case {num_partitions}/{band_width} must be uneven to exercise the fix"
             );
             let mut seen = std::collections::HashSet::new();
-            let mut seed: u64 = 0x9e3779b97f4a7c15 ^ (num_partitions as u64) ^ ((band_width as u64) << 32);
+            let mut seed: u64 =
+                0x9e3779b97f4a7c15 ^ (num_partitions as u64) ^ ((band_width as u64) << 32);
             for _ in 0..5000 {
                 seed = xorshift(seed);
                 let session = format!("sess-{seed}");
@@ -1018,7 +1028,12 @@ mod tests {
         for band in 0..4u32 {
             let mut seen = std::collections::HashSet::new();
             for i in 0..1000 {
-                seen.insert(band_partition(band, &format!("o_{band}_{i}"), n, band_width));
+                seen.insert(band_partition(
+                    band,
+                    &format!("o_{band}_{i}"),
+                    n,
+                    band_width,
+                ));
             }
             ranges.push(seen);
         }
@@ -1154,7 +1169,10 @@ mod tests {
         assert_eq!(decoded.worker_id, "worker-1");
         assert_eq!(decoded.events.len(), 1);
         assert_eq!(decoded.events[0].order_id, "sess-1_7_3_O");
-        assert_eq!(decoded.events[0].barrier_epoch_ns, 1_770_000_000_000_000_000);
+        assert_eq!(
+            decoded.events[0].barrier_epoch_ns,
+            1_770_000_000_000_000_000
+        );
 
         let reconstituted = decoded.into_events();
         assert_eq!(reconstituted[0].session_id, events[0].session_id);

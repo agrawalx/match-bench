@@ -470,9 +470,19 @@ fn batch_by_partition(
     let mut by_part: BTreeMap<i32, Vec<MatchedEvent>> = BTreeMap::new();
     for e in events.drain(..) {
         let partition = if order_band != ORDER_BAND_UNSET {
-            band_partition(order_band, &e.order_id, orders_partitions, partition_band_width)
+            band_partition(
+                order_band,
+                &e.order_id,
+                orders_partitions,
+                partition_band_width,
+            )
         } else {
-            session_band_partition(session_id, &e.order_id, orders_partitions, partition_band_width)
+            session_band_partition(
+                session_id,
+                &e.order_id,
+                orders_partitions,
+                partition_band_width,
+            )
         };
         by_part.entry(partition).or_default().push(e);
     }
@@ -900,7 +910,14 @@ mod tests {
         assert_eq!(
             args,
             vec![
-                "link", "set", "dev", "eth0", "gso_max_size", "1500", "gso_max_segs", "1"
+                "link",
+                "set",
+                "dev",
+                "eth0",
+                "gso_max_size",
+                "1500",
+                "gso_max_segs",
+                "1"
             ]
         );
     }
@@ -1019,7 +1036,8 @@ mod tests {
         let band_width = DEFAULT_PARTITION_BAND_WIDTH;
         let band = 2u32;
         let session_id = "sess-band-test";
-        let mut events: Vec<MatchedEvent> = (0..50).map(|i| mk_event(&format!("ord-{i}"))).collect();
+        let mut events: Vec<MatchedEvent> =
+            (0..50).map(|i| mk_event(&format!("ord-{i}"))).collect();
         let expected: Vec<(String, i32)> = events
             .iter()
             .map(|e| {
@@ -1041,12 +1059,11 @@ mod tests {
                 base + band_width
             );
             for e in chunk {
-                let want = expected
-                    .iter()
-                    .find(|(id, _)| id == &e.order_id)
-                    .unwrap()
-                    .1;
-                assert_eq!(*part, want, "must match band_partition, not the hash-derived path");
+                let want = expected.iter().find(|(id, _)| id == &e.order_id).unwrap().1;
+                assert_eq!(
+                    *part, want,
+                    "must match band_partition, not the hash-derived path"
+                );
             }
         }
     }
@@ -1072,7 +1089,10 @@ mod tests {
                     != session_band_partition(&session_id, &order_id, n, band_width)
             })
         });
-        assert!(diverges, "fixture must exercise a real difference between the two paths");
+        assert!(
+            diverges,
+            "fixture must exercise a real difference between the two paths"
+        );
     }
 
     const ENV_KEYS: &[&str] = &[

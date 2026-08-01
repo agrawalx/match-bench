@@ -595,6 +595,25 @@ and actively blocks load testing, not just capacity claims.
 
 ### 5. Contestant-facing feedback and display
 
+- **A submission deduped against ANOTHER contestant's upload is a permanent dead end.**
+  Observed 2026-08-01: uploading `deploy-local/smoke-rest-echo.zip` from the browser
+  returned HTTP 200 with an existing submission id, and every following
+  `GET /submissions/{id}` returned 404, so the page showed "queued" forever. Nothing was
+  broken and nothing was built — the build was correctly SKIPPED because that sha256 was
+  already built — the caller simply cannot read what it was handed.
+  Three individually-sound decisions compose into the trap: `/submit` dedups on sha256
+  GLOBALLY (`FindBySHA256`); `GetSubmission` is owner-scoped and returns 404 rather than 403
+  when `meta.ContestantID != contestantID` (`handler/submission.go`); and
+  `claimOrResolveOwner` (`handler/ownership.go`) only binds an owner when the row is
+  UNOWNED, so an already-owned row is handed back unchanged. It also leaks existence: the
+  404 exists to hide other users' submissions, yet `/submit` discloses one by returning its
+  id. Two contestants submitting the same starter template hit this identically and the
+  second is stuck permanently.
+  Fix: scope dedup to `(sha256, contestant_id)` so identical bytes from different users
+  become separate submissions — that keeps the cheap re-run for your OWN resubmission,
+  which is what the dedup comment is actually after. Frontend should also distinguish 404
+  from pending so a future mismatch surfaces an error instead of hanging.
+
 - **The run page presents pass-1 and pass-2 correctness as the same kind of number, and
   they are not.** The structure is already right — one page per run-group (one group per
   benchmark trigger), with every scenario session inside it, served by `GetRunGroup`. The

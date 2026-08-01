@@ -569,6 +569,24 @@ and actively blocks load testing, not just capacity claims.
 
 ### 5. Contestant-facing feedback and display
 
+- **The run page presents pass-1 and pass-2 correctness as the same kind of number, and
+  they are not.** The structure is already right — one page per run-group (one group per
+  benchmark trigger), with every scenario session inside it, served by `GetRunGroup`. The
+  header already shows the deciding metric: `RunHeader` reads
+  `run.score.total_correctness`, which since b0b790c is the pass-1 full-replay score.
+  The problem is that `SessionCards` renders each session's `correctness_score` with the
+  same word and the same format, including pass-2 sessions graded book-free. An engine
+  that fills every order unconditionally therefore renders **1.00 on the constant/ramp
+  cards next to 0.62 in the header** (both measured on the echo engine), with nothing on
+  the page explaining the difference — a reader would reasonably conclude the header is
+  wrong. Wanted: label the header as full-replay correctness and say it decides; mark the
+  pass-2 figures as invariants-graded and non-deciding, or stop calling them correctness
+  at all (they are closer to "invariant violations observed"); and present the
+  `correctness` session as the SOURCE of the header number rather than as a peer of the
+  scale scenarios.
+  The "Pending" state needs no work — it disappears once every group contains a ramp,
+  per the decided run-group shape in section 2.
+
 - `correctness_summary` now carries every violation class and the breakdown sums exactly;
   what remains is surfacing it usefully.
 - **HDR chart vs latency timeseries disagree** and both are right: `LatencyTimeline.tsx`

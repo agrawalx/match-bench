@@ -570,10 +570,20 @@ and actively blocks load testing, not just capacity claims.
   HTTP `StartBenchmark` INSERTs them; every harness in `deploy-local/` works around it by
   inserting rows itself.
 
-### 7. Live-SSE smoke
+### 7. Live-SSE — mostly observed working; only the concurrent case is open
 
-Redis → poll loop → `live_metrics` → frontend is still unverified end to end; B1 asserts
-on Postgres/Timescale rows and never the UI. Two-live-leaderboard-tiles unverified with it.
+Downgraded 2026-08-01. The live path was watched working during this session's runs: the
+HDR histograms updated in the browser repeatedly WHILE a benchmark was in progress, which
+exercises the whole chain — telemetry-ingester → Redis → poll loop → `live_metrics` → SSE
+→ frontend render. That was a direct observation, not an assertion, but it is far stronger
+evidence than the automated gates provide: B1 asserts on Postgres/Timescale rows and never
+touches the UI.
+
+What is still genuinely unverified is the CONCURRENT case: two sessions rendering as two
+live tiles at once without cross-contamination. B1 proves the backend keeps two sessions
+isolated (separate slots, leases, latency rows, no cross-contestant rows); nobody has
+watched two tiles update side by side. That is the only part worth a deliberate test, and
+it needs a human looking at the page during a B1 run rather than a script.
 
 ### 8. Kafka topology C2-C6
 

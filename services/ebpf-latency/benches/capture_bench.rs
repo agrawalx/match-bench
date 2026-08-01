@@ -459,12 +459,78 @@ fn bench_pipeline(c: &mut Criterion) {
     g.finish();
 }
 
+fn bench_encode(c: &mut Criterion) {
+    // The msgpack encode in flush() runs on the DRAIN thread (main.rs), so it
+    // belongs in the single-core budget alongside the pipeline. This bench
+    // uses the exact production types (OrderAckedBatchRef over borrowed
+    // events) at MAX_EVENTS_PER_BATCH size. Excluded, and therefore still
+    // unmeasured: batch_by_partition's BTreeMap grouping and the rdkafka
+    // enqueue — both live in main.rs, which a bench cannot include.
+    use iicpc_schemas_rust::{OrderAckedBatchRef, OrderAckedEventRef};
+    const BATCH: usize = 1000; // MAX_EVENTS_PER_BATCH in main.rs
+    let events: Vec<matcher::MatchedEvent> = (0..BATCH)
+        .map(|i| matcher::MatchedEvent {
+            order_id: clordid(i),
+            src_ip: 0x0a000001,
+            src_port: 40001,
+            tcp_seq: 1000 + i as u32,
+            t3_ns: 1_000_000 + i as u64,
+            t7_ns: 1_050_000 + i as u64,
+            pod_service_time_ns: 50_000,
+            exec_type: "0".to_string(),
+            fill_qty: 0,
+            fill_price: 0,
+            orig_order_id: String::new(),
+            reordering_detected: false,
+            retransmission_count: 0,
+            liquidity_ind: 0,
+        })
+        .collect();
+    let session = "01890f2a3b4c5d6e7f8090a1";
+    let contestant = "contestant-7";
+    let mut g = c.benchmark_group("encode");
+    g.throughput(Throughput::Elements(BATCH as u64));
+    g.bench_function("orders_acked_msgpack_batch1000", |b| {
+        b.iter(|| {
+            let refs: Vec<OrderAckedEventRef> = events
+                .iter()
+                .map(|e| OrderAckedEventRef {
+                    session_id: session,
+                    contestant_id: contestant,
+                    order_id: &e.order_id,
+                    src_ip: e.src_ip,
+                    src_port: e.src_port,
+                    tcp_seq: e.tcp_seq,
+                    t3_xdp_ingress_ns: e.t3_ns,
+                    t7_xdp_egress_ns: e.t7_ns,
+                    pod_service_time_ns: e.pod_service_time_ns,
+                    exec_type: &e.exec_type,
+                    fill_qty: e.fill_qty,
+                    fill_price: e.fill_price,
+                    orig_order_id: &e.orig_order_id,
+                    reordering_detected: e.reordering_detected,
+                    retransmission_count: e.retransmission_count,
+                    liquidity_ind: e.liquidity_ind,
+                })
+                .collect();
+            let batch = OrderAckedBatchRef {
+                session_id: session,
+                contestant_id: contestant,
+                events: &refs,
+            };
+            rmp_serde::to_vec_named(&batch).unwrap().len()
+        })
+    });
+    g.finish();
+}
+
 criterion_group!(
     benches,
     bench_decode,
     bench_reassembly,
     bench_framing,
     bench_matcher,
-    bench_pipeline
+    bench_pipeline,
+    bench_encode
 );
 criterion_main!(benches);

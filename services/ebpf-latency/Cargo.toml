@@ -14,6 +14,7 @@ iicpc-bot-fleet = { path = "../bot-fleet" }
 iicpc-logger-rust = { path = "../../libs/rust/logger" }
 iicpc-schemas-rust = { path = "../../schemas/rust" }
 libc = "0.2"
+memchr = "2"
 prometheus-client = "0.22.3"
 rmp-serde = "1.3"
 rustc-hash = "2"

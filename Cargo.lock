@@ -1155,6 +1155,7 @@ dependencies = [
  "iicpc-logger-rust",
  "iicpc-schemas-rust",
  "libc",
+ "memchr",
  "prometheus-client",
  "rmp-serde",
  "rustc-hash",

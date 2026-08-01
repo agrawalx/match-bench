@@ -479,10 +479,13 @@ fn parse_json(direction: Direction, body: &[u8]) -> ParsedMessage {
 /// find performs the module-specific operation described by its name.
 /// It keeps validation, side effects, and returned values within this module's contract.
 fn find(hay: &[u8], needle: &[u8]) -> Option<usize> {
-    if needle.is_empty() || hay.len() < needle.len() {
+    // memmem, not a positional scan: the naive version compiled to a memcmp
+    // call per byte offset and was 63% of the HTTP pipeline profile
+    // (docs/http-pipeline-flamegraph.svg, 2026-08-01).
+    if needle.is_empty() {
         return None;
     }
-    (0..=hay.len() - needle.len()).find(|&i| &hay[i..i + needle.len()] == needle)
+    memchr::memmem::find(hay, needle)
 }
 
 /// find_byte performs the module-specific operation described by its name.
@@ -561,11 +564,27 @@ fn header_content_length(headers: &[u8]) -> Option<usize> {
     parse_uint(&val).map(|v| v as usize)
 }
 
+/// Longest JSON key the extractors look up; patterns are built on the stack
+/// (`format!` here allocated per field per message — ~15% of the HTTP
+/// pipeline profile between malloc/free/format_inner).
+const MAX_JSON_KEY: usize = 30;
+
+/// key_pattern writes `"key"` into `buf` and returns the filled slice.
+fn key_pattern<'a>(buf: &'a mut [u8; MAX_JSON_KEY + 2], key: &str) -> &'a [u8] {
+    let k = key.as_bytes();
+    debug_assert!(k.len() <= MAX_JSON_KEY, "raise MAX_JSON_KEY for {key}");
+    buf[0] = b'"';
+    buf[1..1 + k.len()].copy_from_slice(k);
+    buf[1 + k.len()] = b'"';
+    &buf[..k.len() + 2]
+}
+
 /// json_string performs the module-specific operation described by its name.
 /// It keeps validation, side effects, and returned values within this module's contract.
 fn json_string(body: &[u8], key: &str) -> Option<String> {
-    let pat = format!("\"{key}\"");
-    let i = find(body, pat.as_bytes())?;
+    let mut pbuf = [0u8; MAX_JSON_KEY + 2];
+    let pat = key_pattern(&mut pbuf, key);
+    let i = find(body, pat)?;
     let rest = &body[i + pat.len()..];
     let colon = rest.iter().position(|&b| b == b':')?;
     let after = &rest[colon + 1..];
@@ -578,8 +597,9 @@ fn json_string(body: &[u8], key: &str) -> Option<String> {
 /// json_value_slice performs the module-specific operation described by its name.
 /// It keeps validation, side effects, and returned values within this module's contract.
 fn json_value_slice<'a>(body: &'a [u8], key: &str) -> Option<&'a [u8]> {
-    let pat = format!("\"{key}\"");
-    let i = find(body, pat.as_bytes())?;
+    let mut pbuf = [0u8; MAX_JSON_KEY + 2];
+    let pat = key_pattern(&mut pbuf, key);
+    let i = find(body, pat)?;
     let rest = &body[i + pat.len()..];
     let colon = rest.iter().position(|&b| b == b':')?;
     let after = &rest[colon + 1..];

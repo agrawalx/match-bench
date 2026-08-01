@@ -404,12 +404,14 @@ SELECT EXTRACT(EPOCH FROM time) * 1000000000, wave_index,
 
 // ViolationCounts returns the per-category violation totals for a run-group,
 // read straight from the pre-aggregated correctness_summary row (one row per
-// session). The raw per-violation table is no longer scanned — the validator
-// writes these six category counters at score time.
+// session). There is no per-violation table: storing one row per violation
+// reached tens of millions of rows at high TPS for data nothing rendered, so the
+// validator writes these category counters at score time instead.
 func (s *Store) ViolationCounts(ctx context.Context, runGroupID string) ([]ViolationCount, error) {
 	rows, err := s.meta.Query(ctx, `
 SELECT r.session_id, cs.price_violations, cs.self_trades, cs.phantom_fills,
-       cs.time_violations, cs.cancel_replace_loss, cs.overfills
+       cs.time_violations, cs.cancel_replace_loss, cs.overfills,
+       cs.missed_fills, cs.lost_orders, cs.lost_cancels
   FROM runs r
   JOIN correctness_summary cs ON cs.session_id = r.session_id
  WHERE r.run_group_id = $1`, runGroupID)
@@ -421,9 +423,16 @@ SELECT r.session_id, cs.price_violations, cs.self_trades, cs.phantom_fills,
 	for rows.Next() {
 		var sessionID string
 		var price, selfTrade, phantom, timeV, crl, overfill int64
-		if err := rows.Scan(&sessionID, &price, &selfTrade, &phantom, &timeV, &crl, &overfill); err != nil {
+		var missed, lostOrders, lostCancels int64
+		if err := rows.Scan(&sessionID, &price, &selfTrade, &phantom, &timeV, &crl, &overfill,
+			&missed, &lostOrders, &lostCancels); err != nil {
 			return nil, err
 		}
+		// These must cover EVERY class counted into violation_count, or the
+		// breakdown silently fails to add up to the headline the UI shows beside
+		// it. missed_fills was the omission that made this obvious: one session
+		// reported 7,860 violations of which 7,663 were missed fills, so the
+		// categories shown totalled 196.
 		for _, c := range []ViolationCount{
 			{SessionID: sessionID, ViolationType: "price", Count: price},
 			{SessionID: sessionID, ViolationType: "self_trade", Count: selfTrade},
@@ -431,6 +440,9 @@ SELECT r.session_id, cs.price_violations, cs.self_trades, cs.phantom_fills,
 			{SessionID: sessionID, ViolationType: "time", Count: timeV},
 			{SessionID: sessionID, ViolationType: "cancel_replace_loss", Count: crl},
 			{SessionID: sessionID, ViolationType: "overfill", Count: overfill},
+			{SessionID: sessionID, ViolationType: "missed_fill", Count: missed},
+			{SessionID: sessionID, ViolationType: "lost_order", Count: lostOrders},
+			{SessionID: sessionID, ViolationType: "lost_cancel", Count: lostCancels},
 		} {
 			if c.Count > 0 {
 				out = append(out, c)

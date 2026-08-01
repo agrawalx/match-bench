@@ -59,18 +59,25 @@ ALTER TABLE correctness_summary ADD COLUMN IF NOT EXISTS matched_count BIGINT NO
 ALTER TABLE correctness_summary ADD COLUMN IF NOT EXISTS time_violations BIGINT NOT NULL DEFAULT 0;
 ALTER TABLE correctness_summary ADD COLUMN IF NOT EXISTS self_trades BIGINT NOT NULL DEFAULT 0;
 ALTER TABLE correctness_summary ADD COLUMN IF NOT EXISTS cancel_replace_loss BIGINT NOT NULL DEFAULT 0;
-CREATE TABLE IF NOT EXISTS correctness_violations (
-    id             BIGSERIAL PRIMARY KEY,
-    session_id     TEXT NOT NULL,
-    contestant_id  TEXT NOT NULL DEFAULT '',
-    violation_type TEXT NOT NULL,
-    order_id       TEXT NOT NULL,
-    reported_qty   BIGINT,
-    reported_price BIGINT,
-    detail         TEXT,
-    detected_at    TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-CREATE INDEX IF NOT EXISTS idx_cviol_session ON correctness_violations (session_id);
+-- The remaining violation classes. Without these the breakdown does not add up to
+-- violation_count, and how wrong it looks depends entirely on which class happened
+-- to dominate the run: one measured session reported 7,860 violations of which
+-- missed_fills was 7,663 (97.5%), so the UI showed categories totalling 196 under a
+-- headline of 7,860 and gave the contestant no way to learn what actually went wrong.
+--
+-- capture_gaps and tainted are deliberately NOT here. They describe the PLATFORM's
+-- observation of a session (the capture missed responses the engine did send), not
+-- anything the submission did, and putting them in a violations breakdown would
+-- blame a contestant for the harness.
+ALTER TABLE correctness_summary ADD COLUMN IF NOT EXISTS missed_fills BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE correctness_summary ADD COLUMN IF NOT EXISTS lost_orders BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE correctness_summary ADD COLUMN IF NOT EXISTS lost_cancels BIGINT NOT NULL DEFAULT 0;
+-- correctness_violations is gone. It stored one row per violation, reached tens of
+-- millions of rows at high TPS, and nothing ever read it: the API switched to the
+-- per-category counters above and the table sat at 0 rows across 47 sessions that
+-- between them recorded hundreds of thousands of violations. Dropping it removes a
+-- schema whose only effect was to look like a data source.
+DROP TABLE IF EXISTS correctness_violations;
 `
 
 // Record groups the state and dependencies used by this package.
@@ -159,8 +166,9 @@ INSERT INTO correctness_summary
     (session_id, contestant_id, valid_fills, total_fills, correctness_score, violation_count,
      phantom_fills, overfills, price_violations, computed_at_ns, status,
      sent_count, acked_count, matched_count,
-     time_violations, self_trades, cancel_replace_loss)
-VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
+     time_violations, self_trades, cancel_replace_loss,
+     missed_fills, lost_orders, lost_cancels)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)
 ON CONFLICT (session_id) DO UPDATE SET
     contestant_id       = EXCLUDED.contestant_id,
     valid_fills         = EXCLUDED.valid_fills,
@@ -177,7 +185,10 @@ ON CONFLICT (session_id) DO UPDATE SET
     matched_count       = EXCLUDED.matched_count,
     time_violations     = EXCLUDED.time_violations,
     self_trades         = EXCLUDED.self_trades,
-    cancel_replace_loss = EXCLUDED.cancel_replace_loss
+    cancel_replace_loss = EXCLUDED.cancel_replace_loss,
+    missed_fills        = EXCLUDED.missed_fills,
+    lost_orders         = EXCLUDED.lost_orders,
+    lost_cancels        = EXCLUDED.lost_cancels
 WHERE correctness_summary.status = 'timed_out' AND EXCLUDED.status = 'scored'`,
 		rec.SessionID, rec.ContestantID,
 		int64(rec.Report.ValidFills), int64(rec.Report.TotalFills),
@@ -186,13 +197,11 @@ WHERE correctness_summary.status = 'timed_out' AND EXCLUDED.status = 'scored'`,
 		int64(rec.ComputedAtNS), status,
 		int64(rec.SentCount), int64(rec.AckedCount), int64(rec.MatchedCount),
 		timeCount, selfTradeCount, crlCount,
+		int64(rec.Report.MissedFills), int64(rec.Report.LostOrders), int64(rec.Report.LostCancels),
 	)
 	if err != nil {
 		return false, fmt.Errorf("insert summary: %w", err)
 	}
-	// The per-violation table (correctness_violations) is intentionally no longer
-	// written: it reached tens of millions of rows at high TPS and only the
-	// per-category totals above are ever rendered.
 	return tag.RowsAffected() > 0, nil
 }
 

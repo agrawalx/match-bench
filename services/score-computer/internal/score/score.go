@@ -256,7 +256,14 @@ func Compute(in Input) (Result, error) {
 			default:
 				wr.Passed = true
 				res.PeakSustainedTPS = wave.OfferedRPS
-				res.P99AtPeakNS = m.MaxP99NS
+				// StableP99NS, not MaxP99NS (decision 2026-08-02): this field
+				// is the TPS tiebreak in SortResults, and the wave's single
+				// worst second is dominated by connection-setup/warmup noise —
+				// ties were being broken by whose startup hiccup was smaller.
+				// The median is the same summary the gate two cases above
+				// judges, so gate and ranking now agree on what latency means.
+				// MaxP99NS remains computed as the diagnostic it claims to be.
+				res.P99AtPeakNS = m.StableP99NS
 			}
 			res.Waves = append(res.Waves, wr)
 			if !wr.Passed {

@@ -473,3 +473,26 @@ func baseInput() Input {
 		},
 	}
 }
+
+// TestP99AtPeakIsStableNotWorstSecond pins the 2026-08-02 ranking decision:
+// the TPS tiebreak uses the STABLE p99 (median of the peak wave's per-second
+// p99s) — the same summary the pass/fail gate uses — not the wave's single
+// worst second, which is dominated by connection-setup/warmup noise and had
+// been deciding ties despite its own "diagnostic" comment.
+func TestP99AtPeakIsStableNotWorstSecond(t *testing.T) {
+	in := baseInput()
+	// Three seconds within the first JUDGED wave (the climb starts at wave
+	// index 1; wave 0 is baseline): median 500us, worst second 900us.
+	in.Sessions[2].Metrics = []MetricRow{
+		{WaveIndex: 1, P99NS: 100_000, ErrorRate: 0.001},
+		{WaveIndex: 1, P99NS: 500_000, ErrorRate: 0.001},
+		{WaveIndex: 1, P99NS: 900_000, ErrorRate: 0.001},
+	}
+	res, err := Compute(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.P99AtPeakNS != 500_000 {
+		t.Fatalf("P99AtPeakNS = %d, want 500000 (stable/median), not the 900000 worst second", res.P99AtPeakNS)
+	}
+}

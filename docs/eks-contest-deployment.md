@@ -50,9 +50,11 @@ lever if groups/hour proves too low in rehearsal.
 
 Baseline (1 sandbox, 2 botworkers): 36 x86 vCPU + 16 arm vCPU. Contest-day
 (4 sandbox, botworkers scaled to measured need): up to **60 x86 + 80 arm vCPU →
-quota asks: x86 "Running On-Demand Standard" ≥ 64, and the SEPARATE Graviton quota
-("Running On-Demand G instances") ≥ 64** (16 nodes × 4 vCPU — corrected 2026-08-02
-from a stale 96) — the precheck script validates both.
+quota ask: ONE Standard on-demand quota (L-1216C47A) ≥ 128** — the Standard bucket
+(A,C,D,H,I,M,R,T,Z) covers Graviton c7g too; the family LETTER picks the quota, not
+the processor. (Corrected 2026-08-02: an earlier revision asked the "G and VT" quota,
+which is GPU graphics instances — irrelevant, and its 0-default/human-review is a
+new-account trust setting, not a billing-tier limit.) 56 x86 + 64 arm = 120, ask 128.
 Rough on-demand, us-east-1: baseline ≈ $2.2/h; full contest shape ≈ $4–6/h depending
 on how many Graviton nodes the measured per-node TPS demands. Ephemeral posture makes
 the daily rate mostly irrelevant.

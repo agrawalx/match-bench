@@ -1,0 +1,25 @@
+# Spawner in ECR mode (first Kaniko run failed 401, 2026-08-03): the ECR code
+# path (ecr_aws.go — IRSA-minted push tokens) activates only via
+# REGISTRY_PROVIDER=ecr; without it the spawner used Harbor basic-auth
+# (anon/anon) against ECR. HARBOR_PROJECT must be iicpc/ to match the IAM
+# push policy (base says agrawalx, the old ghcr project). The SA's IRSA
+# annotation is applied by terraform's enable_spawner_irsa or by hand:
+#   kubectl -n build annotate sa build-spawner \
+#     eks.amazonaws.com/role-arn=arn:aws:iam::885232248981:role/iicpc-contest-build-spawner --overwrite
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: spawner
+  namespace: build
+spec:
+  template:
+    spec:
+      containers:
+        - name: spawner
+          env:
+            - name: REGISTRY_PROVIDER
+              value: ecr
+            - name: HARBOR_PROJECT
+              value: iicpc
+            - name: HARBOR_PRODUCTION_ENDPOINT
+              value: 885232248981.dkr.ecr.us-east-1.amazonaws.com

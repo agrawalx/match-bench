@@ -35,9 +35,17 @@ for d in benchmark/bot-fleet-controller benchmark/bot-fleet-worker \
   ready=$(kubectl -n "$ns" get deploy "$n" -o jsonpath='{.status.readyReplicas}' 2>/dev/null || echo 0)
   [ "${ready:-0}" -ge 1 ] || { echo "!! $d not ready — run deploy-local/up-dev.sh"; exit 1; }
 done
-for img in "$BOOK_IMAGE" "$ECHO_IMAGE"; do
-  require_image "$img"
-done
+if [ "$HARNESS_ENV" = eks ]; then
+  # Contestant images are BUILD PRODUCTS on EKS (zip -> Kaniko -> ECR);
+  # preflight checks the zips, not pre-pushed images.
+  for z in reference-clob-all.zip smoke-rest-echo.zip; do
+    [ -f "$REPO_ROOT/deploy-local/$z" ] || { echo "!! missing $REPO_ROOT/deploy-local/$z"; exit 1; }
+  done
+else
+  for img in "$BOOK_IMAGE" "$ECHO_IMAGE"; do
+    require_image "$img"
+  done
+fi
 eks_sandbox_preflight
 
 SCEN=$(psql_val "SELECT scenario_id FROM scenarios WHERE name='correctness';")

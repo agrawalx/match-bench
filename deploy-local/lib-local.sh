@@ -112,7 +112,7 @@ require_image() {
     repo="${1#*/}"; repo="${repo%:*}"; tag="${1##*:}"
     aws ecr describe-images --repository-name "$repo" --image-ids imageTag="$tag" \
       --region "${AWS_REGION:-us-east-1}" >/dev/null 2>&1 || {
-      echo "!! $1 not in ECR — push it: TAG=${CONTESTANT_TAG:-${TAG:-dev1}} deploy-local/push-contestants.sh"; exit 1; }
+      echo "!! $1 not in ECR (fixtures: push-images.sh; contestants are build-pipeline products, not pre-pushed)"; exit 1; }
   else
     docker image inspect "$1" >/dev/null 2>&1 || {
       echo "!! $1 not built: TAG=${TAG:-dev1} deploy-local/build-contestants.sh"; exit 1; }

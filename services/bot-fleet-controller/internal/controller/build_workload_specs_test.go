@@ -25,7 +25,7 @@ func TestSubmissionTargetsSingleProtocol(t *testing.T) {
 }
 
 func TestSubmissionTargetsAllProtocols(t *testing.T) {
-	sub := &store.SubmissionInfo{Protocol: protocolAll}
+	sub := &store.SubmissionInfo{Protocol: topics.ProtocolAll}
 	targets := submissionTargets(sub)
 	if len(targets) != 3 {
 		t.Fatalf("expected 3 targets, got %d: %+v", len(targets), targets)
@@ -45,7 +45,7 @@ func TestBuildWorkloadSpecsSplitsTasksRoundRobinAcrossTargets(t *testing.T) {
 		SubmissionID: "sub-1",
 		Endpoint:     &orchestrator.Endpoint{Host: "algo.svc", Port: 9898},
 	}
-	sub := &store.SubmissionInfo{ContestantID: "team-1", Protocol: protocolAll}
+	sub := &store.SubmissionInfo{ContestantID: "team-1", Protocol: topics.ProtocolAll}
 	scenario := &topics.Scenario{TaskSpecs: taskSpecs(9)}
 
 	specs := r.buildWorkloadSpecs(sess, sub, scenario, 2, 3)
@@ -101,7 +101,7 @@ func TestBuildWorkloadSpecsKeepsTaskIDsGloballyUnique(t *testing.T) {
 		SubmissionID: "sub-1",
 		Endpoint:     &orchestrator.Endpoint{Host: "algo.svc", Port: 9898},
 	}
-	sub := &store.SubmissionInfo{Protocol: protocolAll}
+	sub := &store.SubmissionInfo{Protocol: topics.ProtocolAll}
 	scenario := &topics.Scenario{TaskSpecs: taskSpecs(12)}
 
 	specs := r.buildWorkloadSpecs(sess, sub, scenario, 3, 1)
@@ -143,5 +143,34 @@ func TestPass1IsSingleConnectionEvenForProtocolAll(t *testing.T) {
 	}
 	if len(seen) != 1 || !seen[0] {
 		t.Fatalf("pass-1 task target indices = %v, want exactly {0} (single FIX connection)", seen)
+	}
+}
+
+// TestSubmissionTargetsCombos pins partial multi-protocol support
+// (2026-08-02): combos are ordered, target 0 = primary = pass-1 protocol.
+func TestSubmissionTargetsCombos(t *testing.T) {
+	cases := []struct {
+		decl  string
+		want  []string
+		ports []uint16
+	}{
+		{"REST,WS", []string{"REST", "WS"}, []uint16{8080, 8080}},
+		{"REST,FIX", []string{"REST", "FIX"}, []uint16{8080, 9898}},
+		{"FIX,WS", []string{"FIX", "WS"}, []uint16{9898, 8080}},
+	}
+	for _, c := range cases {
+		targets := submissionTargets(&store.SubmissionInfo{Protocol: c.decl})
+		if len(targets) != len(c.want) {
+			t.Fatalf("%s: %d targets, want %d", c.decl, len(targets), len(c.want))
+		}
+		for i := range targets {
+			if targets[i].Protocol != c.want[i] || targets[i].Port != c.ports[i] {
+				t.Errorf("%s target[%d] = %+v, want %s:%d", c.decl, i, targets[i], c.want[i], c.ports[i])
+			}
+		}
+		// Pass-1's single task round-robins onto index 0 — the declared primary.
+		if targets[0].Protocol != c.want[0] {
+			t.Errorf("%s pass-1 protocol = %s, want declared primary %s", c.decl, targets[0].Protocol, c.want[0])
+		}
 	}
 }

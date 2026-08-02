@@ -6,7 +6,9 @@
 package topics
 
 import (
+	"fmt"
 	"math"
+	"strings"
 	"time"
 )
 
@@ -33,6 +35,43 @@ const (
 	// docs/tps-improvement-plan.md §7.3 port policy.
 	PortHTTPWS = uint16(8080)
 )
+
+// ProtocolAll is the declaration alias for all three transports. Kept for
+// back-compat; new combos are declared explicitly ("FIX,REST"). It only
+// stands alone — "FIX,ALL" is rejected.
+const ProtocolAll = "ALL"
+
+// ParseProtocols normalizes a submission's protocol declaration into its
+// ordered element list: one protocol, ProtocolAll (= FIX,REST,WS), or a
+// comma-separated combination. Order is MEANINGFUL and preserved: the first
+// element is the submission's primary protocol — the one the single-connection
+// pass-1 correctness run uses (decision 2026-08-02). Elements are
+// case-insensitive, trimmed, must be unique, and each must be FIX, REST or WS.
+func ParseProtocols(decl string) ([]string, error) {
+	if strings.TrimSpace(strings.ToUpper(decl)) == ProtocolAll {
+		return []string{"FIX", "REST", "WS"}, nil
+	}
+	parts := strings.Split(decl, ",")
+	out := make([]string, 0, len(parts))
+	seen := make(map[string]struct{}, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(strings.ToUpper(p))
+		switch p {
+		case "FIX", "REST", "WS":
+		default:
+			return nil, fmt.Errorf("invalid protocol element %q in %q", p, decl)
+		}
+		if _, dup := seen[p]; dup {
+			return nil, fmt.Errorf("duplicate protocol %q in %q", p, decl)
+		}
+		seen[p] = struct{}{}
+		out = append(out, p)
+	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("empty protocol declaration")
+	}
+	return out, nil
+}
 
 // PortForProtocol returns the platform-mandated port for a protocol string
 // ("FIX" | "REST" | "WS").

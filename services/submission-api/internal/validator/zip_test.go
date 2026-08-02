@@ -8,6 +8,7 @@ package validator
 import (
 	"testing"
 
+	"github.com/iicpc/schemas/topics"
 	cerrs "github.com/iicpc/submission-api/internal/errors"
 )
 
@@ -35,12 +36,15 @@ func TestValidatePortPolicyEnforcesPlatformPorts(t *testing.T) {
 }
 
 func TestValidProtocolsIncludesAllSentinel(t *testing.T) {
-	if _, ok := validProtocols[ProtocolAll]; !ok {
-		t.Fatalf("expected %q to be a valid protocol", ProtocolAll)
+	// validProtocols is gone; declarations validate via topics.ParseProtocols.
+	for _, p := range []string{"FIX", "REST", "WS", ProtocolAll, "REST,WS", "FIX,REST"} {
+		if _, err := topics.ParseProtocols(p); err != nil {
+			t.Fatalf("expected %q to be a valid protocol declaration: %v", p, err)
+		}
 	}
-	for _, p := range []string{"FIX", "REST", "WS"} {
-		if _, ok := validProtocols[p]; !ok {
-			t.Fatalf("expected %q to remain a valid protocol", p)
+	for _, p := range []string{"HTTP", "FIX,ALL", "FIX,FIX", ""} {
+		if _, err := topics.ParseProtocols(p); err == nil {
+			t.Fatalf("expected %q to be rejected", p)
 		}
 	}
 }

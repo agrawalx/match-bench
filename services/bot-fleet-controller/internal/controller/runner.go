@@ -514,26 +514,24 @@ func (r *Runner) awaitReady(ctx context.Context, sess *Session, log *slog.Logger
 	return nil
 }
 
-// protocolAll is the benchmark.yaml sentinel (validator.ProtocolAll) a
-// submission declares to offer FIX + REST + WS to the same contestant
-// simultaneously. Duplicated here (not imported) to avoid a dependency from
-// the controller onto submission-api's validator package.
-const protocolAll = "ALL"
-
-// submissionTargets returns the TargetSpec table for a submission: one
-// target for a single-protocol submission, or all three platform-mandated
-// targets for a submission declaring multi-protocol support (§7.3 Shape A).
+// submissionTargets returns the TargetSpec table for a submission — one
+// target per declared protocol, in DECLARATION ORDER (topics.ParseProtocols:
+// single protocol, "ALL", or an ordered combo like "REST,WS"). Order matters:
+// target 0 is the primary protocol, and the single-task pass-1 correctness
+// scenario lands on it via round-robin stamping — so a "REST,FIX" submission
+// is correctness-graded over REST. An unparseable declaration (cannot happen
+// past submission validation; defensive for hand-inserted rows) falls back to
+// treating the string as a single protocol, preserving old behavior.
 func submissionTargets(sub *store.SubmissionInfo) []topics.TargetSpec {
-	if sub.Protocol == protocolAll {
-		return []topics.TargetSpec{
-			{Protocol: "FIX", Port: topics.PortFIX},
-			{Protocol: "REST", Port: topics.PortHTTPWS},
-			{Protocol: "WS", Port: topics.PortHTTPWS},
-		}
+	parts, err := topics.ParseProtocols(sub.Protocol)
+	if err != nil {
+		parts = []string{sub.Protocol}
 	}
-	return []topics.TargetSpec{
-		{Protocol: sub.Protocol, Port: topics.PortForProtocol(sub.Protocol)},
+	targets := make([]topics.TargetSpec, 0, len(parts))
+	for _, p := range parts {
+		targets = append(targets, topics.TargetSpec{Protocol: p, Port: topics.PortForProtocol(p)})
 	}
+	return targets
 }
 
 // submissionPorts returns every distinct port the sandbox pod must expose for a

@@ -1,6 +1,7 @@
 package topics
 
 import (
+	"reflect"
 	"encoding/json"
 	"fmt"
 	"math"
@@ -170,5 +171,43 @@ func TestPortForProtocolMatchesPlatformPolicy(t *testing.T) {
 	}
 	if PortFIX != 9898 || PortHTTPWS != 8080 {
 		t.Fatalf("platform port constants drifted")
+	}
+}
+
+// TestParseProtocols pins the protocol-declaration grammar (2026-08-02):
+// a single protocol, "ALL" (alias for FIX,REST,WS), or an ordered
+// comma-separated combination. Order is MEANINGFUL — the first element is the
+// submission's primary protocol, the one pass-1 correctness runs on.
+func TestParseProtocols(t *testing.T) {
+	cases := []struct {
+		in      string
+		want    []string
+		wantErr bool
+	}{
+		{"FIX", []string{"FIX"}, false},
+		{"REST", []string{"REST"}, false},
+		{"WS", []string{"WS"}, false},
+		{"ALL", []string{"FIX", "REST", "WS"}, false},
+		{"FIX,REST", []string{"FIX", "REST"}, false},
+		{"REST,WS", []string{"REST", "WS"}, false},
+		// Order preserved: REST-first combo grades pass-1 on REST.
+		{"REST,FIX", []string{"REST", "FIX"}, false},
+		{"ws,fix", []string{"WS", "FIX"}, false}, // case-insensitive
+		{" FIX , WS ", []string{"FIX", "WS"}, false},
+		{"FIX,FIX", nil, true},  // duplicate
+		{"FIX,ALL", nil, true},  // ALL only stands alone
+		{"HTTP", nil, true},     // unknown
+		{"", nil, true},
+		{",", nil, true},
+	}
+	for _, c := range cases {
+		got, err := ParseProtocols(c.in)
+		if c.wantErr != (err != nil) {
+			t.Errorf("ParseProtocols(%q) err = %v, wantErr %v", c.in, err, c.wantErr)
+			continue
+		}
+		if !c.wantErr && !reflect.DeepEqual(got, c.want) {
+			t.Errorf("ParseProtocols(%q) = %v, want %v", c.in, got, c.want)
+		}
 	}
 }

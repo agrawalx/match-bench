@@ -26,7 +26,9 @@ const maxRootConfigBytes = 1 << 20 // 1 MB per root config/build file after deco
 // simultaneously. See docs/tps-improvement-plan.md §7.3.
 const ProtocolAll = "ALL"
 
-var validProtocols = map[string]struct{}{"FIX": {}, "REST": {}, "WS": {}, ProtocolAll: {}}
+// Protocol declarations are validated by topics.ParseProtocols: one protocol,
+// "ALL", or an ordered comma combo ("REST,WS"). Order is meaningful — the
+// first element is the primary protocol pass-1 correctness runs on.
 var validLanguages = map[string]struct{}{"cpp": {}, "rust": {}, "go": {}}
 
 // BuildSection groups the state and dependencies used by this package.
@@ -128,7 +130,7 @@ func ValidateSubmissionZip(r io.ReaderAt, size int64) (*BenchmarkConfig, error) 
 		return nil, cerrs.ErrNoSrcDir
 	}
 
-	if _, ok := validProtocols[cfg.Protocol]; !ok {
+	if _, err := topics.ParseProtocols(cfg.Protocol); err != nil {
 		return nil, cerrs.ErrInvalidProtocol
 	}
 	if _, ok := validLanguages[cfg.Language]; !ok {
@@ -172,10 +174,16 @@ var validBuildTargetName = regexp.MustCompile(`^[A-Za-z0-9_.-]{1,64}$`)
 // declaring ProtocolAll offers all protocols on their respective mandated
 // ports, so its declared port is not checked against a single value.
 func validatePortPolicy(protocol string, port int) error {
-	if protocol == ProtocolAll {
+	parts, err := topics.ParseProtocols(protocol)
+	if err != nil {
+		return cerrs.ErrInvalidProtocol
+	}
+	// Multi-protocol (ALL or any combo) serves each protocol on its own
+	// mandated port, so the single declared port is not checked.
+	if len(parts) > 1 {
 		return nil
 	}
-	if uint16(port) != topics.PortForProtocol(protocol) {
+	if uint16(port) != topics.PortForProtocol(parts[0]) {
 		return cerrs.ErrPortProtocolMismatch
 	}
 	return nil

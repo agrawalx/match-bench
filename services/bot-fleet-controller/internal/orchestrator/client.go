@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"time"
 )
 
@@ -50,12 +51,30 @@ type Client struct {
 	http    *http.Client
 }
 
+// defaultSlotHTTPTimeout bounds a single orchestrator call. 180s, not the
+// original 15s (raised 2026-08-03 after the first EKS run): slot creation
+// blocks until the contestant pod is observable, and on a real registry that
+// includes the FIRST PULL of that submission's image. Locally every image was
+// pre-imported into containerd, so 15s always sufficed and the limit was
+// invisible; in a contest EVERY new submission is a cold pull, and a timeout
+// here fails the session with "context deadline exceeded" while the
+// orchestrator is still healthily waiting (its own request context is
+// canceled mid-flight, which is what the confusing "context canceled" pod-get
+// error was). Override with ORCHESTRATOR_HTTP_TIMEOUT (Go duration).
+const defaultSlotHTTPTimeout = 180 * time.Second
+
 // NewClient performs the package-specific operation described by its name.
 // It keeps validation, side effects, and returned values within this package's contract.
 func NewClient(baseURL string) *Client {
+	timeout := defaultSlotHTTPTimeout
+	if v := os.Getenv("ORCHESTRATOR_HTTP_TIMEOUT"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			timeout = d
+		}
+	}
 	return &Client{
 		baseURL: baseURL,
-		http:    &http.Client{Timeout: 15 * time.Second},
+		http:    &http.Client{Timeout: timeout},
 	}
 }
 

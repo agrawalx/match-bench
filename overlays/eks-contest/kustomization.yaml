@@ -54,6 +54,11 @@ images:
     newTag: "418a2c0"
 
 patches:
+  - path: patch-orchestrator-nodepool.yaml
+    target:
+      kind: Deployment
+      name: sandbox-orchestrator
+      namespace: sandbox
   - path: patch-orchestrator-algo.yaml
     target:
       kind: Deployment

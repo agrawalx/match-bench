@@ -159,12 +159,14 @@ GitOps (Argo) is deliberately OUT of scope for an ephemeral cluster — `kustomi
    status topic), gro-disable, secrets from SSM.
 4. Verifier gate: capture Job on a sandbox node loads XDP+tc programs (kernel 6.1 check).
 5. NetworkPolicy smoke: denied cross-namespace probe actually DENIED (hard gate, no gVisor).
-6. `b2-two-pass.sh` EKS variant — the same 11 assertions, plus FINAL counters
-   (gaps=0/drops=0/throttled=0) at MTU 9001. Then the TWO sizing measurements this
-   design deliberately leaves open: per-node loadgen TPS on Graviton at MTU 9001
-   (fixes `botworker_max`), and a full-ramp run to 500k/s asserting capture FINAL
-   counters and telemetry (ingester consumed ≈ flushed) hold at peak — the capture's
-   offline ceiling says yes (§capture-ringbuf-drops 6.2b), this is the live proof.
+6. **The FULL b1–b5 suite on EKS** (decided 2026-08-02 — not just b2): b1
+   concurrency/leases on real multi-node scheduling, b2 two-pass grading (+ FINAL
+   counters gaps=0/drops=0/throttled=0 at MTU 9001 — the jumbo regime's first live
+   proof), b3 all three protocols over the VPC CNI, b4 stalled-peer with real
+   network buffers, b5 KEDA + cluster-autoscaler against real node provisioning.
+   Mechanism: the b-scripts stay unforked — lib-local.sh grows HARNESS_ENV=eks
+   (ECR image lookups instead of docker inspect; contestant/stall-sink refs from
+   ECR via push-contestants.sh). Then the sizing measurements (§6b M1–M5).
 ### 6b. Measurement campaign — the numbers that finish the sizing
 
 This design deliberately leaves four capacities as measurement outputs, not guesses.

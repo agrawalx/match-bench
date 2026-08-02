@@ -3,7 +3,7 @@
 #
 # Validates the traps that stalled previous bring-ups:
 #   1. x86 on-demand vCPU quota (L-1216C47A)  — contest-day needs ~60, ask 64.
-#   2. Graviton on-demand vCPU quota (L-DB2E81BA) — botworker burst, ask 96.
+#   2. Graviton on-demand vCPU quota (L-DB2E81BA) — 16 botworker nodes x 4 vCPU, ask 64.
 #   3. AWS credentials + region sanity.
 #   4. Live spot prices printed for reference (informational only; no spot).
 #
@@ -11,7 +11,7 @@
 set -euo pipefail
 REGION="${1:-us-east-1}"
 X86_NEED="${X86_NEED:-64}"
-ARM_NEED="${ARM_NEED:-96}"
+ARM_NEED="${ARM_NEED:-64}"
 
 fail=0
 

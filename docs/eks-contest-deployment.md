@@ -51,7 +51,8 @@ lever if groups/hour proves too low in rehearsal.
 Baseline (1 sandbox, 2 botworkers): 36 x86 vCPU + 16 arm vCPU. Contest-day
 (4 sandbox, botworkers scaled to measured need): up to **60 x86 + 80 arm vCPU →
 quota asks: x86 "Running On-Demand Standard" ≥ 64, and the SEPARATE Graviton quota
-("Running On-Demand G instances") ≥ 96** — the precheck script validates both.
+("Running On-Demand G instances") ≥ 64** (16 nodes × 4 vCPU — corrected 2026-08-02
+from a stale 96) — the precheck script validates both.
 Rough on-demand, us-east-1: baseline ≈ $2.2/h; full contest shape ≈ $4–6/h depending
 on how many Graviton nodes the measured per-node TPS demands. Ephemeral posture makes
 the daily rate mostly irrelevant.

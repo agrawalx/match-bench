@@ -18,39 +18,39 @@ resources:
 images:
   - name: ghcr.io/agrawalx/submission-api
     newName: 885232248981.dkr.ecr.us-east-1.amazonaws.com/iicpc/submission-api
-    newTag: SET-BY-PUSH-SCRIPT
+    newTag: "418a2c0"
   - name: ghcr.io/agrawalx/auth-api
     newName: 885232248981.dkr.ecr.us-east-1.amazonaws.com/iicpc/auth-api
-    newTag: SET-BY-PUSH-SCRIPT
+    newTag: "418a2c0"
   - name: ghcr.io/agrawalx/leaderboard-api
     newName: 885232248981.dkr.ecr.us-east-1.amazonaws.com/iicpc/leaderboard-api
-    newTag: SET-BY-PUSH-SCRIPT
+    newTag: "418a2c0"
   - name: ghcr.io/agrawalx/frontend
     newName: 885232248981.dkr.ecr.us-east-1.amazonaws.com/iicpc/frontend
-    newTag: SET-BY-PUSH-SCRIPT
+    newTag: "418a2c0"
   - name: ghcr.io/agrawalx/spawner
     newName: 885232248981.dkr.ecr.us-east-1.amazonaws.com/iicpc/spawner
-    newTag: SET-BY-PUSH-SCRIPT
+    newTag: "418a2c0"
   - name: ghcr.io/agrawalx/sandbox-orchestrator
     newName: 885232248981.dkr.ecr.us-east-1.amazonaws.com/iicpc/sandbox-orchestrator
-    newTag: SET-BY-PUSH-SCRIPT
+    newTag: "418a2c0"
   - name: ghcr.io/agrawalx/bot-fleet-controller
     newName: 885232248981.dkr.ecr.us-east-1.amazonaws.com/iicpc/bot-fleet-controller
-    newTag: SET-BY-PUSH-SCRIPT
+    newTag: "418a2c0"
   - name: ghcr.io/agrawalx/bot-fleet
     # Multi-arch manifest list (amd64 + arm64) — the ONE dual-arch image;
     # Graviton botworker nodes pull arm64 automatically.
     newName: 885232248981.dkr.ecr.us-east-1.amazonaws.com/iicpc/bot-fleet
-    newTag: SET-BY-PUSH-SCRIPT
+    newTag: "418a2c0"
   - name: ghcr.io/agrawalx/correctness-validator
     newName: 885232248981.dkr.ecr.us-east-1.amazonaws.com/iicpc/correctness-validator
-    newTag: SET-BY-PUSH-SCRIPT
+    newTag: "418a2c0"
   - name: ghcr.io/agrawalx/score-computer
     newName: 885232248981.dkr.ecr.us-east-1.amazonaws.com/iicpc/score-computer
-    newTag: SET-BY-PUSH-SCRIPT
+    newTag: "418a2c0"
   - name: ghcr.io/agrawalx/telemetry-ingester
     newName: 885232248981.dkr.ecr.us-east-1.amazonaws.com/iicpc/telemetry-ingester
-    newTag: SET-BY-PUSH-SCRIPT
+    newTag: "418a2c0"
 
 patches:
   - path: patch-orchestrator-algo.yaml

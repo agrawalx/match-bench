@@ -1,0 +1,55 @@
+# k8s/benchmark/telemetry-rollup/deployment.yaml
+#
+# Committed 2026-08-02 from the LIVE cluster spec: this deployment had only
+# ever been created by hand/script and never checked in — exactly the drift
+# class the manifest audit exists to close. The rollup is the second stage of
+# the distributed ingester (merges per-shard HDR partials into final metrics
+# rows); it ships in the telemetry-ingester image as a separate binary and is
+# single-replica by design (one merger per cluster).
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: telemetry-rollup
+  namespace: benchmark
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: telemetry-rollup
+  template:
+    metadata:
+      labels:
+        app: telemetry-rollup
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/path: /metrics
+        prometheus.io/port: "9090"
+    spec:
+      automountServiceAccountToken: false
+      containers:
+        - name: telemetry-rollup
+          image: ghcr.io/agrawalx/telemetry-ingester:demo
+          command: ["/usr/local/bin/telemetry-rollup"]
+          ports:
+            - name: metrics
+              containerPort: 9090
+          env:
+            - name: LOKI_URL
+              value: http://loki.observability.svc.cluster.local:3100
+            - name: TIMESCALE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: telemetry-ingester-secrets
+                  key: TIMESCALE_URL
+            - name: ROLLUP_INTERVAL_MS
+              value: "1000"
+            - name: RUST_LOG
+              value: info
+          resources:
+            requests:
+              cpu: 250m
+              memory: 256Mi
+            limits:
+              cpu: "1"
+              memory: 512Mi

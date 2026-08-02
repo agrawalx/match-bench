@@ -53,13 +53,18 @@ spec:
               # plain CPU starvation by neighbours. Keep in sync with captureResources() in
               # sandbox-orchestrator/internal/k8s/slot.go.
               cpu: "2"
-              memory: 256Mi
+              # REFERENCE ONLY: nothing consumes this template — the orchestrator
+              # builds capture Jobs programmatically (slot.go captureResources is
+              # the authority). Values kept aligned so a reader is not misled:
+              # 2Gi/4Gi (2026-08-02) pairs with the 256MB memcg-charged BPF ring
+              # and leaves ring-growth headroom to 1GB.
+              memory: 2Gi
             limits:
               # 4 (was 2): at >150k delivered the userspace drain+parse+publish wants
               # ~3 cores; a 2-core cap CFS-throttled it and caused ringbuf drops. Fits
               # the c6i.2xlarge (8 vCPU) sandbox node alongside the contestant (ALGO_CPU=4).
               cpu: "4"
-              memory: 512Mi
+              memory: 4Gi
           securityContext:
             privileged: true
             capabilities:

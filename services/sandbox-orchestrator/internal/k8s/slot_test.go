@@ -303,9 +303,9 @@ func TestCaptureResourcesPairWithRingBuffer(t *testing.T) {
 	res := captureResources()
 	for name, want := range map[string]string{
 		"cpu request":    "2",
-		"memory request": "1Gi",
+		"memory request": "2Gi",
 		"cpu limit":      "4",
-		"memory limit":   "2Gi",
+		"memory limit":   "4Gi",
 	} {
 		var got string
 		switch name {

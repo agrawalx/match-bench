@@ -91,11 +91,16 @@ spec:
               drop:
                 - ALL
           resources:
+            # 2/2Gi Guaranteed (2026-08-02, was 250m/1CPU Burstable): one
+            # full-replay validation per pod (VALIDATOR_CONCURRENCY=1) — a
+            # 1-CPU limit CFS-throttles the replay, the exact failure class
+            # the capture had. requests == limits so a validation's footprint
+            # is bounded and predictable under KEDA scale-out (1..4 pods).
             requests:
-              cpu: 250m
-              memory: 256Mi
+              cpu: "2"
+              memory: 2Gi
             limits:
-              cpu: "1"
-              memory: 1Gi
+              cpu: "2"
+              memory: 2Gi
       securityContext:
         runAsNonRoot: true

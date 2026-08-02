@@ -698,15 +698,17 @@ func captureResources() corev1.ResourceRequirements {
 			// (producer_inflight 24) and CFS throttling was 0, so the loss was plain CPU
 			// starvation by neighbours.
 			corev1.ResourceCPU: resource.MustParse("2"),
-			// 1Gi (was 256Mi), limit 2Gi (was 512Mi), moving in lockstep with
-			// the 256MB BPF ring buffer (ebpf.rs EVENTS): BPF map memory is
-			// memcg-charged to the creating pod since kernel 5.11, so ring +
-			// userspace heap did not fit the old 512Mi limit. The raise also
-			// covers the matcher's worst case under an unresponsive engine —
-			// entries linger up to the 5s idle eviction, and 500k orders/s x
-			// 5s ~= 2.5M inflight entries — which would otherwise OOM the
+			// 2Gi request / 4Gi limit (2026-08-02, was 1Gi/2Gi), in lockstep
+			// with the 256MB BPF ring buffer (ebpf.rs EVENTS): BPF map memory
+			// is memcg-charged to the creating pod since kernel 5.11. The
+			// limit intentionally leaves room for the ring to grow to
+			// 512MB-1GB as a pure config response if contest-rate runs (M2)
+			// ever show drops — headroom bought now so the fix later is one
+			// constant, not a resize. Also covers the matcher's worst case
+			// under an unresponsive engine (500k orders/s x 5s idle window
+			// ~= 2.5M inflight entries), which would otherwise OOM the
 			// capture exactly when measuring the interesting failure mode.
-			corev1.ResourceMemory: resource.MustParse("1Gi"),
+			corev1.ResourceMemory: resource.MustParse("2Gi"),
 		},
 		Limits: corev1.ResourceList{
 			// 4 (was 2): the userspace drain+parse+publish wants ~3 cores at >150k
@@ -715,7 +717,7 @@ func captureResources() corev1.ResourceRequirements {
 			// scheduler floor), and lets the capture use its needed cores on
 			// the c6i.2xlarge (8 vCPU) sandbox node.
 			corev1.ResourceCPU:    resource.MustParse("4"),
-			corev1.ResourceMemory: resource.MustParse("2Gi"),
+			corev1.ResourceMemory: resource.MustParse("4Gi"),
 		},
 	}
 }

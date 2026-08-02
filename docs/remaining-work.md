@@ -616,6 +616,11 @@ always has a pass-1 session to read, and `score.Compute` never returns
 disqualified groups published while passing ones showed "pending" forever — cannot arise
 once every group contains a ramp.
 
+**Sequential-within-group dispatch is DONE (2026-08-02)** — StartBenchmark publishes
+only the first scenario; the status consumer dispatches the next on each terminal
+session (continue-on-fail). A 4-scenario group holds at most one order band at a time,
+so 4 contestants' groups run concurrently. Unit + live-DB integration tested.
+
 **What still has to change for that to be what actually runs:**
 - `StartBenchmark` fans out over EVERY row returned by `ListScenarios`, so the scenario
   table (or the trigger) has to be reduced to exactly these two. The local table currently

@@ -30,8 +30,14 @@ one contestant's group monopolizes the platform. Options:
   (b) grow the band space (48 partitions / width 6 = 8 bands) — touches producers,
       validator, ingester replica math, and is exactly the §7 Kafka topology exercise;
   (c) hybrid: sequential within group, 4 groups concurrent (= (a), the cheap answer).
-This doc assumes **(a)/(c)** until decided otherwise; (b) is the lever if contest-day
-throughput (groups/hour) proves too low.
+**DECIDED 2026-08-02: (a/c) — sequential within group, continue-on-fail.**
+Implemented in submission-api: StartBenchmark inserts every child run upfront but
+publishes only the first scenario (entered as `queued`); the benchmark-status consumer
+claims and dispatches the next `requested` run on each terminal session (completed OR
+failed — a failed correctness gate still lets the scale scenarios produce metrics;
+correctness scores 0 via pass-1-only aggregation). Claim is `FOR UPDATE SKIP LOCKED`
++ status-guarded → redelivery-safe, dispatch-at-most-once. (b) 8 bands remains the
+lever if groups/hour proves too low in rehearsal.
 
 ## 2. Node pools
 

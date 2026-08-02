@@ -48,3 +48,33 @@ func TestValidProtocolsIncludesAllSentinel(t *testing.T) {
 		}
 	}
 }
+
+// TestPortIsOptionalAndDerived pins the 2026-08-02 decision: `port:` in
+// benchmark.yaml is optional — ports are platform-mandated per protocol and
+// the eBPF capture filter hardcodes them, so the field never carried
+// information. Absent → derived from the PRIMARY protocol (first declared).
+// Present-but-wrong on a single-protocol declaration is still rejected.
+func TestPortIsOptionalAndDerived(t *testing.T) {
+	cases := []struct {
+		protocol string
+		wantPort int
+	}{
+		{"FIX", 9898},
+		{"REST", 8080},
+		{"WS", 8080},
+		{"REST,FIX", 8080}, // primary REST drives the derived port
+		{"FIX,WS", 9898},
+		{"ALL", 9898}, // ALL expands FIX-first
+	}
+	for _, c := range cases {
+		cfg := BenchmarkConfig{Protocol: c.protocol} // Port absent (0)
+		got, err := normalizePort(cfg)
+		if err != nil {
+			t.Errorf("%s: unexpected error %v", c.protocol, err)
+			continue
+		}
+		if got != c.wantPort {
+			t.Errorf("%s: derived port = %d, want %d", c.protocol, got, c.wantPort)
+		}
+	}
+}

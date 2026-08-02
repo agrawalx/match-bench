@@ -139,12 +139,11 @@ func ValidateSubmissionZip(r io.ReaderAt, size int64) (*BenchmarkConfig, error) 
 	if cfg.Build.Target == "" {
 		return nil, cerrs.ErrMissingBuildTarget
 	}
-	if cfg.Port < 1024 || cfg.Port > 65535 {
-		return nil, cerrs.ErrInvalidPortRange
-	}
-	if err := validatePortPolicy(cfg.Protocol, cfg.Port); err != nil {
+	port, err := normalizePort(cfg)
+	if err != nil {
 		return nil, err
 	}
+	cfg.Port = port
 
 	if err := validateBuildTarget(&cfg, buildFileName, buildFileContent); err != nil {
 		return nil, err
@@ -173,6 +172,30 @@ var validBuildTargetName = regexp.MustCompile(`^[A-Za-z0-9_.-]{1,64}$`)
 // contestant-chosen (docs/tps-improvement-plan.md §7.3). A submission
 // declaring ProtocolAll offers all protocols on their respective mandated
 // ports, so its declared port is not checked against a single value.
+// normalizePort resolves benchmark.yaml's OPTIONAL `port:` (decision
+// 2026-08-02): ports are platform-mandated per protocol (FIX=9898,
+// REST/WS=8080 — the eBPF capture filter hardcodes them, so they were never
+// contestant-choosable). Absent → derived from the PRIMARY (first-declared)
+// protocol. Present → still validated: a wrong value on a single-protocol
+// declaration means a confused contestant, better told loudly at upload than
+// debugged at run time.
+func normalizePort(cfg BenchmarkConfig) (int, error) {
+	if cfg.Port == 0 {
+		parts, err := topics.ParseProtocols(cfg.Protocol)
+		if err != nil {
+			return 0, cerrs.ErrInvalidProtocol
+		}
+		return int(topics.PortForProtocol(parts[0])), nil
+	}
+	if cfg.Port < 1024 || cfg.Port > 65535 {
+		return 0, cerrs.ErrInvalidPortRange
+	}
+	if err := validatePortPolicy(cfg.Protocol, cfg.Port); err != nil {
+		return 0, err
+	}
+	return cfg.Port, nil
+}
+
 func validatePortPolicy(protocol string, port int) error {
 	parts, err := topics.ParseProtocols(protocol)
 	if err != nil {

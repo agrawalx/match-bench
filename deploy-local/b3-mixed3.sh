@@ -24,12 +24,11 @@ TAG="${TAG:-dev1}"
 RUN_TIMEOUT="${RUN_TIMEOUT:-600}"
 VALIDATE_WAIT="${VALIDATE_WAIT:-420}"
 RPS="${RPS:-15000}"
-BOOK_IMAGE="iicpc/contestant-matching-engine:$TAG"
+BOOK_IMAGE="$(contestant_image contestant-matching-engine)"
 
 echo "############ B3 (minimal): FIX + REST + WS, one task each ############"
 
-docker image inspect "$BOOK_IMAGE" >/dev/null 2>&1 || {
-  echo "!! $BOOK_IMAGE not built: TAG=$TAG deploy-local/build-contestants.sh"; exit 1; }
+require_image "$BOOK_IMAGE"
 
 # ── seed the 3-task scenario (idempotent) ────────────────────────────────────
 # `|| true` is required, not defensive noise: psql_val pipes through `grep -vE '^Defaulted'`,

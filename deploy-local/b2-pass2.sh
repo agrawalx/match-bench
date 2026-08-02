@@ -19,7 +19,7 @@ TAG="${TAG:-dev1}"
 SCENARIO="${SCENARIO:-constant}"
 RUN_TIMEOUT="${RUN_TIMEOUT:-900}"
 VALIDATE_WAIT="${VALIDATE_WAIT:-420}"
-BOOK_IMAGE="iicpc/contestant-matching-engine:$TAG"
+BOOK_IMAGE="$(contestant_image contestant-matching-engine)"
 
 echo "############ B2 pass 2: invariants-mode grading of a scale scenario ############"
 
@@ -31,8 +31,7 @@ for d in benchmark/bot-fleet-controller benchmark/bot-fleet-worker \
   ready=$(kubectl -n "$ns" get deploy "$n" -o jsonpath='{.status.readyReplicas}' 2>/dev/null || echo 0)
   [ "${ready:-0}" -ge 1 ] || { echo "!! $d not ready — run deploy-local/up-dev.sh"; exit 1; }
 done
-docker image inspect "$BOOK_IMAGE" >/dev/null 2>&1 || {
-  echo "!! $BOOK_IMAGE not built: TAG=$TAG deploy-local/build-contestants.sh"; exit 1; }
+require_image "$BOOK_IMAGE"
 
 SCEN=$(psql_val "SELECT scenario_id FROM scenarios WHERE name='$SCENARIO';")
 [ -n "$SCEN" ] || { echo "!! scenario '$SCENARIO' is not seeded"; exit 1; }

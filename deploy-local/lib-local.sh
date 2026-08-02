@@ -84,3 +84,51 @@ prom_value() {
 ASSERT_FAILURES=0
 ok()   { echo "  PASS  $*"; }
 fail() { echo "  FAIL  $*"; ASSERT_FAILURES=$((ASSERT_FAILURES+1)); }
+
+# ── environment awareness (HARNESS_ENV=local | eks) ──────────────────────────
+# The b1–b5 suite runs UNFORKED on both environments (decided 2026-08-02):
+# everything kubectl/exec-based is identical (same pod names, namespaces),
+# so the only env-specific seams are image REFERENCES and image EXISTENCE
+# checks, both funneled through the helpers below.
+HARNESS_ENV="${HARNESS_ENV:-local}"
+if [ "$HARNESS_ENV" = eks ]; then
+  AWS_REGION="${AWS_REGION:-us-east-1}"
+  ECR_REGISTRY="${ECR_REGISTRY:-$(aws sts get-caller-identity --query Account --output text).dkr.ecr.${AWS_REGION}.amazonaws.com}"
+fi
+
+# contestant_image <short-name> — env-appropriate full image ref.
+contestant_image() {
+  case "$HARNESS_ENV" in
+    eks) echo "${ECR_REGISTRY}/iicpc/$1:${CONTESTANT_TAG:-${TAG:-dev1}}" ;;
+    *)   echo "iicpc/$1:${TAG:-dev1}" ;;
+  esac
+}
+
+# require_image <ref> — fail fast if the image this run depends on is absent
+# from the env's registry (docker store locally, ECR on EKS).
+require_image() {
+  if [ "$HARNESS_ENV" = eks ]; then
+    local repo tag
+    repo="${1#*/}"; repo="${repo%:*}"; tag="${1##*:}"
+    aws ecr describe-images --repository-name "$repo" --image-ids imageTag="$tag" \
+      --region "${AWS_REGION:-us-east-1}" >/dev/null 2>&1 || {
+      echo "!! $1 not in ECR — push it: TAG=${CONTESTANT_TAG:-${TAG:-dev1}} deploy-local/push-contestants.sh"; exit 1; }
+  else
+    docker image inspect "$1" >/dev/null 2>&1 || {
+      echo "!! $1 not built: TAG=${TAG:-dev1} deploy-local/build-contestants.sh"; exit 1; }
+  fi
+}
+
+# eks_sandbox_preflight — EKS-only capture-regime gates, no-op locally:
+# gro-disable must cover every sandbox node (GRO coalesces to 64KB regardless
+# of MTU; a missed node shows up later as inexplicable capture gaps).
+eks_sandbox_preflight() {
+  [ "$HARNESS_ENV" = eks ] || return 0
+  local nodes pods
+  nodes=$(${K} get nodes -l pool=sandbox --no-headers 2>/dev/null | wc -l)
+  pods=$(${K} -n sandbox get pods -l app=gro-disable --field-selector=status.phase=Running --no-headers 2>/dev/null | wc -l)
+  if [ "${nodes:-0}" -eq 0 ] || [ "${pods:-0}" -ne "${nodes:-0}" ]; then
+    echo "!! gro-disable coverage ${pods}/${nodes} sandbox nodes — capture WILL show gaps"; exit 1
+  fi
+  echo "   eks preflight: gro-disable covers ${pods}/${nodes} sandbox nodes"
+}

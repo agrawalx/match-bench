@@ -31,7 +31,7 @@ VALIDATE_WAIT="${VALIDATE_WAIT:-420}"
 DQ_THRESHOLD="${DQ_THRESHOLD:-0.95}"
 GAP_PCT_MAX="${GAP_PCT_MAX:-1.0}"
 
-BOOK_IMAGE="iicpc/contestant-matching-engine:$TAG"
+BOOK_IMAGE="$(contestant_image contestant-matching-engine)"
 
 echo "############ B3: mixed-protocol capture (FIX / REST / WS / ALL) ############"
 
@@ -43,8 +43,7 @@ for d in benchmark/bot-fleet-controller benchmark/bot-fleet-worker \
   ready=$(kubectl -n "$ns" get deploy "$n" -o jsonpath='{.status.readyReplicas}' 2>/dev/null || echo 0)
   [ "${ready:-0}" -ge 1 ] || { echo "!! $d not ready — run deploy-local/up-dev.sh"; exit 1; }
 done
-docker image inspect "$BOOK_IMAGE" >/dev/null 2>&1 || {
-  echo "!! $BOOK_IMAGE not built: TAG=$TAG deploy-local/build-contestants.sh"; exit 1; }
+require_image "$BOOK_IMAGE"
 
 SCEN_C=$(psql_val "SELECT scenario_id FROM scenarios WHERE name='correctness';")
 SCEN_K=$(psql_val "SELECT scenario_id FROM scenarios WHERE name='constant';")

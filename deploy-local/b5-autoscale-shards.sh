@@ -31,7 +31,7 @@ RUN_TIMEOUT="${RUN_TIMEOUT:-900}"
 RPS_CAP="${RPS_CAP:-2000}"
 WANT_SHARDS="${WANT_SHARDS:-3}"
 
-IMAGE="iicpc/contestant-echo:$TAG"
+IMAGE="$(contestant_image contestant-echo)"
 
 echo "############ B5: rate-aware sharding + autoscaling (scenario=$SCENARIO) ############"
 
@@ -42,8 +42,7 @@ kubectl get crd scaledobjects.keda.sh >/dev/null 2>&1 || {
   echo "!!   helm repo add kedacore https://kedacore.github.io/charts && helm repo update"
   echo "!!   helm install keda kedacore/keda -n keda --create-namespace --wait"
   exit 1; }
-docker image inspect "$IMAGE" >/dev/null 2>&1 || {
-  echo "!! $IMAGE not built: TAG=$TAG deploy-local/build-contestants.sh"; exit 1; }
+require_image "$IMAGE"
 
 total_rps=$(psql_val "SELECT sum((t->>'target_rps')::bigint) FROM scenarios, jsonb_array_elements(task_specs) t WHERE name='$SCENARIO';")
 # Expected ORDERS is sum(rate x that task's OWN duration), not peak_rate x scenario

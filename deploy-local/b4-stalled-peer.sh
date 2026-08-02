@@ -21,7 +21,7 @@ set -euo pipefail
 cd "$REPO_ROOT"
 
 TAG="${TAG:-dev1}"
-SINK_IMAGE="iicpc/stall-sink:$TAG"
+SINK_IMAGE="$(contestant_image stall-sink)"
 RUN_TIMEOUT="${RUN_TIMEOUT:-300}"
 SETTLE_S="${SETTLE_S:-30}"   # post-run wait for watchdog sweep + telemetry flush
 ASSERT_FAILURES=0
@@ -36,10 +36,14 @@ for d in benchmark/bot-fleet-controller benchmark/bot-fleet-worker sandbox/sandb
   [ "${ready:-0}" -ge 1 ] || { echo "!! $d not ready — run deploy-local/up-dev.sh"; exit 1; }
 done
 
-docker image inspect "$SINK_IMAGE" >/dev/null 2>&1 || {
-  echo ">> building $SINK_IMAGE"
-  docker build -q -f deploy-local/stall-sink/Dockerfile -t "$SINK_IMAGE" deploy-local/stall-sink
-}
+if [ "$HARNESS_ENV" = eks ]; then
+  require_image "$SINK_IMAGE"
+else
+  docker image inspect "$SINK_IMAGE" >/dev/null 2>&1 || {
+    echo ">> building $SINK_IMAGE"
+    docker build -q -f deploy-local/stall-sink/Dockerfile -t "$SINK_IMAGE" deploy-local/stall-sink
+  }
+fi
 echo "!! ensure the image is imported into k3s (idempotent, needs root):"
 echo "!!   docker save $SINK_IMAGE | sudo k3s ctr images import -"
 if [ "${SKIP_IMPORT_WAIT:-0}" != 1 ]; then

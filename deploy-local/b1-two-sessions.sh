@@ -23,8 +23,8 @@ TAG="${TAG:-dev1}"
 SCENARIO="${1:-constant}"
 RUN_TIMEOUT="${RUN_TIMEOUT:-600}"
 
-A_IMAGE="iicpc/contestant-matching-engine:$TAG"
-B_IMAGE="iicpc/contestant-echo:$TAG"
+A_IMAGE="$(contestant_image contestant-matching-engine)"
+B_IMAGE="$(contestant_image contestant-echo)"
 
 echo "############ B1: two concurrent sessions (scenario=$SCENARIO) ############"
 
@@ -43,8 +43,7 @@ done
 # what can be checked unprivileged (docker) and let the pod's own ErrImagePull report
 # a missed import; the run loop below surfaces it as slots never reaching Running.
 for img in "$A_IMAGE" "$B_IMAGE"; do
-  docker image inspect "$img" >/dev/null 2>&1 || {
-    echo "!! $img not built: TAG=$TAG deploy-local/build-contestants.sh"; exit 1; }
+  require_image "$img"
 done
 echo "   (images built; if a slot never leaves ContainerCreating, the k3s import was missed:"
 echo "    TAG=$TAG sudo -E deploy-local/import-dev-images.sh)"

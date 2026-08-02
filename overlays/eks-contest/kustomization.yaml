@@ -11,6 +11,7 @@ kind: Kustomization
 
 resources:
   - ../../k8s
+  - results-export-job.yaml
 
 # ECR account/region match infra/terraform-v2 tfvars. newTag is a placeholder
 # until the first push-images.sh run stamps a real immutable tag.

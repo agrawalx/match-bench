@@ -22,8 +22,8 @@ TAG="${TAG:-dev1}"
 RUN_TIMEOUT="${RUN_TIMEOUT:-600}"
 VALIDATE_WAIT="${VALIDATE_WAIT:-300}"
 
-BOOK_IMAGE="iicpc/contestant-matching-engine:$TAG"
-ECHO_IMAGE="iicpc/contestant-echo:$TAG"
+BOOK_IMAGE="$(contestant_image contestant-matching-engine)"
+ECHO_IMAGE="$(contestant_image contestant-echo)"
 
 echo "############ B2: two-pass flow — pass 1 correctness gate ############"
 
@@ -36,9 +36,9 @@ for d in benchmark/bot-fleet-controller benchmark/bot-fleet-worker \
   [ "${ready:-0}" -ge 1 ] || { echo "!! $d not ready — run deploy-local/up-dev.sh"; exit 1; }
 done
 for img in "$BOOK_IMAGE" "$ECHO_IMAGE"; do
-  docker image inspect "$img" >/dev/null 2>&1 || {
-    echo "!! $img not built: TAG=$TAG deploy-local/build-contestants.sh"; exit 1; }
+  require_image "$img"
 done
+eks_sandbox_preflight
 
 SCEN=$(psql_val "SELECT scenario_id FROM scenarios WHERE name='correctness';")
 [ -n "$SCEN" ] || {

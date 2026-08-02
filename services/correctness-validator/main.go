@@ -87,7 +87,13 @@ func main() {
 	// controller's MAX_CONCURRENT_SESSIONS=4. See the constant's doc comment in
 	// schemas/rust/src/lib.rs for why 8 broke exclusivity at the 4th session.
 	bandWidth := int32(envInt("VALIDATOR_ORDER_BAND_WIDTH", 6))
-	workloadGroup := envOr("KAFKA_WORKLOAD_BAND_GROUP", "correctness-validator-band")
+	// Per-POD group, not shared: the band consumer must see EVERY session's
+	// WorkloadSpec, and a group shared across replicas splits the topic's
+	// partitions between them — each replica then learns only a subset of
+	// bands, and validating a session with an unknown band silently falls
+	// back to MaxRate=false, i.e. invariants mode for a pass-1 session.
+	// POD_NAME comes from the downward API; empty (local dev) keeps the base.
+	workloadGroup := instanceGroup(envOr("KAFKA_WORKLOAD_BAND_GROUP", "correctness-validator-band"), os.Getenv("POD_NAME"))
 	brokers := parseBrokers(kafkaBrokers)
 	if err := checkTimeoutConfig(validationTimeout, settleDelay); err != nil {
 		log.Error("invalid validation timeout config", "validation_timeout_ms", validationTimeout.Milliseconds(), "settle_ms", settleDelay.Milliseconds(), "error", err)
@@ -574,6 +580,17 @@ func checkTimeoutConfig(validationTimeout, settleDelay time.Duration) error {
 
 // envOr performs the package-specific operation described by its name.
 // It keeps validation, side effects, and returned values within this package's contract.
+// instanceGroup suffixes a consumer-group id with this pod's identity so
+// every replica joins its OWN group and reads the whole topic (broadcast),
+// instead of sharing one group and splitting partitions. Empty instance
+// (local dev, tests) leaves the base group unchanged.
+func instanceGroup(base, instance string) string {
+	if instance == "" {
+		return base
+	}
+	return base + "-" + instance
+}
+
 func envOr(key, def string) string {
 	if v := strings.TrimSpace(os.Getenv(key)); v != "" {
 		return v

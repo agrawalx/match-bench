@@ -58,7 +58,12 @@ spec:
               create_topic submission.build.requested 3 604800000 || failed=1
               create_topic submission.status.updated 3 604800000 || failed=1
               create_topic benchmark.requested 3 604800000 || failed=1
-              create_topic benchmark.status.updated 3 604800000 || failed=1
+              # 4, not 3: partitions here bound VALIDATION parallelism (one
+              # status partition per active validator group member), and the
+              # true concurrent-run ceiling is 4 exclusive order bands
+              # (24 partitions / width 6). Keep this >= the band count or the
+              # last completing session's validation queues by construction.
+              create_topic benchmark.status.updated 4 604800000 || failed=1
               create_topic workload.assignments 24 86400000 || failed=1
               create_topic barrier 3 86400000 || failed=1
               create_topic bot.ready 3 86400000 || failed=1

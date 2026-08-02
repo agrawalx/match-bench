@@ -78,7 +78,7 @@ done
 echo
 
 val() { # val <field>
-  { kubectl -n benchmark logs deploy/correctness-validator --tail=6000 2>/dev/null \
+  { kubectl -n benchmark logs -l app=correctness-validator --tail=6000 2>/dev/null \
       | grep "\"session_id\":\"$sess\"" | grep '"msg":"session validated"' \
       | grep -oE "\"$1\":(\"[^\"]*\"|[0-9.eE+-]+|true|false)" | tail -1 | cut -d: -f2- | tr -d '"'; } 2>/dev/null || true
 }

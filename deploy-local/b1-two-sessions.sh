@@ -247,7 +247,7 @@ echo "   waiting up to ${SCORE_WAIT}s for both sessions to be validated..."
 # pipeline here aborts the run before any assertion prints — which is exactly what
 # happened on the first attempt.
 val_counter() { # val_counter <session> <field>
-  { kubectl -n benchmark logs deploy/correctness-validator --tail=4000 2>/dev/null \
+  { kubectl -n benchmark logs -l app=correctness-validator --tail=4000 2>/dev/null \
       | grep "\"session_id\":\"$1\"" \
       | grep '"msg":"session validated"' \
       | grep -oE "\"$2\":[0-9]+" \

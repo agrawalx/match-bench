@@ -99,7 +99,7 @@ echo
 # Validation is asynchronous (settle delay + drain) and sessions are validated one at a
 # time, so poll rather than read once.
 val() { # val <session> <field>
-  { kubectl -n benchmark logs deploy/correctness-validator --tail=5000 2>/dev/null \
+  { kubectl -n benchmark logs -l app=correctness-validator --tail=5000 2>/dev/null \
       | grep "\"session_id\":\"$1\"" | grep '"msg":"session validated"' \
       | grep -oE "\"$2\":[0-9.]+" | tail -1 | cut -d: -f2; } 2>/dev/null || true
 }

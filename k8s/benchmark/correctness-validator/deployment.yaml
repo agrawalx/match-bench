@@ -54,10 +54,23 @@ spec:
                   key: database-url
             - name: KAFKA_STATUS_GROUP
               value: correctness-validator
+            # Downward-API pod identity: suffixes the band-learning consumer's
+            # group so every replica reads ALL of workload.assignments (a
+            # shared group would split it and replicas would miss bands ->
+            # silent wrong-mode validation). Required for replicas > 1.
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
             - name: SETTLE_DELAY_MS
               value: "10000"
+            # 1 (was 4): parallelism now comes from KEDA-scaled replicas
+            # (scaledobject.yaml, 1..4), one validation per pod, so a pod's
+            # requests/limits bound exactly one full-replay validation. In a
+            # single process, >1 was capped at 3 by the status topic's
+            # partition count anyway.
             - name: VALIDATOR_CONCURRENCY
-              value: "4"
+              value: "1"
           livenessProbe:
             httpGet:
               path: /healthz

@@ -75,7 +75,7 @@ ctl_status() {
       | grep -oE '"status":"[a-z_]+"' | tail -1 | cut -d'"' -f4; } 2>/dev/null || true
 }
 val() {
-  { kubectl -n benchmark logs deploy/correctness-validator --tail=6000 2>/dev/null \
+  { kubectl -n benchmark logs -l app=correctness-validator --tail=6000 2>/dev/null \
       | grep "\"session_id\":\"$1\"" | grep '"msg":"session validated"' \
       | grep -oE "\"$2\":[0-9.a-z]+" | tail -1 | cut -d: -f2; } 2>/dev/null || true
 }

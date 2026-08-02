@@ -39,17 +39,12 @@ spec:
 
     # 443 for ECR pull/push + HTTPS package mirrors; 80 for apt (deb.debian.org is HTTP) in
     # the generated Dockerfile's runtime stage (ca-certificates install).
+    # NOT extended with cluster CIDRs (unlike the API-server rules elsewhere):
+    # build jobs must reach the internet (ECR, apt) and explicitly NOT the
+    # cluster's internal networks — that is what the except list is for.
     - to:
         - ipBlock:
             cidr: 0.0.0.0/0
-        - ipBlock:
-            cidr: 172.20.0.0/16
-        - ipBlock:
-            cidr: 10.0.0.0/16
-        - ipBlock:
-            cidr: 10.43.0.0/16
-        - ipBlock:
-            cidr: 10.42.0.0/16
             except:
               - 10.0.0.0/8
               - 172.16.0.0/12

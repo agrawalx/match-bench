@@ -2,7 +2,11 @@
 # path (ecr_aws.go — IRSA-minted push tokens) activates only via
 # REGISTRY_PROVIDER=ecr; without it the spawner used Harbor basic-auth
 # (anon/anon) against ECR. HARBOR_PROJECT must be iicpc/ to match the IAM
-# push policy (base says agrawalx, the old ghcr project). The SA's IRSA
+# push policy (base says agrawalx, the old ghcr project). Do NOT set
+# HARBOR_PRODUCTION_ENDPOINT here: the base takes it from a secretKeyRef and a
+# strategic-merge `value:` on the same env name yields both fields, which the
+# API server rejects — silently killing the whole Deployment apply (2026-08-03).
+# create-secrets.sh already points that secret at the ECR registry. The SA IRSA
 # annotation is applied by terraform's enable_spawner_irsa or by hand:
 #   kubectl -n build annotate sa build-spawner \
 #     eks.amazonaws.com/role-arn=arn:aws:iam::885232248981:role/iicpc-contest-build-spawner --overwrite
@@ -21,5 +25,3 @@ spec:
               value: ecr
             - name: HARBOR_PROJECT
               value: iicpc
-            - name: HARBOR_PRODUCTION_ENDPOINT
-              value: 885232248981.dkr.ecr.us-east-1.amazonaws.com

@@ -36,7 +36,8 @@ images:
     newTag: "418a2c0"
   - name: ghcr.io/agrawalx/bot-fleet-controller
     newName: 885232248981.dkr.ecr.us-east-1.amazonaws.com/iicpc/bot-fleet-controller
-    newTag: "418a2c0"
+    # carries the 180s slot HTTP timeout fix (client.go)
+    newTag: "45364d4-t180"
   - name: ghcr.io/agrawalx/bot-fleet
     # Multi-arch manifest list (amd64 + arm64) — the ONE dual-arch image;
     # Graviton botworker nodes pull arm64 automatically.
@@ -68,6 +69,11 @@ patches:
       kind: Deployment
       name: submission-api
       namespace: platform
+  - path: patch-controller-deadlines.yaml
+    target:
+      kind: Deployment
+      name: bot-fleet-controller
+      namespace: benchmark
   - path: patch-spawner-ecr.yaml
     target:
       kind: Deployment

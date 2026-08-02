@@ -1,0 +1,27 @@
+# Kafka = 1 broker (decided 2026-08-02, validation phase — same shape as
+# local; the 2nd kafka node idles and 2-broker scaling is a later revisit).
+# The base statefulset carries the bench-tier 3-broker shape and left kafka-2
+# Pending forever on the first apply. RF=1 everywhere: re-runnable benchmark
+# data, no replication.
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: kafka
+  namespace: data
+spec:
+  replicas: 1
+  template:
+    spec:
+      containers:
+        - name: kafka
+          env:
+            - name: KAFKA_CONTROLLER_QUORUM_VOTERS
+              value: "0@kafka-0.kafka.data.svc.cluster.local:9093"
+            - name: KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR
+              value: "1"
+            - name: KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR
+              value: "1"
+            - name: KAFKA_TRANSACTION_STATE_LOG_MIN_ISR
+              value: "1"
+            - name: KAFKA_MIN_INSYNC_REPLICAS
+              value: "1"

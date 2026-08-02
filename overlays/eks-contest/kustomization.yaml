@@ -68,3 +68,8 @@ patches:
       kind: Deployment
       name: submission-api
       namespace: platform
+  - path: patch-kafka-single-broker.yaml
+    target:
+      kind: StatefulSet
+      name: kafka
+      namespace: data

@@ -5,7 +5,9 @@
 # the images transformer owns refs now), build/serviceaccount.yaml (redundant: the
 # same ServiceAccount is defined in build/rbac.yaml with its roles),
 # benchmark/telemetry-rollup (rollup lives as the 2nd document of
-# benchmark/telemetry-ingester/deployment.yaml).
+# benchmark/telemetry-ingester/deployment.yaml), platform/auth-api (auth is
+# disabled platform-wide, decided 2026-08-02; files kept for a future
+# auth-enabled deployment).
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 resources:
@@ -54,8 +56,6 @@ resources:
   - observability/prometheus/pvc.yaml
   - observability/prometheus/rbac.yaml
   - observability/prometheus/service.yaml
-  - platform/auth-api/deployment.yaml
-  - platform/auth-api/service.yaml
   - platform/frontend/deployment.yaml
   - platform/frontend/network-policy.yaml
   - platform/frontend/service.yaml

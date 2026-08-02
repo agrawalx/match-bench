@@ -596,11 +596,13 @@ everything still open, ordered by what would hurt most if it stayed broken.
   pass-2-only calibration**, measured in the MTU-9001 regime (pre-change numbers are
   invalid): reference engine vs a deliberately-naive engine, set W where the
   distributions separate; fully local except the final number.
-- **`P99AtPeakNS` is the WORST SINGLE SECOND** (`MaxP99NS`), commented "diagnostic;
-  retained for visibility" — but `score.go` ranks on it as a tie-break. The pass/fail
-  gate correctly uses `StableP99NS` (median of per-second p99), which is immune to
-  cold start. The ranking is not. For a 45s run the deciding second is very often the
-  connection-setup one.
+- ~~**`P99AtPeakNS` is the WORST SINGLE SECOND**~~ **DECIDED + FIXED (2026-08-02):**
+  the TPS tiebreak now uses `StableP99NS` (median of the peak wave's per-second p99s) —
+  the same summary the pass/fail gate judges, so gate and ranking agree on what latency
+  means and ties are no longer broken by connection-setup/warmup noise. `MaxP99NS`
+  stays computed as the diagnostic its comment always claimed. Pinned by
+  `TestP99AtPeakIsStableNotWorstSecond` (which also documents that the climb judges
+  waves from index 1; wave 0 is baseline).
 
 ### 2. Make the run-group shape match the scoring rule
 

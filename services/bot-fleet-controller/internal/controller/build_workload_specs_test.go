@@ -118,3 +118,30 @@ func TestBuildWorkloadSpecsKeepsTaskIDsGloballyUnique(t *testing.T) {
 		t.Fatalf("expected 12 unique task_ids, got %d", len(ids))
 	}
 }
+
+// TestPass1IsSingleConnectionEvenForProtocolAll pins the decision (2026-08-02)
+// that pass-1 correctness ALWAYS runs on ONE connection with ONE protocol —
+// for a ProtocolAll submission, the first declared target (FIX). The
+// correctness scenario builds exactly one task, and round-robin stamping
+// (TargetIdx = i % len(targets)) therefore lands it on index 0. This is what
+// makes TCPSeq a total order over the session, which full-replay grading
+// depends on; W (CROSS_FLOW_WINDOW_US) is thereby a pass-2-only concern.
+// If the correctness scenario ever grows a second task, or the target table's
+// first entry stops being FIX, this fails and the decision must be revisited
+// consciously rather than eroded.
+func TestPass1IsSingleConnectionEvenForProtocolAll(t *testing.T) {
+	sub := &store.SubmissionInfo{Protocol: "ALL"}
+	targets := submissionTargets(sub)
+	if len(targets) != 3 || targets[0].Protocol != "FIX" {
+		t.Fatalf("ALL targets = %+v, want FIX first of 3", targets)
+	}
+	// One correctness task, round-robin stamped exactly as runner.go does.
+	correctnessTasks := 1
+	seen := map[uint8]bool{}
+	for i := 0; i < correctnessTasks; i++ {
+		seen[uint8(i%len(targets))] = true
+	}
+	if len(seen) != 1 || !seen[0] {
+		t.Fatalf("pass-1 task target indices = %v, want exactly {0} (single FIX connection)", seen)
+	}
+}

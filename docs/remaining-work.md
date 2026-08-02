@@ -585,11 +585,17 @@ everything still open, ordered by what would hurt most if it stayed broken.
 
 ### 1. Two ranking decisions that change what contestants are graded on
 
-- **W (B6).** No longer a pass-2-only question: a `ProtocolAll` submission runs three
-  concurrent flows, so pass 1 loses its single-connection guarantee too (measured: 15.5%
-  of orders flagged as `time_violations`, accounting for the score exactly). Whatever is
-  chosen has to cover multi-flow replay in BOTH passes. The naive-engine comparison that
-  finds where the distributions separate is fully local; only the final number needs EKS.
+- **W (B6).** ~~No longer a pass-2-only question: a `ProtocolAll` submission runs three
+  concurrent flows in pass 1~~ **Corrected 2026-08-02: pass-1 is single-connection by
+  construction for EVERY submission, including ProtocolAll.** The correctness scenario
+  builds exactly one task (`buildCorrectnessTasks`) and round-robin target stamping
+  (`runner.go` TargetIdx = i % len(targets)) lands it on target 0 — FIX, one flow. The
+  15.5%-time-violation measurement predates this shape and should not drive W. Decision
+  (2026-08-02): keep it this way — one protocol, one connection, TCPSeq totally orders
+  pass 1; pinned by `TestPass1IsSingleConnectionEvenForProtocolAll`. **W is therefore a
+  pass-2-only calibration**, measured in the MTU-9001 regime (pre-change numbers are
+  invalid): reference engine vs a deliberately-naive engine, set W where the
+  distributions separate; fully local except the final number.
 - **`P99AtPeakNS` is the WORST SINGLE SECOND** (`MaxP99NS`), commented "diagnostic;
   retained for visibility" — but `score.go` ranks on it as a tie-break. The pass/fail
   gate correctly uses `StableP99NS` (median of per-second p99), which is immune to

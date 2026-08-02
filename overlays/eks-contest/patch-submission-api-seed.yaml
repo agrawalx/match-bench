@@ -1,0 +1,20 @@
+# Contest scenario seed: the decided 4-scenario run group (2026-08-02) —
+# correctness gate first, then ramp/spike/constant, dispatched sequentially
+# within each group by the status consumer.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: submission-api
+  namespace: platform
+spec:
+  template:
+    spec:
+      containers:
+        - name: submission-api
+          env:
+            - name: SEED_SCENARIOS
+              value: "correctness,ramp,spike,constant"
+            - name: RESEED_SCENARIOS
+              value: "true"
+            - name: AUTH_REQUIRED
+              value: "true"

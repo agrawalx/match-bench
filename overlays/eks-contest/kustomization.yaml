@@ -1,0 +1,69 @@
+# overlays/eks-contest — the contest-tier EKS environment
+# (docs/eks-contest-deployment.md).
+#   kubectl apply -k overlays/eks-contest
+# Owns: ECR image refs (tags stamped by infra/terraform-v2/push-images.sh —
+# IMMUTABLE tags, so "did this pod get my code" is answerable by construction),
+# contest sizing (ALGO 4CPU/8Gi), the Graviton 1-pod-per-node bot-worker shape,
+# and the full 4-scenario seed. NO CoreDNS hack here — it exists only in
+# overlays/local-k3s, structurally.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - ../../k8s
+
+# ECR account/region match infra/terraform-v2 tfvars. newTag is a placeholder
+# until the first push-images.sh run stamps a real immutable tag.
+images:
+  - name: ghcr.io/agrawalx/submission-api
+    newName: 885232248981.dkr.ecr.us-east-1.amazonaws.com/iicpc/submission-api
+    newTag: SET-BY-PUSH-SCRIPT
+  - name: ghcr.io/agrawalx/auth-api
+    newName: 885232248981.dkr.ecr.us-east-1.amazonaws.com/iicpc/auth-api
+    newTag: SET-BY-PUSH-SCRIPT
+  - name: ghcr.io/agrawalx/leaderboard-api
+    newName: 885232248981.dkr.ecr.us-east-1.amazonaws.com/iicpc/leaderboard-api
+    newTag: SET-BY-PUSH-SCRIPT
+  - name: ghcr.io/agrawalx/frontend
+    newName: 885232248981.dkr.ecr.us-east-1.amazonaws.com/iicpc/frontend
+    newTag: SET-BY-PUSH-SCRIPT
+  - name: ghcr.io/agrawalx/spawner
+    newName: 885232248981.dkr.ecr.us-east-1.amazonaws.com/iicpc/spawner
+    newTag: SET-BY-PUSH-SCRIPT
+  - name: ghcr.io/agrawalx/sandbox-orchestrator
+    newName: 885232248981.dkr.ecr.us-east-1.amazonaws.com/iicpc/sandbox-orchestrator
+    newTag: SET-BY-PUSH-SCRIPT
+  - name: ghcr.io/agrawalx/bot-fleet-controller
+    newName: 885232248981.dkr.ecr.us-east-1.amazonaws.com/iicpc/bot-fleet-controller
+    newTag: SET-BY-PUSH-SCRIPT
+  - name: ghcr.io/agrawalx/bot-fleet
+    # Multi-arch manifest list (amd64 + arm64) — the ONE dual-arch image;
+    # Graviton botworker nodes pull arm64 automatically.
+    newName: 885232248981.dkr.ecr.us-east-1.amazonaws.com/iicpc/bot-fleet
+    newTag: SET-BY-PUSH-SCRIPT
+  - name: ghcr.io/agrawalx/correctness-validator
+    newName: 885232248981.dkr.ecr.us-east-1.amazonaws.com/iicpc/correctness-validator
+    newTag: SET-BY-PUSH-SCRIPT
+  - name: ghcr.io/agrawalx/score-computer
+    newName: 885232248981.dkr.ecr.us-east-1.amazonaws.com/iicpc/score-computer
+    newTag: SET-BY-PUSH-SCRIPT
+  - name: ghcr.io/agrawalx/telemetry-ingester
+    newName: 885232248981.dkr.ecr.us-east-1.amazonaws.com/iicpc/telemetry-ingester
+    newTag: SET-BY-PUSH-SCRIPT
+
+patches:
+  - path: patch-orchestrator-algo.yaml
+    target:
+      kind: Deployment
+      name: sandbox-orchestrator
+      namespace: sandbox
+  - path: patch-botworker-arm.yaml
+    target:
+      kind: Deployment
+      name: bot-fleet-worker
+      namespace: benchmark
+  - path: patch-submission-api-seed.yaml
+    target:
+      kind: Deployment
+      name: submission-api
+      namespace: platform

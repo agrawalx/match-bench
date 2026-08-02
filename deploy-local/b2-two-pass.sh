@@ -58,22 +58,36 @@ fi
 
 # ── trigger both contestants through pass 1 ──────────────────────────────────
 STAMP="$(date +%s)"
-declare -A SESSION IMAGE_OF
+declare -A SESSION IMAGE_OF SUB_OF CONTESTANT_OF
 IMAGE_OF[book]="$BOOK_IMAGE"
 IMAGE_OF[echo]="$ECHO_IMAGE"
 
+# EKS: contestants go through the REAL submission path (zip -> build-worker ->
+# Kaniko -> ECR -> ready); the direct-insert bypass below stays local-only.
+if [ "$HARNESS_ENV" = eks ]; then
+  SUB_OF[book]="$(eks_submission "$REPO_ROOT/deploy-local/reference-clob-all.zip")"
+  SUB_OF[echo]="$(eks_submission "$REPO_ROOT/deploy-local/smoke-rest-echo.zip")"
+fi
+
 for who in book echo; do
-  sub="b2-$who-$STAMP"; sess="$(new_session_id)"; grp="$(cat /proc/sys/kernel/random/uuid)"
+  sess="$(new_session_id)"; grp="$(cat /proc/sys/kernel/random/uuid)"
   SESSION[$who]="$sess"
-  psql_exec "INSERT INTO submissions
-    (submission_id, contestant_id, sha256, language, protocol, port, team_name, artifact_path, image_ref, status)
-   VALUES ('$sub','b2-$who','b2-$who-$STAMP','rust','FIX',9898,'b2-$who','n/a','${IMAGE_OF[$who]}','ready');" >/dev/null
+  if [ "$HARNESS_ENV" = eks ]; then
+    sub="${SUB_OF[$who]}"
+    CONTESTANT_OF[$who]="$(psql_val "SELECT contestant_id FROM submissions WHERE submission_id='$sub';")"
+  else
+    sub="b2-$who-$STAMP"
+    CONTESTANT_OF[$who]="b2-$who"
+    psql_exec "INSERT INTO submissions
+      (submission_id, contestant_id, sha256, language, protocol, port, team_name, artifact_path, image_ref, status)
+     VALUES ('$sub','b2-$who','b2-$who-$STAMP','rust','FIX',9898,'b2-$who','n/a','${IMAGE_OF[$who]}','ready');" >/dev/null
+  fi
   psql_exec "INSERT INTO run_groups (run_group_id, submission_id, contestant_id, status)
-   VALUES ('$grp','$sub','b2-$who','running');" >/dev/null
+   VALUES ('$grp','$sub','${CONTESTANT_OF[$who]}','running');" >/dev/null
   psql_exec "INSERT INTO runs (session_id, submission_id, contestant_id, run_group_id, scenario_id, status)
-   VALUES ('$sess','$sub','b2-$who','$grp','$SCEN','requested');" >/dev/null
+   VALUES ('$sess','$sub','${CONTESTANT_OF[$who]}','$grp','$SCEN','requested');" >/dev/null
   kafka_produce benchmark.requested "$grp" \
-    "{\"session_id\":\"$sess\",\"submission_id\":\"$sub\",\"contestant_id\":\"b2-$who\",\"run_group_id\":\"$grp\",\"scenario_id\":\"$SCEN\",\"requested_at\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}" >/dev/null
+    "{\"session_id\":\"$sess\",\"submission_id\":\"$sub\",\"contestant_id\":\"${CONTESTANT_OF[$who]}\",\"run_group_id\":\"$grp\",\"scenario_id\":\"$SCEN\",\"requested_at\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}" >/dev/null
   echo "   $who -> session ${SESSION[$who]}"
   # Serialize: pass 1 is a single-task, single-connection run by design, and running
   # both at once would put two sessions on one worker and skew the max-rate load.

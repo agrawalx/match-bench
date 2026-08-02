@@ -132,3 +132,34 @@ eks_sandbox_preflight() {
   fi
   echo "   eks preflight: gro-disable covers ${pods}/${nodes} sandbox nodes"
 }
+
+# eks_submission <zip-path> — push a contestant through the REAL submission
+# path (decided 2026-08-02: contestant images exist ONLY as build-pipeline
+# products; the local direct-insert bypass stays local-only). Uploads the zip
+# to submission-api via a short-lived port-forward, polls until the build
+# pipeline reports `ready`, echoes the submission_id. Requires AUTH off (the
+# validation-phase overlay setting; contest-day auth is the other account's
+# concern). Fails loudly on build failure or timeout.
+eks_submission() {
+  local zip="$1" lport pf_pid sid status deadline
+  [ -f "$zip" ] || { echo "!! zip not found: $zip" >&2; return 1; }
+  lport=$(( 21000 + RANDOM % 9000 ))
+  ${K} -n platform port-forward svc/submission-api "${lport}:8080" >/dev/null 2>&1 &
+  pf_pid=$!
+  for _ in $(seq 1 40); do curl -sf "http://127.0.0.1:${lport}/health" >/dev/null 2>&1 && break; sleep 0.25; done
+  sid=$(curl -sf -F "file=@${zip}" "http://127.0.0.1:${lport}/submit" | grep -oE '"submission_id":"[^"]*"' | cut -d'"' -f4)
+  [ -n "$sid" ] || { kill "$pf_pid" 2>/dev/null; echo "!! upload failed for $zip" >&2; return 1; }
+  echo ">> submitted $(basename "$zip") -> $sid (waiting for build pipeline)" >&2
+  deadline=$(( $(date +%s) + ${SUBMISSION_BUILD_TIMEOUT:-900} ))
+  while [ "$(date +%s)" -lt "$deadline" ]; do
+    status=$(curl -sf "http://127.0.0.1:${lport}/submissions/${sid}" | grep -oE '"status":"[^"]*"' | head -1 | cut -d'"' -f4)
+    case "$status" in
+      ready)  kill "$pf_pid" 2>/dev/null; echo "$sid"; return 0 ;;
+      failed) kill "$pf_pid" 2>/dev/null; echo "!! build FAILED for $sid" >&2; return 1 ;;
+    esac
+    sleep 10
+  done
+  kill "$pf_pid" 2>/dev/null
+  echo "!! build timeout for $sid (status=$status)" >&2
+  return 1
+}

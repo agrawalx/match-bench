@@ -148,6 +148,10 @@ variable "service_images" {
     "score-computer",
     "telemetry-ingester",
     "ebpf-latency",
+    # Measurement fixtures (platform tooling, not contestants — contestant
+    # repos are created by build-worker from real submissions):
+    "drain-sink",
+    "stall-sink",
   ]
 }
 

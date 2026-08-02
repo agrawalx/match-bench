@@ -7,11 +7,16 @@
 #                                 new code means a new tag)
 #
 # bot-fleet is the ONE dual-arch build (linux/amd64 + linux/arm64 manifest
-# list): local x86 k3s and the Graviton botworker pool pull the same tag and
-# each gets its own arch. Everything else runs on x86 pools only and gets a
-# plain amd64 build. Requires: docker buildx (with binfmt/QEMU for the arm
-# cross-build: `docker run --privileged --rm tonistiigi/binfmt --install arm64`
-# once per machine), AWS credentials, and the ECR repos from terraform-v2.
+# list) and REQUIRES a docker-container buildx builder — the default docker
+# driver cannot do multi-platform (bitten 2026-08-02):
+#   docker buildx create --name multiarch --driver docker-container
+# plus binfmt/QEMU once per machine:
+#   docker run --privileged --rm tonistiigi/binfmt --install arm64
+# Everything else is x86-only and uses plain docker build+push (reuses the
+# daemon layer cache). Includes the measurement FIXTURES (drain-sink,
+# stall-sink) — platform tooling, not contestants; real contestant images are
+# produced ONLY by the build pipeline from submitted zips (decided
+# 2026-08-02; push-contestants.sh deleted for that reason).
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 
@@ -39,18 +44,20 @@ services/leaderboard-api/Dockerfile       iicpc/leaderboard-api
 frontend/Dockerfile                       iicpc/frontend frontend
 services/telemetry-ingester/Dockerfile    iicpc/telemetry-ingester
 services/ebpf-latency/Dockerfile          iicpc/ebpf-latency
+deploy-local/drain-sink/Dockerfile        iicpc/drain-sink deploy-local/drain-sink
+deploy-local/stall-sink/Dockerfile        iicpc/stall-sink deploy-local/stall-sink
 EOF
 }
 
 while read -r df repo ctx; do
   [ -n "$df" ] || continue
   echo "=== amd64 build+push $repo:$TAG  ($(date +%H:%M:%S)) ==="
-  docker buildx build --platform linux/amd64 \
-    -f "$df" -t "$REGISTRY/$repo:$TAG" --push "${ctx:-.}"
+  docker build -f "$df" -t "$REGISTRY/$repo:$TAG" "${ctx:-.}"
+  docker push "$REGISTRY/$repo:$TAG"
 done < <(x86_builds)
 
 echo "=== MULTI-ARCH build+push iicpc/bot-fleet:$TAG (amd64+arm64) ==="
-docker buildx build --platform linux/amd64,linux/arm64 \
+docker buildx build --builder multiarch --platform linux/amd64,linux/arm64 \
   -f services/bot-fleet/Dockerfile -t "$REGISTRY/iicpc/bot-fleet:$TAG" --push .
 
 echo ">> stamping tag $TAG into $OVERLAY"

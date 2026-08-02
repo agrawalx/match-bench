@@ -16,5 +16,7 @@ spec:
               value: "correctness,ramp,spike,constant"
             - name: RESEED_SCENARIOS
               value: "true"
+            # false during the validation phase: the b-suite submits zips
+            # unauthenticated. Contest-day (different account) flips true.
             - name: AUTH_REQUIRED
-              value: "true"
+              value: "false"

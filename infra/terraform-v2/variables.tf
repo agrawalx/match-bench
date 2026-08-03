@@ -70,16 +70,17 @@ variable "kafka_instance_type" {
 }
 variable "kafka_min_size" {
   type    = number
-  default = 2
+  default = 1
 }
 variable "kafka_max_size" {
-  type    = number
-  default = 2
-}
-variable "kafka_desired_size" {
-  description = "2 for contest (ramp-peak telemetry); 1 is the cheap bring-up knob."
+  description = "Headroom for a 2nd broker if M3 shows one is not enough; raising this alone changes nothing until the overlay's broker patch and quorum voters follow."
   type        = number
   default     = 2
+}
+variable "kafka_desired_size" {
+  description = "1 (2026-08-03): the eks-contest overlay runs a SINGLE broker, so a 2nd node sat idle at ~$0.19/h. Node count and broker count must move together — raise this only alongside patch-kafka-single-broker.yaml (replicas + quorum voters + internal-topic RFs). M3 decides whether one broker holds at the ramp target."
+  type        = number
+  default     = 1
 }
 variable "kafka_disk_size" {
   type    = number

@@ -18,40 +18,40 @@ resources:
 images:
   - name: ghcr.io/agrawalx/submission-api
     newName: 885232248981.dkr.ecr.us-east-1.amazonaws.com/iicpc/submission-api
-    newTag: "418a2c0"
+    newTag: "9385af4"
   - name: ghcr.io/agrawalx/auth-api
     newName: 885232248981.dkr.ecr.us-east-1.amazonaws.com/iicpc/auth-api
-    newTag: "418a2c0"
+    newTag: "9385af4"
   - name: ghcr.io/agrawalx/leaderboard-api
     newName: 885232248981.dkr.ecr.us-east-1.amazonaws.com/iicpc/leaderboard-api
-    newTag: "418a2c0"
+    newTag: "9385af4"
   - name: ghcr.io/agrawalx/frontend
     newName: 885232248981.dkr.ecr.us-east-1.amazonaws.com/iicpc/frontend
-    newTag: "418a2c0"
+    newTag: "9385af4"
   - name: ghcr.io/agrawalx/spawner
     newName: 885232248981.dkr.ecr.us-east-1.amazonaws.com/iicpc/spawner
-    newTag: "418a2c0"
+    newTag: "9385af4"
   - name: ghcr.io/agrawalx/sandbox-orchestrator
     newName: 885232248981.dkr.ecr.us-east-1.amazonaws.com/iicpc/sandbox-orchestrator
-    newTag: "418a2c0"
+    newTag: "9385af4"
   - name: ghcr.io/agrawalx/bot-fleet-controller
     newName: 885232248981.dkr.ecr.us-east-1.amazonaws.com/iicpc/bot-fleet-controller
     # carries the 180s slot HTTP timeout fix (client.go)
-    newTag: "45364d4-t180"
+    newTag: "9385af4"
   - name: ghcr.io/agrawalx/bot-fleet
     # Multi-arch manifest list (amd64 + arm64) — the ONE dual-arch image;
     # Graviton botworker nodes pull arm64 automatically.
     newName: 885232248981.dkr.ecr.us-east-1.amazonaws.com/iicpc/bot-fleet
-    newTag: "418a2c0"
+    newTag: "9385af4"
   - name: ghcr.io/agrawalx/correctness-validator
     newName: 885232248981.dkr.ecr.us-east-1.amazonaws.com/iicpc/correctness-validator
-    newTag: "418a2c0"
+    newTag: "9385af4"
   - name: ghcr.io/agrawalx/score-computer
     newName: 885232248981.dkr.ecr.us-east-1.amazonaws.com/iicpc/score-computer
-    newTag: "418a2c0"
+    newTag: "9385af4"
   - name: ghcr.io/agrawalx/telemetry-ingester
     newName: 885232248981.dkr.ecr.us-east-1.amazonaws.com/iicpc/telemetry-ingester
-    newTag: "418a2c0"
+    newTag: "9385af4"
 
 patches:
   - path: patch-orchestrator-nodepool.yaml
@@ -60,6 +60,11 @@ patches:
       name: sandbox-orchestrator
       namespace: sandbox
   - path: patch-orchestrator-algo.yaml
+    target:
+      kind: Deployment
+      name: sandbox-orchestrator
+      namespace: sandbox
+  - path: patch-orchestrator-capture-image.yaml
     target:
       kind: Deployment
       name: sandbox-orchestrator
@@ -89,3 +94,51 @@ patches:
       kind: StatefulSet
       name: kafka
       namespace: data
+
+# The capture image ships as an ENV VAR (CAPTURE_IMAGE on sandbox-orchestrator,
+# consumed by captureJobSpec), which the `images:` transformer above cannot
+# reach — see patch-orchestrator-capture-image.yaml for the bring-up this cost.
+# Rather than add a second thing for push-images.sh to stamp (which would drift
+# the day someone stamps one and not the other), copy the tag OUT of the
+# already-stamped sandbox-orchestrator image field. Only the ":tag" segment is
+# replaced, so the ECR repo path in the patch is preserved. One source of
+# truth: whatever tag the platform runs, the capture runs.
+replacements:
+  - source:
+      kind: Deployment
+      name: sandbox-orchestrator
+      namespace: sandbox
+      fieldPath: spec.template.spec.containers.[name=sandbox-orchestrator].image
+      options:
+        delimiter: ":"
+        index: 1
+    targets:
+      - select:
+          kind: Deployment
+          name: sandbox-orchestrator
+          namespace: sandbox
+        fieldPaths:
+          - spec.template.spec.containers.[name=sandbox-orchestrator].env.[name=CAPTURE_IMAGE].value
+        options:
+          delimiter: ":"
+          index: 1
+  # SPAWNER_IMAGE — same shape: the `fetch` initContainer of every build Job,
+  # carried as an env var. See patch-spawner-ecr.yaml.
+  - source:
+      kind: Deployment
+      name: spawner
+      namespace: build
+      fieldPath: spec.template.spec.containers.[name=spawner].image
+      options:
+        delimiter: ":"
+        index: 1
+    targets:
+      - select:
+          kind: Deployment
+          name: spawner
+          namespace: build
+        fieldPaths:
+          - spec.template.spec.containers.[name=spawner].env.[name=SPAWNER_IMAGE].value
+        options:
+          delimiter: ":"
+          index: 1

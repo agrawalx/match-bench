@@ -75,3 +75,37 @@ spec:
           protocol: UDP
         - port: 53
           protocol: TCP
+
+    # The slot READINESS DIAL (added 2026-08-03, found on EKS). slot.go TCP-dials
+    # the contestant's port(s) to decide a slot is ready, and does so BEFORE it
+    # creates the capture Job — so a blocked dial presents as "no capture pod,
+    # session stuck in deploying", which is what `docs/eks-bringup-handoff.md` §7b
+    # recorded as a ProtocolAll bug. It is not ProtocolAll: measured from inside
+    # the orchestrator's netns, BOTH 9898 and 8080 timed out, on algo pods on two
+    # different nodes in two AZs. Single-protocol submissions only appeared to work
+    # because slot.go dials the EXTRA port, so a FIX-only slot performs no dial at
+    # all and is declared ready without ever touching the contestant.
+    #
+    # Why nothing allowed it: `sandbox-isolation` already permits the INGRESS half
+    # (algo pods accept `from podSelector app=sandbox-orchestrator`), but no policy
+    # permitted the matching EGRESS. NetworkPolicy requires both ends, and the
+    # orchestrator is itself in the sandbox namespace, so sandbox-isolation's
+    # egress applies to it too — and its catch-all `0.0.0.0/0` EXCEPTs 10.0.0.0/8,
+    # which is every pod IP. Union of both policies = dial denied.
+    #
+    # Scoped to the contestant ports only (9898 FIX, 8080 REST/WS) rather than a
+    # blanket allow: the orchestrator legitimately dials every slot it manages, and
+    # this mirrors sandbox-isolation's ingress rule, which already allows the
+    # orchestrator to reach ALL sandbox pods. A podSelector with no
+    # namespaceSelector is same-namespace only, so this grants nothing outside
+    # sandbox. Per the header note, selector-based rules are used rather than
+    # ipBlock, which the VPC CNI agent does not honour for cluster-internal IPs.
+    - to:
+        - podSelector:
+            matchLabels:
+              app: algo
+      ports:
+        - port: 9898
+          protocol: TCP
+        - port: 8080
+          protocol: TCP

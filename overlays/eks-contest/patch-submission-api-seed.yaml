@@ -1,6 +1,16 @@
-# Contest scenario seed: the decided 4-scenario run group (2026-08-02) —
-# correctness gate first, then ramp/spike/constant, dispatched sequentially
-# within each group by the status consumer.
+# Contest scenario seed. The decided run-group shape (2026-08-01) is ONE
+# `correctness` run plus ONE `ramp` run: correctness supplies the full-replay
+# score that decides grading, ramp supplies latency/TPS and the pass-2 telemetry
+# the frontend charts. Seeded as exactly those two for the first EKS end-to-end
+# bring-up (2026-08-03) — `StartBenchmark` fans out over EVERY scenario row, so
+# each extra row is another full session per upload, and `spike`/`constant` are
+# 204-task sessions that add cluster time without answering anything the first
+# run is asking.
+#
+# Contest-day tradeoff to revisit: dropping `spike` removes the only source of
+# `SpikeRecoveryNS` (`score.go` matches `Scenario == "spike"`). Restore the
+# 4-scenario seed — "correctness,ramp,spike,constant" — once the platform is
+# proven end to end, or accept that the metric goes away.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -13,7 +23,7 @@ spec:
         - name: submission-api
           env:
             - name: SEED_SCENARIOS
-              value: "correctness,ramp,spike,constant"
+              value: "correctness,ramp"
             - name: RESEED_SCENARIOS
               value: "true"
             # false during the validation phase: the b-suite submits zips

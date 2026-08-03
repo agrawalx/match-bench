@@ -1,5 +1,11 @@
 # EKS bring-up — complete guide
 
+> **SUPERSEDED for procedure (2026-08-03). Use `docs/eks-cluster-guide.md`.**
+> That guide carries the corrected bring-up order (namespaces before secrets,
+> terraform applied twice for IRSA), the verification steps, and the teardown.
+> This file is kept for the narrative of what went wrong and why — the §7
+> corrections below are the useful part, not the step list above them.
+
 Rewritten 2026-08-03 after the first bring-up (cluster built, validated, torn
 down). Self-contained: follow top to bottom. Every step here is either proven or
 explicitly marked as unresolved.

@@ -38,15 +38,24 @@ botworker_instance_type = "c7g.xlarge"
 botworker_desired_size  = 2
 botworker_max_size      = 8
 
-# Annotate the build-spawner ServiceAccount with its IRSA role. MUST be true, but
-# only on a SECOND apply: the SA is created by the platform manifests, which are
-# applied after terraform, so the first apply has nothing to annotate (that is
-# why the variable defaults to false). Left false on 2026-08-03 it cost a failed
-# submission — the spawner's ECR CreateRepository fell through the whole AWS
-# credential chain to EC2 IMDS, found no role, and the build never started.
+# Annotate the build-spawner ServiceAccount with its IRSA role.
 #
-# Bring-up order that works: terraform apply -> push images -> namespaces ->
-# secrets -> kubectl apply -k -> terraform apply AGAIN (this flag takes effect)
-# -> kubectl -n build rollout restart deploy/spawner (the web-identity env is
-# injected at pod creation, so a running pod does not pick it up).
+# Set true here because leaving it false is what cost a failed submission on
+# 2026-08-03: without the annotation the spawner's ECR CreateRepository falls
+# through the entire AWS credential chain to EC2 IMDS, finds no role, and no
+# build Job is ever created. As a committed value it is correct for every apply
+# from the second onward, which is every apply that matters.
+#
+# THE FIRST APPLY OF A FRESH CLUSTER MUST OVERRIDE IT TO FALSE:
+#   terraform apply -var-file=tfvars/contest.tfvars -var enable_spawner_irsa=false
+# kubernetes_annotations PATCHES an existing object and has no depends_on, but
+# the build-spawner SA is created by the platform manifests, which are applied
+# after terraform — so on a fresh cluster the first apply would fail with
+# "ServiceAccount not found".
+#
+# Bring-up order that works: terraform apply (irsa=false) -> push images ->
+# namespaces -> secrets -> kubectl apply -k -> terraform apply AGAIN (no
+# override, so this flag takes effect) -> kubectl -n build rollout restart
+# deploy/spawner. The restart is required: the web-identity env is injected at
+# pod creation, so an already-running spawner does not pick it up.
 enable_spawner_irsa = true

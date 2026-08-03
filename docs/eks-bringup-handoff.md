@@ -143,12 +143,24 @@ Expect: book qualifies (~0.994), echo disqualified (~0.045), `capture_gaps=0`,
 
 ## 7. Open problems — expect these, and diagnose them THIS way
 
-Both were seen on EKS and **do not reproduce on local k3s even with all 12
-NetworkPolicies enforced** (verified 2026-08-03), so they are environment- or
-VPC-CNI-specific, not platform logic.
+**All three of (a), (b) and (c) below are RESOLVED as of 2026-08-03**, and all
+three had the wrong diagnosis recorded. They are kept here with the corrections
+attached because the diagnostic recipes are still the right ones to reach for,
+and because the wrong theories are worth not re-deriving. Summary:
 
-**a) `orders.acked` stays 0 / no graphs.** While a session is RUNNING (the
-capture Job is reaped at session end — you get one window):
+| | recorded cause | actual cause |
+|---|---|---|
+| a | capture netns / Kafka QueueFull | stale `:demo` capture image (see c) |
+| b | ProtocolAll dial in `slot.go` | NetworkPolicy egress gap, all ports |
+| c | something sets `CAPTURE_CLAMP_MTU=1500` | stale image's compiled-in default |
+
+**a) `orders.acked` stays 0 / no graphs — RESOLVED.** Root cause was (c): the
+capture Job ran a stale public `ghcr.io/agrawalx/ebpf-latency:demo` because
+`CAPTURE_IMAGE` is an env var the `images:` transformer cannot rewrite. With the
+correctly-stamped image, `orders.acked` populates immediately and a reference
+engine scores 0.9921 with `matched/sent = 95%`. The triage below is still the
+right first move if it recurs. While a session is RUNNING (the capture Job is
+reaped at session end — you get one window):
 
 ```bash
 P=$(kubectl -n sandbox get pods --no-headers | grep capture | grep Running | awk '{print $1}' | head -1)
@@ -163,15 +175,31 @@ curl -s localhost:29090/metrics | grep -E "events_decoded|ringbuf_dropped|acked_
   hook.
 - `ringbuf_dropped` > 0 or `throttled` > 0 → CPU starvation (all clean locally).
 
-**b) ProtocolAll slots never become ready.** `slot.go` TCP-dials the extra port
-before declaring ready and *before* creating the capture, so a failed dial
-looks like "no capture, stuck in deploying". With a LIVE algo pod:
+**b) ProtocolAll slots never become ready — RESOLVED 2026-08-03. The diagnosis
+below was wrong; it is a NetworkPolicy egress gap, not ProtocolAll.** Measured
+from inside the orchestrator's own netns, BOTH 9898 and 8080 timed out, against
+algo pods on two different nodes in two AZs — so the "extra port" was never the
+issue. `sandbox-isolation` already permitted the INGRESS half of the dial (algo
+pods accept `from podSelector app=sandbox-orchestrator`) but nothing permitted
+the matching EGRESS, and the orchestrator is itself in the sandbox namespace, so
+sandbox-isolation's egress applies to it too — whose catch-all `0.0.0.0/0`
+EXCEPTs 10.0.0.0/8, i.e. every pod IP. The union of both policies denied it.
+
+Single-protocol submissions only *looked* healthy because `slot.go` dials the
+EXTRA port: a FIX-only slot performs no dial at all and is declared ready
+without ever touching the contestant. ProtocolAll was simply the only code path
+that exercised the broken one.
+
+Fixed by the egress rule at the end of
+`k8s/sandbox/sandbox-orchestrator/network-policy.yaml`. Verified before/after
+from the orchestrator netns (timeout -> `open`), and a full `protocol: ALL`
+submission then completed end to end. If it ever regresses, this is the test:
 
 ```bash
 IP=$(kubectl -n sandbox get pod <algo-pod> -o jsonpath='{.status.podIP}')
 O=$(kubectl -n sandbox get pod -l app=sandbox-orchestrator -o jsonpath='{.items[0].metadata.name}')
 kubectl -n sandbox debug $O --image=busybox:1.36 --target=sandbox-orchestrator -q --attach=false \
-  -- sh -c "nc -w 5 -zv $IP 8080; echo RC=\$?"
+  -- sh -c "nc -w 5 -zv $IP 9898; nc -w 5 -zv $IP 8080"
 # then read the ephemeral container's logs
 ```
 
@@ -181,9 +209,41 @@ others reproduces that known-good config and unblocks measurement work — but
 policies are the only isolation boundary now that gVisor is off, so this is
 acceptable only while contestants are our own engines.
 
-**c) Capture MTU**: the capture still logs `clamped 9001 -> 1500`, so the jumbo
-regime is not actually in effect despite `CAPTURE_CAP=9029`. Something passes
-`CAPTURE_CLAMP_MTU=1500` (job template or `captureJobSpec`).
+**c) Capture MTU — RESOLVED 2026-08-03, root cause was a stale image.** The
+capture logged `clamped 9001 -> 1500` and the earlier diagnosis ("something
+passes `CAPTURE_CLAMP_MTU=1500`") was wrong: nothing in the tree sets that var.
+`captureJobSpec` (`slot.go:610`) passes nine env vars and none is the MTU;
+`k8s/benchmark/ebpf-latency/job-template.yaml` has no such entry; there are no
+initContainers anywhere in `k8s/`, `overlays/`, `e2e/` or `deploy-local/`; and
+`gro-disable-daemonset.yaml` runs `ethtool -K` only, never touching MTU. The
+1500 was the **old binary's compiled-in default**. `DEFAULT_CLAMP_MTU` became
+9001 in `ccf0f80` (2026-08-01), but the capture image is not a container image
+field — it is the `CAPTURE_IMAGE` env var on sandbox-orchestrator, which
+kustomize's `images:` transformer cannot rewrite, and the overlay had no entry
+for ebpf-latency anyway. So every capture Job on EKS pulled the public
+`ghcr.io/agrawalx/ebpf-latency:demo` from the base manifest while the rest of
+the platform ran ECR `418a2c0`. That image also carries `CAPTURE_CAP=1536`.
+
+`SPAWNER_IMAGE` (the `fetch` initContainer of every build Job, `spawner.go:528`)
+had the identical defect — base `ghcr.io/agrawalx/spawner:demo`.
+
+Both are fixed: `overlays/eks-contest` now patches the two env vars to ECR refs
+and derives their tags from the already-stamped image fields via a
+`replacements:` block, so they cannot drift from the deploy. `push-images.sh`
+now fails the push if any `ghcr.io/` ref survives the render, or if either env
+var does not resolve to the pushed tag. Why local k3s never showed it: every
+other bring-up path injects both vars explicitly (`up-dev.sh:168,210`,
+`e2e/02-bootstrap.sh:35,80`, `deploy-bench/up-full.sh:46,63`,
+`infra/Makefile:168`) — only `kubectl apply -k overlays/eks-contest` fell
+through to the base defaults.
+
+**This changes the priors on (a) and on the Kaniko 401.** The `:demo` capture
+binary predates every recent ebpf-latency change, so re-test `orders.acked`
+with a correctly-tagged capture *before* investigating netns targeting or
+producer QueueFill. Likewise the `:demo` fetcher ignores `REGISTRY_PROVIDER=ecr`
+if it predates that branch, and would clobber the mounted `/kaniko/.docker` ECR
+config with Harbor creds (`fetcherEnv`, `spawner.go:710`) — a plausible
+mechanism for the 401 that `patch-spawner-ecr.yaml` worked around.
 
 ## 8. Measurements (only after gates are green)
 

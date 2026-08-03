@@ -112,9 +112,16 @@ in the tree and re-testable on the next bring-up.
 - **ProtocolAll slots never ready** — with a LIVE algo pod, dial 8080 from the
   orchestrator's netns. Engine binds both ports (verified in the zip source),
   so this is platform-side.
-- **Capture still clamps MTU 9001 → 1500** — something passes
-  `CAPTURE_CLAMP_MTU=1500` (job template or `captureJobSpec`), so the jumbo
-  regime is not actually in effect despite `CAPTURE_CAP=9029`.
+- ~~**Capture still clamps MTU 9001 → 1500**~~ — **RESOLVED 2026-08-03; this
+  diagnosis was wrong.** Nothing in the tree sets `CAPTURE_CLAMP_MTU`. The
+  capture image travels as the `CAPTURE_IMAGE` **env var**, which kustomize's
+  `images:` transformer cannot rewrite, so EKS ran the stale public
+  `ghcr.io/agrawalx/ebpf-latency:demo` — whose compiled-in default was still
+  1500 (and `CAPTURE_CAP=1536`). `SPAWNER_IMAGE` had the same defect. Fixed in
+  `overlays/eks-contest` via env patches + a `replacements:` block that derives
+  both tags from the stamped image fields, plus a guard in `push-images.sh`.
+  Full write-up in `docs/eks-bringup-handoff.md` §7c. Re-test `orders.acked`
+  and the Kaniko 401 against correctly-tagged images before digging further.
 - **`terraform apply` does not reconcile node-group `desired_size`** (module
   defers to autoscalers) — scaling must go through the EKS API or module
   config. Bit us when adding the second sandbox node.

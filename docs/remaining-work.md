@@ -571,6 +571,225 @@ Not backlog items, but the next session will waste time rediscovering them.
   would end this permanently; `up-dev.sh` already warns when the installed registries.yaml
   no longer matches.
 
+## The second EKS bring-up (2026-08-03) — first end-to-end success, and what it cost
+
+**Outcome: the platform ran end to end on EKS for the first time.** A contestant zip
+went upload -> Kaniko build -> ECR -> scheduled slot -> capture -> bots -> telemetry ->
+validation -> score -> leaderboard, with graphs rendering. Reference engine scored
+**0.9921** (local FIX reference: 0.99445) and the FIX acker was correctly disqualified at
+**0.0417**, so grading discriminates on EKS. A `protocol: ALL` submission also completed.
+
+Seven defects had to be fixed to get there. **Six were invisible to local k3s by
+construction, and five of those are the same class:** the local path (`up-dev.sh`,
+`e2e/02-bootstrap.sh`, `infra/Makefile`) injects something imperatively that the
+`kubectl apply -k overlays/eks-contest` path never creates. That class is the single
+biggest source of EKS-only failure and every instance below is now declared in the tree.
+
+### Fixed and committed
+
+1. **`CAPTURE_IMAGE` / `SPAWNER_IMAGE` were never stamped.** Both travel as ENV VARS,
+   which kustomize's `images:` transformer cannot rewrite, so EKS ran the stale public
+   `ghcr.io/agrawalx/*:demo` while everything else ran the pushed tag. The capture image
+   predated `ccf0f80`, so it carried `CAPTURE_CAP=1536` and a compiled-in
+   `CAPTURE_CLAMP_MTU` default of 1500 — which is the *entire* explanation of the
+   "capture clamps MTU 9001 -> 1500" mystery (nothing in the tree sets that var) and the
+   prime suspect for `orders.acked = 0`. `SPAWNER_IMAGE` is the `fetch` initContainer of
+   every build Job, so the build pipeline ran stale code too. Fixed with a
+   `replacements:` block that derives both tags from the already-stamped image fields
+   (one source of truth, cannot drift) plus a fail-closed guard in `push-images.sh` that
+   refuses the push if any `ghcr.io/` ref survives the render or either env var does not
+   resolve to the pushed tag.
+2. **orchestrator -> algo dial denied by NetworkPolicy.** Recorded as a ProtocolAll bug
+   in `slot.go`; it was neither. `sandbox-isolation` allowed the ingress half of the dial
+   and nothing allowed the egress half, and its catch-all `0.0.0.0/0` EXCEPTs 10.0.0.0/8,
+   i.e. every pod IP. Single-protocol runs looked fine only because `slot.go` dials the
+   EXTRA port, so a FIX-only slot never dials at all. Egress rule added, scoped to 9898 +
+   8080, verified before/after from the orchestrator's netns.
+3. **Kafka did not tolerate its own node's taint.** Terraform creates a dedicated,
+   tainted kafka node group; nothing tolerated it, so Kafka scheduled onto a general node
+   and the broker node ran nothing while Kafka competed with Postgres/Timescale/validator.
+   Fixed in `patch-kafka-single-broker.yaml`. Must be set BEFORE first apply — EBS PVCs
+   are AZ-bound, so moving Kafka later can strand `kafka-logs` and force a topic wipe.
+4. **`auth-api` Service missing from the tree -> frontend CrashLoopBackOff.** The frontend
+   templates its nginx upstreams from env and nginx resolves every upstream at
+   CONFIG-PARSE time, so an unresolvable name is a hard `[emerg] host not found in
+   upstream` and the container never starts — regardless of whether anything ever calls
+   `/api/auth/`. `up-dev.sh` had always injected a placeholder Service; the kustomize tree
+   had not. Service (not Deployment) now declared in `k8s/kustomization.yaml`.
+5. **IRSA never annotated -> the build pipeline could not create ECR repos.** The AWS SDK
+   fell through its whole credential chain to EC2 IMDS and found nothing; the submission
+   went `failed`. `enable_spawner_irsa` now `true` in `contest.tfvars`, with the two-apply
+   ordering documented there (the SA does not exist during the first apply).
+6. **Validator OOMKilled at 2Gi, in a poison loop.** See the dedicated section below.
+7. **Fixture bug: the drain acker killed itself.** `accept().await?` in
+   `e2e/contestant-echo` propagated any transient accept error out of `main`, taking the
+   listener with it — so a 500-task connect storm ended the process after 3 seconds and
+   read as a platform throughput ceiling. Now logs and continues, with an EMFILE/ENFILE
+   backoff. The reference CLOB already did this correctly (`match` on accept), which is
+   why it degraded gracefully instead of vanishing.
+
+Also corrected: the bring-up guide told you to create secrets BEFORE the overlay, but
+nothing creates the six namespaces except the overlay, so `create-secrets.sh` fails on a
+fresh cluster. Namespaces must be applied first; doing so also means no pod ever enters
+the `CreateContainerConfigError` state that step existed to avoid.
+
+### Validator memory — measured, and the eviction question settled
+
+2Gi OOMKilled every validator pod. Because the OOM lands before the Kafka offset is
+committed, the pod restarts and re-reads the SAME session: a poison loop that never
+drains, which KEDA makes strictly worse by scaling to max so every replica loops. 14
+session-completion events were stuck behind it. Raising the limit drained all 14 with
+zero restarts.
+
+**Measured peak: 5.2 GiB for one 3.8M-order pass-1 session** (limit now 8Gi). Where it
+goes, measured not estimated:
+
+- The reorder buffer holds up to `2*REORDER_WINDOW` = 2,097,152 assembled orders before
+  releasing anything (`Push` releases at `2*window`, not `window`). At a measured
+  **283 B/order** that is ~594 MB, and it is FIXED. Consequence worth knowing: for any
+  session SMALLER than 2.1M orders, `release()` never fires and the whole session is
+  buffered — the streaming validator degenerates to batch behaviour below that threshold,
+  which is the failure the batch path was deleted for.
+- The rest scales with the orders RESTING in the reference book (`v.pending`, `v.ref`).
+
+**Eviction is not missing and this is not a leak.** Filled, cancelled and never-resting
+orders are finalized and deleted as they leave the book (`DrainEvicted` -> `finalize`),
+and `book.Forget` exists solely to bound the streaming path ("Batch never calls it").
+Resting orders *cannot* be evicted — a later order may still match them, and they must be
+scored when they leave. So validator memory is **O(peak book depth), not O(session)**, and
+it is scenario-controlled rather than contestant-controlled (the book replays the bot's
+flow, so no submission can inflate it). 8Gi is a ceiling sized against one measurement,
+not a bound: re-measure peak book depth per scenario once contest scenarios are fixed.
+
+### The "120k/s stall" — explained: it is the RESPONSE_TIMEOUT cliff
+
+Reproduced with three unrelated engines (Rust CLOB, Go REST echo, tokio drain acker), so
+never contestant-specific. Ruled out by direct measurement, each with evidence:
+
+| candidate | verdict |
+|---|---|
+| bot send capacity | not it — FIX drain-sink sustained **200,001/s** for a full 60s |
+| mutual TCP flow-control stall | not it — 200 sockets stay ESTABLISHED with small, *churning* queues |
+| capture overload | not it — `ringbuf_dropped` / `acked_dropped` were 0 |
+| engine crash | not it — listener stays up, sockets stay established |
+| bandwidth shaping | not it — `bandwidth` is absent from the CNI chain (see below) |
+
+The actual mechanism, caught second-by-second on a 100-task ProtocolAll run:
+
+```
+16:03:53  80,058 tps  p50 4,706 ms  err 0.000
+16:03:54  72,992 tps  p50 4,920 ms  err 0.005   <- first timeouts
+16:03:55  21,455 tps  p50 5,125 ms  err 0.765   <- p50 crosses 5,000 ms
+16:03:56       0 tps                err 1.000
+```
+
+Offered load above engine capacity builds a standing queue; latency climbs; the moment
+the queue exceeds **5 seconds of work** every response arrives after its deadline, the
+bot's watchdog times them all out, and delivered tps reads **0** with `error_rate` 1.0 —
+while the engine is still processing at full rate (queues still churning, 100 sockets
+still established). Only the *time to reach* the cliff differs: ~30s at mild overload
+(100k offered vs ~90k capacity), ~4s at heavy overload (200k offered vs ~120k delivered),
+never for drain-sink (no responses, so nothing can be late).
+
+**Grading consequence, needs a decision:** a submission that is merely slightly too slow
+currently scores as though it died completely — 0 throughput, 100% errors — rather than
+"90k with high latency". That is a ranking decision, not a bug, but it is not the
+behaviour anyone would choose on purpose.
+
+**Not fully explained:** in one acker run the capture's `xdp_packets`/`tc_packets` froze
+and the bot's `sent_rate` went to 0, which the cliff does not account for (there the
+engine kept working and sockets kept moving). Possibly a second effect at higher backlog
+rates. Treat that specific case as open.
+
+### Throughput numbers measured (all bounded by the caveat below)
+
+- Platform, with a minimal FIX responder: **336,698 orders/s at 0.03-0.05 ms p50**, one
+  bot worker pod, zero capture drops. So the ~80k both real engines cap at is the
+  ENGINE, not the bot, capture or network.
+- Bot send ceiling per c7g.xlarge (drain-sink, no acks): **200,001/s sustained exactly**;
+  at a 1M/s target it peaked 901k and decayed to ~460k; at 2M/s across two workers both
+  were **OOMKilled**. That OOM is an artefact of the control, not the bot: with nothing
+  responding, every order stays pending for `RESPONSE_TIMEOUT`, so a worker tracks
+  `rate x 5s` live entries (5M at 1M/s) on a 6.6Gi node. A responding engine holds
+  `rate x actual latency` (~100 entries). **M1 is therefore still unmeasured** and
+  `botworker_max_size` still cannot be fixed from this.
+- The 104 ms "service_time" seen on `correctness` is **queue depth, not engine cost**:
+  Little's Law gives 10,000 inflight / 94,735 per s = 105.6 ms vs 104.4 measured, and
+  `service_time ~= round_trip` (103.9 vs 104.4) leaves only ~0.5 ms of network. `t3` is
+  stamped by the eBPF ingress hook on packet arrival, so it legitimately includes kernel
+  socket backlog. Latency from the unpaced `correctness` scenario is meaningless as a
+  latency figure.
+
+### Unfixed bugs discovered — none of these are addressed
+
+1. **A REST acker scores 1.0000.** `smoke-rest-echo` — no order book, returns
+   `exec_type=2` (FILL) at the order's own price for every request including cancels and
+   replaces — produced `valid_fills == total_fills`, **zero violations**, and a perfect
+   score on 1.89M real orders. The identical cheat over FIX scores 0.0417. **Grading is
+   protocol-dependent and the REST path does not discriminate at all.** Contest-fatal,
+   and invisible because it presents as a flawless submission. `remaining-work` records
+   the acker-scores-1.0 defect as fixed; that fix holds for FIX only. First place to look
+   is `frame_http_ws`, the one capture path `session-handoff.md` §3 flags as having no
+   property coverage, then the validator's JSON fill decoding.
+2. **Empty sessions score 1.0000 instead of failing closed.** Every session with
+   `sent_count = 0` / `status = timed_out` published a perfect score — 8 of 14 backlogged
+   sessions. A session the validator saw no data for must not be scoreable.
+3. **KEDA cannot scale the bot fleet — circular dependency.** The controller's pre-scale
+   gate refuses to publish `workload.assignments` until members == shards; the committed
+   ScaledObject scales on *lag on that same topic*. No publish -> no lag -> no scale ->
+   the gate times out after 90s and the session fails. **Any session needing more shards
+   than the current replica count fails at cold start, permanently** (observed: ramp
+   needed 5, had 2). The prometheus/`iicpc_controller_demanded_workers` design that §B5
+   describes as validated is applied ONLY by `deploy-local/b5-autoscale-shards.sh`
+   inline — it was never committed to `k8s/benchmark/bot-fleet/scaledobject.yaml`. The
+   gauge is emitted and nothing consumes it. Note a second, independent problem behind
+   it: 1-pod-per-node (required podAntiAffinity + 3 CPU of 3.6 allocatable) means N
+   shards needs N nodes, and node provisioning (~2 min) loses to the 90s gate anyway.
+4. **Contestant bandwidth shaping is inert.** `ALGO_EGRESS_BANDWIDTH` /
+   `ALGO_INGRESS_BANDWIDTH` are set to 100M and `slot.go` stamps
+   `kubernetes.io/{egress,ingress}-bandwidth` on every algo pod, but the `bandwidth`
+   plugin is **not in the CNI chain** (`aws-cni -> egress-cni -> host-local -> portmap`;
+   the binary is present in `/opt/cni/bin`, unused). The platform believes it rate-limits
+   contestants to 100 Mbit and does not. That is a fairness assumption that silently does
+   not hold.
+5. **Go submissions are silently capped at Go 1.23.** The build template pins
+   `golang:1.23-alpine` with `GOTOOLCHAIN=local`, so any `go >= 1.24` in a contestant's
+   `go.mod` fails with `go.mod requires go >= 1.25 (running go 1.23.12)` and no guidance.
+   Repo fixtures already declare 1.25, so this is not hypothetical.
+6. **A failed build permanently poisons its sha256.** `submit.go:114` dedups on sha256
+   without checking status, so re-uploading identical bytes returns the FAILED submission
+   and explicitly skips the build. Recovering required deleting the row from Postgres. A
+   contestant hitting a transient build failure can never retry the same artifact.
+   Related to, but distinct from, the cross-contestant 404 trap already recorded.
+7. **Owner-scoped 404 hides submissions across identities.** With auth off, identity comes
+   from the token `sub`; a submission made as one identity returns `submission not found`
+   to another, including for `/benchmark`. Already recorded as a dedup trap; observed here
+   as a plain operational footgun.
+8. **`drain-sink` cannot be used as a load-ceiling control as committed.** It hardcodes
+   `Port: 8080`, which forces `protocol: REST`, and HTTP/1.1 cannot reuse a connection
+   without a response — so it degenerates to ~10 connections at 10k/s. A FIX variant on
+   9898 is required (`deploy-local/drain-sink-fix.zip`, untracked).
+9. **`submission-api`'s Service maps its `metrics` port to 8080**, the app's HTTP port,
+   not 9090 — so that scrape target is wrong.
+10. **Cluster-autoscaler adding sandbox nodes is unvalidated.** Slots scheduled onto
+    autoscaler-added nodes failed during this session; the netpol fix (item 2 above) is
+    the likely explanation since it was AZ-independent, but node-scaling was never
+    re-tested after the fix. Worth confirming before relying on sandbox autoscaling.
+
+### Corrections to previously recorded diagnoses
+
+- §7a/b/c of `eks-bringup-handoff.md` all had the wrong cause; corrected in place.
+- The NetworkPolicy theory for `orders.acked = 0` was confounded: the "known-good"
+  `e2e/02-bootstrap.sh` runs also injected the correct images, so image version and
+  netpol scope varied together and nothing isolated the policies.
+- `bot-fleet-controller`'s one-off `45364d4-t180` pin is safe to overwrite: `45364d4` IS
+  an ancestor of HEAD and `defaultSlotHTTPTimeout = 180 * time.Second` is in the tree.
+  `context deadline exceeded` on a slot is the overall readiness deadline, not that
+  timeout.
+- Every capture measurement taken through `overlays/eks-contest` before this session is
+  invalid (unknown binary). `deploy-bench` numbers are unaffected — `up-full.sh` injects
+  `CAPTURE_IMAGE` correctly.
+
 ## Housekeeping
 
 - ~25 commits on `feat/bot-tps` unpushed: `git push fork feat/bot-tps`.

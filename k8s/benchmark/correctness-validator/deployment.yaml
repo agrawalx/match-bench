@@ -64,6 +64,19 @@ spec:
                   fieldPath: metadata.name
             - name: SETTLE_DELAY_MS
               value: "10000"
+            # 300s (added 2026-08-03). The Go default is 60s (main.go:58) and was
+            # never declared here, so every harness overrode it imperatively
+            # (deploy-bench/eks-up.sh:64, deploy-local/up-dev.sh:253) while a
+            # plain `apply -k` deployment silently ran at 60s.
+            #
+            # 60s is far under what a real session needs. A 3.8M-order pass-1
+            # validation measured on EKS peaked at 5.2 GiB and ran for minutes;
+            # the full-replay path rebuilds the reference book order by order.
+            # Timing out mid-validation abandons work that was going to succeed
+            # AND leaves the session's Kafka offset uncommitted, so the next pod
+            # re-reads it — the same shape as the OOM poison loop above.
+            - name: VALIDATION_TIMEOUT_MS
+              value: "300000"
             # 1 (was 4): parallelism now comes from KEDA-scaled replicas
             # (scaledobject.yaml, 1..4), one validation per pod, so a pod's
             # requests/limits bound exactly one full-replay validation. In a

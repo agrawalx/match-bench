@@ -36,8 +36,12 @@ gate_health() {
     | awk '$5+0 > 3 {print "      "$1"/"$2" restarts="$5}' || true)"
   [ -n "$restarting" ] && { warn "pods with >3 restarts:"; printf '%s\n' "$restarting"; } || ok "no pod above 3 restarts"
 
-  if kubectl -n data get job kafka-topic-init \
-      -o jsonpath='{.status.succeeded}' 2>/dev/null | grep -q '^1$'; then
+  # Captured, not piped into `grep -q`: grep exits on the first match, the
+  # producer takes SIGPIPE, and `set -o pipefail` reports the pipeline as
+  # failed — so the condition reads false even when the match succeeded.
+  local succeeded
+  succeeded="$(kubectl -n data get job kafka-topic-init -o jsonpath='{.status.succeeded}' 2>/dev/null || true)"
+  if [ "$succeeded" = "1" ]; then
     ok "kafka-topic-init succeeded"
   else
     fail "kafka-topic-init has not succeeded — auto-create is off, so every publish goes nowhere"
@@ -65,7 +69,7 @@ gate_placement() {
   # Postgres/Timescale/the validator while its own node sat idle.
   for node in $(kubectl get nodes -l pool=kafka -o jsonpath='{.items[*].metadata.name}' 2>/dev/null); do
     pods="$(pods_on_node "$node" || true)"
-    if printf '%s\n' "$pods" | grep -q '^data/kafka-0$'; then
+    if grep -qx 'data/kafka-0' <<<"$pods"; then
       ok "kafka-0 on the kafka node"
     else
       fail "kafka-0 is NOT on the kafka node — it is competing for general-node cores"

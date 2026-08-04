@@ -57,12 +57,22 @@ main() {
   ok "spawner restarted"
 
   step "credentials injected"
-  local role_env token_env
-  role_env="$(deploy_env build spawner AWS_ROLE_ARN)"
-  token_env="$(kubectl -n build get pods -l app=spawner \
-    -o 'jsonpath={.items[0].spec.containers[0].env[?(@.name=="AWS_WEB_IDENTITY_TOKEN_FILE")].value}' 2>/dev/null)"
-  [ -n "$role_env" ]  && ok "AWS_ROLE_ARN present in the pod"          || fail "AWS_ROLE_ARN not injected into the spawner pod"
-  [ -n "$token_env" ] && ok "AWS_WEB_IDENTITY_TOKEN_FILE present"      || fail "AWS_WEB_IDENTITY_TOKEN_FILE not injected"
+  # Read the POD, never the Deployment. The IRSA env (AWS_ROLE_ARN,
+  # AWS_WEB_IDENTITY_TOKEN_FILE, AWS_REGION, ...) is added by the EKS pod
+  # identity mutating webhook at POD CREATION, so it exists only on the pod
+  # spec — the Deployment's container env is untouched and always empty of
+  # AWS_*. Checking the Deployment produces a false negative on a cluster where
+  # IRSA is working perfectly, which is exactly what it did on the first run.
+  local pod pod_env role_env token_env
+  pod="$(kubectl -n build get pods -l app=spawner \
+    -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)"
+  [ -n "$pod" ] || die "no spawner pod found after rollout"
+  pod_env="$(kubectl -n build get pod "$pod" \
+    -o 'jsonpath={range .spec.containers[0].env[*]}{.name}={.value}{"\n"}{end}' 2>/dev/null || true)"
+  role_env="$(grep -m1 '^AWS_ROLE_ARN=' <<<"$pod_env" | cut -d= -f2- || true)"
+  token_env="$(grep -m1 '^AWS_WEB_IDENTITY_TOKEN_FILE=' <<<"$pod_env" | cut -d= -f2- || true)"
+  [ -n "$role_env" ]  && ok "AWS_ROLE_ARN=$role_env"              || fail "AWS_ROLE_ARN not injected into the spawner pod"
+  [ -n "$token_env" ] && ok "AWS_WEB_IDENTITY_TOKEN_FILE present" || fail "AWS_WEB_IDENTITY_TOKEN_FILE not injected"
 
   finish "IRSA"
 }

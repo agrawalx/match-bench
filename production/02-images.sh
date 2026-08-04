@@ -126,7 +126,10 @@ main() {
   local var want got
   for var in CAPTURE_IMAGE:iicpc/ebpf-latency SPAWNER_IMAGE:iicpc/spawner; do
     want="${var#*:}"; var="${var%%:*}"
-    got="$(printf '%s\n' "$render" | grep -A1 "name: $var\$" | grep 'value:' | awk '{print $2}' | head -1)"
+    # `awk ... exit` rather than `| head -1`: head closes the pipe after one
+    # line, awk takes SIGPIPE, and pipefail turns that into a failed command
+    # substitution under `set -e`. Same hazard as `| grep -q`.
+    got="$(grep -A1 "name: $var\$" <<<"$render" | grep 'value:' | awk '{print $2; exit}')"
     case "$got" in
       */"$want:$tag") ok "$var -> $got" ;;
       *) fail "$var did not stamp: got '${got:-<missing>}', want */$want:$tag" ;;

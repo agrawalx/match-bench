@@ -776,6 +776,99 @@ rates. Treat that specific case as open.
     the likely explanation since it was AZ-independent, but node-scaling was never
     re-tested after the fix. Worth confirming before relying on sandbox autoscaling.
 
+### Found by the first `production/` bring-up (2026-08-04)
+
+**11. A slot's capture can be denied its node, permanently, and the session
+silently produces no data.** Two concurrent submissions; one session out of four
+finished `completed` with `acked_count = 0`, zero telemetry rows and no score.
+The contestant sees a completed run with no result and no error anywhere.
+
+Measured, exact:
+
+```
+Warning OutOfcpu  capture-019fccfc-bf25-7e52-...
+  Node didn't have enough resource: cpu, requested: 2000, used: 6190, capacity: 7910
+Warning BackoffLimitExceeded  job/capture-019fccfc-bf25-7e52-...
+```
+
+Timeline on the node (`c6i.2xlarge`, 7910m allocatable), one submission per node
+throughout — the 1-slot-per-node property held, this is an overlap in TIME:
+
+```
+13:35:46  algo(constant)       Scheduled            holds 4000m
+13:35:49  capture(constant)    Started              holds 2000m
+13:36:55  both sent Killing    algo grace 30s -> frees 13:37:25
+                               capture grace 60s -> frees ~13:37:55
+13:36:58  algo(correctness)    FailedScheduling
+13:37:06                       TriggeredScaleUp
+13:37:25  algo(correctness)    Scheduled  <- the instant the old ALGO's 30s expired
+13:37:28  capture(correctness) OutOfcpu   <- old CAPTURE still draining (33s of 60s)
+13:37:29                       BackoffLimitExceeded -> permanent
+```
+
+Arithmetic at 13:37:28: new algo 4000m + OLD capture 2000m + DaemonSets ~190m =
+**6190m**, exactly the reported figure. Free 1720m against 2000m needed, short by
+280m.
+
+Root cause: **a slot's 6000m does not release atomically.** The algo pod takes
+the default 30s grace; the capture is given 60s explicitly (`slot.go:596`) so its
+Kafka producer can drain — which is correct and must not simply be shortened,
+since SIGKILL mid-flush loses whole batches of `orders.acked`. So for **30
+seconds after every session there is a window where a node looks schedulable for
+a new slot but cannot host that slot's capture**. Three decisions compose into
+the failure:
+
+- the capture is placed by explicit `NodeName` (it must share the algo's netns),
+  which **bypasses the scheduler entirely** — it either fits instantly or dies;
+- nothing reserves the capture's 2000m when the ALGO is scheduled, so the
+  scheduler admits a slot onto a node that cannot actually hold it;
+- `backoffLimit: 0` (`slot.go:588`) makes one transient rejection permanent.
+
+The cluster autoscaler behaved correctly and was simply too late — it fired at
+13:37:06 and delivered nodes at 13:37:43, while the scheduler had already placed
+the algo on the old node at 13:37:25.
+
+Fix options, none obviously right: reserve the pair (make the algo request the
+combined footprint, or use a placeholder pod); allow `backoffLimit: 1` with a
+guard so a retried capture that missed the session start is discarded rather
+than trusted; or align the grace periods. The first is the only one that removes
+the race rather than narrowing it.
+
+**Related fragility worth recording separately: 1-slot-per-node is emergent, not
+declared.** There is no `podAntiAffinity` on algo pods (verified on a live pod:
+`.spec.affinity` is empty). Isolation comes only from resource requests — algo
+4000m/8Gi + capture 2000m/2Gi against 7910m/~14.4Gi means a second slot cannot
+fit. But the BASE default is `ALGO_CPU=2`; only `overlays/eks-contest` raises it
+to 4. On any deployment without that patch two slots fit on one node and the
+fairness property silently disappears, with nothing failing to signal it.
+
+**12. `envUint32` cannot express zero — every numeric scenario knob silently
+ignores `0`.** `builder.go:410`:
+
+```go
+n, err := strconv.ParseUint(v, 10, 32)
+if err != nil || n == 0 { return def }   // a parsed ZERO is treated as "unset"
+```
+
+Setting `MIX_RETAIL_PCT=0` and `MIX_INSTITUTIONAL_PCT=0` left them at their
+defaults 25 and 15, the mix summed to 140, validation rejected it, and
+submission-api CrashLooped on every start with `population mix must sum to 100,
+got 140`. Affects `CONSTANT_TOTAL_RPS`, `SPIKE_PEAK_RPS`, `RAMP_PEAK_RPS` and all
+three mix percentages. For a percentage, zero is a legitimate value and there is
+no way to express it.
+
+Consequence in practice: a "100% HFT" workload is unreachable. The closest is
+98/1/1, which at 100k adds 200 retail bots — 1,000 rps but **two-thirds of the
+task count**, and task count is what decides shard count. Fix: only fall back
+when `os.Getenv` returns `""`.
+
+**13. Bring-up was not idempotent against its own teardown.** Teardown
+`state rm`s the results bucket (it carries `prevent_destroy`), leaving it alive
+in AWS but absent from state; the next apply then fails with
+`BucketAlreadyExists` because S3 names are globally unique. Fixed in
+`production/01-cluster.sh`, which re-imports it before applying. Recorded because
+the same shape applies to anything else ever protected by `prevent_destroy`.
+
 ### Corrections to previously recorded diagnoses
 
 - §7a/b/c of `eks-bringup-handoff.md` all had the wrong cause; corrected in place.

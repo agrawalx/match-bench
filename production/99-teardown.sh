@@ -50,6 +50,13 @@ main() {
   step "release the results bucket from state"
   # prevent_destroy is a deliberate safety gate on the one bucket that can hold
   # exported results. Releasing it from state leaves the BUCKET in place.
+  #
+  # Consequence, handled on the other side: the bucket then exists in AWS while
+  # terraform has forgotten it, so the NEXT apply would try to create it and fail
+  # with BucketAlreadyExists (S3 names are globally unique). 01-cluster.sh
+  # re-imports it before applying, which is what keeps bring-up idempotent
+  # against this teardown. Do not "fix" that by deleting the bucket here —
+  # protecting it is the entire point of prevent_destroy.
   local b
   for b in aws_s3_bucket.results aws_s3_bucket_versioning.results \
            aws_s3_bucket_public_access_block.results \

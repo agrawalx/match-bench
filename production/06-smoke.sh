@@ -125,7 +125,7 @@ main() {
       dbg="$(kubectl -n sandbox get pod "$orch" -o jsonpath='{range .status.ephemeralContainerStatuses[*]}{.name}{"\n"}{end}' 2>/dev/null | tail -1)"
       local dial
       dial="$(kubectl -n sandbox logs "$orch" -c "$dbg" 2>/dev/null || true)"
-      if printf '%s' "$dial" | grep -q 'open'; then
+      if grep -q 'open' <<<"$dial"; then
         ok "orchestrator reaches the contestant"
       else
         fail "orchestrator cannot reach the contestant — check the egress rule in k8s/sandbox/sandbox-orchestrator/network-policy.yaml"
@@ -160,13 +160,50 @@ main() {
     fail "orders.acked is 0 — the capture published nothing (stale image? wrong netns?)"
   fi
 
-  score="$(psql_platform "select coalesce(max(correctness_score),0) from correctness_summary cs join runs r on r.session_id=cs.session_id where r.run_group_id='$rg' and cs.status='scored';" || echo 0)"
-  info "best correctness score: $score"
+  # Grade on the PASS-1 (`correctness`) session only.
+  #
+  # Two reasons this is not `max(score)` across the run group. First, pass-2
+  # scenarios (constant/ramp/spike) are graded BOOK-FREE in invariants mode and
+  # are explicitly non-deciding -- an overloaded pass-2 run scores near zero
+  # because every order past the 5s RESPONSE_TIMEOUT counts as lost, which says
+  # nothing about engine correctness. Observed here: constant scored 0.09 with
+  # 2.54M lost of 6.00M sent while correctness scored 0.9928 on the same engine.
+  # Second, `max()` silently grades whichever session happens to have a row.
+  #
+  # And a run reaching a TERMINAL state does not mean it has been SCORED: the
+  # validator settles for SETTLE_DELAY_MS and then replays the whole session, so
+  # the summary row arrives well after `runs.status` goes terminal. Querying
+  # immediately caught only the earlier-finishing session on the first run.
+  step "await pass-1 scoring"
+  local scored=0 deadline2=$(( SECONDS + 600 )) n
+  while [ "$SECONDS" -lt "$deadline2" ]; do
+    n="$(psql_platform "select count(*) from correctness_summary cs
+           join runs r on r.session_id=cs.session_id
+           left join scenarios s on s.scenario_id=r.scenario_id
+          where r.run_group_id='$rg' and s.name='correctness' and cs.status='scored';" || echo 0)"
+    [ "${n:-0}" -ge 1 ] && { scored=1; break; }
+    sleep 10
+  done
+  [ "$scored" -eq 1 ] || fail "the correctness session was never scored within 600s of finishing"
+
+  score="$(psql_platform "select coalesce(max(correctness_score),0) from correctness_summary cs
+             join runs r on r.session_id=cs.session_id
+             left join scenarios s on s.scenario_id=r.scenario_id
+            where r.run_group_id='$rg' and s.name='correctness' and cs.status='scored';" || echo 0)"
+  info "pass-1 correctness score: $score"
   if awk -v s="$score" -v m="$SMOKE_MIN_SCORE" 'BEGIN{exit !(s+0 >= m+0)}'; then
     ok "score $score >= $SMOKE_MIN_SCORE (reference engine qualifies)"
   else
     fail "score $score < $SMOKE_MIN_SCORE — a KNOWN-GOOD engine failed to qualify, so grading is wrong"
   fi
+
+  # Pass-2 scores are reported for visibility, never asserted on.
+  psql_platform "select '      pass-2 '||coalesce(s.name,'?')||': score='||round(cs.correctness_score::numeric,4)
+                        ||' sent='||cs.sent_count||' lost='||cs.lost_orders
+                   from correctness_summary cs
+                   join runs r on r.session_id=cs.session_id
+                   left join scenarios s on s.scenario_id=r.scenario_id
+                  where r.run_group_id='$rg' and coalesce(s.name,'') <> 'correctness';" 2>/dev/null || true
 
   # A session that scored 1.0 on zero orders is the fail-open bug, not a pass.
   local vacuous
